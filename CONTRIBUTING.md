@@ -6,7 +6,7 @@ Thank you for your interest in contributing to Nexus! This document provides gui
 
 ### Prerequisites
 
-- Rust 1.75+ (MSRV)
+- Rust 1.85+ (MSRV - required for edition 2024)
 - Claude Code CLI (optional - SDK can auto-download)
 
 ### Building

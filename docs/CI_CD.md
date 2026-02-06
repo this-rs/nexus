@@ -65,7 +65,7 @@ Runs on every push and pull request to `main` and version branches.
 | `coverage` | Generate code coverage report | ubuntu-latest |
 | `docs` | Build documentation | ubuntu-latest |
 | `security` | Run cargo-deny audit | ubuntu-latest |
-| `msrv` | Verify MSRV (1.75) | ubuntu-latest |
+| `msrv` | Verify MSRV (1.85) | ubuntu-latest |
 
 #### Test Matrix
 
@@ -148,7 +148,7 @@ Reusable action for Rust toolchain setup with caching.
 1. **Format** - Code must be formatted with rustfmt
 2. **Lints** - No Clippy warnings
 3. **Tests** - All tests pass on all platforms
-4. **MSRV** - Builds with Rust 1.75
+4. **MSRV** - Builds with Rust 1.85
 
 ### Advisory Checks
 

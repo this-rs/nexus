@@ -121,7 +121,7 @@ Use `new_method()` instead.
 
 ## Rust MSRV Policy
 
-- Minimum Supported Rust Version (MSRV): **1.75**
+- Minimum Supported Rust Version (MSRV): **1.85** (required for edition 2024)
 - MSRV bumps are considered **minor** version changes
 - MSRV is tested in CI on every PR
 
@@ -158,5 +158,5 @@ v1.0.0 - `old_api()` removed
 
 | Nexus Version | Rust Version |
 |---------------|--------------|
-| 0.5.x | 1.75+ |
+| 0.5.x | 1.85+ |
 | 0.4.x | 1.75+ |
