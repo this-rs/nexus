@@ -56,14 +56,29 @@ jobs:
           toolchain: ${{ matrix.toolchain }}
           components: ''
 
-      - name: Build
+      - name: Build (Unix)
+        if: runner.os != 'Windows'
         run: cargo build --all-features --verbose
 
-      - name: Run tests
+      - name: Build (Windows)
+        if: runner.os == 'Windows'
+        run: cargo build --features auto-download --verbose
+
+      - name: Run tests (Unix)
+        if: runner.os != 'Windows'
         run: cargo test --all-features --verbose
 
-      - name: Run doc tests
+      - name: Run tests (Windows)
+        if: runner.os == 'Windows'
+        run: cargo test --features auto-download --verbose
+
+      - name: Run doc tests (Unix)
+        if: runner.os != 'Windows'
         run: cargo test --doc --all-features
+
+      - name: Run doc tests (Windows)
+        if: runner.os == 'Windows'
+        run: cargo test --doc --features auto-download
 
   # Code coverage
   coverage:
