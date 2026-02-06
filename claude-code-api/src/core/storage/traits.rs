@@ -3,6 +3,8 @@
 //! These traits define the interface for storage backends.
 //! Implementations can be in-memory, Neo4j-backed, or any other storage system.
 
+#![allow(dead_code)] // Public API - may not be used internally
+
 use anyhow::Result;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};

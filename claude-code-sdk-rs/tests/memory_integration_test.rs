@@ -6,7 +6,7 @@
 #![cfg(feature = "memory")]
 
 use nexus_claude::memory::{
-    ConversationMemoryManager, MemoryConfig, MemoryIntegrationBuilder, MessageDocument,
+    MemoryIntegrationBuilder, MessageDocument,
     SummaryGenerator,
 };
 use serde_json::json;

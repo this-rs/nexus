@@ -153,7 +153,7 @@ impl RelevanceScorer {
     pub fn semantic_score(&self, meilisearch_score: f64) -> f64 {
         // Meilisearch scores are typically 0-1 for BM25-like scoring
         // but can exceed 1.0. We clamp and normalize.
-        (meilisearch_score.min(2.0) / 2.0).min(1.0).max(0.0)
+        (meilisearch_score.min(2.0) / 2.0).clamp(0.0, 1.0)
     }
 
     /// Computes the working directory match score.

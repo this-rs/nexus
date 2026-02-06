@@ -3,6 +3,8 @@
 //! Combines short-term, medium-term, and long-term memory with
 //! intelligent scoring and deduplication.
 
+#![allow(dead_code, unused_imports)] // Public API - may not be used internally
+
 use anyhow::Result;
 use async_trait::async_trait;
 use std::collections::HashSet;

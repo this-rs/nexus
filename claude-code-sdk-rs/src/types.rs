@@ -12,11 +12,16 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
+/// Callback type for stderr output handling.
+/// Called with each line of stderr output from the CLI.
+pub type StderrCallback = Arc<dyn Fn(&str) + Send + Sync>;
+
 /// Permission mode for tool execution
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum PermissionMode {
     /// Default mode - CLI prompts for dangerous tools
+    #[default]
     Default,
     /// Auto-accept file edits
     AcceptEdits,
@@ -30,7 +35,7 @@ pub enum PermissionMode {
 // SDK Beta Features (matching Python SDK v0.1.12+)
 // ============================================================================
 
-/// SDK Beta features - see https://docs.anthropic.com/en/api/beta-headers
+/// SDK Beta features - see <https://docs.anthropic.com/en/api/beta-headers>
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SdkBeta {
     /// Extended context window (1M tokens)
@@ -176,28 +181,17 @@ pub enum SdkPluginConfig {
     },
 }
 
-impl Default for PermissionMode {
-    fn default() -> Self {
-        Self::Default
-    }
-}
 
 /// Control protocol format for sending messages
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ControlProtocolFormat {
     /// Legacy format: {"type":"sdk_control_request","request":{...}}
+    #[default]
     Legacy,
     /// New format: {"type":"control","control":{...}}
     Control,
     /// Auto-detect based on CLI capabilities (default to Legacy for compatibility)
     Auto,
-}
-
-impl Default for ControlProtocolFormat {
-    fn default() -> Self {
-        // Default to Legacy for maximum compatibility
-        Self::Legacy
-    }
 }
 
 /// MCP (Model Context Protocol) server configuration
@@ -853,11 +847,11 @@ pub struct ClaudeCodeOptions {
     /// Can be either a string or a preset configuration
     /// Replaces the old system_prompt and append_system_prompt fields
     pub system_prompt_v2: Option<SystemPrompt>,
-    /// [DEPRECATED] System prompt to prepend to all messages
+    /// \[DEPRECATED\] System prompt to prepend to all messages
     /// Use system_prompt_v2 instead
     #[deprecated(since = "0.1.12", note = "Use system_prompt_v2 instead")]
     pub system_prompt: Option<String>,
-    /// [DEPRECATED] Additional system prompt to append
+    /// \[DEPRECATED\] Additional system prompt to append
     /// Use system_prompt_v2 instead
     #[deprecated(since = "0.1.12", note = "Use system_prompt_v2 instead")]
     pub append_system_prompt: Option<String>,
@@ -962,7 +956,7 @@ pub struct ClaudeCodeOptions {
     /// ```
     pub tools: Option<ToolsConfig>,
     /// SDK beta features to enable
-    /// See https://docs.anthropic.com/en/api/beta-headers
+    /// See <https://docs.anthropic.com/en/api/beta-headers>
     pub betas: Vec<SdkBeta>,
     /// Maximum spending limit in USD for the session
     /// When exceeded, the session will automatically terminate
@@ -991,7 +985,7 @@ pub struct ClaudeCodeOptions {
     pub user: Option<String>,
     /// Stderr callback (alternative to debug_stderr)
     /// Called with each line of stderr output from the CLI
-    pub stderr_callback: Option<Arc<dyn Fn(&str) + Send + Sync>>,
+    pub stderr_callback: Option<StderrCallback>,
     /// Automatically download Claude Code CLI if not found
     ///
     /// When enabled, the SDK will automatically download and cache the Claude Code

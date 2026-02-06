@@ -120,10 +120,10 @@ impl DefaultToolContextExtractor {
         // Exclude the cd target path from files
         for path in self.extract_absolute_paths(command) {
             // Skip if this is the cd target
-            if let Some(ref cwd) = cwd_path {
-                if &path == cwd {
-                    continue;
-                }
+            if let Some(ref cwd) = cwd_path
+                && &path == cwd
+            {
+                continue;
             }
             if !context.files.contains(&path) {
                 context.files.push(path);
@@ -187,11 +187,10 @@ impl DefaultToolContextExtractor {
     /// Extracts absolute file paths from a command string.
     fn extract_absolute_paths(&self, command: &str) -> Vec<String> {
         let mut paths = Vec::new();
-        let mut chars = command.chars().peekable();
         let mut current_path = String::new();
         let mut in_path = false;
 
-        while let Some(c) = chars.next() {
+        for c in command.chars() {
             if c == '/' && !in_path {
                 in_path = true;
                 current_path.push(c);

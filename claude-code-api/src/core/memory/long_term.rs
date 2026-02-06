@@ -3,6 +3,8 @@
 //! Provides semantic search across all past conversations and
 //! knowledge notes.
 
+#![allow(dead_code)] // Public API - may not be used internally
+
 use anyhow::Result;
 use async_trait::async_trait;
 use chrono::{DateTime, TimeZone, Utc};

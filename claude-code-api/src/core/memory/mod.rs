@@ -24,8 +24,14 @@ mod short_term;
 mod traits;
 mod unified;
 
+// Re-export for public API
+#[allow(unused_imports)]
 pub use long_term::LongTermMemory;
+#[allow(unused_imports)]
 pub use medium_term::MediumTermMemory;
+#[allow(unused_imports)]
 pub use short_term::ShortTermMemory;
+#[allow(unused_imports)]
 pub use traits::{ContextualMemoryProvider, MemoryResult, MemorySource, RelevanceScore};
+#[allow(unused_imports)]
 pub use unified::UnifiedMemoryProvider;

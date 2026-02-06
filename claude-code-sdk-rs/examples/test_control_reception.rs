@@ -10,8 +10,10 @@ async fn main() -> Result<()> {
         log: Arc::new(Mutex::new(Vec::new())),
     });
 
-    let mut options = ClaudeCodeOptions::default();
-    options.can_use_tool = Some(permission_callback.clone());
+    let options = ClaudeCodeOptions {
+        can_use_tool: Some(permission_callback.clone()),
+        ..Default::default()
+    };
 
     let mut client = ClaudeSDKClient::new(options);
 

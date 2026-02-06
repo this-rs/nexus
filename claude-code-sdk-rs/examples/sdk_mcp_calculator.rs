@@ -211,10 +211,8 @@ async fn main() -> Result<()> {
                         }
                     }
                 },
-                Message::Result { total_cost_usd, .. } => {
-                    if let Some(cost) = total_cost_usd {
-                        println!("Cost: ${cost:.6}");
-                    }
+                Message::Result { total_cost_usd: Some(cost), .. } => {
+                    println!("Cost: ${cost:.6}");
                 },
                 _ => {},
             }

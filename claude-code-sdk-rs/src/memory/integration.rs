@@ -415,7 +415,7 @@ impl SummaryGenerator {
 
         // Simple extractive summary: first sentence + "..." + last sentence
         let sentences: Vec<&str> = content
-            .split(|c| c == '.' || c == '!' || c == '?')
+            .split(['.', '!', '?'])
             .map(|s| s.trim())
             .filter(|s| !s.is_empty())
             .collect();

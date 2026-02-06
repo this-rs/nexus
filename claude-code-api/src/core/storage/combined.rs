@@ -6,6 +6,8 @@
 //!
 //! Messages are automatically indexed in Meilisearch when added to conversations.
 
+#![allow(dead_code)] // Public API - may not be used internally
+
 use anyhow::Result;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};

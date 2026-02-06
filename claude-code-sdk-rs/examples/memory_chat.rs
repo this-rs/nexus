@@ -282,8 +282,7 @@ async fn main() -> Result<()> {
                                 content.clone()
                             };
                             println!(
-                                "  \x1b[1;{}m{}.\x1b[0m \x1b[1;{}m{}>\x1b[0m {}",
-                                "2",
+                                "  \x1b[1;2m{}.\x1b[0m \x1b[1;{}m{}>\x1b[0m {}",
                                 i + 1,
                                 role_color,
                                 role_label,
@@ -302,10 +301,10 @@ async fn main() -> Result<()> {
                     if let Some(ref mut manager) = memory_manager {
                         // Store pending messages before clearing
                         let pending = manager.take_pending_messages();
-                        if !pending.is_empty() {
-                            if let Some(ref injector) = context_injector {
-                                let _ = injector.store_messages(&pending).await;
-                            }
+                        if !pending.is_empty()
+                            && let Some(ref injector) = context_injector
+                        {
+                            let _ = injector.store_messages(&pending).await;
                         }
                         // Create new manager (new conversation)
                         *manager = MemoryIntegrationBuilder::new()
@@ -626,24 +625,22 @@ async fn main() -> Result<()> {
 
         // Record assistant message
         #[cfg(feature = "memory")]
-        if let Some(ref mut manager) = memory_manager {
-            if !response_text.is_empty() {
-                manager.record_assistant_message(&response_text);
-            }
+        if let Some(ref mut manager) = memory_manager
+            && !response_text.is_empty()
+        {
+            manager.record_assistant_message(&response_text);
         }
 
         // Store messages periodically
         #[cfg(feature = "memory")]
         if let Some(ref mut manager) = memory_manager {
             let pending = manager.take_pending_messages();
-            if !pending.is_empty() {
-                if let Some(ref injector) = context_injector {
-                    if let Err(e) = injector.store_messages(&pending).await {
-                        if config.verbose {
-                            println!("\x1b[33mWarning: Could not store messages: {}\x1b[0m", e);
-                        }
-                    }
-                }
+            if !pending.is_empty()
+                && let Some(ref injector) = context_injector
+                && let Err(e) = injector.store_messages(&pending).await
+                && config.verbose
+            {
+                println!("\x1b[33mWarning: Could not store messages: {}\x1b[0m", e);
             }
         }
     }

@@ -25,6 +25,10 @@ use std::path::PathBuf;
 #[allow(unused_imports)]
 use tracing::{debug, info, warn};
 
+/// Progress callback type for download operations.
+/// Called with (bytes_downloaded, total_bytes) where total_bytes may be None if unknown.
+pub type ProgressCallback = Box<dyn Fn(u64, Option<u64>) + Send + Sync>;
+
 /// Minimum CLI version required by this SDK
 pub const MIN_CLI_VERSION: &str = "2.0.0";
 
@@ -61,19 +65,20 @@ pub fn get_cached_cli_path() -> Option<PathBuf> {
 /// Check if the cached CLI exists and is executable
 #[allow(dead_code)]
 pub fn is_cli_cached() -> bool {
-    if let Some(path) = get_cached_cli_path() {
-        if path.exists() && path.is_file() {
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                if let Ok(metadata) = path.metadata() {
-                    return metadata.permissions().mode() & 0o111 != 0;
-                }
+    if let Some(path) = get_cached_cli_path()
+        && path.exists()
+        && path.is_file()
+    {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if let Ok(metadata) = path.metadata() {
+                return metadata.permissions().mode() & 0o111 != 0;
             }
-            #[cfg(not(unix))]
-            {
-                return true;
-            }
+        }
+        #[cfg(not(unix))]
+        {
+            return true;
         }
     }
     false
@@ -97,7 +102,7 @@ pub fn is_cli_cached() -> bool {
 #[cfg(feature = "auto-download")]
 pub async fn download_cli(
     version: Option<&str>,
-    on_progress: Option<Box<dyn Fn(u64, Option<u64>) + Send + Sync>>,
+    on_progress: Option<ProgressCallback>,
 ) -> Result<PathBuf> {
     let version = version.unwrap_or(DEFAULT_CLI_VERSION);
     info!("Downloading Claude Code CLI version: {}", version);
@@ -124,7 +129,7 @@ pub async fn download_cli(
 #[cfg(not(feature = "auto-download"))]
 pub async fn download_cli(
     _version: Option<&str>,
-    _on_progress: Option<Box<dyn Fn(u64, Option<u64>) + Send + Sync>>,
+    _on_progress: Option<ProgressCallback>,
 ) -> Result<PathBuf> {
     Err(SdkError::ConfigError(
         "Auto-download feature is not enabled. \
@@ -139,7 +144,7 @@ pub async fn download_cli(
 async fn install_cli_for_platform(
     version: &str,
     target_path: &PathBuf,
-    on_progress: Option<Box<dyn Fn(u64, Option<u64>) + Send + Sync>>,
+    on_progress: Option<ProgressCallback>,
 ) -> Result<PathBuf> {
     #[cfg(unix)]
     {
@@ -156,7 +161,7 @@ async fn install_cli_for_platform(
 async fn install_cli_unix(
     version: &str,
     target_path: &PathBuf,
-    on_progress: Option<Box<dyn Fn(u64, Option<u64>) + Send + Sync>>,
+    on_progress: Option<ProgressCallback>,
 ) -> Result<PathBuf> {
     use tokio::process::Command;
 
@@ -288,7 +293,7 @@ async fn install_cli_unix(
 async fn install_cli_windows(
     version: &str,
     target_path: &PathBuf,
-    on_progress: Option<Box<dyn Fn(u64, Option<u64>) + Send + Sync>>,
+    on_progress: Option<ProgressCallback>,
 ) -> Result<PathBuf> {
     use tokio::process::Command;
 
@@ -400,11 +405,11 @@ pub async fn ensure_cli(auto_download: bool) -> Result<PathBuf> {
     }
 
     // Check cached CLI
-    if let Some(cached_path) = get_cached_cli_path() {
-        if cached_path.exists() {
-            debug!("Using cached CLI at: {}", cached_path.display());
-            return Ok(cached_path);
-        }
+    if let Some(cached_path) = get_cached_cli_path()
+        && cached_path.exists()
+    {
+        debug!("Using cached CLI at: {}", cached_path.display());
+        return Ok(cached_path);
     }
 
     // Download if auto_download is enabled

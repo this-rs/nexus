@@ -5,6 +5,8 @@
 //! - Architectural decisions
 //! - Knowledge notes attached to entities
 
+#![allow(dead_code)] // Public API - may not be used internally
+
 use anyhow::Result;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};

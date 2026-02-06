@@ -1,6 +1,8 @@
 //! Neo4j-backed permission provider
 //!
 //! Implements the CanUseTool trait with permission rules stored in Neo4j.
+
+#![allow(dead_code)] // Public API - may not be used internally
 //!
 //! ## Schema
 //!

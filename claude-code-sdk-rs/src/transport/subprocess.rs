@@ -1111,11 +1111,12 @@ pub fn find_claude_cli() -> Result<PathBuf> {
     }
 
     // Check SDK cache directory (for auto-downloaded CLI)
-    if let Some(cached_path) = crate::cli_download::get_cached_cli_path() {
-        if cached_path.exists() && cached_path.is_file() {
-            debug!("Found cached Claude CLI at: {}", cached_path.display());
-            return Ok(cached_path);
-        }
+    if let Some(cached_path) = crate::cli_download::get_cached_cli_path()
+        && cached_path.exists()
+        && cached_path.is_file()
+    {
+        debug!("Found cached Claude CLI at: {}", cached_path.display());
+        return Ok(cached_path);
     }
 
     // Check common installation locations
@@ -1251,7 +1252,7 @@ fn apply_process_user_inner(cmd: &mut Command, user: &str) -> Result<()> {
         }
 
         let pwd = unsafe { pwd.assume_init() };
-        Ok((pwd.pw_uid as u32, pwd.pw_gid as u32))
+        Ok((pwd.pw_uid, pwd.pw_gid))
     }
 
     fn lookup_by_uid(uid: u32) -> Result<(u32, u32)> {
@@ -1282,7 +1283,7 @@ fn apply_process_user_inner(cmd: &mut Command, user: &str) -> Result<()> {
         }
 
         let pwd = unsafe { pwd.assume_init() };
-        Ok((pwd.pw_uid as u32, pwd.pw_gid as u32))
+        Ok((pwd.pw_uid, pwd.pw_gid))
     }
 
     let (uid, gid) = match user.parse::<u32>() {

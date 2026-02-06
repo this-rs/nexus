@@ -1,6 +1,8 @@
 //! Neo4j-backed hook callback implementation
 //!
 //! Captures all Claude Code events into Neo4j for knowledge graph persistence.
+
+#![allow(dead_code)] // Public API - may not be used internally
 //!
 //! ## Schema
 //!
@@ -144,9 +146,8 @@ impl Neo4jHookCallback {
 
     /// Initialize Meilisearch index for tool usage
     pub async fn init_meilisearch_index(&self) -> Result<()> {
-        if let Some(ref ms) = self.meilisearch {
+        if let Some(ref _ms) = self.meilisearch {
             // Create index (ignore if exists)
-            let client = ms.messages_index(); // Access underlying client
             // For now, we'll just log - actual index creation is handled by MeilisearchClient
             debug!("Meilisearch tool usage index ready");
         }
@@ -247,21 +248,21 @@ impl Neo4jHookCallback {
         }
 
         // Index in Meilisearch if configured
-        if self.config.index_in_meilisearch {
-            if let Some(ref ms) = self.meilisearch {
-                let doc = ToolUsageDocument {
-                    id: id.clone(),
-                    tool_name: input.tool_name.clone(),
-                    input_summary: truncate_for_search(&input_json, 500),
-                    output_summary: truncate_for_search(&output_json, 1000),
-                    session_id: input.session_id.clone(),
-                    created_at: now.timestamp(),
-                };
+        if self.config.index_in_meilisearch
+            && let Some(ref _ms) = self.meilisearch
+        {
+            let doc = ToolUsageDocument {
+                id: id.clone(),
+                tool_name: input.tool_name.clone(),
+                input_summary: truncate_for_search(&input_json, 500),
+                output_summary: truncate_for_search(&output_json, 1000),
+                session_id: input.session_id.clone(),
+                created_at: now.timestamp(),
+            };
 
-                // Use a custom index for tool usage - for now just log
-                // In production, we'd create a dedicated tool_usage index
-                debug!("Would index tool usage in Meilisearch: {}", doc.tool_name);
-            }
+            // Use a custom index for tool usage - for now just log
+            // In production, we'd create a dedicated tool_usage index
+            debug!("Would index tool usage in Meilisearch: {}", doc.tool_name);
         }
 
         Ok(HookJSONOutput::Sync(SyncHookJSONOutput::default()))

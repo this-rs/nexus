@@ -94,10 +94,10 @@ async fn create_app(settings: Settings) -> Result<Router> {
     ));
 
     // 如果启用了交互式会话，预热一个默认进程
-    if settings.claude.use_interactive_sessions {
-        if let Err(e) = interactive_session_manager.prewarm_default_session().await {
-            tracing::error!("Failed to pre-warm Claude process: {}", e);
-        }
+    if settings.claude.use_interactive_sessions
+        && let Err(e) = interactive_session_manager.prewarm_default_session().await
+    {
+        tracing::error!("Failed to pre-warm Claude process: {}", e);
     }
 
     let conversation_store = InMemoryConversationStore::new(InMemoryConversationConfig::default());

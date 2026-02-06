@@ -3,6 +3,8 @@
 //! These implementations store data in memory using thread-safe data structures.
 //! Data is lost when the process exits.
 
+#![allow(dead_code)] // Public API - may not be used internally
+
 use anyhow::Result;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};

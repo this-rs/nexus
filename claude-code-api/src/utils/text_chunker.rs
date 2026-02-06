@@ -3,6 +3,8 @@
 //! Since Claude CLI returns complete messages, we need to chunk them
 //! to provide a better streaming experience.
 
+#![allow(dead_code)] // Public API - may not be used internally
+
 use futures::stream::Stream;
 use std::pin::Pin;
 use std::task::{Context, Poll};

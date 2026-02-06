@@ -2,6 +2,8 @@
 //!
 //! This module provides Neo4j-backed implementations of the storage traits.
 //! Labels are prefixed with "Nexus" to avoid conflicts with other applications.
+
+#![allow(dead_code)] // Public API - may not be used internally
 //!
 //! ## Schema
 //!
@@ -48,7 +50,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use neo4rs::{Graph, Node, query};
 use std::sync::Arc;
-use tracing::{debug, error, info};
+use tracing::{debug, info};
 use uuid::Uuid;
 
 use crate::core::conversation::{Conversation, ConversationMetadata};

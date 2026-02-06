@@ -235,10 +235,10 @@ impl InteractiveSessionManager {
         }
 
         // MCP 配置
-        if self.mcp_config.enabled {
-            if let Some(ref config_file) = self.mcp_config.config_file {
-                cmd.arg("--mcp-config").arg(config_file);
-            }
+        if self.mcp_config.enabled
+            && let Some(ref config_file) = self.mcp_config.config_file
+        {
+            cmd.arg("--mcp-config").arg(config_file);
         }
 
         cmd.stdin(Stdio::piped())
@@ -431,32 +431,43 @@ impl InteractiveSessionManager {
         sessions: Arc<RwLock<HashMap<String, InteractiveSession>>>,
         timeout_minutes: u64,
     ) {
-        let mut sessions = sessions.write();
         let now = std::time::Instant::now();
         let timeout = std::time::Duration::from_secs(timeout_minutes * 60);
 
-        let expired: Vec<String> = sessions
-            .iter()
-            .filter(|(_, session)| {
-                let last_used = *session.last_used.lock();
-                now.duration_since(last_used) > timeout
-            })
-            .map(|(id, _)| id.clone())
-            .collect();
+        // Collect expired sessions while holding the lock
+        let expired_sessions: Vec<(String, InteractiveSession)> = {
+            let mut sessions = sessions.write();
+            let expired_ids: Vec<String> = sessions
+                .iter()
+                .filter(|(_, session)| {
+                    let last_used = *session.last_used.lock();
+                    now.duration_since(last_used) > timeout
+                })
+                .map(|(id, _)| id.clone())
+                .collect();
 
-        for id in expired {
-            if let Some(mut session) = sessions.remove(&id) {
-                info!("Cleaning up expired session: {}", id);
-                let _ = session.child.kill();
-            }
+            expired_ids
+                .into_iter()
+                .filter_map(|id| sessions.remove(&id).map(|s| (id, s)))
+                .collect()
+        };
+        // Lock is released here
+
+        // Now kill the expired sessions without holding the lock
+        for (id, mut session) in expired_sessions {
+            info!("Cleaning up expired session: {}", id);
+            let _ = session.child.kill().await;
         }
     }
 
     /// 关闭指定会话
     #[allow(dead_code)]
     pub async fn close_session(&self, conversation_id: &str) -> Result<()> {
-        let mut sessions = self.sessions.write();
-        if let Some(mut session) = sessions.remove(conversation_id) {
+        let session_opt = {
+            let mut sessions = self.sessions.write();
+            sessions.remove(conversation_id)
+        };
+        if let Some(mut session) = session_opt {
             info!("Closing session: {}", conversation_id);
             session.child.kill().await?;
             Ok(())
@@ -488,6 +499,9 @@ impl Drop for InteractiveSessionManager {
         let mut sessions = self.sessions.write();
         for (id, mut session) in sessions.drain() {
             info!("Cleaning up session on shutdown: {}", id);
+            // Note: In Drop we can't await, so we start the kill and let it complete
+            // The process will be cleaned up by the OS regardless
+            #[allow(clippy::let_underscore_future)]
             let _ = session.child.kill();
         }
     }

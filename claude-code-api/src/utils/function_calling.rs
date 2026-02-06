@@ -63,12 +63,12 @@ fn extract_json_from_content(content: &str) -> Option<Value> {
     }
 
     // Look for any JSON object in the content
-    if let Some(start) = content.find('{') {
-        if let Some(end) = find_matching_brace(&content[start..]) {
-            let json_str = &content[start..start + end + 1];
-            if let Ok(json) = serde_json::from_str::<Value>(json_str) {
-                return Some(json);
-            }
+    if let Some(start) = content.find('{')
+        && let Some(end) = find_matching_brace(&content[start..])
+    {
+        let json_str = &content[start..start + end + 1];
+        if let Ok(json) = serde_json::from_str::<Value>(json_str) {
+            return Some(json);
         }
     }
 
@@ -120,11 +120,11 @@ fn detect_tool_name(json: &Value, requested_tools: &Option<Vec<Tool>>) -> Option
     // Check if the JSON structure matches any of the requested tools
     if let Some(tools) = requested_tools {
         for tool in tools {
-            if tool.tool_type == "function" {
-                if json_matches_tool_schema(json, &tool.function.parameters) {
-                    info!("JSON matches schema for tool: {}", tool.function.name);
-                    return Some(tool.function.name.clone());
-                }
+            if tool.tool_type == "function"
+                && json_matches_tool_schema(json, &tool.function.parameters)
+            {
+                info!("JSON matches schema for tool: {}", tool.function.name);
+                return Some(tool.function.name.clone());
             }
         }
     }
@@ -135,10 +135,11 @@ fn detect_tool_name(json: &Value, requested_tools: &Option<Vec<Tool>>) -> Option
 /// Checks if JSON matches a tool's parameter schema
 fn json_matches_tool_schema(json: &Value, schema: &Value) -> bool {
     // Check if the JSON object matches the schema structure
-    if let (Some(json_obj), Some(schema_obj)) = (json.as_object(), schema.as_object()) {
-        if let Some(properties) = schema_obj.get("properties").and_then(|p| p.as_object()) {
-            // Check if JSON has all required properties
-            if let Some(required) = schema_obj.get("required").and_then(|r| r.as_array()) {
+    if let (Some(json_obj), Some(schema_obj)) = (json.as_object(), schema.as_object())
+        && let Some(properties) = schema_obj.get("properties").and_then(|p| p.as_object())
+    {
+        // Check if JSON has all required properties
+        if let Some(required) = schema_obj.get("required").and_then(|r| r.as_array()) {
                 let required_props: Vec<&str> =
                     required.iter().filter_map(|v| v.as_str()).collect();
 
@@ -165,7 +166,6 @@ fn json_matches_tool_schema(json: &Value, schema: &Value) -> bool {
                 // Consider it a match if at least 50% of properties match
                 return matches > 0 && (matches * 2 >= total_props);
             }
-        }
     }
 
     false

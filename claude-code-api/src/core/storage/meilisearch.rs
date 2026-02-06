@@ -2,6 +2,8 @@
 //!
 //! This module provides Meilisearch-backed search capabilities for conversations.
 //! Index names are prefixed with "nexus_" to avoid conflicts with other applications.
+
+#![allow(dead_code)] // Public API - may not be used internally
 //!
 //! ## Indexes
 //!

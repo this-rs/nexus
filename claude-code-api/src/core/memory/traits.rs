@@ -1,5 +1,7 @@
 //! Traits for the contextual memory system
 
+#![allow(dead_code)] // Public API - may not be used internally
+
 use anyhow::Result;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};

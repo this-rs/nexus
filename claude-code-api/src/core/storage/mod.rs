@@ -16,11 +16,16 @@ pub mod neo4j;
 pub mod tiered_cache;
 mod traits;
 
+// Re-export for public API
+#[allow(unused_imports)]
 pub use combined::{CombinedConversationStore, CombinedSessionStore};
+#[allow(unused_imports)]
 pub use meilisearch::{
     ConversationDocument, MeilisearchClient, MeilisearchConfig, MessageDocument,
 };
 pub use memory::*;
+#[allow(unused_imports)]
 pub use neo4j::{Neo4jClient, Neo4jConfig, Neo4jConversationStore, Neo4jSessionStore};
+#[allow(unused_imports)]
 pub use tiered_cache::{TieredCache, TieredCacheConfig, TieredCacheStats};
 pub use traits::*;

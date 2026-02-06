@@ -120,13 +120,13 @@ jobs:
 
   # MSRV check
   msrv:
-    name: MSRV (1.85)
+    name: MSRV (1.88)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/setup-rust
         with:
-          toolchain: '1.85'
+          toolchain: '1.88'
           components: ''
 
       - name: Build with MSRV

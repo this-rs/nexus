@@ -599,14 +599,14 @@ impl ClaudeSDKClient {
         ];
 
         for path in config_paths {
-            if let Ok(content) = tokio::fs::read_to_string(&path).await {
-                if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
-                    if let Some(email) = json.get("email").and_then(|v| v.as_str()) {
-                        return Some(format!("Email: {}", email));
-                    }
-                    if let Some(user) = json.get("user").and_then(|v| v.as_str()) {
-                        return Some(format!("User: {}", user));
-                    }
+            if let Ok(content) = tokio::fs::read_to_string(&path).await
+                && let Ok(json) = serde_json::from_str::<serde_json::Value>(&content)
+            {
+                if let Some(email) = json.get("email").and_then(|v| v.as_str()) {
+                    return Some(format!("Email: {}", email));
+                }
+                if let Some(user) = json.get("user").and_then(|v| v.as_str()) {
+                    return Some(format!("User: {}", user));
                 }
             }
         }

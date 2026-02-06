@@ -3,6 +3,8 @@
 //! Wraps ConversationStore to provide access to recent messages
 //! in the current conversation.
 
+#![allow(dead_code)] // Public API - may not be used internally
+
 use anyhow::Result;
 use async_trait::async_trait;
 use std::sync::Arc;
@@ -149,10 +151,10 @@ impl<S: ConversationStore + 'static> ContextualMemoryProvider for ShortTermMemor
         limit: usize,
     ) -> Result<Vec<MemoryResult>> {
         // Short-term only has conversation source
-        if let Some(filter) = source_filter {
-            if filter != "conversation" {
-                return Ok(vec![]);
-            }
+        if let Some(filter) = source_filter
+            && filter != "conversation"
+        {
+            return Ok(vec![]);
         }
 
         self.query(query, limit).await

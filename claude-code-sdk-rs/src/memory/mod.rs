@@ -13,10 +13,10 @@
 //!
 //! ## Components
 //!
-//! - [`MessageDocument`]: Persistent message storage format
-//! - [`ToolContextExtractor`]: Extracts context from tool calls
-//! - [`RelevanceScorer`]: Multi-factor relevance scoring
-//! - [`MemoryProvider`]: Unified memory access trait
+//! - `MessageDocument`: Persistent message storage format
+//! - `ToolContextExtractor`: Extracts context from tool calls
+//! - `RelevanceScorer`: Multi-factor relevance scoring
+//! - `MemoryProvider`: Unified memory access trait
 
 mod integration;
 mod message_document;

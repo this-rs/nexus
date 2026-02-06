@@ -8,11 +8,13 @@
 //! 1. Read: L1 hit → return | L1 miss → L2 lookup → populate L1 → return
 //! 2. Write: Write to L1 → async write to L2
 
+#![allow(dead_code)] // Public API - may not be used internally
+
 use anyhow::Result;
 use async_trait::async_trait;
 use dashmap::DashMap;
-use neo4rs::{Graph, Node, query};
-use serde::{Deserialize, Serialize};
+use neo4rs::{Graph, query};
+use serde::Serialize;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
@@ -148,15 +150,14 @@ impl TieredCache {
 
         match graph.execute(q).await {
             Ok(mut result) => {
-                if let Ok(Some(row)) = result.next().await {
-                    if let Ok(response_json) = row.get::<String>("response") {
-                        if let Ok(response) = serde_json::from_str(&response_json) {
-                            self.l2_hits
-                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                            debug!("L2 cache hit for key: {}", key);
-                            return Some(response);
-                        }
-                    }
+                if let Ok(Some(row)) = result.next().await
+                    && let Ok(response_json) = row.get::<String>("response")
+                    && let Ok(response) = serde_json::from_str(&response_json)
+                {
+                    self.l2_hits
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    debug!("L2 cache hit for key: {}", key);
+                    return Some(response);
                 }
             },
             Err(e) => {
@@ -346,12 +347,11 @@ impl CacheStore for TieredCache {
                 RETURN count(c) as deleted",
             );
 
-            if let Ok(mut result) = graph.execute(q).await {
-                if let Ok(Some(row)) = result.next().await {
-                    if let Ok(deleted) = row.get::<i64>("deleted") {
-                        count += deleted as usize;
-                    }
-                }
+            if let Ok(mut result) = graph.execute(q).await
+                && let Ok(Some(row)) = result.next().await
+                && let Ok(deleted) = row.get::<i64>("deleted")
+            {
+                count += deleted as usize;
             }
         }
 
