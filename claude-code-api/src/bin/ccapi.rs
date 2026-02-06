@@ -35,11 +35,11 @@ fn main() {
         match Command::new(&claude_code_api_path).args(&args).status() {
             Ok(status) => {
                 std::process::exit(status.code().unwrap_or(1));
-            }
+            },
             Err(e) => {
                 eprintln!("Failed to execute claude-code-api: {}", e);
                 std::process::exit(1);
-            }
+            },
         }
     }
 }
