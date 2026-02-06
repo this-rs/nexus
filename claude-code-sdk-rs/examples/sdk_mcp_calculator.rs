@@ -211,7 +211,10 @@ async fn main() -> Result<()> {
                         }
                     }
                 },
-                Message::Result { total_cost_usd: Some(cost), .. } => {
+                Message::Result {
+                    total_cost_usd: Some(cost),
+                    ..
+                } => {
                     println!("Cost: ${cost:.6}");
                 },
                 _ => {},

@@ -181,7 +181,6 @@ pub enum SdkPluginConfig {
     },
 }
 
-
 /// Control protocol format for sending messages
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ControlProtocolFormat {

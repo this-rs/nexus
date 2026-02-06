@@ -140,32 +140,31 @@ fn json_matches_tool_schema(json: &Value, schema: &Value) -> bool {
     {
         // Check if JSON has all required properties
         if let Some(required) = schema_obj.get("required").and_then(|r| r.as_array()) {
-                let required_props: Vec<&str> =
-                    required.iter().filter_map(|v| v.as_str()).collect();
+            let required_props: Vec<&str> = required.iter().filter_map(|v| v.as_str()).collect();
 
-                // All required properties must be present
-                for req_prop in &required_props {
-                    if !json_obj.contains_key(*req_prop) {
-                        return false;
-                    }
+            // All required properties must be present
+            for req_prop in &required_props {
+                if !json_obj.contains_key(*req_prop) {
+                    return false;
                 }
-
-                // If all required properties are present, it's a match
-                return true;
-            } else {
-                // No required properties specified, check if JSON has any of the schema properties
-                let mut matches = 0;
-                let total_props = properties.len();
-
-                for (key, _) in properties {
-                    if json_obj.contains_key(key) {
-                        matches += 1;
-                    }
-                }
-
-                // Consider it a match if at least 50% of properties match
-                return matches > 0 && (matches * 2 >= total_props);
             }
+
+            // If all required properties are present, it's a match
+            return true;
+        } else {
+            // No required properties specified, check if JSON has any of the schema properties
+            let mut matches = 0;
+            let total_props = properties.len();
+
+            for (key, _) in properties {
+                if json_obj.contains_key(key) {
+                    matches += 1;
+                }
+            }
+
+            // Consider it a match if at least 50% of properties match
+            return matches > 0 && (matches * 2 >= total_props);
+        }
     }
 
     false

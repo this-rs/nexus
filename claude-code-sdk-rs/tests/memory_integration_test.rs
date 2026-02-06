@@ -5,10 +5,7 @@
 
 #![cfg(feature = "memory")]
 
-use nexus_claude::memory::{
-    MemoryIntegrationBuilder, MessageDocument,
-    SummaryGenerator,
-};
+use nexus_claude::memory::{MemoryIntegrationBuilder, MessageDocument, SummaryGenerator};
 use serde_json::json;
 
 /// Test the full conversation flow with memory capture.
