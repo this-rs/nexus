@@ -46,7 +46,7 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use neo4rs::{query, Graph, Node};
+use neo4rs::{Graph, Node, query};
 use std::sync::Arc;
 use tracing::{debug, error, info};
 use uuid::Uuid;
@@ -156,7 +156,7 @@ impl ConversationStore for Neo4jConversationStore {
                 created_at: datetime($now),
                 updated_at: datetime($now)
             })
-            RETURN c.id as id"
+            RETURN c.id as id",
         )
         .param("id", id.clone())
         .param("model", model.unwrap_or_default())
@@ -174,7 +174,7 @@ impl ConversationStore for Neo4jConversationStore {
             OPTIONAL MATCH (c)-[:HAS_MESSAGE]->(m:NexusMessage)
             WITH c, m ORDER BY m.turn_index
             WITH c, collect(m) as messages
-            RETURN c, messages"
+            RETURN c, messages",
         )
         .param("id", id);
 
@@ -239,7 +239,7 @@ impl ConversationStore for Neo4jConversationStore {
                     })
                     .collect::<Vec<_>>()
                     .join("\n")
-            }
+            },
             None => String::new(),
         };
 
@@ -255,7 +255,7 @@ impl ConversationStore for Neo4jConversationStore {
             CREATE (c)-[:HAS_MESSAGE]->(m)
             SET c.turn_count = c.turn_count + 1,
                 c.updated_at = datetime($now)
-            RETURN c.id as id"
+            RETURN c.id as id",
         )
         .param("conv_id", id)
         .param("msg_id", msg_id)
@@ -282,7 +282,7 @@ impl ConversationStore for Neo4jConversationStore {
                 c.total_tokens = $total_tokens,
                 c.turn_count = $turn_count,
                 c.updated_at = datetime($now)
-            RETURN c.id as id"
+            RETURN c.id as id",
         )
         .param("id", id)
         .param("model", metadata.model.unwrap_or_default())
@@ -304,7 +304,7 @@ impl ConversationStore for Neo4jConversationStore {
             "MATCH (c:NexusConversation)
             RETURN c.id as id, c.updated_at as updated_at
             ORDER BY c.updated_at DESC
-            LIMIT 100"
+            LIMIT 100",
         );
 
         let mut result = self.client.graph.execute(q).await?;
@@ -328,7 +328,7 @@ impl ConversationStore for Neo4jConversationStore {
             WHERE c.updated_at < datetime() - duration({minutes: $timeout})
             OPTIONAL MATCH (c)-[:HAS_MESSAGE]->(m:NexusMessage)
             DETACH DELETE c, m
-            RETURN count(c) as deleted"
+            RETURN count(c) as deleted",
         )
         .param("timeout", timeout_minutes);
 
@@ -350,7 +350,7 @@ impl ConversationStore for Neo4jConversationStore {
             "MATCH (c:NexusConversation {id: $id})
             OPTIONAL MATCH (c)-[:HAS_MESSAGE]->(m:NexusMessage)
             DETACH DELETE c, m
-            RETURN count(c) as deleted"
+            RETURN count(c) as deleted",
         )
         .param("id", id);
 
@@ -393,7 +393,7 @@ impl SessionStore for Neo4jSessionStore {
                 created_at: datetime($now),
                 updated_at: datetime($now)
             })
-            RETURN s.id as id"
+            RETURN s.id as id",
         )
         .param("id", id.clone())
         .param("project_path", project_path.unwrap_or_default())
@@ -408,7 +408,7 @@ impl SessionStore for Neo4jSessionStore {
     async fn get(&self, id: &str) -> Result<Option<Session>> {
         let q = query(
             "MATCH (s:NexusSession {id: $id})
-            RETURN s"
+            RETURN s",
         )
         .param("id", id);
 
@@ -438,7 +438,7 @@ impl SessionStore for Neo4jSessionStore {
         let q = query(
             "MATCH (s:NexusSession {id: $id})
             SET s.updated_at = datetime($now)
-            RETURN s.id as id"
+            RETURN s.id as id",
         )
         .param("id", id)
         .param("now", now);
@@ -459,7 +459,7 @@ impl SessionStore for Neo4jSessionStore {
         if session.is_some() {
             let q = query(
                 "MATCH (s:NexusSession {id: $id})
-                DETACH DELETE s"
+                DETACH DELETE s",
             )
             .param("id", id);
 
@@ -475,7 +475,7 @@ impl SessionStore for Neo4jSessionStore {
             "MATCH (s:NexusSession)
             RETURN s
             ORDER BY s.updated_at DESC
-            LIMIT 100"
+            LIMIT 100",
         );
 
         let mut result = self.client.graph.execute(q).await?;
@@ -486,8 +486,10 @@ impl SessionStore for Neo4jSessionStore {
 
             let id: String = node.get("id")?;
             let project_path: Option<String> = node.get("project_path").ok();
-            let created_at = parse_neo4j_datetime(&node, "created_at").unwrap_or_else(|_| Utc::now());
-            let updated_at = parse_neo4j_datetime(&node, "updated_at").unwrap_or_else(|_| Utc::now());
+            let created_at =
+                parse_neo4j_datetime(&node, "created_at").unwrap_or_else(|_| Utc::now());
+            let updated_at =
+                parse_neo4j_datetime(&node, "updated_at").unwrap_or_else(|_| Utc::now());
 
             sessions.push(Session {
                 id,
@@ -543,7 +545,10 @@ mod tests {
         let client = Neo4jClient::new(config).await.unwrap();
         let store = Neo4jSessionStore::new(client);
 
-        let id = store.create(Some("/path/to/project".to_string())).await.unwrap();
+        let id = store
+            .create(Some("/path/to/project".to_string()))
+            .await
+            .unwrap();
         assert!(!id.is_empty());
 
         let session = store.get(&id).await.unwrap();

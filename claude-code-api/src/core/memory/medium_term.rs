@@ -103,10 +103,10 @@ impl MediumTermMemory {
     async fn search_plans(&self, query: &str, limit: usize) -> Result<Vec<PlanSummary>> {
         let url = format!("{}/plans", self.config.url);
 
-        let mut request = self.client.get(&url).query(&[
-            ("search", query),
-            ("limit", &limit.to_string()),
-        ]);
+        let mut request = self
+            .client
+            .get(&url)
+            .query(&[("search", query), ("limit", &limit.to_string())]);
 
         if let Some(ref key) = self.config.api_key {
             request = request.header("Authorization", format!("Bearer {}", key));
@@ -128,11 +128,11 @@ impl MediumTermMemory {
                     }
                 }
                 Ok(vec![])
-            }
+            },
             Err(e) => {
                 warn!("Failed to search plans: {}", e);
                 Ok(vec![])
-            }
+            },
         }
     }
 
@@ -141,10 +141,10 @@ impl MediumTermMemory {
         // For now, use a simple approach - in production this would call the MCP
         let url = format!("{}/tasks", self.config.url);
 
-        let request = self.client.get(&url).query(&[
-            ("search", query),
-            ("limit", &limit.to_string()),
-        ]);
+        let request = self
+            .client
+            .get(&url)
+            .query(&[("search", query), ("limit", &limit.to_string())]);
 
         match request.send().await {
             Ok(response) => {
@@ -158,11 +158,11 @@ impl MediumTermMemory {
                     }
                 }
                 Ok(vec![])
-            }
+            },
             Err(e) => {
                 warn!("Failed to search tasks: {}", e);
                 Ok(vec![])
-            }
+            },
         }
     }
 
@@ -170,10 +170,10 @@ impl MediumTermMemory {
     async fn search_decisions(&self, query: &str, limit: usize) -> Result<Vec<DecisionSummary>> {
         let url = format!("{}/decisions/search", self.config.url);
 
-        let request = self.client.get(&url).query(&[
-            ("query", query),
-            ("limit", &limit.to_string()),
-        ]);
+        let request = self
+            .client
+            .get(&url)
+            .query(&[("query", query), ("limit", &limit.to_string())]);
 
         match request.send().await {
             Ok(response) => {
@@ -187,11 +187,11 @@ impl MediumTermMemory {
                     }
                 }
                 Ok(vec![])
-            }
+            },
             Err(e) => {
                 warn!("Failed to search decisions: {}", e);
                 Ok(vec![])
-            }
+            },
         }
     }
 
@@ -199,10 +199,10 @@ impl MediumTermMemory {
     async fn search_notes(&self, query: &str, limit: usize) -> Result<Vec<NoteSummary>> {
         let url = format!("{}/notes/search", self.config.url);
 
-        let mut request = self.client.get(&url).query(&[
-            ("query", query),
-            ("limit", &limit.to_string()),
-        ]);
+        let mut request = self
+            .client
+            .get(&url)
+            .query(&[("query", query), ("limit", &limit.to_string())]);
 
         if let Some(ref project_id) = self.project_id {
             request = request.query(&[("project_id", project_id)]);
@@ -220,11 +220,11 @@ impl MediumTermMemory {
                     }
                 }
                 Ok(vec![])
-            }
+            },
             Err(e) => {
                 warn!("Failed to search notes: {}", e);
                 Ok(vec![])
-            }
+            },
         }
     }
 
@@ -249,7 +249,7 @@ impl MediumTermMemory {
 
         // Scope based on entity type
         let scope = match entity_type {
-            "decision" => 0.9,  // Decisions are most specific
+            "decision" => 0.9, // Decisions are most specific
             "task" => 0.8,
             "plan" => 0.7,
             "note" => 0.6,
@@ -373,7 +373,10 @@ impl ContextualMemoryProvider for MediumTermMemory {
         });
 
         results.truncate(limit);
-        debug!("MediumTermMemory: found {} results for query", results.len());
+        debug!(
+            "MediumTermMemory: found {} results for query",
+            results.len()
+        );
 
         Ok(results)
     }
@@ -409,7 +412,7 @@ impl ContextualMemoryProvider for MediumTermMemory {
                         .with_title(p.title)
                     })
                     .collect())
-            }
+            },
             Some("task") => {
                 let tasks = self.search_tasks(query, limit).await?;
                 Ok(tasks
@@ -431,7 +434,7 @@ impl ContextualMemoryProvider for MediumTermMemory {
                         .with_title(t.title)
                     })
                     .collect())
-            }
+            },
             Some("decision") => self.get_relevant_decisions(query, limit).await,
             _ => self.query(query, limit).await,
         }

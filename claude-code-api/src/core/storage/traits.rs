@@ -7,10 +7,10 @@ use anyhow::Result;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 
+use crate::core::cache::CacheStats;
 use crate::core::conversation::{Conversation, ConversationMetadata};
 use crate::core::session_manager::Session;
-use crate::core::cache::CacheStats;
-use crate::models::openai::{ChatMessage, ChatCompletionResponse};
+use crate::models::openai::{ChatCompletionResponse, ChatMessage};
 
 /// Trait for conversation storage backends
 ///

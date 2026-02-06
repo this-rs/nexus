@@ -11,7 +11,7 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use dashmap::DashMap;
-use neo4rs::{query, Graph, Node};
+use neo4rs::{Graph, Node, query};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -39,7 +39,7 @@ impl Default for TieredCacheConfig {
     fn default() -> Self {
         Self {
             l1_max_entries: 1000,
-            l1_ttl_seconds: 3600,  // 1 hour
+            l1_ttl_seconds: 3600, // 1 hour
             l2_enabled: true,
             l2_ttl_seconds: 86400, // 24 hours
         }
@@ -142,7 +142,7 @@ impl TieredCache {
         let q = query(
             "MATCH (c:NexusCacheEntry {key: $key})
             WHERE c.expires_at > datetime()
-            RETURN c.response as response"
+            RETURN c.response as response",
         )
         .param("key", key);
 
@@ -158,10 +158,10 @@ impl TieredCache {
                         }
                     }
                 }
-            }
+            },
             Err(e) => {
                 warn!("L2 cache read error: {}", e);
-            }
+            },
         }
 
         None
@@ -214,14 +214,14 @@ impl TieredCache {
             Err(e) => {
                 warn!("Failed to serialize response for L2 cache: {}", e);
                 return;
-            }
+            },
         };
 
         let q = query(
             "MERGE (c:NexusCacheEntry {key: $key})
             SET c.response = $response,
                 c.created_at = datetime(),
-                c.expires_at = datetime() + duration({seconds: $ttl})"
+                c.expires_at = datetime() + duration({seconds: $ttl})",
         )
         .param("key", key)
         .param("response", response_json)
@@ -240,8 +240,7 @@ impl TieredCache {
             return Ok(());
         };
 
-        let constraint =
-            "CREATE CONSTRAINT nexus_cache_key IF NOT EXISTS FOR (c:NexusCacheEntry) REQUIRE c.key IS UNIQUE";
+        let constraint = "CREATE CONSTRAINT nexus_cache_key IF NOT EXISTS FOR (c:NexusCacheEntry) REQUIRE c.key IS UNIQUE";
 
         if let Err(e) = graph.run(query(constraint)).await {
             debug!("Cache constraint creation result: {:?}", e);
@@ -344,7 +343,7 @@ impl CacheStore for TieredCache {
                 "MATCH (c:NexusCacheEntry)
                 WHERE c.expires_at < datetime()
                 DELETE c
-                RETURN count(c) as deleted"
+                RETURN count(c) as deleted",
             );
 
             if let Ok(mut result) = graph.execute(q).await {

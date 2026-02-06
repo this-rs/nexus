@@ -87,14 +87,16 @@ impl DefaultToolContextExtractor {
 
     /// Extracts file_path from Read/Write/Edit tool inputs.
     fn extract_file_path(&self, input: &Value) -> Option<String> {
-        input.get("file_path")
+        input
+            .get("file_path")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string())
     }
 
     /// Extracts path from Glob/Grep tool inputs.
     fn extract_path(&self, input: &Value) -> Option<String> {
-        input.get("path")
+        input
+            .get("path")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string())
     }
@@ -161,10 +163,7 @@ impl DefaultToolContextExtractor {
 
         // Handle quoted paths
         let path = if arg.starts_with('"') {
-            arg.trim_start_matches('"')
-                .split('"')
-                .next()
-                .unwrap_or("")
+            arg.trim_start_matches('"').split('"').next().unwrap_or("")
         } else if arg.starts_with('\'') {
             arg.trim_start_matches('\'')
                 .split('\'')
@@ -197,7 +196,15 @@ impl DefaultToolContextExtractor {
                 in_path = true;
                 current_path.push(c);
             } else if in_path {
-                if c.is_whitespace() || c == '"' || c == '\'' || c == '&' || c == '|' || c == ';' || c == ')' || c == '(' {
+                if c.is_whitespace()
+                    || c == '"'
+                    || c == '\''
+                    || c == '&'
+                    || c == '|'
+                    || c == ';'
+                    || c == ')'
+                    || c == '('
+                {
                     // End of path
                     if current_path.len() > 1 && self.looks_like_file_path(&current_path) {
                         paths.push(current_path.clone());
@@ -251,7 +258,7 @@ impl ToolContextExtractor for DefaultToolContextExtractor {
                 } else {
                     ToolContext::new()
                 }
-            }
+            },
 
             // Search operations
             "Glob" | "Grep" => {
@@ -265,7 +272,7 @@ impl ToolContextExtractor for DefaultToolContextExtractor {
                 } else {
                     ToolContext::new()
                 }
-            }
+            },
 
             // Shell commands
             "Bash" => self.extract_from_bash(input),
@@ -438,7 +445,10 @@ mod tests {
 
         let context = extractor.extract_context("Bash", &input);
 
-        assert_eq!(context.cwd, Some("/projects/my app with spaces".to_string()));
+        assert_eq!(
+            context.cwd,
+            Some("/projects/my app with spaces".to_string())
+        );
     }
 
     #[test]
@@ -497,20 +507,32 @@ mod tests {
         let mut aggregator = MessageContextAggregator::new();
 
         // Simulate a turn with multiple tool calls
-        aggregator.process_tool_call("Read", &json!({
-            "file_path": "/src/main.rs"
-        }));
-        aggregator.process_tool_call("Edit", &json!({
-            "file_path": "/src/lib.rs",
-            "old_string": "a",
-            "new_string": "b"
-        }));
-        aggregator.process_tool_call("Bash", &json!({
-            "command": "cd /projects/app && cargo build"
-        }));
-        aggregator.process_tool_call("Read", &json!({
-            "file_path": "/src/main.rs"  // Duplicate
-        }));
+        aggregator.process_tool_call(
+            "Read",
+            &json!({
+                "file_path": "/src/main.rs"
+            }),
+        );
+        aggregator.process_tool_call(
+            "Edit",
+            &json!({
+                "file_path": "/src/lib.rs",
+                "old_string": "a",
+                "new_string": "b"
+            }),
+        );
+        aggregator.process_tool_call(
+            "Bash",
+            &json!({
+                "command": "cd /projects/app && cargo build"
+            }),
+        );
+        aggregator.process_tool_call(
+            "Read",
+            &json!({
+                "file_path": "/src/main.rs"  // Duplicate
+            }),
+        );
 
         let files = aggregator.files();
         assert_eq!(files.len(), 2); // Deduplicated
@@ -530,9 +552,12 @@ mod tests {
     fn test_aggregator_cwd_update() {
         let mut aggregator = MessageContextAggregator::with_initial_cwd("/old/path");
 
-        aggregator.process_tool_call("Bash", &json!({
-            "command": "cd /new/path"
-        }));
+        aggregator.process_tool_call(
+            "Bash",
+            &json!({
+                "command": "cd /new/path"
+            }),
+        );
 
         assert_eq!(aggregator.cwd(), Some("/new/path"));
     }
@@ -540,9 +565,12 @@ mod tests {
     #[test]
     fn test_aggregator_reset() {
         let mut aggregator = MessageContextAggregator::with_initial_cwd("/projects");
-        aggregator.process_tool_call("Read", &json!({
-            "file_path": "/src/main.rs"
-        }));
+        aggregator.process_tool_call(
+            "Read",
+            &json!({
+                "file_path": "/src/main.rs"
+            }),
+        );
 
         aggregator.reset();
 
@@ -553,9 +581,12 @@ mod tests {
     #[test]
     fn test_aggregator_finalize() {
         let mut aggregator = MessageContextAggregator::with_initial_cwd("/projects");
-        aggregator.process_tool_call("Read", &json!({
-            "file_path": "/src/main.rs"
-        }));
+        aggregator.process_tool_call(
+            "Read",
+            &json!({
+                "file_path": "/src/main.rs"
+            }),
+        );
 
         let context = aggregator.finalize();
 

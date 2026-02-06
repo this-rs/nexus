@@ -4,12 +4,12 @@
 //! including messages, configuration options, and content blocks.
 
 #![allow(missing_docs)]
+use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Arc;
-use async_trait::async_trait;
-use std::io::Write;
 use tokio::sync::Mutex;
 
 /// Permission mode for tool execution
@@ -281,25 +281,25 @@ impl Serialize for McpServerConfig {
                 if let Some(env) = env {
                     map.serialize_entry("env", env)?;
                 }
-            }
+            },
             Self::Sse { url, headers } => {
                 map.serialize_entry("type", "sse")?;
                 map.serialize_entry("url", url)?;
                 if let Some(headers) = headers {
                     map.serialize_entry("headers", headers)?;
                 }
-            }
+            },
             Self::Http { url, headers } => {
                 map.serialize_entry("type", "http")?;
                 map.serialize_entry("url", url)?;
                 if let Some(headers) = headers {
                     map.serialize_entry("headers", headers)?;
                 }
-            }
+            },
             Self::Sdk { name, .. } => {
                 map.serialize_entry("type", "sdk")?;
                 map.serialize_entry("name", name)?;
-            }
+            },
         }
 
         map.end()
@@ -337,13 +337,9 @@ impl<'de> Deserialize<'de> for McpServerConfig {
         Ok(match helper {
             McpServerConfigHelper::Stdio { command, args, env } => {
                 McpServerConfig::Stdio { command, args, env }
-            }
-            McpServerConfigHelper::Sse { url, headers } => {
-                McpServerConfig::Sse { url, headers }
-            }
-            McpServerConfigHelper::Http { url, headers } => {
-                McpServerConfig::Http { url, headers }
-            }
+            },
+            McpServerConfigHelper::Sse { url, headers } => McpServerConfig::Sse { url, headers },
+            McpServerConfigHelper::Http { url, headers } => McpServerConfig::Http { url, headers },
         })
     }
 }
@@ -697,7 +693,10 @@ pub struct PreToolUseHookSpecificOutput {
     #[serde(rename = "permissionDecision", skip_serializing_if = "Option::is_none")]
     pub permission_decision: Option<String>,
     /// Reason for the permission decision
-    #[serde(rename = "permissionDecisionReason", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "permissionDecisionReason",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub permission_decision_reason: Option<String>,
     /// Updated input parameters for the tool
     #[serde(rename = "updatedInput", skip_serializing_if = "Option::is_none")]
@@ -840,8 +839,8 @@ pub enum SystemPrompt {
     /// Preset-based prompt with optional append
     Preset {
         #[serde(rename = "type")]
-        preset_type: String,  // "preset"
-        preset: String,       // e.g., "claude_code"
+        preset_type: String, // "preset"
+        preset: String, // e.g., "claude_code"
         #[serde(skip_serializing_if = "Option::is_none")]
         append: Option<String>,
     },
@@ -1063,7 +1062,10 @@ impl std::fmt::Debug for ClaudeCodeOptions {
             .field("cwd", &self.cwd)
             .field("continue_conversation", &self.continue_conversation)
             .field("resume", &self.resume)
-            .field("permission_prompt_tool_name", &self.permission_prompt_tool_name)
+            .field(
+                "permission_prompt_tool_name",
+                &self.permission_prompt_tool_name,
+            )
             .field("settings", &self.settings)
             .field("add_dirs", &self.add_dirs)
             .field("extra_args", &self.extra_args)
@@ -1630,21 +1632,24 @@ pub struct AssistantContent {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SDKControlInterruptRequest {
     /// Subtype
-    pub subtype: String,  // "interrupt"
+    pub subtype: String, // "interrupt"
 }
 
 /// SDK Control Protocol - Permission request
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SDKControlPermissionRequest {
     /// Subtype
-    pub subtype: String,  // "can_use_tool"
+    pub subtype: String, // "can_use_tool"
     /// Tool name
     #[serde(alias = "toolName")]
     pub tool_name: String,
     /// Tool input
     pub input: serde_json::Value,
     /// Permission suggestions
-    #[serde(skip_serializing_if = "Option::is_none", alias = "permissionSuggestions")]
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        alias = "permissionSuggestions"
+    )]
     pub permission_suggestions: Option<Vec<PermissionUpdate>>,
     /// Blocked path
     #[serde(skip_serializing_if = "Option::is_none", alias = "blockedPath")]
@@ -1655,7 +1660,7 @@ pub struct SDKControlPermissionRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SDKControlInitializeRequest {
     /// Subtype
-    pub subtype: String,  // "initialize"
+    pub subtype: String, // "initialize"
     /// Hooks configuration
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hooks: Option<HashMap<String, serde_json::Value>>,
@@ -1666,7 +1671,7 @@ pub struct SDKControlInitializeRequest {
 #[serde(rename_all = "camelCase")]
 pub struct SDKControlSetPermissionModeRequest {
     /// Subtype
-    pub subtype: String,  // "set_permission_mode"
+    pub subtype: String, // "set_permission_mode"
     /// Permission mode
     pub mode: String,
 }
@@ -1686,7 +1691,7 @@ pub struct SDKControlSetModelRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SDKHookCallbackRequest {
     /// Subtype
-    pub subtype: String,  // "hook_callback"
+    pub subtype: String, // "hook_callback"
     /// Callback ID
     #[serde(alias = "callbackId")]
     pub callback_id: String,
@@ -1701,9 +1706,13 @@ pub struct SDKHookCallbackRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SDKControlMcpMessageRequest {
     /// Subtype
-    pub subtype: String,  // "mcp_message"
+    pub subtype: String, // "mcp_message"
     /// MCP server name
-    #[serde(rename = "server_name", alias = "mcpServerName", alias = "mcp_server_name")]
+    #[serde(
+        rename = "server_name",
+        alias = "mcpServerName",
+        alias = "mcp_server_name"
+    )]
     pub mcp_server_name: String,
     /// Message to send
     pub message: serde_json::Value,
@@ -1855,9 +1864,15 @@ mod tests {
             .build();
 
         assert_eq!(options.extra_args.len(), 3);
-        assert_eq!(options.extra_args.get("custom-flag"), Some(&Some("value".to_string())));
+        assert_eq!(
+            options.extra_args.get("custom-flag"),
+            Some(&Some("value".to_string()))
+        );
         assert_eq!(options.extra_args.get("boolean-flag"), Some(&None));
-        assert_eq!(options.extra_args.get("another-flag"), Some(&Some("another-value".to_string())));
+        assert_eq!(
+            options.extra_args.get("another-flag"),
+            Some(&Some("another-value".to_string()))
+        );
     }
 
     #[test]
@@ -1880,7 +1895,11 @@ mod tests {
 
     #[test]
     fn test_tools_config_list_serialization() {
-        let tools = ToolsConfig::List(vec!["Read".to_string(), "Write".to_string(), "Bash".to_string()]);
+        let tools = ToolsConfig::List(vec![
+            "Read".to_string(),
+            "Write".to_string(),
+            "Bash".to_string(),
+        ]);
         let json = serde_json::to_string(&tools).unwrap();
 
         // List variant serializes as JSON array
@@ -1893,7 +1912,7 @@ mod tests {
             ToolsConfig::List(list) => {
                 assert_eq!(list.len(), 3);
                 assert!(list.contains(&"Read".to_string()));
-            }
+            },
             _ => panic!("Expected List variant"),
         }
     }
@@ -1944,7 +1963,7 @@ mod tests {
             ToolsConfig::Preset(p) => {
                 assert_eq!(p.preset_type, "preset");
                 assert_eq!(p.preset, "claude_code");
-            }
+            },
             _ => panic!("Expected Preset variant"),
         }
     }
@@ -1996,7 +2015,10 @@ mod tests {
         let deserialized: SandboxSettings = serde_json::from_str(&json).unwrap();
         assert!(deserialized.enabled.unwrap());
         assert!(deserialized.network.is_some());
-        assert_eq!(deserialized.network.as_ref().unwrap().http_proxy_port, Some(8080));
+        assert_eq!(
+            deserialized.network.as_ref().unwrap().http_proxy_port,
+            Some(8080)
+        );
     }
 
     #[test]
@@ -2044,7 +2066,7 @@ mod tests {
     #[test]
     fn test_sdk_plugin_config_serialization() {
         let plugin = SdkPluginConfig::Local {
-            path: "/path/to/plugin".to_string()
+            path: "/path/to/plugin".to_string(),
         };
 
         let json = serde_json::to_string(&plugin).unwrap();
@@ -2055,7 +2077,7 @@ mod tests {
         match deserialized {
             SdkPluginConfig::Local { path } => {
                 assert_eq!(path, "/path/to/plugin");
-            }
+            },
         }
     }
 
@@ -2087,7 +2109,9 @@ mod tests {
             .output_format(serde_json::json!({"type": "object"}))
             .enable_file_checkpointing(true)
             .sandbox(SandboxSettings::default())
-            .add_plugin(SdkPluginConfig::Local { path: "/plugin".to_string() })
+            .add_plugin(SdkPluginConfig::Local {
+                path: "/plugin".to_string(),
+            })
             .auto_download_cli(true)
             .build();
 
@@ -2127,7 +2151,10 @@ mod tests {
     #[test]
     fn test_options_builder_with_tools_list() {
         let options = ClaudeCodeOptions::builder()
-            .tools(ToolsConfig::List(vec!["Read".to_string(), "Bash".to_string()]))
+            .tools(ToolsConfig::List(vec![
+                "Read".to_string(),
+                "Bash".to_string(),
+            ]))
             .build();
 
         match options.tools.as_ref().unwrap() {
@@ -2135,7 +2162,7 @@ mod tests {
                 assert_eq!(list.len(), 2);
                 assert!(list.contains(&"Read".to_string()));
                 assert!(list.contains(&"Bash".to_string()));
-            }
+            },
             _ => panic!("Expected List variant"),
         }
     }
@@ -2165,9 +2192,15 @@ mod tests {
     #[test]
     fn test_options_builder_multiple_plugins() {
         let options = ClaudeCodeOptions::builder()
-            .add_plugin(SdkPluginConfig::Local { path: "/plugin1".to_string() })
-            .add_plugin(SdkPluginConfig::Local { path: "/plugin2".to_string() })
-            .plugins(vec![SdkPluginConfig::Local { path: "/plugin3".to_string() }])
+            .add_plugin(SdkPluginConfig::Local {
+                path: "/plugin1".to_string(),
+            })
+            .add_plugin(SdkPluginConfig::Local {
+                path: "/plugin2".to_string(),
+            })
+            .plugins(vec![SdkPluginConfig::Local {
+                path: "/plugin3".to_string(),
+            }])
             .build();
 
         // plugins() replaces previous, so only 1
@@ -2177,9 +2210,15 @@ mod tests {
     #[test]
     fn test_options_builder_add_plugin_accumulates() {
         let options = ClaudeCodeOptions::builder()
-            .add_plugin(SdkPluginConfig::Local { path: "/plugin1".to_string() })
-            .add_plugin(SdkPluginConfig::Local { path: "/plugin2".to_string() })
-            .add_plugin(SdkPluginConfig::Local { path: "/plugin3".to_string() })
+            .add_plugin(SdkPluginConfig::Local {
+                path: "/plugin1".to_string(),
+            })
+            .add_plugin(SdkPluginConfig::Local {
+                path: "/plugin2".to_string(),
+            })
+            .add_plugin(SdkPluginConfig::Local {
+                path: "/plugin3".to_string(),
+            })
             .build();
 
         // add_plugin() accumulates
@@ -2204,13 +2243,12 @@ mod tests {
         let msg: Message = serde_json::from_str(json).unwrap();
         match msg {
             Message::Result {
-                structured_output,
-                ..
+                structured_output, ..
             } => {
                 assert!(structured_output.is_some());
                 let output = structured_output.unwrap();
                 assert_eq!(output["answer"], 42);
-            }
+            },
             _ => panic!("Expected Result message"),
         }
     }
@@ -2233,14 +2271,13 @@ mod tests {
         let msg: Message = serde_json::from_str(json).unwrap();
         match msg {
             Message::Result {
-                structured_output,
-                ..
+                structured_output, ..
             } => {
                 assert!(structured_output.is_some());
                 let output = structured_output.unwrap();
                 assert_eq!(output["name"], "test");
                 assert_eq!(output["value"], true);
-            }
+            },
             _ => panic!("Expected Result message"),
         }
     }

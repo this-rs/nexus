@@ -10,13 +10,13 @@ use dashmap::DashMap;
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
-use tracing::{info, debug};
+use tracing::{debug, info};
 use uuid::Uuid;
 
 use crate::core::cache::CacheStats;
 use crate::core::conversation::{Conversation, ConversationMetadata};
 use crate::core::session_manager::Session;
-use crate::models::openai::{ChatMessage, ChatCompletionResponse};
+use crate::models::openai::{ChatCompletionResponse, ChatMessage};
 
 use super::traits::{CacheStore, ConversationStore, SessionStore};
 
@@ -97,7 +97,10 @@ impl ConversationStore for InMemoryConversationStore {
             if conversation.messages.len() > self.config.max_history_messages {
                 let remove_count = conversation.messages.len() - self.config.max_history_messages;
                 conversation.messages.drain(0..remove_count);
-                info!("Trimmed {} old messages from conversation {}", remove_count, id);
+                info!(
+                    "Trimmed {} old messages from conversation {}",
+                    remove_count, id
+                );
             }
 
             Ok(())
@@ -365,7 +368,11 @@ impl CacheStore for InMemoryCacheStore {
             debug!("Removed expired cache entry: {}", key);
         }
 
-        info!("Cache cleanup: removed {} entries, {} remaining", count, self.cache.len());
+        info!(
+            "Cache cleanup: removed {} entries, {} remaining",
+            count,
+            self.cache.len()
+        );
         Ok(count)
     }
 }
@@ -396,7 +403,9 @@ mod tests {
 
         let message = ChatMessage {
             role: "user".to_string(),
-            content: Some(crate::models::openai::MessageContent::Text("Hello".to_string())),
+            content: Some(crate::models::openai::MessageContent::Text(
+                "Hello".to_string(),
+            )),
             name: None,
             tool_calls: None,
         };
@@ -414,7 +423,9 @@ mod tests {
 
         let message = ChatMessage {
             role: "user".to_string(),
-            content: Some(crate::models::openai::MessageContent::Text("Hello".to_string())),
+            content: Some(crate::models::openai::MessageContent::Text(
+                "Hello".to_string(),
+            )),
             name: None,
             tool_calls: None,
         };
@@ -458,7 +469,10 @@ mod tests {
     #[tokio::test]
     async fn test_session_create_and_get() {
         let store = InMemorySessionStore::default();
-        let id = store.create(Some("/path/to/project".to_string())).await.unwrap();
+        let id = store
+            .create(Some("/path/to/project".to_string()))
+            .await
+            .unwrap();
 
         assert!(!id.is_empty());
 

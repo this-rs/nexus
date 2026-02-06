@@ -15,7 +15,7 @@ pub enum MemorySource {
     },
     /// Plan/task/decision from project-orchestrator (medium-term)
     ProjectOrchestrator {
-        entity_type: String,  // "plan", "task", "decision", "note"
+        entity_type: String, // "plan", "task", "decision", "note"
         entity_id: String,
     },
     /// Cross-conversation search result (long-term)
@@ -68,12 +68,7 @@ impl RelevanceScore {
     }
 
     /// Create with custom weights
-    pub fn with_weights(
-        semantic: f64,
-        recency: f64,
-        scope: f64,
-        weights: (f64, f64, f64),
-    ) -> Self {
+    pub fn with_weights(semantic: f64, recency: f64, scope: f64, weights: (f64, f64, f64)) -> Self {
         let combined = semantic * weights.0 + recency * weights.1 + scope * weights.2;
         Self {
             semantic,

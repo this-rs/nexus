@@ -112,7 +112,9 @@ impl MeilisearchClient {
             .with_filterable_attributes(["model", "created_at", "updated_at"])
             .with_sortable_attributes(["created_at", "updated_at", "message_count"]);
 
-        conversations_index.set_settings(&conversations_settings).await?;
+        conversations_index
+            .set_settings(&conversations_settings)
+            .await?;
 
         info!("Meilisearch indexes initialized for Nexus");
         Ok(())
@@ -209,7 +211,9 @@ impl MeilisearchClient {
     pub async fn delete_conversation_messages(&self, conversation_id: &str) -> Result<()> {
         // Search for all messages in this conversation and delete them one by one
         // Note: Meilisearch SDK v0.27 doesn't have filter-based deletion
-        let messages = self.search_messages("", Some(conversation_id), 1000).await?;
+        let messages = self
+            .search_messages("", Some(conversation_id), 1000)
+            .await?;
 
         let index = self.messages_index();
         for msg in messages {

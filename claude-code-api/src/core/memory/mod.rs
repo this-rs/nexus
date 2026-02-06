@@ -18,14 +18,14 @@
 //! let results = memory.query("What did we decide about authentication?").await?;
 //! ```
 
-mod traits;
-mod short_term;
-mod medium_term;
 mod long_term;
+mod medium_term;
+mod short_term;
+mod traits;
 mod unified;
 
-pub use traits::{ContextualMemoryProvider, MemoryResult, MemorySource, RelevanceScore};
-pub use short_term::ShortTermMemory;
-pub use medium_term::MediumTermMemory;
 pub use long_term::LongTermMemory;
+pub use medium_term::MediumTermMemory;
+pub use short_term::ShortTermMemory;
+pub use traits::{ContextualMemoryProvider, MemoryResult, MemorySource, RelevanceScore};
 pub use unified::UnifiedMemoryProvider;
