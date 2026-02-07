@@ -208,6 +208,9 @@ async fn main() -> Result<()> {
                                 println!("✓ Result (error: {is_error})");
                                 break;
                             },
+                            nexus_claude::Message::StreamEvent { .. } => {
+                                println!("🔄 StreamEvent");
+                            },
                         },
                         Err(e) => {
                             eprintln!("❌ Error: {e}");

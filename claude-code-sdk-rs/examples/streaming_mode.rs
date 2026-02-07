@@ -38,6 +38,9 @@ fn display_message(msg: &Message) {
                 println!("Cost: ${cost:.4}");
             }
         },
+        Message::StreamEvent { .. } => {
+            // Stream events are handled separately for token-by-token display
+        },
     }
 }
 

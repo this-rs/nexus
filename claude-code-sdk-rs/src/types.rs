@@ -1518,6 +1518,76 @@ pub enum Message {
         #[serde(skip_serializing_if = "Option::is_none", alias = "structuredOutput")]
         structured_output: Option<serde_json::Value>,
     },
+    /// Stream event for real-time token streaming (requires --include-partial-messages)
+    #[serde(rename = "stream_event")]
+    StreamEvent {
+        /// The streaming event data
+        event: StreamEventData,
+        /// Session ID
+        #[serde(skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
+    },
+}
+
+/// Stream event data for real-time token streaming
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum StreamEventData {
+    /// Message start event
+    MessageStart {
+        /// The initial message object
+        message: serde_json::Value,
+    },
+    /// Content block start event
+    ContentBlockStart {
+        /// Block index
+        index: usize,
+        /// The content block being started
+        content_block: serde_json::Value,
+    },
+    /// Content block delta event (contains the streaming token)
+    ContentBlockDelta {
+        /// Block index
+        index: usize,
+        /// The delta containing the token
+        delta: StreamDelta,
+    },
+    /// Content block stop event
+    ContentBlockStop {
+        /// Block index
+        index: usize,
+    },
+    /// Message delta event
+    MessageDelta {
+        /// The delta
+        delta: serde_json::Value,
+        /// Usage information
+        #[serde(skip_serializing_if = "Option::is_none")]
+        usage: Option<serde_json::Value>,
+    },
+    /// Message stop event
+    MessageStop,
+}
+
+/// Delta in a content block stream event
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum StreamDelta {
+    /// Text delta containing a token
+    TextDelta {
+        /// The streamed text token
+        text: String,
+    },
+    /// Thinking delta
+    ThinkingDelta {
+        /// The streamed thinking content
+        thinking: String,
+    },
+    /// Input JSON delta (for tool use)
+    InputJsonDelta {
+        /// Partial JSON input
+        partial_json: String,
+    },
 }
 
 /// User message content

@@ -1,7 +1,15 @@
-//! # Memory Chat - Interactive Claude Code with Persistent Memory
+//! # Interactive Memory Chat - Claude Code with Persistent Memory & Streaming
 //!
-//! This example demonstrates the Nexus SDK's persistent memory system.
-//! It creates an interactive chat that remembers context across sessions.
+//! This example demonstrates the Nexus SDK's persistent memory system using
+//! the `InteractiveClient` for stateful conversations with real-time streaming.
+//!
+//! ## Key Features
+//!
+//! - **InteractiveClient**: Maintains conversation state across multiple turns
+//! - **Streaming Output**: Real-time token-by-token response display
+//! - **Persistent Memory**: Stores conversations in Meilisearch for cross-session retrieval
+//! - **MCP Support**: Optional Model Context Protocol server integration
+//! - **Context Injection**: Automatically injects relevant historical context
 //!
 //! ## Prerequisites
 //!
@@ -16,48 +24,64 @@
 //!
 //! ```bash
 //! # Basic usage
-//! cargo run --example memory_chat --features memory
+//! cargo run --example interactive_memory_chat --features memory
+//!
+//! # With verbose mode (shows injected context)
+//! cargo run --example interactive_memory_chat --features memory -- --verbose
 //!
 //! # With custom Meilisearch URL
-//! MEILISEARCH_URL=http://localhost:7700 cargo run --example memory_chat --features memory
-//!
-//! # Verbose mode (shows injected context)
-//! cargo run --example memory_chat --features memory -- --verbose
+//! MEILISEARCH_URL=http://localhost:7700 cargo run --example interactive_memory_chat --features memory
 //! ```
 //!
 //! ## Commands
 //!
 //! - `/help` - Show available commands
-//! - `/context` - Show current context (cwd, files)
+//! - `/context` - Show current context (cwd, files touched)
 //! - `/history` - Show retrieved historical context
+//! - `/session` - Show current session conversation
 //! - `/clear` - Clear current conversation
+//! - `/stats` - Show memory statistics
 //! - `/quit` or `/exit` - Exit the chat
-//!
-//! ## How it works
-//!
-//! 1. **Context Capture**: Each message and tool call is captured with metadata
-//!    (working directory, files touched)
-//!
-//! 2. **Storage**: Messages are stored in Meilisearch with full-text search
-//!
-//! 3. **Retrieval**: Before each response, relevant historical context is retrieved
-//!    using multi-factor scoring (semantic + cwd + files + recency)
-//!
-//! 4. **Injection**: Retrieved context is injected into the prompt
 
 use std::io::{self, Write};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+use futures::StreamExt;
+use nexus_claude::{
+    ClaudeCodeOptions, ContentBlock, InteractiveClient, Message, PermissionMode, Result,
+};
+
 #[cfg(feature = "memory")]
 use nexus_claude::memory::{ContextInjector, MemoryConfig, MemoryIntegrationBuilder};
 
-use futures::StreamExt;
-use nexus_claude::{ClaudeCodeOptions, Message, PermissionMode, Result, query};
-
 /// Spinner frames for thinking animation
 const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
+/// Chat configuration parsed from CLI args and environment
+struct ChatConfig {
+    verbose: bool,
+    #[cfg_attr(not(feature = "memory"), allow(dead_code))]
+    meilisearch_url: String,
+    #[allow(dead_code)] // Reserved for future auth support
+    meilisearch_key: Option<String>,
+    cwd: String,
+}
+
+impl Default for ChatConfig {
+    fn default() -> Self {
+        Self {
+            verbose: std::env::args().any(|a| a == "--verbose" || a == "-v"),
+            meilisearch_url: std::env::var("MEILISEARCH_URL")
+                .unwrap_or_else(|_| "http://localhost:7700".to_string()),
+            meilisearch_key: std::env::var("MEILISEARCH_KEY").ok(),
+            cwd: std::env::current_dir()
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_else(|_| ".".to_string()),
+        }
+    }
+}
 
 /// Starts a thinking spinner in the background
 fn start_spinner(message: &str) -> Arc<AtomicBool> {
@@ -87,42 +111,18 @@ fn start_spinner(message: &str) -> Arc<AtomicBool> {
 /// Stops the spinner
 fn stop_spinner(running: Arc<AtomicBool>) {
     running.store(false, Ordering::Relaxed);
-    // Small delay to let the spinner task clean up
     std::thread::sleep(Duration::from_millis(100));
-}
-
-/// Chat configuration
-struct ChatConfig {
-    verbose: bool,
-    meilisearch_url: String,
-    #[allow(dead_code)]
-    meilisearch_key: Option<String>,
-    cwd: String,
-}
-
-impl Default for ChatConfig {
-    fn default() -> Self {
-        Self {
-            verbose: std::env::args().any(|a| a == "--verbose" || a == "-v"),
-            meilisearch_url: std::env::var("MEILISEARCH_URL")
-                .unwrap_or_else(|_| "http://localhost:7700".to_string()),
-            meilisearch_key: std::env::var("MEILISEARCH_KEY").ok(),
-            cwd: std::env::current_dir()
-                .map(|p| p.to_string_lossy().to_string())
-                .unwrap_or_else(|_| ".".to_string()),
-        }
-    }
 }
 
 fn print_banner() {
     println!(
-        "\n\x1b[1;36m╔═══════════════════════════════════════════════════════════════╗\x1b[0m"
+        "\n\x1b[1;36m╔═══════════════════════════════════════════════════════════════════╗\x1b[0m"
     );
     println!(
-        "\x1b[1;36m║\x1b[0m   \x1b[1;33m◈ NEXUS\x1b[0m - Claude Code with Persistent Memory              \x1b[1;36m║\x1b[0m"
+        "\x1b[1;36m║\x1b[0m   \x1b[1;33m◈ NEXUS\x1b[0m - Interactive Claude Code with Streaming & Memory     \x1b[1;36m║\x1b[0m"
     );
     println!(
-        "\x1b[1;36m╚═══════════════════════════════════════════════════════════════╝\x1b[0m\n"
+        "\x1b[1;36m╚═══════════════════════════════════════════════════════════════════╝\x1b[0m\n"
     );
 }
 
@@ -145,6 +145,15 @@ fn print_status(msg: &str, is_ok: bool) {
         "\x1b[1;31m✗\x1b[0m"
     };
     println!("  {} {}", icon, msg);
+}
+
+#[cfg(feature = "memory")]
+async fn check_meilisearch(url: &str) -> std::result::Result<(), String> {
+    use meilisearch_sdk::client::Client;
+
+    let client = Client::new(url, Option::<&str>::None).map_err(|e| e.to_string())?;
+    client.health().await.map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 #[tokio::main]
@@ -186,6 +195,7 @@ async fn main() -> Result<()> {
     };
 
     print_status(&format!("Working directory: {}", config.cwd), true);
+    print_status("Using InteractiveClient with streaming", true);
 
     if config.verbose {
         print_status("Verbose mode enabled", true);
@@ -194,9 +204,9 @@ async fn main() -> Result<()> {
     println!();
     print_help();
 
-    // Conversation history for current session (maintains context between turns)
-    let mut conversation_history: Vec<(String, String)> = Vec::new(); // (role, content)
-    const MAX_HISTORY_TURNS: usize = 10; // Keep last N turns
+    // Conversation history for current session
+    let mut conversation_history: Vec<(String, String)> = Vec::new();
+    const MAX_HISTORY_TURNS: usize = 10;
 
     // Initialize memory manager
     #[cfg(feature = "memory")]
@@ -235,6 +245,32 @@ async fn main() -> Result<()> {
     } else {
         None
     };
+
+    // Create InteractiveClient with options
+    // Enable include_partial_messages for true token-by-token streaming
+    let options = ClaudeCodeOptions::builder()
+        .permission_mode(PermissionMode::BypassPermissions)
+        .cwd(&config.cwd)
+        .include_partial_messages(true) // Enable streaming of partial messages
+        .build();
+
+    let mut client = InteractiveClient::new(options)?;
+
+    // Connect to Claude
+    let spinner = start_spinner("Connecting to Claude CLI...");
+    match client.connect().await {
+        Ok(_) => {
+            stop_spinner(spinner);
+            print_status("Connected to Claude CLI (InteractiveClient)", true);
+        },
+        Err(e) => {
+            stop_spinner(spinner);
+            print_status(&format!("Failed to connect: {}", e), false);
+            return Err(e);
+        },
+    }
+
+    println!();
 
     // Main chat loop
     loop {
@@ -294,19 +330,16 @@ async fn main() -> Result<()> {
                     continue;
                 },
                 "/clear" => {
-                    // Clear session conversation history
                     conversation_history.clear();
 
                     #[cfg(feature = "memory")]
                     if let Some(ref mut manager) = memory_manager {
-                        // Store pending messages before clearing
                         let pending = manager.take_pending_messages();
                         if !pending.is_empty()
                             && let Some(ref injector) = context_injector
                         {
                             let _ = injector.store_messages(&pending).await;
                         }
-                        // Create new manager (new conversation)
                         *manager = MemoryIntegrationBuilder::new()
                             .enabled(true)
                             .cwd(&config.cwd)
@@ -385,6 +418,7 @@ async fn main() -> Result<()> {
                             manager.config().max_context_items
                         );
                         println!("  Token Budget: {}", manager.config().token_budget);
+                        println!("  Client Type: InteractiveClient (stateful)");
                         println!();
                     }
                     #[cfg(not(feature = "memory"))]
@@ -401,13 +435,13 @@ async fn main() -> Result<()> {
             }
         }
 
-        // Record user message
+        // Record user message in memory
         #[cfg(feature = "memory")]
         if let Some(ref mut manager) = memory_manager {
             manager.record_user_message(input);
         }
 
-        // Get historical context for injection (always retrieve, only print if verbose)
+        // Get historical context for injection
         #[cfg(feature = "memory")]
         let context_prefix: Option<String> = if let Some(ref injector) = context_injector {
             if let Some(ref manager) = memory_manager {
@@ -448,16 +482,14 @@ async fn main() -> Result<()> {
         #[cfg(not(feature = "memory"))]
         let context_prefix: Option<String> = None;
 
-        // Build prompt with conversation history and context
+        // Build prompt with context
         let mut prompt_parts = Vec::new();
 
-        // System instruction for context handling
         if !conversation_history.is_empty() || context_prefix.is_some() {
             prompt_parts.push("<system>You are continuing a conversation. Use the context below to maintain continuity.</system>".to_string());
             prompt_parts.push(String::new());
         }
 
-        // Add historical context from memory (cross-session) - lower priority
         if let Some(ref ctx) = context_prefix {
             prompt_parts.push("<historical_context>".to_string());
             prompt_parts.push(ctx.clone());
@@ -465,15 +497,10 @@ async fn main() -> Result<()> {
             prompt_parts.push(String::new());
         }
 
-        // Add current session conversation history - higher priority
         if !conversation_history.is_empty() {
             prompt_parts.push("<current_session>".to_string());
-            prompt_parts.push("This is our current conversation. When I refer to 'this' or 'that', I mean the content from your previous response.".to_string());
-            prompt_parts.push(String::new());
-
             for (role, content) in &conversation_history {
                 let tag = if role == "user" { "human" } else { "assistant" };
-                // Keep more context for assistant messages (they're what user might refer to)
                 let max_len = if role == "assistant" { 2000 } else { 500 };
                 let truncated = if content.len() > max_len {
                     format!("{}...", &content[..max_len])
@@ -488,174 +515,182 @@ async fn main() -> Result<()> {
             prompt_parts.push(String::new());
         }
 
-        // Add current user message
         prompt_parts.push("<human>".to_string());
         prompt_parts.push(input.to_string());
         prompt_parts.push("</human>".to_string());
 
         let prompt = prompt_parts.join("\n");
 
-        // Show prompt in verbose mode
         if config.verbose {
             println!(
                 "\n\x1b[1;35m┌─── Full Prompt ({} chars) ───\x1b[0m",
                 prompt.len()
             );
-            for line in prompt.lines().take(30) {
+            for line in prompt.lines().take(20) {
                 println!("\x1b[35m│\x1b[0m {}", line);
             }
-            if prompt.lines().count() > 30 {
+            if prompt.lines().count() > 20 {
                 println!(
                     "\x1b[35m│\x1b[0m ... ({} more lines)\x1b[0m",
-                    prompt.lines().count() - 30
+                    prompt.lines().count() - 20
                 );
             }
             println!("\x1b[1;35m└────────────────────────────────\x1b[0m\n");
         }
 
-        // Send to Claude Code
-        // Enable include_partial_messages for true token-by-token streaming
-        let options = ClaudeCodeOptions::builder()
-            .permission_mode(PermissionMode::BypassPermissions)
-            .max_turns(10) // Allow multi-turn for tool usage
-            .include_partial_messages(true) // Enable streaming of partial messages
-            .build();
-
+        // Receive response with streaming
         let mut response_text = String::new();
         let mut displayed_len = 0; // Track how much text we've already displayed
         let mut first_token = true;
         let spinner = start_spinner("Thinking...");
 
-        match query(prompt.as_str(), Some(options)).await {
-            Ok(mut stream) => {
-                while let Some(msg_result) = stream.next().await {
-                    match msg_result {
-                        Ok(Message::Assistant { message }) => {
-                            // Stop spinner on first token
-                            if first_token {
-                                stop_spinner(spinner.clone());
-                                print!("\x1b[1;34mClaude>\x1b[0m ");
-                                io::stdout().flush().unwrap();
-                                first_token = false;
-                            }
-
-                            for block in &message.content {
-                                match block {
-                                    nexus_claude::ContentBlock::Text(text_content) => {
-                                        // With include_partial_messages, we receive cumulative text.
-                                        // Only print the NEW characters (delta) since last update.
-                                        let full_text = &text_content.text;
-                                        if full_text.len() > displayed_len {
-                                            let delta = &full_text[displayed_len..];
-                                            print!("{}", delta);
-                                            io::stdout().flush().unwrap();
-                                            displayed_len = full_text.len();
-                                        }
-                                        // Update response_text with full content for final storage
-                                        response_text = full_text.clone();
-                                    },
-                                    nexus_claude::ContentBlock::ToolUse(tool_use) => {
-                                        // Show tool usage
-                                        println!(
-                                            "\n\x1b[2m  🔧 Using tool: {}\x1b[0m",
-                                            tool_use.name
-                                        );
-                                        io::stdout().flush().unwrap();
-
-                                        // Record tool call for memory context
-                                        #[cfg(feature = "memory")]
-                                        if let Some(ref mut mgr) = memory_manager {
-                                            mgr.process_tool_call(&tool_use.name, &tool_use.input);
-                                        }
-                                    },
-                                    nexus_claude::ContentBlock::Thinking(thinking) => {
-                                        // Show thinking if verbose
-                                        if config.verbose {
-                                            println!(
-                                                "\n\x1b[2;3m  💭 {}\x1b[0m",
-                                                thinking
-                                                    .thinking
-                                                    .chars()
-                                                    .take(100)
-                                                    .collect::<String>()
-                                            );
-                                        }
-                                    },
-                                    _ => {},
-                                }
-                            }
-                        },
-                        Ok(Message::StreamEvent {
-                            event:
-                                nexus_claude::StreamEventData::ContentBlockDelta {
-                                    delta: nexus_claude::StreamDelta::TextDelta { text },
-                                    ..
-                                },
-                            ..
-                        }) => {
-                            // Real-time token streaming via StreamEvent
-                            if first_token {
-                                stop_spinner(spinner.clone());
-                                print!("\x1b[1;34mClaude>\x1b[0m ");
-                                io::stdout().flush().unwrap();
-                                first_token = false;
-                            }
-                            print!("{}", text);
-                            io::stdout().flush().unwrap();
-                            response_text.push_str(&text);
-                        },
-                        Ok(Message::StreamEvent { .. }) => {
-                            // Other stream events (message_start, content_block_stop, etc.)
-                        },
-                        Ok(Message::Result {
-                            total_cost_usd,
-                            duration_ms,
-                            ..
-                        }) => {
-                            if first_token {
-                                stop_spinner(spinner.clone());
-                            }
-                            // Show cost and timing info
-                            let cost_str = total_cost_usd
-                                .map(|c| format!("💰 ${:.4}", c))
-                                .unwrap_or_default();
-                            let time_str = format!("⏱ {}ms", duration_ms);
-                            if !cost_str.is_empty() || duration_ms > 0 {
-                                println!("\n\x1b[2m  {} {}\x1b[0m", cost_str, time_str);
-                            }
-                            break;
-                        },
-                        Err(e) => {
-                            if first_token {
-                                stop_spinner(spinner.clone());
-                            }
-                            println!("\n\x1b[31mError: {}\x1b[0m", e);
-                            break;
-                        },
-                        _ => {},
-                    }
-                }
-            },
+        // Use send_and_receive_stream to avoid race condition between send and subscribe
+        // This method subscribes to the broadcast BEFORE sending the message
+        let stream_result = client.send_and_receive_stream(prompt).await;
+        let stream = match stream_result {
+            Ok(s) => s,
             Err(e) => {
                 stop_spinner(spinner);
-                println!("\x1b[31mError: {}\x1b[0m", e);
+                println!("\x1b[31mError sending message: {}\x1b[0m\n", e);
+                continue;
             },
+        };
+
+        // Pin the stream since async_stream returns a !Unpin type
+        let mut stream = std::pin::pin!(stream);
+
+        while let Some(msg_result) = stream.next().await {
+            match msg_result {
+                Ok(Message::Assistant { message }) => {
+                    if first_token {
+                        stop_spinner(spinner.clone());
+                        print!("\x1b[1;34mClaude>\x1b[0m ");
+                        io::stdout().flush().unwrap();
+                        first_token = false;
+                    }
+
+                    for block in &message.content {
+                        match block {
+                            ContentBlock::Text(text_content) => {
+                                // With include_partial_messages, we receive cumulative text.
+                                // Only print the NEW characters (delta) since last update.
+                                let full_text = &text_content.text;
+                                if full_text.len() > displayed_len {
+                                    let delta = &full_text[displayed_len..];
+                                    print!("{}", delta);
+                                    io::stdout().flush().unwrap();
+                                    displayed_len = full_text.len();
+                                }
+                                // Update response_text with full content for final storage
+                                response_text = full_text.clone();
+                            },
+                            ContentBlock::ToolUse(tool_use) => {
+                                // Show tool usage
+                                println!("\n\x1b[2m  🔧 Using tool: {}\x1b[0m", tool_use.name);
+                                io::stdout().flush().unwrap();
+
+                                // Record tool call for memory context
+                                #[cfg(feature = "memory")]
+                                if let Some(ref mut mgr) = memory_manager {
+                                    mgr.process_tool_call(&tool_use.name, &tool_use.input);
+                                }
+                            },
+                            ContentBlock::ToolResult(tool_result) => {
+                                if config.verbose {
+                                    let preview = match &tool_result.content {
+                                        Some(nexus_claude::ContentValue::Text(text)) => {
+                                            if text.len() > 100 {
+                                                format!("{}...", &text[..100])
+                                            } else {
+                                                text.clone()
+                                            }
+                                        },
+                                        Some(nexus_claude::ContentValue::Structured(arr)) => {
+                                            format!("[{} items]", arr.len())
+                                        },
+                                        None => "(no content)".to_string(),
+                                    };
+                                    println!(
+                                        "\n\x1b[2m  📋 Tool result: {}\x1b[0m",
+                                        preview.replace('\n', " ")
+                                    );
+                                }
+                            },
+                            ContentBlock::Thinking(thinking) => {
+                                if config.verbose {
+                                    println!(
+                                        "\n\x1b[2;3m  💭 {}\x1b[0m",
+                                        thinking.thinking.chars().take(100).collect::<String>()
+                                    );
+                                }
+                            },
+                        }
+                    }
+                },
+                Ok(Message::StreamEvent {
+                    event:
+                        nexus_claude::StreamEventData::ContentBlockDelta {
+                            delta: nexus_claude::StreamDelta::TextDelta { text },
+                            ..
+                        },
+                    ..
+                }) => {
+                    // Real-time token streaming via StreamEvent
+                    if first_token {
+                        stop_spinner(spinner.clone());
+                        print!("\x1b[1;34mClaude>\x1b[0m ");
+                        io::stdout().flush().unwrap();
+                        first_token = false;
+                    }
+                    print!("{}", text);
+                    io::stdout().flush().unwrap();
+                    response_text.push_str(&text);
+                },
+                Ok(Message::StreamEvent { .. }) => {
+                    // Other stream events (message_start, content_block_stop, etc.)
+                },
+                Ok(Message::Result {
+                    total_cost_usd,
+                    duration_ms,
+                    ..
+                }) => {
+                    if first_token {
+                        stop_spinner(spinner.clone());
+                    }
+                    // Show cost and timing info
+                    let cost_str = total_cost_usd
+                        .map(|c| format!("💰 ${:.4}", c))
+                        .unwrap_or_default();
+                    let time_str = format!("⏱ {}ms", duration_ms);
+                    if !cost_str.is_empty() || duration_ms > 0 {
+                        println!("\n\x1b[2m  {} {}\x1b[0m", cost_str, time_str);
+                    }
+                    break;
+                },
+                Err(e) => {
+                    if first_token {
+                        stop_spinner(spinner.clone());
+                    }
+                    println!("\n\x1b[31mError: {}\x1b[0m", e);
+                    break;
+                },
+                _ => {},
+            }
         }
 
         println!();
 
-        // Update conversation history for session continuity
+        // Update conversation history
         if !response_text.is_empty() {
             conversation_history.push(("user".to_string(), input.to_string()));
             conversation_history.push(("assistant".to_string(), response_text.clone()));
 
-            // Keep only the last N turns (2 messages per turn)
             while conversation_history.len() > MAX_HISTORY_TURNS * 2 {
                 conversation_history.remove(0);
             }
         }
 
-        // Record assistant message
+        // Record assistant message in memory
         #[cfg(feature = "memory")]
         if let Some(ref mut manager) = memory_manager
             && !response_text.is_empty()
@@ -677,19 +712,11 @@ async fn main() -> Result<()> {
         }
     }
 
-    // Suppress unused variable warning when memory feature is disabled
+    // Disconnect client
+    let _ = client.disconnect().await;
+
+    // Suppress unused variable warning
     let _ = memory_available;
-
-    Ok(())
-}
-
-#[cfg(feature = "memory")]
-async fn check_meilisearch(url: &str) -> std::result::Result<(), String> {
-    use meilisearch_sdk::client::Client;
-
-    let client = Client::new(url, Option::<&str>::None).map_err(|e| e.to_string())?;
-
-    client.health().await.map_err(|e| e.to_string())?;
 
     Ok(())
 }

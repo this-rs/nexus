@@ -129,6 +129,9 @@ pub use types::{
     // Phase 2 enhancements
     SettingSource,
     StopHookInput,
+    // Streaming types (for real-time token streaming)
+    StreamDelta,
+    StreamEventData,
     SubagentStopHookInput,
     SyncHookJSONOutput,
     SystemMessage,

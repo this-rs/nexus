@@ -53,6 +53,9 @@ async fn main() -> Result<()> {
                 Ok(Message::User { .. }) => {
                     println!("User message (unexpected)");
                 },
+                Ok(Message::StreamEvent { .. }) => {
+                    // Stream events for real-time token streaming
+                },
                 Err(e) => {
                     println!("Error: {e}");
                     return Err(e);

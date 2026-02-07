@@ -320,12 +320,47 @@ export MEILISEARCH_KEY="your-key"  # If using authentication
 
 Check the `examples/` directory:
 
-- `memory_chat.rs` - Interactive chat with persistent memory
+- `interactive_memory_chat.rs` - **InteractiveClient with streaming and persistent memory** (recommended)
+- `memory_chat.rs` - Simple query-based chat with persistent memory
 - `interactive_demo.rs` - Interactive conversation demo
 - `simple_query.rs` - Simple query example
 - `streaming_output.rs` - Streaming message handling
 - `permission_modes.rs` - Permission mode examples
 - `hooks_typed.rs` - Strongly-typed hook callbacks
+
+### Interactive Memory Chat (Recommended)
+
+The `interactive_memory_chat` example demonstrates the full capabilities of the SDK:
+
+```bash
+# Start Meilisearch for persistent memory
+docker run -d -p 7700:7700 getmeili/meilisearch:latest
+
+# Run the interactive chat
+cargo run --example interactive_memory_chat --features memory
+
+# With verbose mode to see context injection
+cargo run --example interactive_memory_chat --features memory -- --verbose
+
+# With custom Meilisearch URL
+cargo run --example interactive_memory_chat --features memory -- --meilisearch-url http://localhost:7700
+```
+
+**Features:**
+- Uses `InteractiveClient` for stateful multi-turn conversations
+- Real-time streaming of responses
+- Persistent memory via Meilisearch integration
+- Multi-factor relevance scoring for context retrieval
+- Autonomous context injection into prompts
+
+**Commands:**
+- `/help` - Show available commands
+- `/session` - Show current session conversation history
+- `/context` - Show current context (cwd, files touched)
+- `/history` - Retrieve and display historical context from memory
+- `/stats` - Show memory statistics
+- `/clear` - Clear current conversation
+- `/quit` - Exit the chat
 
 ## License
 
