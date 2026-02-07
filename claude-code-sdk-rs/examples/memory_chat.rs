@@ -514,12 +514,15 @@ async fn main() -> Result<()> {
         }
 
         // Send to Claude Code
+        // Enable include_partial_messages for true token-by-token streaming
         let options = ClaudeCodeOptions::builder()
             .permission_mode(PermissionMode::BypassPermissions)
-            .max_turns(10)  // Allow multi-turn for tool usage
+            .max_turns(10) // Allow multi-turn for tool usage
+            .include_partial_messages(true) // Enable streaming of partial messages
             .build();
 
         let mut response_text = String::new();
+        let mut displayed_len = 0; // Track how much text we've already displayed
         let mut first_token = true;
         let spinner = start_spinner("Thinking...");
 
@@ -539,10 +542,17 @@ async fn main() -> Result<()> {
                             for block in &message.content {
                                 match block {
                                     nexus_claude::ContentBlock::Text(text_content) => {
-                                        // Stream text content
-                                        print!("{}", text_content.text);
-                                        io::stdout().flush().unwrap();
-                                        response_text.push_str(&text_content.text);
+                                        // With include_partial_messages, we receive cumulative text.
+                                        // Only print the NEW characters (delta) since last update.
+                                        let full_text = &text_content.text;
+                                        if full_text.len() > displayed_len {
+                                            let delta = &full_text[displayed_len..];
+                                            print!("{}", delta);
+                                            io::stdout().flush().unwrap();
+                                            displayed_len = full_text.len();
+                                        }
+                                        // Update response_text with full content for final storage
+                                        response_text = full_text.clone();
                                     },
                                     nexus_claude::ContentBlock::ToolUse(tool_use) => {
                                         // Show tool usage
