@@ -62,8 +62,9 @@ const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦
 /// Chat configuration parsed from CLI args and environment
 struct ChatConfig {
     verbose: bool,
+    #[cfg_attr(not(feature = "memory"), allow(dead_code))]
     meilisearch_url: String,
-    #[allow(dead_code)]
+    #[allow(dead_code)] // Reserved for future auth support
     meilisearch_key: Option<String>,
     cwd: String,
 }
