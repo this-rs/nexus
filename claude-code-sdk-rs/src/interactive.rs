@@ -114,6 +114,97 @@ impl InteractiveClient {
         Ok(())
     }
 
+    /// Send a message and receive response as a stream (atomic operation)
+    ///
+    /// This method subscribes to the message stream BEFORE sending the message,
+    /// ensuring no messages are lost due to race conditions. This is the recommended
+    /// way to send messages when you need streaming responses.
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// use nexus_claude::{InteractiveClient, ClaudeCodeOptions, Message};
+    /// use futures::StreamExt;
+    ///
+    /// #[tokio::main]
+    /// async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    ///     let mut client = InteractiveClient::new(ClaudeCodeOptions::default())?;
+    ///     client.connect().await?;
+    ///
+    ///     // Send and receive atomically - no race condition
+    ///     let mut stream = std::pin::pin!(client.send_and_receive_stream("Hello!".to_string()).await?);
+    ///     while let Some(msg) = stream.next().await {
+    ///         match msg? {
+    ///             Message::Assistant { message } => println!("{:?}", message),
+    ///             Message::Result { .. } => break,
+    ///             _ => {}
+    ///         }
+    ///     }
+    ///
+    ///     Ok(())
+    /// }
+    /// ```
+    pub async fn send_and_receive_stream(
+        &mut self,
+        prompt: String,
+    ) -> Result<impl Stream<Item = Result<Message>> + '_> {
+        if !self.connected {
+            return Err(SdkError::InvalidState {
+                message: "Not connected".into(),
+            });
+        }
+
+        // Create channel and subscribe BEFORE sending message to avoid race condition
+        let (tx, rx) = tokio::sync::mpsc::channel(100);
+        let transport = self.transport.clone();
+
+        // Spawn receiver task first (will wait for lock, but subscription happens inside)
+        let transport_for_recv = transport.clone();
+        tokio::spawn(async move {
+            let mut transport = transport_for_recv.lock().await;
+            let mut stream = transport.receive_messages();
+
+            while let Some(result) = stream.next().await {
+                if tx.send(result).await.is_err() {
+                    break;
+                }
+            }
+        });
+
+        // Small yield to ensure the receiver task has started
+        tokio::task::yield_now().await;
+
+        // Now send the message
+        {
+            let mut transport = transport.lock().await;
+            let message = InputMessage::user(prompt, "default".to_string());
+            transport.send_message(message).await?;
+        }
+
+        debug!("Message sent, streaming response");
+
+        // Return stream that stops at Result message
+        Ok(async_stream::stream! {
+            let mut rx_stream = ReceiverStream::new(rx);
+
+            while let Some(result) = rx_stream.next().await {
+                match &result {
+                    Ok(msg) => {
+                        let is_result = matches!(msg, Message::Result { .. });
+                        yield result;
+                        if is_result {
+                            break;
+                        }
+                    }
+                    Err(_) => {
+                        yield result;
+                        break;
+                    }
+                }
+            }
+        })
+    }
+
     /// Receive messages until Result message (convenience method like Python SDK)
     pub async fn receive_response(&mut self) -> Result<Vec<Message>> {
         if !self.connected {

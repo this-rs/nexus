@@ -538,21 +538,26 @@ async fn main() -> Result<()> {
             println!("\x1b[1;35m└────────────────────────────────\x1b[0m\n");
         }
 
-        // Send message via InteractiveClient
-        if let Err(e) = client.send_message(prompt).await {
-            println!("\x1b[31mError sending message: {}\x1b[0m\n", e);
-            continue;
-        }
-
         // Receive response with streaming
         let mut response_text = String::new();
         let mut displayed_len = 0; // Track how much text we've already displayed
         let mut first_token = true;
         let spinner = start_spinner("Thinking...");
 
-        // Use streaming to receive messages
+        // Use send_and_receive_stream to avoid race condition between send and subscribe
+        // This method subscribes to the broadcast BEFORE sending the message
+        let stream_result = client.send_and_receive_stream(prompt).await;
+        let stream = match stream_result {
+            Ok(s) => s,
+            Err(e) => {
+                stop_spinner(spinner);
+                println!("\x1b[31mError sending message: {}\x1b[0m\n", e);
+                continue;
+            },
+        };
+
         // Pin the stream since async_stream returns a !Unpin type
-        let mut stream = std::pin::pin!(client.receive_response_stream().await);
+        let mut stream = std::pin::pin!(stream);
 
         while let Some(msg_result) = stream.next().await {
             match msg_result {
