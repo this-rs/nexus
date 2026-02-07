@@ -169,6 +169,22 @@ fn display_message(msg: &Message) {
                 println!("Total cost: ${cost:.4} USD");
             }
         },
+        Message::StreamEvent {
+            event:
+                nexus_claude::StreamEventData::ContentBlockDelta {
+                    delta: nexus_claude::StreamDelta::TextDelta { text },
+                    ..
+                },
+            ..
+        } => {
+            // Display stream events for real-time token streaming
+            print!("{text}");
+            use std::io::Write;
+            let _ = std::io::stdout().flush();
+        },
+        Message::StreamEvent { .. } => {
+            // Other stream events
+        },
     }
 }
 
@@ -179,5 +195,6 @@ fn message_type(msg: &Message) -> &str {
         Message::Assistant { .. } => "Assistant",
         Message::System { .. } => "System",
         Message::Result { .. } => "Result",
+        Message::StreamEvent { .. } => "StreamEvent",
     }
 }

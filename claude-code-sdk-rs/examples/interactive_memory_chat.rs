@@ -627,6 +627,28 @@ async fn main() -> Result<()> {
                         }
                     }
                 },
+                Ok(Message::StreamEvent {
+                    event:
+                        nexus_claude::StreamEventData::ContentBlockDelta {
+                            delta: nexus_claude::StreamDelta::TextDelta { text },
+                            ..
+                        },
+                    ..
+                }) => {
+                    // Real-time token streaming via StreamEvent
+                    if first_token {
+                        stop_spinner(spinner.clone());
+                        print!("\x1b[1;34mClaude>\x1b[0m ");
+                        io::stdout().flush().unwrap();
+                        first_token = false;
+                    }
+                    print!("{}", text);
+                    io::stdout().flush().unwrap();
+                    response_text.push_str(&text);
+                },
+                Ok(Message::StreamEvent { .. }) => {
+                    // Other stream events (message_start, content_block_stop, etc.)
+                },
                 Ok(Message::Result {
                     total_cost_usd,
                     duration_ms,

@@ -51,6 +51,9 @@ async fn main() -> Result<()> {
                                     println!("  ✓ Result (error: {is_error})");
                                     break;
                                 },
+                                Message::StreamEvent { event, .. } => {
+                                    println!("  🔄 StreamEvent: {:?}", event);
+                                },
                             }
                         },
                         Err(e) => {

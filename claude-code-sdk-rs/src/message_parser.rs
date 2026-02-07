@@ -6,8 +6,8 @@
 use crate::{
     errors::{Result, SdkError},
     types::{
-        AssistantMessage, ContentBlock, ContentValue, Message, TextContent, ThinkingContent,
-        ToolResultContent, ToolUseContent, UserMessage,
+        AssistantMessage, ContentBlock, ContentValue, Message, StreamDelta, StreamEventData,
+        TextContent, ThinkingContent, ToolResultContent, ToolUseContent, UserMessage,
     },
 };
 use serde_json::Value;
@@ -26,6 +26,7 @@ pub fn parse_message(json: Value) -> Result<Option<Message>> {
         "assistant" => parse_assistant_message(json),
         "system" => parse_system_message(json),
         "result" => parse_result_message(json),
+        "stream_event" => parse_stream_event(json),
         _ => {
             debug!("Ignoring message type: {}", msg_type);
             Ok(None)
@@ -261,6 +262,106 @@ fn parse_result_message(json: Value) -> Result<Option<Message>> {
             }))
         },
     }
+}
+
+/// Parse a stream event message (for real-time token streaming)
+fn parse_stream_event(json: Value) -> Result<Option<Message>> {
+    let event = json.get("event").ok_or_else(|| {
+        SdkError::parse_error("Missing 'event' field in stream_event", json.to_string())
+    })?;
+
+    let event_type = event
+        .get("type")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| SdkError::parse_error("Missing 'type' in event", json.to_string()))?;
+
+    let session_id = json
+        .get("session_id")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+
+    let event_data = match event_type {
+        "message_start" => {
+            let message = event.get("message").cloned().unwrap_or(Value::Null);
+            StreamEventData::MessageStart { message }
+        },
+        "content_block_start" => {
+            let index = event.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+            let content_block = event.get("content_block").cloned().unwrap_or(Value::Null);
+            StreamEventData::ContentBlockStart {
+                index,
+                content_block,
+            }
+        },
+        "content_block_delta" => {
+            let index = event.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+            let delta_obj = event.get("delta").ok_or_else(|| {
+                SdkError::parse_error("Missing 'delta' in content_block_delta", json.to_string())
+            })?;
+
+            let delta_type = delta_obj
+                .get("type")
+                .and_then(|v| v.as_str())
+                .unwrap_or("text_delta");
+
+            let delta = match delta_type {
+                "text_delta" => {
+                    let text = delta_obj
+                        .get("text")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    StreamDelta::TextDelta { text }
+                },
+                "thinking_delta" => {
+                    let thinking = delta_obj
+                        .get("thinking")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    StreamDelta::ThinkingDelta { thinking }
+                },
+                "input_json_delta" => {
+                    let partial_json = delta_obj
+                        .get("partial_json")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    StreamDelta::InputJsonDelta { partial_json }
+                },
+                _ => {
+                    // Default to text delta for unknown types
+                    let text = delta_obj
+                        .get("text")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    StreamDelta::TextDelta { text }
+                },
+            };
+
+            StreamEventData::ContentBlockDelta { index, delta }
+        },
+        "content_block_stop" => {
+            let index = event.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+            StreamEventData::ContentBlockStop { index }
+        },
+        "message_delta" => {
+            let delta = event.get("delta").cloned().unwrap_or(Value::Null);
+            let usage = event.get("usage").cloned();
+            StreamEventData::MessageDelta { delta, usage }
+        },
+        "message_stop" => StreamEventData::MessageStop,
+        _ => {
+            debug!("Unknown stream event type: {}", event_type);
+            return Ok(None);
+        },
+    };
+
+    Ok(Some(Message::StreamEvent {
+        event: event_data,
+        session_id,
+    }))
 }
 
 #[cfg(test)]

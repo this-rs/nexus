@@ -154,34 +154,34 @@ impl InteractiveClient {
             });
         }
 
-        // Create channel and subscribe BEFORE sending message to avoid race condition
+        // Create channel for forwarding messages
         let (tx, rx) = tokio::sync::mpsc::channel(100);
-        let transport = self.transport.clone();
 
-        // Spawn receiver task first (will wait for lock, but subscription happens inside)
-        let transport_for_recv = transport.clone();
-        tokio::spawn(async move {
-            let mut transport = transport_for_recv.lock().await;
+        // CRITICAL: Subscribe and send within the SAME lock acquisition
+        // This guarantees the subscription happens BEFORE any response arrives
+        {
+            let mut transport = self.transport.lock().await;
+
+            // 1. Subscribe to the broadcast FIRST
             let mut stream = transport.receive_messages();
 
-            while let Some(result) = stream.next().await {
-                if tx.send(result).await.is_err() {
-                    break;
-                }
-            }
-        });
-
-        // Small yield to ensure the receiver task has started
-        tokio::task::yield_now().await;
-
-        // Now send the message
-        {
-            let mut transport = transport.lock().await;
+            // 2. THEN send the message
             let message = InputMessage::user(prompt, "default".to_string());
             transport.send_message(message).await?;
-        }
 
-        debug!("Message sent, streaming response");
+            debug!("Message sent, subscription active");
+
+            // 3. Spawn task to forward messages (stream is already subscribed)
+            let tx_clone = tx;
+            tokio::spawn(async move {
+                while let Some(result) = stream.next().await {
+                    if tx_clone.send(result).await.is_err() {
+                        // Receiver dropped
+                        break;
+                    }
+                }
+            });
+        } // Lock released here, after subscription and send
 
         // Return stream that stops at Result message
         Ok(async_stream::stream! {
