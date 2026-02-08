@@ -4,6 +4,7 @@
 //! - Storing and retrieving messages
 //! - Applying multi-factor relevance scoring
 //! - Managing index settings
+//! - Retrieving conversation history with pagination
 
 use super::{
     ConversationDocument, MemoryConfig, MessageDocument, RelevanceConfig, RelevanceScore,
@@ -13,7 +14,7 @@ use async_trait::async_trait;
 use chrono::Utc;
 use meilisearch_sdk::client::Client;
 use meilisearch_sdk::settings::Settings;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// Result type for memory operations.
 pub type MemoryResult<T> = Result<T, MemoryError>;
@@ -89,6 +90,79 @@ pub struct ScoredMemoryResult {
     pub score: RelevanceScore,
 }
 
+/// Options for retrieving conversation messages with pagination.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct GetMessagesOptions {
+    /// Maximum number of messages to return (default: 50)
+    pub limit: Option<usize>,
+
+    /// Number of messages to skip for pagination (default: 0)
+    pub offset: Option<usize>,
+
+    /// If true, return newest messages first (descending turn_index).
+    /// Default: true (newest first, like a chat UI)
+    pub newest_first: Option<bool>,
+}
+
+impl GetMessagesOptions {
+    /// Creates new options with defaults.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Sets the maximum number of messages to return.
+    pub fn limit(mut self, limit: usize) -> Self {
+        self.limit = Some(limit);
+        self
+    }
+
+    /// Sets the offset for pagination.
+    pub fn offset(mut self, offset: usize) -> Self {
+        self.offset = Some(offset);
+        self
+    }
+
+    /// Sets the sort order. True = newest first (default).
+    pub fn newest_first(mut self, newest: bool) -> Self {
+        self.newest_first = Some(newest);
+        self
+    }
+
+    /// Returns the effective limit (default: 50).
+    pub fn effective_limit(&self) -> usize {
+        self.limit.unwrap_or(50)
+    }
+
+    /// Returns the effective offset (default: 0).
+    pub fn effective_offset(&self) -> usize {
+        self.offset.unwrap_or(0)
+    }
+
+    /// Returns whether to sort newest first (default: true).
+    pub fn is_newest_first(&self) -> bool {
+        self.newest_first.unwrap_or(true)
+    }
+}
+
+/// Result of fetching paginated messages.
+#[derive(Debug, Clone)]
+pub struct PaginatedMessages {
+    /// The messages in this page
+    pub messages: Vec<MessageDocument>,
+
+    /// Total number of messages in the conversation
+    pub total_count: usize,
+
+    /// Whether there are more messages after this page
+    pub has_more: bool,
+
+    /// Current offset used for this query
+    pub offset: usize,
+
+    /// Limit used for this query
+    pub limit: usize,
+}
+
 /// Trait for memory providers.
 #[async_trait]
 pub trait MemoryProvider: Send + Sync {
@@ -110,6 +184,44 @@ pub trait MemoryProvider: Send + Sync {
 
     /// Checks if memory is healthy.
     async fn health_check(&self) -> MemoryResult<bool>;
+
+    /// Retrieves all messages for a conversation with pagination.
+    ///
+    /// By default, messages are returned newest first (descending turn_index),
+    /// which is suitable for chat UI display.
+    ///
+    /// # Arguments
+    ///
+    /// * `conversation_id` - The ID of the conversation
+    /// * `options` - Optional pagination and sorting options
+    ///
+    /// # Returns
+    ///
+    /// A paginated result containing messages and metadata.
+    async fn get_conversation_messages(
+        &self,
+        conversation_id: &str,
+        options: Option<GetMessagesOptions>,
+    ) -> MemoryResult<PaginatedMessages>;
+
+    /// Returns the total count of messages in a conversation.
+    ///
+    /// Useful for displaying pagination info (e.g., "showing 1-50 of 142").
+    async fn count_conversation_messages(&self, conversation_id: &str) -> MemoryResult<usize>;
+
+    /// Lists all conversations with basic metadata.
+    ///
+    /// Returns conversations sorted by `updated_at` descending (most recent first).
+    ///
+    /// # Arguments
+    ///
+    /// * `limit` - Maximum number of conversations to return
+    /// * `offset` - Number of conversations to skip for pagination
+    async fn list_conversations(
+        &self,
+        limit: usize,
+        offset: usize,
+    ) -> MemoryResult<Vec<ConversationDocument>>;
 }
 
 /// Meilisearch-based memory provider.
@@ -359,6 +471,86 @@ impl MemoryProvider for MeilisearchMemoryProvider {
             Err(e) => Err(MemoryError::Meilisearch(e.to_string())),
         }
     }
+
+    async fn get_conversation_messages(
+        &self,
+        conversation_id: &str,
+        options: Option<GetMessagesOptions>,
+    ) -> MemoryResult<PaginatedMessages> {
+        let opts = options.unwrap_or_default();
+        let limit = opts.effective_limit();
+        let offset = opts.effective_offset();
+        let newest_first = opts.is_newest_first();
+
+        let index = self.client.index(&self.config.messages_index);
+        let filter = format!("conversation_id = \"{}\"", conversation_id);
+
+        // Sort order: desc for newest first, asc for oldest first
+        let sort = if newest_first {
+            "turn_index:desc"
+        } else {
+            "turn_index:asc"
+        };
+
+        // Execute search with empty query to match all documents
+        let results = index
+            .search()
+            .with_query("")
+            .with_filter(&filter)
+            .with_sort(&[sort])
+            .with_limit(limit)
+            .with_offset(offset)
+            .execute::<MessageDocument>()
+            .await?;
+
+        let total_count = results.estimated_total_hits.unwrap_or(0);
+        let messages: Vec<MessageDocument> = results.hits.into_iter().map(|h| h.result).collect();
+        let has_more = offset + messages.len() < total_count;
+
+        Ok(PaginatedMessages {
+            messages,
+            total_count,
+            has_more,
+            offset,
+            limit,
+        })
+    }
+
+    async fn count_conversation_messages(&self, conversation_id: &str) -> MemoryResult<usize> {
+        let index = self.client.index(&self.config.messages_index);
+        let filter = format!("conversation_id = \"{}\"", conversation_id);
+
+        // Execute search with limit 0 to just get the count
+        let results = index
+            .search()
+            .with_query("")
+            .with_filter(&filter)
+            .with_limit(0)
+            .execute::<MessageDocument>()
+            .await?;
+
+        Ok(results.estimated_total_hits.unwrap_or(0))
+    }
+
+    async fn list_conversations(
+        &self,
+        limit: usize,
+        offset: usize,
+    ) -> MemoryResult<Vec<ConversationDocument>> {
+        let index = self.client.index(&self.config.conversations_index);
+
+        // Sort by updated_at descending (most recent first)
+        let results = index
+            .search()
+            .with_query("")
+            .with_sort(&["updated_at:desc"])
+            .with_limit(limit)
+            .with_offset(offset)
+            .execute::<ConversationDocument>()
+            .await?;
+
+        Ok(results.hits.into_iter().map(|h| h.result).collect())
+    }
 }
 
 /// Builder for creating memory providers.
@@ -563,5 +755,137 @@ mod tests {
         let results: Vec<ScoredMemoryResult> = vec![];
         let formatted = ContextFormatter::format_for_prompt(&results);
         assert!(formatted.is_empty());
+    }
+
+    // ========================================================================
+    // GetMessagesOptions tests
+    // ========================================================================
+
+    #[test]
+    fn test_get_messages_options_default() {
+        let opts = GetMessagesOptions::default();
+
+        assert_eq!(opts.limit, None);
+        assert_eq!(opts.offset, None);
+        assert_eq!(opts.newest_first, None);
+
+        // Test effective defaults
+        assert_eq!(opts.effective_limit(), 50);
+        assert_eq!(opts.effective_offset(), 0);
+        assert!(opts.is_newest_first());
+    }
+
+    #[test]
+    fn test_get_messages_options_builder() {
+        let opts = GetMessagesOptions::new()
+            .limit(25)
+            .offset(10)
+            .newest_first(false);
+
+        assert_eq!(opts.limit, Some(25));
+        assert_eq!(opts.offset, Some(10));
+        assert_eq!(opts.newest_first, Some(false));
+
+        assert_eq!(opts.effective_limit(), 25);
+        assert_eq!(opts.effective_offset(), 10);
+        assert!(!opts.is_newest_first());
+    }
+
+    #[test]
+    fn test_get_messages_options_partial_builder() {
+        // Only set limit, others should use defaults
+        let opts = GetMessagesOptions::new().limit(100);
+
+        assert_eq!(opts.effective_limit(), 100);
+        assert_eq!(opts.effective_offset(), 0); // default
+        assert!(opts.is_newest_first()); // default true
+    }
+
+    #[test]
+    fn test_get_messages_options_serialization() {
+        let opts = GetMessagesOptions::new().limit(50).offset(10);
+
+        let json = serde_json::to_string(&opts).unwrap();
+        let parsed: GetMessagesOptions = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(parsed.limit, Some(50));
+        assert_eq!(parsed.offset, Some(10));
+    }
+
+    // ========================================================================
+    // PaginatedMessages tests
+    // ========================================================================
+
+    #[test]
+    fn test_paginated_messages_has_more() {
+        // Page with more results available
+        let paginated = PaginatedMessages {
+            messages: vec![],
+            total_count: 100,
+            has_more: true,
+            offset: 0,
+            limit: 50,
+        };
+
+        assert!(paginated.has_more);
+        assert_eq!(paginated.total_count, 100);
+    }
+
+    #[test]
+    fn test_paginated_messages_last_page() {
+        // Last page - no more results
+        let paginated = PaginatedMessages {
+            messages: vec![],
+            total_count: 75,
+            has_more: false,
+            offset: 50,
+            limit: 50,
+        };
+
+        assert!(!paginated.has_more);
+    }
+
+    #[test]
+    fn test_paginated_messages_with_documents() {
+        let messages = vec![
+            MessageDocument::new("msg-1", "conv-1", "user", "Hello", 0, 1700000000),
+            MessageDocument::new("msg-2", "conv-1", "assistant", "Hi!", 1, 1700000001),
+        ];
+
+        let paginated = PaginatedMessages {
+            messages,
+            total_count: 2,
+            has_more: false,
+            offset: 0,
+            limit: 50,
+        };
+
+        assert_eq!(paginated.messages.len(), 2);
+        assert_eq!(paginated.messages[0].role, "user");
+        assert_eq!(paginated.messages[1].role, "assistant");
+    }
+
+    // ========================================================================
+    // MemoryError tests
+    // ========================================================================
+
+    #[test]
+    fn test_memory_error_display() {
+        let err = MemoryError::Meilisearch("connection failed".to_string());
+        assert!(err.to_string().contains("connection failed"));
+
+        let err = MemoryError::Config("invalid config".to_string());
+        assert!(err.to_string().contains("invalid config"));
+
+        let err = MemoryError::Disabled;
+        assert!(err.to_string().contains("disabled"));
+    }
+
+    #[test]
+    fn test_memory_error_from_serde() {
+        let json_err = serde_json::from_str::<i32>("invalid").unwrap_err();
+        let mem_err: MemoryError = json_err.into();
+
+        matches!(mem_err, MemoryError::Serialization(_));
     }
 }

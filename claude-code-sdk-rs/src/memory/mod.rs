@@ -38,9 +38,9 @@ mod provider;
 
 #[cfg(feature = "memory")]
 pub use provider::{
-    ContextFormatter, MeilisearchMemoryProvider, MemoryError, MemoryProvider,
-    MemoryProviderBuilder, MemoryResult, QueryContext, ScoredMemoryResult,
+    ContextFormatter, GetMessagesOptions, MeilisearchMemoryProvider, MemoryError, MemoryProvider,
+    MemoryProviderBuilder, MemoryResult, PaginatedMessages, QueryContext, ScoredMemoryResult,
 };
 
 #[cfg(feature = "memory")]
-pub use integration::ContextInjector;
+pub use integration::{ContextInjector, LoadedConversation};
