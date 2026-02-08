@@ -36,6 +36,8 @@
 //! ## Commands
 //!
 //! - `/help` - Show available commands
+//! - `/list` - List available conversations (from memory)
+//! - `/resume <id>` - Resume a previous conversation by ID
 //! - `/context` - Show current context (cwd, files touched)
 //! - `/history` - Show retrieved historical context
 //! - `/session` - Show current session conversation
@@ -128,13 +130,15 @@ fn print_banner() {
 
 fn print_help() {
     println!("\n\x1b[1;33mAvailable Commands:\x1b[0m");
-    println!("  \x1b[1;32m/help\x1b[0m     - Show this help message");
-    println!("  \x1b[1;32m/session\x1b[0m  - Show current session conversation history");
-    println!("  \x1b[1;32m/context\x1b[0m  - Show current context (cwd, files touched)");
-    println!("  \x1b[1;32m/history\x1b[0m  - Show retrieved historical context (from memory)");
-    println!("  \x1b[1;32m/clear\x1b[0m    - Clear current conversation");
-    println!("  \x1b[1;32m/stats\x1b[0m    - Show memory statistics");
-    println!("  \x1b[1;32m/quit\x1b[0m     - Exit the chat");
+    println!("  \x1b[1;32m/help\x1b[0m          - Show this help message");
+    println!("  \x1b[1;32m/list\x1b[0m          - List available conversations from memory");
+    println!("  \x1b[1;32m/resume <id>\x1b[0m   - Resume a previous conversation by ID");
+    println!("  \x1b[1;32m/session\x1b[0m       - Show current session conversation history");
+    println!("  \x1b[1;32m/context\x1b[0m       - Show current context (cwd, files touched)");
+    println!("  \x1b[1;32m/history\x1b[0m       - Show retrieved historical context (from memory)");
+    println!("  \x1b[1;32m/clear\x1b[0m         - Clear current conversation");
+    println!("  \x1b[1;32m/stats\x1b[0m         - Show memory statistics");
+    println!("  \x1b[1;32m/quit\x1b[0m          - Exit the chat");
     println!();
 }
 
@@ -145,6 +149,39 @@ fn print_status(msg: &str, is_ok: bool) {
         "\x1b[1;31m✗\x1b[0m"
     };
     println!("  {} {}", icon, msg);
+}
+
+/// Formats a Unix timestamp as a human-readable age string.
+#[cfg(feature = "memory")]
+fn format_age(timestamp: i64) -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+
+    let diff = now - timestamp;
+
+    if diff < 60 {
+        "just now".to_string()
+    } else if diff < 3600 {
+        let mins = diff / 60;
+        format!("{}m ago", mins)
+    } else if diff < 86400 {
+        let hours = diff / 3600;
+        format!("{}h ago", hours)
+    } else if diff < 604800 {
+        let days = diff / 86400;
+        if days == 1 {
+            "yesterday".to_string()
+        } else {
+            format!("{}d ago", days)
+        }
+    } else {
+        let weeks = diff / 604800;
+        format!("{}w ago", weeks)
+    }
 }
 
 #[cfg(feature = "memory")]
@@ -409,6 +446,7 @@ async fn main() -> Result<()> {
                         println!("\n\x1b[1;34mMemory Statistics:\x1b[0m");
                         println!("  Memory Enabled: {}", manager.is_enabled());
                         println!("  Current Turn: {}", manager.turn_index());
+                        println!("  Is Resumed: {}", manager.is_resumed());
                         println!(
                             "  Min Relevance Score: {}",
                             manager.config().min_relevance_score
@@ -423,6 +461,141 @@ async fn main() -> Result<()> {
                     }
                     #[cfg(not(feature = "memory"))]
                     println!("\x1b[33mMemory not enabled.\x1b[0m\n");
+                    continue;
+                },
+                "/list" => {
+                    #[cfg(feature = "memory")]
+                    if let Some(ref injector) = context_injector {
+                        println!("\n\x1b[1;34m📚 Available Conversations:\x1b[0m\n");
+                        match injector.list_conversations(10, 0).await {
+                            Ok(conversations) => {
+                                if conversations.is_empty() {
+                                    println!("  \x1b[2m(no conversations found)\x1b[0m");
+                                } else {
+                                    for (i, conv) in conversations.iter().enumerate() {
+                                        let age = format_age(conv.updated_at);
+                                        let cwd_display = conv
+                                            .cwd
+                                            .as_ref()
+                                            .map(|c| {
+                                                if c.len() > 30 {
+                                                    format!("...{}", &c[c.len() - 27..])
+                                                } else {
+                                                    c.clone()
+                                                }
+                                            })
+                                            .unwrap_or_else(|| "(no cwd)".to_string());
+                                        println!(
+                                            "  \x1b[1;33m{}.\x1b[0m \x1b[1;36m{}\x1b[0m",
+                                            i + 1,
+                                            conv.id
+                                        );
+                                        println!(
+                                            "     {} messages, {} • {}",
+                                            conv.message_count, age, cwd_display
+                                        );
+                                    }
+                                }
+                            },
+                            Err(e) => {
+                                println!("\x1b[31mError listing conversations: {}\x1b[0m", e);
+                            },
+                        }
+                        println!();
+                    } else {
+                        println!("\x1b[33mMemory not available.\x1b[0m\n");
+                    }
+                    #[cfg(not(feature = "memory"))]
+                    println!("\x1b[33mMemory not enabled.\x1b[0m\n");
+                    continue;
+                },
+                cmd if cmd.starts_with("/resume ") => {
+                    let conv_id = cmd.strip_prefix("/resume ").unwrap().trim();
+                    if conv_id.is_empty() {
+                        println!("\x1b[31mUsage: /resume <conversation_id>\x1b[0m\n");
+                        continue;
+                    }
+
+                    #[cfg(feature = "memory")]
+                    if let Some(ref injector) = context_injector {
+                        println!(
+                            "\n\x1b[1;34m📜 Loading conversation {}...\x1b[0m\n",
+                            conv_id
+                        );
+                        match injector.load_conversation(conv_id, Some(20), None).await {
+                            Ok(loaded) => {
+                                if loaded.is_empty() {
+                                    println!(
+                                        "\x1b[33mNo messages found for conversation {}\x1b[0m\n",
+                                        conv_id
+                                    );
+                                    continue;
+                                }
+
+                                // Display loaded messages in chronological order
+                                println!(
+                                    "\x1b[1;32m✓ Loaded {} messages (total: {})\x1b[0m\n",
+                                    loaded.len(),
+                                    loaded.total_count
+                                );
+
+                                for msg in loaded.messages_chronological() {
+                                    let role_color = if msg.role == "user" { "32" } else { "34" };
+                                    let role_label =
+                                        if msg.role == "user" { "You" } else { "Claude" };
+                                    let preview = if msg.content.len() > 100 {
+                                        format!("{}...", &msg.content[..100])
+                                    } else {
+                                        msg.content.clone()
+                                    };
+                                    println!(
+                                        "  \x1b[1;{}m{}>\x1b[0m {}",
+                                        role_color,
+                                        role_label,
+                                        preview.replace('\n', " ")
+                                    );
+                                }
+                                println!();
+
+                                // Resume the conversation in the manager
+                                if let Some(ref mut manager) = memory_manager {
+                                    let next_turn =
+                                        loaded.max_turn_index().map(|i| i + 1).unwrap_or(0);
+                                    let cwd =
+                                        loaded.messages.first().and_then(|m| m.cwd.as_deref());
+
+                                    manager.resume_conversation(conv_id, cwd, next_turn);
+
+                                    // Also update local conversation history for context building
+                                    conversation_history.clear();
+                                    for msg in loaded.messages_chronological() {
+                                        conversation_history
+                                            .push((msg.role.clone(), msg.content.clone()));
+                                    }
+
+                                    // Trim to max history
+                                    while conversation_history.len() > MAX_HISTORY_TURNS * 2 {
+                                        conversation_history.remove(0);
+                                    }
+
+                                    println!(
+                                        "\x1b[1;33m→ Resuming from turn {}. Continue the conversation below.\x1b[0m\n",
+                                        next_turn
+                                    );
+                                }
+                            },
+                            Err(e) => {
+                                println!("\x1b[31mError loading conversation: {}\x1b[0m\n", e);
+                            },
+                        }
+                    } else {
+                        println!("\x1b[33mMemory not available.\x1b[0m\n");
+                    }
+                    #[cfg(not(feature = "memory"))]
+                    {
+                        let _ = conv_id; // suppress unused warning
+                        println!("\x1b[33mMemory not enabled.\x1b[0m\n");
+                    }
                     continue;
                 },
                 _ => {

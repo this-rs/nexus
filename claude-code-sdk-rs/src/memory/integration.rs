@@ -4,6 +4,8 @@
 //! SDK's conversation management.
 
 #[cfg(feature = "memory")]
+use super::provider::GetMessagesOptions;
+#[cfg(feature = "memory")]
 use super::{ContextFormatter, MeilisearchMemoryProvider, MemoryProvider};
 use super::{DefaultToolContextExtractor, MemoryConfig, MessageContextAggregator, MessageDocument};
 
@@ -220,6 +222,56 @@ impl ConversationMemoryManager {
     pub fn config(&self) -> &MemoryConfig {
         &self.config
     }
+
+    /// Resumes a conversation from a loaded state.
+    ///
+    /// This sets up the manager to continue an existing conversation
+    /// by restoring the conversation ID, working directory, and turn index.
+    ///
+    /// # Arguments
+    ///
+    /// * `conversation_id` - The ID of the conversation to resume
+    /// * `cwd` - The working directory to restore (if any)
+    /// * `turn_index` - The turn index to resume from (typically max_turn_index + 1)
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // Load conversation from memory
+    /// let loaded = injector.load_conversation("conv-123", Some(50), None).await?;
+    ///
+    /// // Resume the conversation
+    /// let next_turn = loaded.max_turn_index().map(|i| i + 1).unwrap_or(0);
+    /// manager.resume_conversation(
+    ///     "conv-123",
+    ///     loaded.messages.first().and_then(|m| m.cwd.as_deref()),
+    ///     next_turn,
+    /// );
+    /// ```
+    pub fn resume_conversation(
+        &mut self,
+        conversation_id: impl Into<String>,
+        cwd: Option<&str>,
+        turn_index: usize,
+    ) {
+        self.conversation_id = conversation_id.into();
+        self.turn_index = turn_index;
+
+        if let Some(cwd_str) = cwd {
+            self.cwd = Some(cwd_str.to_string());
+            self.aggregator = MessageContextAggregator::with_initial_cwd(cwd_str.to_string());
+        }
+
+        // Clear any pending messages from previous state
+        self.pending_messages.clear();
+    }
+
+    /// Returns whether this manager has been resumed from an existing conversation.
+    ///
+    /// This is determined by checking if the turn index is greater than 0.
+    pub fn is_resumed(&self) -> bool {
+        self.turn_index > 0
+    }
 }
 
 /// Builder for creating memory-enabled conversations.
@@ -375,6 +427,123 @@ impl ContextInjector {
     /// Returns a reference to the underlying provider.
     pub fn provider(&self) -> &MeilisearchMemoryProvider {
         &self.provider
+    }
+
+    /// Loads all messages from a conversation with pagination support.
+    ///
+    /// This method retrieves the complete message history for a conversation,
+    /// useful for re-displaying messages when resuming a session.
+    ///
+    /// # Arguments
+    ///
+    /// * `conversation_id` - The ID of the conversation to load
+    /// * `limit` - Maximum number of messages to retrieve (default: 50)
+    /// * `offset` - Number of messages to skip for pagination (default: 0)
+    ///
+    /// # Returns
+    ///
+    /// A `LoadedConversation` containing messages ordered from newest to oldest,
+    /// along with pagination info.
+    pub async fn load_conversation(
+        &self,
+        conversation_id: &str,
+        limit: Option<usize>,
+        offset: Option<usize>,
+    ) -> Result<LoadedConversation, super::provider::MemoryError> {
+        let options = GetMessagesOptions::new()
+            .limit(limit.unwrap_or(50))
+            .offset(offset.unwrap_or(0))
+            .newest_first(true);
+
+        let paginated = self
+            .provider
+            .get_conversation_messages(conversation_id, Some(options))
+            .await?;
+
+        Ok(LoadedConversation {
+            messages: paginated.messages,
+            total_count: paginated.total_count,
+            has_more: paginated.has_more,
+            offset: paginated.offset,
+            limit: paginated.limit,
+        })
+    }
+
+    /// Lists all available conversations with pagination.
+    ///
+    /// Returns conversations ordered by most recently updated.
+    pub async fn list_conversations(
+        &self,
+        limit: usize,
+        offset: usize,
+    ) -> Result<Vec<super::ConversationDocument>, super::provider::MemoryError> {
+        self.provider.list_conversations(limit, offset).await
+    }
+
+    /// Counts the total number of messages in a conversation.
+    pub async fn count_conversation_messages(
+        &self,
+        conversation_id: &str,
+    ) -> Result<usize, super::provider::MemoryError> {
+        self.provider
+            .count_conversation_messages(conversation_id)
+            .await
+    }
+}
+
+/// Result of loading a conversation's message history.
+///
+/// Contains the messages along with pagination information for
+/// implementing infinite scroll or paged UIs.
+#[cfg(feature = "memory")]
+#[derive(Debug, Clone)]
+pub struct LoadedConversation {
+    /// The messages in this page, ordered from newest to oldest.
+    pub messages: Vec<MessageDocument>,
+
+    /// Total number of messages in the conversation.
+    pub total_count: usize,
+
+    /// Whether there are more messages beyond this page.
+    pub has_more: bool,
+
+    /// The offset used for this query.
+    pub offset: usize,
+
+    /// The limit used for this query.
+    pub limit: usize,
+}
+
+#[cfg(feature = "memory")]
+impl LoadedConversation {
+    /// Returns true if this is an empty conversation.
+    pub fn is_empty(&self) -> bool {
+        self.messages.is_empty()
+    }
+
+    /// Returns the number of messages in this page.
+    pub fn len(&self) -> usize {
+        self.messages.len()
+    }
+
+    /// Returns the offset for the next page of messages.
+    pub fn next_offset(&self) -> usize {
+        self.offset + self.messages.len()
+    }
+
+    /// Returns messages in chronological order (oldest first).
+    ///
+    /// This is useful for displaying messages in a chat UI where
+    /// older messages appear at the top.
+    pub fn messages_chronological(&self) -> Vec<&MessageDocument> {
+        let mut msgs: Vec<_> = self.messages.iter().collect();
+        msgs.reverse();
+        msgs
+    }
+
+    /// Returns the highest turn index in this page, if any.
+    pub fn max_turn_index(&self) -> Option<usize> {
+        self.messages.iter().map(|m| m.turn_index).max()
     }
 }
 
@@ -550,5 +719,236 @@ mod tests {
         manager.record_user_message("Q2");
         manager.record_assistant_message("A2");
         assert_eq!(manager.turn_index(), 2);
+    }
+
+    #[test]
+    fn test_resume_conversation() {
+        let config = MemoryConfig::default().with_enabled(true);
+        let mut manager = ConversationMemoryManager::new(config);
+
+        // Initially not resumed
+        assert!(!manager.is_resumed());
+        assert_eq!(manager.turn_index(), 0);
+
+        // Resume from an existing conversation
+        manager.resume_conversation("existing-conv-123", Some("/projects/test"), 5);
+
+        assert!(manager.is_resumed());
+        assert_eq!(manager.conversation_id(), "existing-conv-123");
+        assert_eq!(manager.cwd(), Some("/projects/test"));
+        assert_eq!(manager.turn_index(), 5);
+    }
+
+    #[test]
+    fn test_resume_conversation_without_cwd() {
+        let config = MemoryConfig::default().with_enabled(true);
+        let mut manager = ConversationMemoryManager::new(config).with_cwd("/old/path");
+
+        manager.resume_conversation("conv-456", None, 3);
+
+        assert_eq!(manager.conversation_id(), "conv-456");
+        // CWD should remain from before since we passed None
+        assert_eq!(manager.cwd(), Some("/old/path"));
+        assert_eq!(manager.turn_index(), 3);
+    }
+
+    #[test]
+    fn test_resume_clears_pending_messages() {
+        let config = MemoryConfig::default().with_enabled(true);
+        let mut manager = ConversationMemoryManager::new(config);
+
+        // Add a message without taking it
+        manager.record_user_message("Hello");
+
+        // Resume should clear pending messages
+        manager.resume_conversation("new-conv", Some("/new/path"), 10);
+
+        let pending = manager.take_pending_messages();
+        assert!(
+            pending.is_empty(),
+            "Expected pending messages to be cleared after resume"
+        );
+    }
+
+    #[test]
+    fn test_record_after_resume() {
+        let config = MemoryConfig::default().with_enabled(true);
+        let mut manager = ConversationMemoryManager::new(config);
+
+        // Resume at turn 5
+        manager.resume_conversation("conv-789", Some("/projects/app"), 5);
+
+        // Record new messages
+        manager.record_user_message("Continued question");
+        manager.record_assistant_message("Continued answer");
+
+        let messages = manager.take_pending_messages();
+        assert_eq!(messages.len(), 2);
+
+        // Messages should have the resumed conversation ID
+        assert_eq!(messages[0].conversation_id, "conv-789");
+        assert_eq!(messages[1].conversation_id, "conv-789");
+
+        // Turn indices should continue from 5
+        assert_eq!(messages[0].turn_index, 5);
+        assert_eq!(messages[1].turn_index, 5);
+
+        // Next turn should be 6
+        assert_eq!(manager.turn_index(), 6);
+    }
+}
+
+#[cfg(all(test, feature = "memory"))]
+mod memory_tests {
+    use super::*;
+
+    #[test]
+    fn test_loaded_conversation_basic() {
+        let messages = vec![
+            MessageDocument::new("msg-3", "conv-1", "assistant", "Reply 2", 2, 1700002000),
+            MessageDocument::new("msg-2", "conv-1", "user", "Question 2", 1, 1700001000),
+            MessageDocument::new("msg-1", "conv-1", "user", "Question 1", 0, 1700000000),
+        ];
+
+        let loaded = LoadedConversation {
+            messages,
+            total_count: 5,
+            has_more: true,
+            offset: 0,
+            limit: 3,
+        };
+
+        assert_eq!(loaded.len(), 3);
+        assert!(!loaded.is_empty());
+        assert!(loaded.has_more);
+        assert_eq!(loaded.total_count, 5);
+    }
+
+    #[test]
+    fn test_loaded_conversation_empty() {
+        let loaded = LoadedConversation {
+            messages: vec![],
+            total_count: 0,
+            has_more: false,
+            offset: 0,
+            limit: 50,
+        };
+
+        assert!(loaded.is_empty());
+        assert_eq!(loaded.len(), 0);
+        assert!(!loaded.has_more);
+        assert_eq!(loaded.max_turn_index(), None);
+    }
+
+    #[test]
+    fn test_loaded_conversation_next_offset() {
+        let messages = vec![
+            MessageDocument::new("msg-1", "conv-1", "user", "Q1", 0, 1700000000),
+            MessageDocument::new("msg-2", "conv-1", "assistant", "A1", 1, 1700001000),
+        ];
+
+        let loaded = LoadedConversation {
+            messages,
+            total_count: 10,
+            has_more: true,
+            offset: 2,
+            limit: 2,
+        };
+
+        assert_eq!(loaded.next_offset(), 4); // offset (2) + len (2)
+    }
+
+    #[test]
+    fn test_loaded_conversation_max_turn_index() {
+        let messages = vec![
+            MessageDocument::new("msg-3", "conv-1", "assistant", "A2", 4, 1700003000),
+            MessageDocument::new("msg-2", "conv-1", "user", "Q2", 3, 1700002000),
+            MessageDocument::new("msg-1", "conv-1", "assistant", "A1", 2, 1700001000),
+        ];
+
+        let loaded = LoadedConversation {
+            messages,
+            total_count: 5,
+            has_more: true,
+            offset: 0,
+            limit: 3,
+        };
+
+        assert_eq!(loaded.max_turn_index(), Some(4));
+    }
+
+    #[test]
+    fn test_loaded_conversation_chronological_order() {
+        let messages = vec![
+            MessageDocument::new("msg-3", "conv-1", "assistant", "Latest", 2, 1700002000),
+            MessageDocument::new("msg-2", "conv-1", "user", "Middle", 1, 1700001000),
+            MessageDocument::new("msg-1", "conv-1", "user", "Oldest", 0, 1700000000),
+        ];
+
+        let loaded = LoadedConversation {
+            messages,
+            total_count: 3,
+            has_more: false,
+            offset: 0,
+            limit: 50,
+        };
+
+        let chronological = loaded.messages_chronological();
+        assert_eq!(chronological.len(), 3);
+        assert_eq!(chronological[0].content, "Oldest");
+        assert_eq!(chronological[1].content, "Middle");
+        assert_eq!(chronological[2].content, "Latest");
+    }
+
+    #[test]
+    fn test_resume_and_continue_workflow() {
+        // This test simulates the full workflow of:
+        // 1. Creating a loaded conversation (as if from injector.load_conversation)
+        // 2. Resuming the manager
+        // 3. Continuing to record messages
+
+        let config = MemoryConfig::default().with_enabled(true);
+        let mut manager = ConversationMemoryManager::new(config);
+
+        // Simulate loaded conversation with messages at turns 0, 1, 2
+        let loaded = LoadedConversation {
+            messages: vec![
+                MessageDocument::new("msg-3", "conv-xyz", "assistant", "A2", 2, 1700002000)
+                    .with_cwd("/projects/app"),
+                MessageDocument::new("msg-2", "conv-xyz", "user", "Q2", 1, 1700001000)
+                    .with_cwd("/projects/app"),
+                MessageDocument::new("msg-1", "conv-xyz", "user", "Q1", 0, 1700000000)
+                    .with_cwd("/projects/app"),
+            ],
+            total_count: 3,
+            has_more: false,
+            offset: 0,
+            limit: 50,
+        };
+
+        // Calculate next turn index
+        let next_turn = loaded.max_turn_index().map(|i| i + 1).unwrap_or(0);
+        assert_eq!(next_turn, 3);
+
+        // Get CWD from most recent message
+        let cwd = loaded.messages.first().and_then(|m| m.cwd.as_deref());
+
+        // Resume the conversation
+        manager.resume_conversation("conv-xyz", cwd, next_turn);
+
+        assert_eq!(manager.conversation_id(), "conv-xyz");
+        assert_eq!(manager.cwd(), Some("/projects/app"));
+        assert_eq!(manager.turn_index(), 3);
+        assert!(manager.is_resumed());
+
+        // Continue the conversation
+        manager.record_user_message("Q3");
+        manager.record_assistant_message("A3");
+
+        let new_messages = manager.take_pending_messages();
+        assert_eq!(new_messages.len(), 2);
+        assert_eq!(new_messages[0].turn_index, 3);
+        assert_eq!(new_messages[1].turn_index, 3);
+        assert_eq!(manager.turn_index(), 4);
     }
 }
