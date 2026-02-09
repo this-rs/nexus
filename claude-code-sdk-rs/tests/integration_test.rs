@@ -30,6 +30,7 @@ fn test_message_types() {
     let user_msg = Message::User {
         message: UserMessage {
             content: "Hello".to_string(),
+            content_blocks: None,
         },
         parent_tool_use_id: None,
     };

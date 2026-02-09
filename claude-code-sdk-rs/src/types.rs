@@ -1631,11 +1631,22 @@ pub enum StreamDelta {
     },
 }
 
-/// User message content
+/// User message content.
+///
+/// The CLI emits two kinds of user messages:
+/// 1. **Text prompts**: `{ "content": "Hello" }` — simple string content
+/// 2. **Tool results**: `{ "content": [{ "type": "tool_result", ... }] }` — array of content blocks
+///
+/// The `content` field holds the text for simple messages (empty string for tool-result-only messages).
+/// The `content_blocks` field holds the structured content blocks when present.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct UserMessage {
-    /// Message content
+    /// Text content (empty for tool-result-only messages)
     pub content: String,
+    /// Structured content blocks (tool_result, etc.) — present when the CLI
+    /// sends a user message with array content (e.g. after executing a tool).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content_blocks: Option<Vec<ContentBlock>>,
 }
 
 /// Assistant message content
@@ -1926,6 +1937,7 @@ mod tests {
         let msg = Message::User {
             message: UserMessage {
                 content: "Hello".to_string(),
+                content_blocks: None,
             },
             parent_tool_use_id: None,
         };

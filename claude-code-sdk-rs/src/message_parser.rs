@@ -40,21 +40,37 @@ fn parse_user_message(json: Value) -> Result<Option<Message>> {
         .get("message")
         .ok_or_else(|| SdkError::parse_error("Missing 'message' field", json.to_string()))?;
 
-    // Handle different content formats
-    let content = if let Some(content_str) = message.get("content").and_then(|v| v.as_str()) {
-        // Simple string content
-        content_str.to_string()
-    } else if let Some(_content_array) = message.get("content").and_then(|v| v.as_array()) {
-        // Array content (e.g., tool results) - we'll skip these for now
-        // as they're not standard user messages but tool responses
-        debug!("Skipping user message with array content (likely tool result)");
-        return Ok(None);
-    } else {
-        return Err(SdkError::parse_error(
-            "Missing or invalid 'content' field",
-            json.to_string(),
-        ));
-    };
+    // Handle different content formats:
+    // 1. String content: simple user text prompt
+    // 2. Array content: tool results (the CLI sends tool_result blocks as a user message)
+    let (content, content_blocks) =
+        if let Some(content_str) = message.get("content").and_then(|v| v.as_str()) {
+            // Simple string content
+            (content_str.to_string(), None)
+        } else if let Some(content_array) = message.get("content").and_then(|v| v.as_array()) {
+            // Array content — parse each item as a content block (tool_result, text, etc.)
+            let mut blocks = Vec::new();
+            for item in content_array {
+                if let Some(block) = parse_content_block(item)? {
+                    blocks.push(block);
+                }
+            }
+            debug!(
+                "Parsed user message with {} content blocks (tool results)",
+                blocks.len()
+            );
+            let blocks_opt = if blocks.is_empty() {
+                None
+            } else {
+                Some(blocks)
+            };
+            (String::new(), blocks_opt)
+        } else {
+            return Err(SdkError::parse_error(
+                "Missing or invalid 'content' field",
+                json.to_string(),
+            ));
+        };
 
     let parent_tool_use_id = json
         .get("parent_tool_use_id")
@@ -62,7 +78,10 @@ fn parse_user_message(json: Value) -> Result<Option<Message>> {
         .map(String::from);
 
     Ok(Some(Message::User {
-        message: UserMessage { content },
+        message: UserMessage {
+            content,
+            content_blocks,
+        },
         parent_tool_use_id,
     }))
 }
@@ -702,10 +721,108 @@ mod tests {
         let sidechain_user = Message::User {
             message: UserMessage {
                 content: "subagent prompt".to_string(),
+                content_blocks: None,
             },
             parent_tool_use_id: Some("toolu_def456".to_string()),
         };
         assert!(sidechain_user.is_sidechain());
         assert_eq!(sidechain_user.parent_tool_use_id(), Some("toolu_def456"));
+    }
+
+    #[test]
+    fn test_parse_user_message_with_tool_result_array() {
+        let json = serde_json::json!({
+            "type": "user",
+            "message": {
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "toolu_abc123",
+                        "content": "File contents here...",
+                        "is_error": false
+                    }
+                ]
+            }
+        });
+
+        let result = parse_message(json).unwrap();
+        assert!(
+            result.is_some(),
+            "User message with tool_result array should be parsed, not skipped"
+        );
+        let msg = result.unwrap();
+
+        if let Message::User { message, .. } = &msg {
+            assert!(
+                message.content.is_empty(),
+                "Text content should be empty for tool-result-only messages"
+            );
+            assert!(
+                message.content_blocks.is_some(),
+                "content_blocks should be present"
+            );
+            let blocks = message.content_blocks.as_ref().unwrap();
+            assert_eq!(blocks.len(), 1);
+            assert!(
+                matches!(&blocks[0], ContentBlock::ToolResult(tr) if tr.tool_use_id == "toolu_abc123")
+            );
+        } else {
+            panic!("Expected Message::User, got {:?}", msg);
+        }
+    }
+
+    #[test]
+    fn test_parse_user_message_with_multiple_tool_results() {
+        let json = serde_json::json!({
+            "type": "user",
+            "message": {
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "toolu_001",
+                        "content": "Result 1",
+                        "is_error": false
+                    },
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "toolu_002",
+                        "content": "Error occurred",
+                        "is_error": true
+                    }
+                ]
+            }
+        });
+
+        let result = parse_message(json).unwrap().unwrap();
+        if let Message::User { message, .. } = &result {
+            let blocks = message.content_blocks.as_ref().unwrap();
+            assert_eq!(blocks.len(), 2);
+            assert!(
+                matches!(&blocks[0], ContentBlock::ToolResult(tr) if tr.tool_use_id == "toolu_001" && tr.is_error == Some(false))
+            );
+            assert!(
+                matches!(&blocks[1], ContentBlock::ToolResult(tr) if tr.tool_use_id == "toolu_002" && tr.is_error == Some(true))
+            );
+        } else {
+            panic!("Expected Message::User");
+        }
+    }
+
+    #[test]
+    fn test_parse_user_message_string_content_has_no_blocks() {
+        let json = serde_json::json!({
+            "type": "user",
+            "message": {
+                "content": "Hello, just a normal message"
+            }
+        });
+
+        let result = parse_message(json).unwrap().unwrap();
+        if let Message::User { message, .. } = &result {
+            assert_eq!(message.content, "Hello, just a normal message");
+            assert!(message.content_blocks.is_none());
+        } else {
+            panic!("Expected Message::User");
+        }
     }
 }
