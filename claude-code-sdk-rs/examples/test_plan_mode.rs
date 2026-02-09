@@ -23,7 +23,7 @@ async fn test_plan_mode_query() -> Result<()> {
     let mut found_response = false;
     while let Some(msg) = messages.next().await {
         match msg? {
-            Message::Assistant { message } => {
+            Message::Assistant { message, .. } => {
                 for block in message.content {
                     if let nexus_claude::ContentBlock::Text(text) = block {
                         println!("Plan Response:\n{}", text.text);
@@ -69,7 +69,7 @@ async fn test_plan_mode_interactive() -> Result<()> {
 
     let mut plan_received = false;
     for msg in &messages {
-        if let Message::Assistant { message } = msg {
+        if let Message::Assistant { message, .. } = msg {
             for block in &message.content {
                 if let nexus_claude::ContentBlock::Text(text) = block {
                     println!(
@@ -89,7 +89,7 @@ async fn test_plan_mode_interactive() -> Result<()> {
             .await?;
 
         for msg in &messages {
-            if let Message::Assistant { message } = msg {
+            if let Message::Assistant { message, .. } = msg {
                 for block in &message.content {
                     if let nexus_claude::ContentBlock::Text(text) = block {
                         println!(
@@ -172,7 +172,7 @@ async fn test_plan_with_thinking_tokens() -> Result<()> {
 
     while let Some(msg) = messages.next().await {
         match msg? {
-            Message::Assistant { message } => {
+            Message::Assistant { message, .. } => {
                 for block in message.content {
                     match block {
                         nexus_claude::ContentBlock::Text(text) => {

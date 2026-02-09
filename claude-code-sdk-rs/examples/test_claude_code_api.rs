@@ -51,7 +51,7 @@ async fn test_simple_query(options: ClaudeCodeOptions) -> Result<()> {
         match client.query(query.to_string()).await {
             Ok(messages) => {
                 for msg in messages {
-                    if let Message::Assistant { message } = msg {
+                    if let Message::Assistant { message, .. } = msg {
                         for content in message.content {
                             if let ContentBlock::Text(text) = content {
                                 info!("Response: {}", text.text);
@@ -87,7 +87,7 @@ async fn test_interactive(options: ClaudeCodeOptions) -> Result<()> {
         match client.send_and_receive(prompt.to_string()).await {
             Ok(messages) => {
                 for msg in messages {
-                    if let Message::Assistant { message } = msg {
+                    if let Message::Assistant { message, .. } = msg {
                         for content in message.content {
                             if let ContentBlock::Text(text) = content {
                                 info!("Claude: {}", text.text);
@@ -132,7 +132,7 @@ async fn test_batch(options: ClaudeCodeOptions) -> Result<()> {
                 if let Ok(messages) = result {
                     info!("\nTask {}: {}", i + 1, tasks[i]);
                     for msg in messages {
-                        if let Message::Assistant { message } = msg {
+                        if let Message::Assistant { message, .. } = msg {
                             for content in &message.content {
                                 if let ContentBlock::Text(text) = content {
                                     info!("Result: {}", text.text);

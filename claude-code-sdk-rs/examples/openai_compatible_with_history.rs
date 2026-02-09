@@ -251,7 +251,7 @@ fn extract_response_text(messages: Vec<nexus_claude::Message>) -> String {
     messages
         .into_iter()
         .filter_map(|msg| {
-            if let nexus_claude::Message::Assistant { message } = msg {
+            if let nexus_claude::Message::Assistant { message, .. } = msg {
                 let text = message
                     .content
                     .into_iter()

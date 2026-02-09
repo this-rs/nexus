@@ -56,8 +56,14 @@ fn parse_user_message(json: Value) -> Result<Option<Message>> {
         ));
     };
 
+    let parent_tool_use_id = json
+        .get("parent_tool_use_id")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+
     Ok(Some(Message::User {
         message: UserMessage { content },
+        parent_tool_use_id,
     }))
 }
 
@@ -82,10 +88,16 @@ fn parse_assistant_message(json: Value) -> Result<Option<Message>> {
         }
     }
 
+    let parent_tool_use_id = json
+        .get("parent_tool_use_id")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+
     Ok(Some(Message::Assistant {
         message: AssistantMessage {
             content: content_blocks,
         },
+        parent_tool_use_id,
     }))
 }
 
@@ -358,9 +370,15 @@ fn parse_stream_event(json: Value) -> Result<Option<Message>> {
         },
     };
 
+    let parent_tool_use_id = json
+        .get("parent_tool_use_id")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+
     Ok(Some(Message::StreamEvent {
         event: event_data,
         session_id,
+        parent_tool_use_id,
     }))
 }
 
@@ -382,8 +400,13 @@ mod tests {
         let result = parse_message(json).unwrap();
         assert!(result.is_some());
 
-        if let Some(Message::User { message }) = result {
+        if let Some(Message::User {
+            message,
+            parent_tool_use_id,
+        }) = result
+        {
             assert_eq!(message.content, "Hello, Claude!");
+            assert!(parent_tool_use_id.is_none());
         } else {
             panic!("Expected User message");
         }
@@ -407,8 +430,13 @@ mod tests {
         let result = parse_message(json).unwrap();
         assert!(result.is_some());
 
-        if let Some(Message::Assistant { message }) = result {
+        if let Some(Message::Assistant {
+            message,
+            parent_tool_use_id,
+        }) = result
+        {
             assert_eq!(message.content.len(), 1);
+            assert!(parent_tool_use_id.is_none());
             if let ContentBlock::Text(text) = &message.content[0] {
                 assert_eq!(text.text, "Hello! How can I help you?");
             } else {

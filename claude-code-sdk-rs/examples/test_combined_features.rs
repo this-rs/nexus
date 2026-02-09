@@ -95,7 +95,7 @@ async fn main() -> Result<()> {
 
     for msg in messages {
         match msg {
-            nexus_claude::Message::Assistant { message } => {
+            nexus_claude::Message::Assistant { message, .. } => {
                 for block in message.content {
                     match block {
                         nexus_claude::ContentBlock::Text(text) => {

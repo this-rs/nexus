@@ -53,7 +53,7 @@ async fn test_interactive_mode(options: ClaudeCodeOptions) -> Result<()> {
             Ok(messages) => {
                 for msg in messages {
                     if let Message::Assistant {
-                        message: assistant_msg,
+                        message: assistant_msg, ..
                     } = msg
                     {
                         for content in assistant_msg.content {
@@ -92,7 +92,7 @@ async fn test_interactive_mode(options: ClaudeCodeOptions) -> Result<()> {
         let messages = client.receive_interactive().await?;
         for msg in messages {
             if let Message::Assistant {
-                message: assistant_msg,
+                message: assistant_msg, ..
             } = msg
             {
                 for content in assistant_msg.content {
@@ -158,7 +158,7 @@ async fn test_batch_mode(options: ClaudeCodeOptions) -> Result<()> {
                     Ok(messages) => {
                         for msg in messages {
                             if let Message::Assistant {
-                                message: assistant_msg,
+                                message: assistant_msg, ..
                             } = msg
                             {
                                 for content in &assistant_msg.content {
@@ -229,7 +229,7 @@ async fn test_mixed_workload(options: ClaudeCodeOptions) -> Result<()> {
         let messages = interactive_client.receive_interactive().await?;
         for msg in messages {
             if let Message::Assistant {
-                message: assistant_msg,
+                message: assistant_msg, ..
             } = msg
             {
                 for content in assistant_msg.content {

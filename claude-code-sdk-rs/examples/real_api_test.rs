@@ -72,7 +72,7 @@ async fn test_oneshot_query(options: ClaudeCodeOptions) -> Result<()> {
             Ok(messages) => {
                 let elapsed = start.elapsed();
                 for msg in messages {
-                    if let Message::Assistant { message } = msg {
+                    if let Message::Assistant { message, .. } = msg {
                         for content in message.content {
                             if let ContentBlock::Text(text) = content {
                                 info!("Response: {}", text.text);
@@ -114,7 +114,7 @@ async fn test_interactive_mode(options: ClaudeCodeOptions) -> Result<()> {
         let messages = client.receive_interactive().await?;
 
         for msg in messages {
-            if let Message::Assistant { message } = msg {
+            if let Message::Assistant { message, .. } = msg {
                 for content in message.content {
                     if let ContentBlock::Text(text) = content {
                         info!("Assistant: {}", text.text);
@@ -167,7 +167,7 @@ async fn test_batch_processing(options: ClaudeCodeOptions) -> Result<()> {
             Ok(messages) => {
                 info!("Query {}: {}", i + 1, queries[i]);
                 for msg in messages {
-                    if let Message::Assistant { message } = msg {
+                    if let Message::Assistant { message, .. } = msg {
                         for content in &message.content {
                             if let ContentBlock::Text(text) = content {
                                 info!("Response: {}", text.text);
@@ -203,7 +203,7 @@ async fn test_traditional_client(options: ClaudeCodeOptions) -> Result<()> {
     let elapsed = start.elapsed();
 
     for msg in messages {
-        if let Message::Assistant { message } = msg {
+        if let Message::Assistant { message, .. } = msg {
             for content in message.content {
                 if let ContentBlock::Text(text) = content {
                     info!("Response: {}", text.text);

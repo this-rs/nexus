@@ -31,10 +31,11 @@ fn test_message_types() {
         message: UserMessage {
             content: "Hello".to_string(),
         },
+        parent_tool_use_id: None,
     };
 
     match user_msg {
-        Message::User { message } => {
+        Message::User { message, .. } => {
             assert_eq!(message.content, "Hello");
         },
         _ => panic!("Expected User message"),

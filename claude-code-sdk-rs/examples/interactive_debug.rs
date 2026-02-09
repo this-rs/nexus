@@ -53,7 +53,7 @@ async fn main() -> Result<()> {
                     println!("Message type: {:?}", std::mem::discriminant(&message));
 
                     match message {
-                        Message::Assistant { message } => {
+                        Message::Assistant { message, .. } => {
                             got_response = true;
                             print!("Claude: ");
                             for block in &message.content {
@@ -139,7 +139,7 @@ async fn main() -> Result<()> {
 
         while let Some(msg) = messages.next().await {
             match msg? {
-                Message::Assistant { message } => {
+                Message::Assistant { message, .. } => {
                     if !got_response {
                         print!("Claude: ");
                         got_response = true;

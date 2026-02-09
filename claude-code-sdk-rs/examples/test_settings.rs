@@ -41,7 +41,7 @@ async fn main() -> Result<()> {
     // Process the response
     while let Some(msg) = messages.next().await {
         match msg? {
-            nexus_claude::Message::Assistant { message } => {
+            nexus_claude::Message::Assistant { message, .. } => {
                 for block in message.content {
                     if let nexus_claude::ContentBlock::Text(text) = block {
                         println!("Claude: {}", text.text);

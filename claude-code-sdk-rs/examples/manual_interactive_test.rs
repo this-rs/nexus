@@ -71,7 +71,7 @@ async fn test_traditional_interactive(options: ClaudeCodeOptions) -> Result<()> 
                 print!("Claude: ");
                 let mut first = true;
                 for msg in messages {
-                    if let Message::Assistant { message } = msg {
+                    if let Message::Assistant { message, .. } = msg {
                         for content in message.content {
                             if let ContentBlock::Text(text) = content {
                                 if !first {
@@ -140,7 +140,7 @@ async fn test_optimized_interactive(options: ClaudeCodeOptions) -> Result<()> {
                         print!("Claude: ");
                         let mut first = true;
                         for msg in messages {
-                            if let Message::Assistant { message } = msg {
+                            if let Message::Assistant { message, .. } = msg {
                                 for content in message.content {
                                     if let ContentBlock::Text(text) = content {
                                         if !first {

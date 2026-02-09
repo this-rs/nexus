@@ -28,6 +28,7 @@ impl MockResponseGenerator {
 
         let message = Message::Assistant {
             message: assistant_msg,
+            parent_tool_use_id: None,
         };
 
         self.responses.write().await.push(message);
@@ -64,6 +65,7 @@ fn test_message_serialization() {
 
     let message = Message::Assistant {
         message: assistant_msg,
+        parent_tool_use_id: None,
     };
 
     // Serialize to JSON
@@ -74,7 +76,7 @@ fn test_message_serialization() {
     // Deserialize back
     let deserialized: Message = serde_json::from_str(&json).unwrap();
     match deserialized {
-        Message::Assistant { message } => {
+        Message::Assistant { message, .. } => {
             assert_eq!(message.content.len(), 1);
             if let ContentBlock::Text(text) = &message.content[0] {
                 assert_eq!(text.text, "Hello, world!");
@@ -121,7 +123,7 @@ async fn test_mock_response_flow() {
 
     // Verify first message is assistant response
     match &responses[0] {
-        Message::Assistant { message } => {
+        Message::Assistant { message, .. } => {
             assert_eq!(message.content.len(), 1);
             if let ContentBlock::Text(text) = &message.content[0] {
                 assert_eq!(text.text, "The answer is 42");

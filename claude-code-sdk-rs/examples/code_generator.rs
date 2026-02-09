@@ -78,7 +78,7 @@ async fn generate_rust_solution(question: &str, project_name: &str) -> Result<()
 
 fn print_claude_response(messages: &[nexus_claude::Message]) {
     for msg in messages {
-        if let nexus_claude::Message::Assistant { message } = msg {
+        if let nexus_claude::Message::Assistant { message, .. } = msg {
             for content in &message.content {
                 if let nexus_claude::ContentBlock::Text(text) = content {
                     // Only print first 500 chars to keep output readable

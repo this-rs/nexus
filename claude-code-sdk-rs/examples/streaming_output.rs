@@ -150,10 +150,10 @@ async fn main() -> Result<()> {
 /// Helper function to display messages
 fn display_message(msg: &Message) {
     match msg {
-        Message::User { message } => {
+        Message::User { message, .. } => {
             println!("User: {}", message.content);
         },
-        Message::Assistant { message } => {
+        Message::Assistant { message, .. } => {
             for block in &message.content {
                 if let nexus_claude::ContentBlock::Text(text_content) = block {
                     println!("Claude: {}", text_content.text);

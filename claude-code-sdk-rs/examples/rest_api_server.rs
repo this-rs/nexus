@@ -285,7 +285,7 @@ fn extract_response_text(messages: Vec<Message>) -> String {
     messages
         .into_iter()
         .filter_map(|msg| match msg {
-            Message::Assistant { message } => {
+            Message::Assistant { message, .. } => {
                 let texts: Vec<String> = message
                     .content
                     .into_iter()

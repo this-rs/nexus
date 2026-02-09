@@ -74,7 +74,7 @@ async fn main() -> Result<()> {
     let mut messages = client.receive_messages().await;
     while let Some(msg_result) = messages.next().await {
         match msg_result? {
-            Message::Assistant { message } => {
+            Message::Assistant { message, .. } => {
                 for block in message.content {
                     if let nexus_claude::ContentBlock::Text(text) = block {
                         println!("   🤖 Response: {}\n", text.text);

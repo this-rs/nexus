@@ -246,7 +246,7 @@ async fn process_question_set(question_set_file: &Path, start_from: Option<u32>)
 fn print_response(messages: &[nexus_claude::Message]) {
     for msg in messages {
         match msg {
-            nexus_claude::Message::Assistant { message } => {
+            nexus_claude::Message::Assistant { message, .. } => {
                 for content in &message.content {
                     if let ContentBlock::Text(text) = content {
                         println!("{}", text.text);

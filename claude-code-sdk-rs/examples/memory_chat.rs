@@ -530,7 +530,7 @@ async fn main() -> Result<()> {
             Ok(mut stream) => {
                 while let Some(msg_result) = stream.next().await {
                     match msg_result {
-                        Ok(Message::Assistant { message }) => {
+                        Ok(Message::Assistant { message, .. }) => {
                             // Stop spinner on first token
                             if first_token {
                                 stop_spinner(spinner.clone());

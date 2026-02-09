@@ -61,7 +61,7 @@ async fn main() -> Result<()> {
         // Process response
         for msg in &messages {
             match msg {
-                Message::Assistant { message } => {
+                Message::Assistant { message, .. } => {
                     print!("Claude: ");
                     for block in &message.content {
                         match block {

@@ -35,10 +35,10 @@ async fn main() -> Result<()> {
                         Ok(msg) => {
                             message_count += 1;
                             match &msg {
-                                Message::User { message } => {
+                                Message::User { message, .. } => {
                                     println!("  📥 User: {}", message.content);
                                 },
-                                Message::Assistant { message } => {
+                                Message::Assistant { message, .. } => {
                                     println!(
                                         "  🤖 Assistant: {} content blocks",
                                         message.content.len()

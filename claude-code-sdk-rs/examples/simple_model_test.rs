@@ -20,7 +20,7 @@ async fn main() -> Result<()> {
         Ok(mut stream) => {
             let mut success = false;
             while let Some(msg) = stream.next().await {
-                if let Ok(nexus_claude::Message::Assistant { message }) = msg {
+                if let Ok(nexus_claude::Message::Assistant { message, .. }) = msg {
                     for block in message.content {
                         if let nexus_claude::ContentBlock::Text(text) = block {
                             println!("Response: {}", text.text);
@@ -47,7 +47,7 @@ async fn main() -> Result<()> {
         Ok(mut stream) => {
             let mut success = false;
             while let Some(msg) = stream.next().await {
-                if let Ok(nexus_claude::Message::Assistant { message }) = msg {
+                if let Ok(nexus_claude::Message::Assistant { message, .. }) = msg {
                     for block in message.content {
                         if let nexus_claude::ContentBlock::Text(text) = block {
                             let preview = if text.text.len() > 100 {

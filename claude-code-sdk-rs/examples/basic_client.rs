@@ -36,7 +36,7 @@ async fn main() -> Result<()> {
             println!("\nMessage {count}: ");
 
             match msg {
-                Ok(Message::Assistant { message }) => {
+                Ok(Message::Assistant { message, .. }) => {
                     for block in &message.content {
                         if let nexus_claude::ContentBlock::Text(text) = block {
                             println!("Assistant: {}", text.text);

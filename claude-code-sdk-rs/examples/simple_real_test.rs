@@ -40,7 +40,7 @@ async fn main() -> Result<()> {
                 match result {
                     Ok(msg) => {
                         // Extract text content from assistant messages
-                        if let nexus_claude::Message::Assistant { message } = msg {
+                        if let nexus_claude::Message::Assistant { message, .. } = msg {
                             for content in message.content {
                                 if let nexus_claude::ContentBlock::Text(text) = content {
                                     println!("Response: {}", text.text);

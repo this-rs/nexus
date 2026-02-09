@@ -135,7 +135,7 @@ impl InteractiveClient {
     ///     let mut stream = std::pin::pin!(client.send_and_receive_stream("Hello!".to_string()).await?);
     ///     while let Some(msg) = stream.next().await {
     ///         match msg? {
-    ///             Message::Assistant { message } => println!("{:?}", message),
+    ///             Message::Assistant { message, .. } => println!("{:?}", message),
     ///             Message::Result { .. } => break,
     ///             _ => {}
     ///         }

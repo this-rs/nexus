@@ -23,7 +23,7 @@ async fn simple_query_example() -> Result<()> {
 
     while let Some(msg) = messages.next().await {
         match msg? {
-            Message::Assistant { message } => {
+            Message::Assistant { message, .. } => {
                 for block in message.content {
                     if let nexus_claude::ContentBlock::Text(text) = block {
                         println!("{}", text.text);
@@ -69,7 +69,7 @@ async fn interactive_session_example() -> Result<()> {
         .await?;
 
     for msg in messages {
-        if let Message::Assistant { message } = msg {
+        if let Message::Assistant { message, .. } = msg {
             for block in message.content {
                 if let nexus_claude::ContentBlock::Text(text) = block {
                     println!("{}", text.text);
@@ -85,7 +85,7 @@ async fn interactive_session_example() -> Result<()> {
         .await?;
 
     for msg in messages {
-        if let Message::Assistant { message } = msg {
+        if let Message::Assistant { message, .. } = msg {
             for block in message.content {
                 if let nexus_claude::ContentBlock::Text(text) = block {
                     println!("{}", text.text);
@@ -119,7 +119,7 @@ async fn model_recommendation_example() -> Result<()> {
     .await?;
 
     while let Some(msg) = messages.next().await {
-        if let Ok(Message::Assistant { message }) = msg {
+        if let Ok(Message::Assistant { message, .. }) = msg {
             for block in message.content {
                 if let nexus_claude::ContentBlock::Text(text) = block {
                     println!("{}", text.text);
@@ -155,7 +155,7 @@ async fn model_comparison_example() -> Result<()> {
         match query(prompt, Some(options)).await {
             Ok(mut stream) => {
                 while let Some(msg) = stream.next().await {
-                    if let Ok(Message::Assistant { message }) = msg {
+                    if let Ok(Message::Assistant { message, .. }) = msg {
                         for block in message.content {
                             if let nexus_claude::ContentBlock::Text(text) = block {
                                 println!("  Response: {}", text.text);
@@ -194,7 +194,7 @@ async fn advanced_features_example() -> Result<()> {
 
     while let Some(msg) = messages.next().await {
         match msg? {
-            Message::Assistant { message } => {
+            Message::Assistant { message, .. } => {
                 for block in message.content {
                     match block {
                         nexus_claude::ContentBlock::Text(text) => {
