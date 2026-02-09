@@ -115,6 +115,31 @@ pub struct DeltaMessage {
     pub role: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_calls: Option<Vec<DeltaToolCall>>,
+}
+
+/// Tool call delta for streaming responses (OpenAI format).
+/// First chunk includes index + id + type + function.name + function.arguments (partial).
+/// Subsequent chunks include index + function.arguments (partial).
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct DeltaToolCall {
+    pub index: i32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
+    pub tool_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub function: Option<DeltaFunctionCall>,
+}
+
+/// Function call delta for streaming tool calls.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct DeltaFunctionCall {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub arguments: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
