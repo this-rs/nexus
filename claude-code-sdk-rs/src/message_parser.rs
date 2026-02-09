@@ -579,4 +579,133 @@ mod tests {
         let result = parse_message(json).unwrap();
         assert!(result.is_none());
     }
+
+    // === Sidechain / parent_tool_use_id tests ===
+
+    #[test]
+    fn test_parse_assistant_message_with_parent_tool_use_id() {
+        let json = json!({
+            "type": "assistant",
+            "parent_tool_use_id": "toolu_abc123",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "Subagent response"
+                    }
+                ]
+            }
+        });
+
+        let result = parse_message(json).unwrap();
+        assert!(result.is_some());
+
+        if let Some(Message::Assistant {
+            message,
+            parent_tool_use_id,
+        }) = result
+        {
+            assert_eq!(message.content.len(), 1);
+            assert_eq!(parent_tool_use_id, Some("toolu_abc123".to_string()));
+            if let ContentBlock::Text(text) = &message.content[0] {
+                assert_eq!(text.text, "Subagent response");
+            } else {
+                panic!("Expected Text content block");
+            }
+        } else {
+            panic!("Expected Assistant message");
+        }
+    }
+
+    #[test]
+    fn test_parse_user_message_with_parent_tool_use_id() {
+        let json = json!({
+            "type": "user",
+            "parent_tool_use_id": "toolu_xyz789",
+            "message": {
+                "role": "user",
+                "content": "Subagent user prompt"
+            }
+        });
+
+        let result = parse_message(json).unwrap();
+        assert!(result.is_some());
+
+        if let Some(Message::User {
+            message,
+            parent_tool_use_id,
+        }) = result
+        {
+            assert_eq!(message.content, "Subagent user prompt");
+            assert_eq!(parent_tool_use_id, Some("toolu_xyz789".to_string()));
+        } else {
+            panic!("Expected User message");
+        }
+    }
+
+    #[test]
+    fn test_is_sidechain_helper() {
+        // Top-level message (no parent_tool_use_id)
+        let top_level = Message::Assistant {
+            message: AssistantMessage {
+                content: vec![ContentBlock::Text(TextContent {
+                    text: "Hello".to_string(),
+                })],
+            },
+            parent_tool_use_id: None,
+        };
+        assert!(!top_level.is_sidechain());
+        assert!(top_level.is_top_level());
+        assert!(top_level.parent_tool_use_id().is_none());
+
+        // Sidechain message (has parent_tool_use_id)
+        let sidechain = Message::Assistant {
+            message: AssistantMessage {
+                content: vec![ContentBlock::Text(TextContent {
+                    text: "Subagent response".to_string(),
+                })],
+            },
+            parent_tool_use_id: Some("toolu_abc123".to_string()),
+        };
+        assert!(sidechain.is_sidechain());
+        assert!(!sidechain.is_top_level());
+        assert_eq!(sidechain.parent_tool_use_id(), Some("toolu_abc123"));
+
+        // System messages are never sidechains
+        let system = Message::System {
+            subtype: "status".to_string(),
+            data: json!({}),
+        };
+        assert!(!system.is_sidechain());
+        assert!(system.is_top_level());
+
+        // Result messages are never sidechains
+        let result = Message::Result {
+            subtype: "done".to_string(),
+            duration_ms: 100,
+            duration_api_ms: 80,
+            is_error: false,
+            num_turns: 1,
+            session_id: "test".to_string(),
+            total_cost_usd: None,
+            usage: None,
+            result: None,
+            structured_output: None,
+        };
+        assert!(!result.is_sidechain());
+        assert!(result.is_top_level());
+    }
+
+    #[test]
+    fn test_user_message_is_sidechain() {
+        let sidechain_user = Message::User {
+            message: UserMessage {
+                content: "subagent prompt".to_string(),
+            },
+            parent_tool_use_id: Some("toolu_def456".to_string()),
+        };
+        assert!(sidechain_user.is_sidechain());
+        assert_eq!(sidechain_user.parent_tool_use_id(), Some("toolu_def456"));
+    }
 }

@@ -2,7 +2,7 @@ use axum::{Json, extract::State, response::IntoResponse};
 use chrono::Utc;
 use std::sync::Arc;
 use tokio::sync::mpsc;
-use tracing::{error, info};
+use tracing::{debug, error, info};
 use uuid::Uuid;
 
 use crate::{
@@ -363,6 +363,17 @@ async fn handle_non_streaming_response(
     loop {
         match timeout(Duration::from_secs(5), rx.recv()).await {
             Ok(Some(output)) => {
+                // Skip messages from subagent sidechains (Task tool executions).
+                // Only top-level messages (parent_tool_use_id == None) should be
+                // accumulated into the response content.
+                if output.is_sidechain() {
+                    debug!(
+                        "Skipping sidechain message (parent_tool_use_id: {:?})",
+                        output.parent_tool_use_id()
+                    );
+                    continue;
+                }
+
                 info!("Received output from Claude");
                 if let Some(response) = claude_to_openai_stream(output, &model)
                     && let Some(content) = response

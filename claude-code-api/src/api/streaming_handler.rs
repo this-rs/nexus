@@ -11,6 +11,7 @@ use chrono::Utc;
 use futures::stream::{Stream, StreamExt};
 use std::pin::Pin;
 use tokio::sync::mpsc;
+use tracing::debug;
 use uuid::Uuid;
 
 /// Handle streaming response with text chunking for better UX
@@ -38,6 +39,16 @@ pub async fn handle_enhanced_streaming_response(
         };
 
         while let Some(output) = rx.recv().await {
+            // Skip messages from subagent sidechains (Task tool executions).
+            // Only top-level messages should be streamed to the client.
+            if output.is_sidechain() {
+                debug!(
+                    "Streaming: skipping sidechain message (parent_tool_use_id: {:?})",
+                    output.parent_tool_use_id()
+                );
+                continue;
+            }
+
             match output.r#type.as_str() {
                 "assistant" => {
                     // Extract the full text content

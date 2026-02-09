@@ -6,7 +6,7 @@ use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::{broadcast, mpsc};
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
 use crate::core::claude_manager::ClaudeManager;
@@ -117,53 +117,57 @@ impl InteractiveSessionManager {
                     let mut output_rx = output_tx.subscribe();
 
                     // 启动响应收集任务
+                    // Uses Result message detection instead of timeout heuristic.
+                    // The Claude CLI sends a message with type="result" when the response is complete.
+                    // Sidechain messages (from Task tool subagents) are filtered out.
                     let response_handle = tokio::spawn(async move {
                         let mut responses = Vec::new();
                         let start_time = std::time::Instant::now();
-                        let mut consecutive_empty_lines = 0;
-                        let mut has_content = false;
 
                         loop {
-                            // 使用较短的超时来检测响应结束
+                            // Use a longer timeout (30s) as safety net only.
+                            // Normal termination is via the "result" message type.
                             match tokio::time::timeout(
-                                std::time::Duration::from_millis(500),
+                                std::time::Duration::from_secs(30),
                                 output_rx.recv(),
                             )
                             .await
                             {
                                 Ok(Ok(output)) => {
-                                    consecutive_empty_lines = 0;
+                                    // Skip sidechain messages (from Task tool subagents)
+                                    if output.is_sidechain() {
+                                        debug!(
+                                            "Interactive: skipping sidechain message (parent_tool_use_id: {:?})",
+                                            output.parent_tool_use_id()
+                                        );
+                                        continue;
+                                    }
+
                                     request_tx.send(output.clone()).await.ok();
                                     responses.push(output.clone());
 
-                                    // 检查是否有实际内容
-                                    if output.r#type == "text" || output.r#type == "content" {
-                                        has_content = true;
+                                    // Detect end-of-response via Result message
+                                    if output.r#type == "result" {
+                                        info!("Response complete (received result message)");
+                                        break;
                                     }
 
-                                    // 检查错误响应
+                                    // Also break on error
                                     if output.r#type == "error" {
                                         break;
                                     }
                                 },
                                 Ok(Err(_)) => {
-                                    // 接收错误，通道关闭
+                                    // Broadcast channel closed
                                     break;
                                 },
                                 Err(_) => {
-                                    // 超时 - 检查是否已经有内容
-                                    consecutive_empty_lines += 1;
-                                    if has_content && consecutive_empty_lines >= 2 {
-                                        // 如果已经收到内容，并且连续2次超时，认为响应完成
-                                        info!("Response appears complete after timeout");
-                                        break;
-                                    }
-
-                                    // 总超时保护
-                                    if start_time.elapsed() > std::time::Duration::from_secs(30) {
-                                        error!("Total timeout waiting for response");
-                                        break;
-                                    }
+                                    // Safety timeout (30s with no messages at all)
+                                    error!(
+                                        "Safety timeout waiting for response after {:?}",
+                                        start_time.elapsed()
+                                    );
+                                    break;
                                 },
                             }
                         }
@@ -273,37 +277,50 @@ impl InteractiveSessionManager {
         let (initial_tx, mut initial_rx) = mpsc::channel::<ClaudeCodeOutput>(100);
 
         // 启动初始响应收集任务
+        // Uses Result message detection instead of timeout heuristic.
+        // Sidechain messages (from Task tool subagents) are filtered out.
         let initial_response_tx_clone = initial_response_tx.clone();
         tokio::spawn(async move {
             let start_time = std::time::Instant::now();
-            let mut has_content = false;
-            let mut consecutive_timeouts = 0;
 
             loop {
-                match tokio::time::timeout(std::time::Duration::from_millis(500), initial_rx.recv())
+                match tokio::time::timeout(std::time::Duration::from_secs(30), initial_rx.recv())
                     .await
                 {
                     Ok(Some(output)) => {
-                        consecutive_timeouts = 0;
-                        if output.r#type == "text" || output.r#type == "content" {
-                            has_content = true;
+                        // Skip sidechain messages (from Task tool subagents)
+                        if output.is_sidechain() {
+                            debug!(
+                                "Initial: skipping sidechain message (parent_tool_use_id: {:?})",
+                                output.parent_tool_use_id()
+                            );
+                            continue;
                         }
+
+                        // Detect end-of-response via Result message
+                        let is_result = output.r#type == "result";
+                        let is_error = output.r#type == "error";
+
                         if initial_response_tx_clone.send(output).await.is_err() {
                             break;
                         }
+
+                        if is_result {
+                            info!("Initial response complete (received result message)");
+                            break;
+                        }
+                        if is_error {
+                            break;
+                        }
                     },
-                    Ok(None) => break, // 通道关闭
+                    Ok(None) => break, // Channel closed
                     Err(_) => {
-                        // 超时
-                        consecutive_timeouts += 1;
-                        if has_content && consecutive_timeouts >= 2 {
-                            info!("Initial response appears complete");
-                            break;
-                        }
-                        if start_time.elapsed() > std::time::Duration::from_secs(30) {
-                            error!("Timeout waiting for initial response");
-                            break;
-                        }
+                        // Safety timeout (30s with no messages at all)
+                        error!(
+                            "Safety timeout waiting for initial response after {:?}",
+                            start_time.elapsed()
+                        );
+                        break;
                     },
                 }
             }

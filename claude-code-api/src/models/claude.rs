@@ -83,6 +83,87 @@ pub struct ClaudeCodeOutput {
     pub data: Value,
 }
 
+impl ClaudeCodeOutput {
+    /// Returns the parent_tool_use_id if this output is from a subagent sidechain.
+    /// None = top-level message, Some(id) = message from a subagent Task execution.
+    pub fn parent_tool_use_id(&self) -> Option<&str> {
+        self.data.get("parent_tool_use_id").and_then(|v| v.as_str())
+    }
+
+    /// Returns true if this output is from a subagent sidechain (has parent_tool_use_id).
+    pub fn is_sidechain(&self) -> bool {
+        self.parent_tool_use_id().is_some()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn test_sidechain_detection() {
+        // Top-level message (no parent_tool_use_id)
+        let top_level = ClaudeCodeOutput {
+            r#type: "assistant".to_string(),
+            subtype: None,
+            data: json!({
+                "message": {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "Hello"}]
+                }
+            }),
+        };
+        assert!(!top_level.is_sidechain());
+        assert!(top_level.parent_tool_use_id().is_none());
+
+        // Sidechain message (has parent_tool_use_id)
+        let sidechain = ClaudeCodeOutput {
+            r#type: "assistant".to_string(),
+            subtype: None,
+            data: json!({
+                "parent_tool_use_id": "toolu_abc123",
+                "message": {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "Subagent response"}]
+                }
+            }),
+        };
+        assert!(sidechain.is_sidechain());
+        assert_eq!(sidechain.parent_tool_use_id(), Some("toolu_abc123"));
+    }
+
+    #[test]
+    fn test_result_message_not_sidechain() {
+        let result = ClaudeCodeOutput {
+            r#type: "result".to_string(),
+            subtype: Some("conversation_turn".to_string()),
+            data: json!({
+                "duration_ms": 1000,
+                "is_error": false,
+                "num_turns": 1,
+                "session_id": "test"
+            }),
+        };
+        assert!(!result.is_sidechain());
+    }
+
+    #[test]
+    fn test_null_parent_tool_use_id_not_sidechain() {
+        // Explicit null should not be treated as sidechain
+        let output = ClaudeCodeOutput {
+            r#type: "assistant".to_string(),
+            subtype: None,
+            data: json!({
+                "parent_tool_use_id": null,
+                "message": {"role": "assistant", "content": []}
+            }),
+        };
+        assert!(!output.is_sidechain());
+        assert!(output.parent_tool_use_id().is_none());
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ClaudeModel {
     pub id: String,

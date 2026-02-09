@@ -53,7 +53,8 @@ async fn demo_oneshot_mode(options: ClaudeCodeOptions) -> Result<()> {
 
         for msg in messages {
             if let nexus_claude::Message::Assistant {
-                message: assistant_msg, ..
+                message: assistant_msg,
+                ..
             } = msg
             {
                 info!("Answer: {:?}", assistant_msg.content);
@@ -91,7 +92,8 @@ async fn demo_interactive_mode(options: ClaudeCodeOptions) -> Result<()> {
 
         for msg in messages {
             if let nexus_claude::Message::Assistant {
-                message: assistant_msg, ..
+                message: assistant_msg,
+                ..
             } = msg
             {
                 info!("Response: {:?}", assistant_msg.content);
@@ -141,7 +143,8 @@ async fn demo_batch_mode(options: ClaudeCodeOptions) -> Result<()> {
                 info!("Query {} completed successfully", i + 1);
                 for msg in messages {
                     if let nexus_claude::Message::Assistant {
-                        message: assistant_msg, ..
+                        message: assistant_msg,
+                        ..
                     } = msg
                     {
                         info!(
@@ -193,7 +196,8 @@ async fn demo_retry_logic(options: ClaudeCodeOptions) -> Result<()> {
 
     for msg in result {
         if let nexus_claude::Message::Assistant {
-            message: assistant_msg, ..
+            message: assistant_msg,
+            ..
         } = msg
         {
             info!("Response: {:?}", assistant_msg.content);
