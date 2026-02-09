@@ -13,7 +13,31 @@ use crate::core::claude_manager::ClaudeManager;
 use crate::core::config::{FileAccessConfig, MCPConfig};
 use crate::models::claude::ClaudeCodeOutput;
 
-/// 交互式会话管理器 - 每个会话复用一个 Claude 进程
+/// Interactive session manager — reuses one Claude CLI process per session.
+///
+/// ## Message queueing and concurrency
+///
+/// The Claude CLI in `--input-format stream-json` mode is **synchronous per turn**:
+/// it processes one user message at a time and emits a `result` message when done.
+/// There is no correlation_id in the protocol — a `result` message does not reference
+/// which request it closes. Sending concurrent messages would cause responses to mix
+/// in the broadcast channel with no way to demux them.
+///
+/// To handle this safely, each session has an `interaction_lock` that serializes
+/// requests. The lock is held for the entire duration of send + response collection:
+///
+/// 1. Acquire `interaction_lock`
+/// 2. Subscribe to broadcast
+/// 3. Send message on stdin
+/// 4. Collect responses until `type == "result"` (NOT a timeout heuristic)
+/// 5. Forward responses to the caller's mpsc channel
+/// 6. Drop the lock guard (implicit, end of scope)
+///
+/// Messages from subagent sidechains (`parent_tool_use_id != None`) are filtered out
+/// during collection — they don't affect end-of-response detection.
+///
+/// The 30-second timeout in the collector is a **safety net only**, not the primary
+/// end-of-response signal. Normal responses terminate via the `result` message.
 #[derive(Clone)]
 pub struct InteractiveSessionManager {
     sessions: Arc<RwLock<HashMap<String, InteractiveSession>>>,
@@ -35,7 +59,8 @@ struct InteractiveSession {
     #[allow(dead_code)]
     created_at: std::time::Instant,
     last_used: Arc<parking_lot::Mutex<std::time::Instant>>,
-    // 添加互斥锁，确保一次只有一个请求与进程交互
+    /// Serializes requests: held from send through Result message reception.
+    /// See struct-level docs for the full protocol explanation.
     interaction_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
