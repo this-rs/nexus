@@ -9,7 +9,7 @@ use crate::{
     api::streaming_handler::handle_enhanced_streaming_response,
     core::claude_manager::ClaudeManager,
     models::{
-        claude::ClaudeCodeOutput,
+        claude::{CliErrorKind, ClaudeCodeOutput},
         error::{ApiError, ApiResult},
         openai::{
             ChatChoice, ChatCompletionRequest, ChatCompletionResponse, ChatMessage, MessageContent,
@@ -351,6 +351,7 @@ async fn handle_non_streaming_response(
 
     let mut full_content = String::new();
     let mut token_count = 0;
+    let mut cli_error: Option<ApiError> = None;
 
     info!(
         "Waiting for Claude response (timeout: {}s)...",
@@ -363,6 +364,26 @@ async fn handle_non_streaming_response(
     loop {
         match timeout(Duration::from_secs(5), rx.recv()).await {
             Ok(Some(output)) => {
+                // Intercept CLI errors before normal processing
+                if output.r#type == "error" {
+                    let parsed = output.parse_cli_error();
+                    error!(
+                        "Claude CLI error: kind={:?}, message={}",
+                        parsed.kind, parsed.message
+                    );
+                    cli_error = Some(match parsed.kind {
+                        CliErrorKind::ContextLengthExceeded => {
+                            ApiError::ContextLengthExceeded(parsed.message)
+                        }
+                        CliErrorKind::RateLimit => ApiError::RateLimit(parsed.message),
+                        CliErrorKind::Overloaded => {
+                            ApiError::ServiceUnavailable(parsed.message)
+                        }
+                        CliErrorKind::Unknown(_) => ApiError::ClaudeProcess(parsed.message),
+                    });
+                    break;
+                }
+
                 info!("Received output from Claude");
                 if let Some(response) = claude_to_openai_stream(output, &model)
                     && let Some(content) = response
@@ -403,6 +424,11 @@ async fn handle_non_streaming_response(
     }
 
     let _ = claude_manager.close_session(&session_id).await;
+
+    // If a CLI error was detected, return it immediately
+    if let Some(err) = cli_error {
+        return Err(err);
+    }
 
     // Check if the response should be formatted as tool calls
     let message = if let Some(function_call) =

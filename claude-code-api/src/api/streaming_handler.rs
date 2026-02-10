@@ -2,11 +2,12 @@
 
 use crate::{
     models::{
-        claude::ClaudeCodeOutput,
+        claude::{CliErrorKind, ClaudeCodeOutput},
         openai::{ChatCompletionStreamResponse, DeltaMessage, StreamChoice},
     },
     utils::text_chunker::{ChunkConfig, chunk_text},
 };
+use tracing::error;
 use chrono::Utc;
 use futures::stream::{Stream, StreamExt};
 use std::pin::Pin;
@@ -74,6 +75,46 @@ pub async fn handle_enhanced_streaming_response(
                             }
                         }
                     }
+                }
+                "error" => {
+                    // Parse the CLI error and send it as an SSE error event
+                    let parsed = output.parse_cli_error();
+                    error!(
+                        "Claude CLI error in stream: kind={:?}, message={}",
+                        parsed.kind, parsed.message
+                    );
+
+                    let error_code = match &parsed.kind {
+                        CliErrorKind::ContextLengthExceeded => "context_length_exceeded",
+                        CliErrorKind::RateLimit => "rate_limit_exceeded",
+                        CliErrorKind::Overloaded => "server_overloaded",
+                        CliErrorKind::Unknown(_) => "claude_process_error",
+                    };
+
+                    // Send the error as content so the client can display it
+                    let error_json = serde_json::json!({
+                        "error": {
+                            "type": "invalid_request_error",
+                            "code": error_code,
+                            "message": parsed.message,
+                        }
+                    });
+
+                    yield ChatCompletionStreamResponse {
+                        id: stream_id.clone(),
+                        object: "chat.completion.chunk".to_string(),
+                        created: Utc::now().timestamp(),
+                        model: model.clone(),
+                        choices: vec![StreamChoice {
+                            index: 0,
+                            delta: DeltaMessage {
+                                role: None,
+                                content: Some(error_json.to_string()),
+                            },
+                            finish_reason: Some("error".to_string()),
+                        }],
+                    };
+                    break;
                 }
                 "result" => {
                     // Send the final chunk with finish_reason
