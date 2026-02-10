@@ -123,14 +123,14 @@ impl ClaudeCodeOutput {
                         || error_message.to_lowercase().contains("maximum context") =>
                 {
                     CliErrorKind::ContextLengthExceeded
-                }
+                },
                 "context_length_exceeded" => CliErrorKind::ContextLengthExceeded,
                 "rate_limit_error" => CliErrorKind::RateLimit,
                 "overloaded_error" | "api_error"
                     if error_message.to_lowercase().contains("overloaded") =>
                 {
                     CliErrorKind::Overloaded
-                }
+                },
                 "overloaded_error" => CliErrorKind::Overloaded,
                 _ => CliErrorKind::Unknown(error_type.to_string()),
             };

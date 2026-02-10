@@ -2,16 +2,16 @@
 
 use crate::{
     models::{
-        claude::{CliErrorKind, ClaudeCodeOutput},
+        claude::{ClaudeCodeOutput, CliErrorKind},
         openai::{ChatCompletionStreamResponse, DeltaMessage, StreamChoice},
     },
     utils::text_chunker::{ChunkConfig, chunk_text},
 };
-use tracing::error;
 use chrono::Utc;
 use futures::stream::{Stream, StreamExt};
 use std::pin::Pin;
 use tokio::sync::mpsc;
+use tracing::error;
 use uuid::Uuid;
 
 /// Handle streaming response with text chunking for better UX

@@ -238,12 +238,253 @@ fn estimate_tokens(msgs: &[ChatMessage]) -> usize {
                 // Use chars().count() for proper UTF-8 handling
                 // Ratio of ~0.3 tokens per character is more conservative than len()/4
                 (text.chars().count() as f64 * 0.3).ceil() as usize
-            }
+            },
             Some(MessageContent::Array(parts)) => {
                 // Estimate 1600 tokens per content part (one image tile)
                 parts.len() * 1600
-            }
+            },
             None => 50,
         })
         .sum()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_text_msg(role: &str, text: &str) -> ChatMessage {
+        ChatMessage {
+            role: role.to_string(),
+            content: Some(MessageContent::Text(text.to_string())),
+            name: None,
+            tool_calls: None,
+        }
+    }
+
+    fn make_manager() -> ConversationManager<InMemoryConversationStore> {
+        ConversationManager {
+            store: Arc::new(InMemoryConversationStore::default()),
+            config: ConversationConfig::default(),
+        }
+    }
+
+    // ── estimate_tokens tests ──────────────────────────────────────────
+
+    #[test]
+    fn test_estimate_tokens_ascii() {
+        // 100 ASCII chars → 100 * 0.3 = 30 tokens
+        let msgs = vec![make_text_msg("user", &"a".repeat(100))];
+        assert_eq!(estimate_tokens(&msgs), 30);
+    }
+
+    #[test]
+    fn test_estimate_tokens_utf8_cjk() {
+        // 10 CJK characters: chars().count() = 10, but len() = 30 (3 bytes each)
+        // With old formula: 30/4 = 7. With new: ceil(10*0.3) = 3
+        let msgs = vec![make_text_msg("user", "你好世界测试中文字符")];
+        let tokens = estimate_tokens(&msgs);
+        assert_eq!(tokens, 3); // ceil(10 * 0.3)
+    }
+
+    #[test]
+    fn test_estimate_tokens_emoji() {
+        // Emojis: 5 emoji chars, each 4 bytes → len()=20, chars()=5
+        // Old: 20/4=5. New: ceil(5*0.3) = 2
+        let msgs = vec![make_text_msg("user", "😀🎉🚀💻🔥")];
+        let tokens = estimate_tokens(&msgs);
+        assert_eq!(tokens, 2); // ceil(5 * 0.3)
+    }
+
+    #[test]
+    fn test_estimate_tokens_none_content() {
+        let msgs = vec![ChatMessage {
+            role: "assistant".to_string(),
+            content: None,
+            name: None,
+            tool_calls: None,
+        }];
+        assert_eq!(estimate_tokens(&msgs), 50);
+    }
+
+    #[test]
+    fn test_estimate_tokens_image_array() {
+        use crate::models::openai::{ContentPart, ImageUrl};
+        let msgs = vec![ChatMessage {
+            role: "user".to_string(),
+            content: Some(MessageContent::Array(vec![
+                ContentPart::ImageUrl {
+                    image_url: ImageUrl {
+                        url: "data:image/png;base64,abc".to_string(),
+                        detail: None,
+                    },
+                },
+                ContentPart::ImageUrl {
+                    image_url: ImageUrl {
+                        url: "data:image/png;base64,def".to_string(),
+                        detail: None,
+                    },
+                },
+            ])),
+            name: None,
+            tool_calls: None,
+        }];
+        assert_eq!(estimate_tokens(&msgs), 3200); // 2 * 1600
+    }
+
+    // ── trim_context tests ─────────────────────────────────────────────
+
+    #[test]
+    fn test_trim_context_within_limits() {
+        let manager = make_manager();
+        let msgs = vec![
+            make_text_msg("system", "You are a helpful assistant."),
+            make_text_msg("user", "Hello"),
+            make_text_msg("assistant", "Hi there!"),
+            make_text_msg("user", "How are you?"),
+        ];
+
+        let result = manager
+            .trim_context(msgs.clone(), "claude-sonnet-4-20250514")
+            .unwrap();
+        // All messages should fit within 450K token limit
+        assert_eq!(result.len(), 4);
+        assert_eq!(result[0].role, "system");
+        assert_eq!(result[1].role, "user");
+    }
+
+    #[test]
+    fn test_trim_context_preserves_order() {
+        let manager = make_manager();
+        let msgs = vec![
+            make_text_msg("user", "First"),
+            make_text_msg("assistant", "Response 1"),
+            make_text_msg("user", "Second"),
+            make_text_msg("assistant", "Response 2"),
+            make_text_msg("user", "Third"),
+        ];
+
+        let result = manager
+            .trim_context(msgs, "claude-sonnet-4-20250514")
+            .unwrap();
+        // Verify correct chronological order
+        assert_eq!(result.len(), 5);
+        assert!(
+            result[0]
+                .content
+                .as_ref()
+                .unwrap()
+                .to_string()
+                .contains("First")
+        );
+        assert!(
+            result[4]
+                .content
+                .as_ref()
+                .unwrap()
+                .to_string()
+                .contains("Third")
+        );
+    }
+
+    #[test]
+    fn test_trim_context_single_message_too_long() {
+        let manager = make_manager();
+        // Create a message that would exceed even the largest model's window
+        // 450K tokens at 0.3 tokens/char ≈ 1.5M chars needed
+        let huge_text = "x".repeat(2_000_000);
+        let msgs = vec![make_text_msg("user", &huge_text)];
+
+        let result = manager.trim_context(msgs, "claude-sonnet-4-20250514");
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            ContextError::SingleMessageTooLong {
+                estimated_tokens,
+                max_tokens,
+            } => {
+                assert_eq!(max_tokens, 450_000);
+                assert!(estimated_tokens > 450_000);
+            },
+        }
+    }
+
+    #[test]
+    fn test_trim_context_drops_oldest_non_system() {
+        let manager = make_manager();
+        // Unknown model → fallback 200K * 0.9 = 180K tokens
+        // At 0.3 tokens/char, we need > 180K tokens ≈ > 600K chars to fill the window
+        // Two messages of 550K chars each (~165K tokens) can't both fit
+        let big_msg_old = "y".repeat(550_000); // ~165K tokens — oldest
+        let big_msg_new = "z".repeat(550_000); // ~165K tokens — newest
+        let msgs = vec![
+            make_text_msg("user", &big_msg_old), // ~165K tokens — oldest, should be dropped
+            make_text_msg("user", &big_msg_new), // ~165K tokens — newest, must be kept
+        ];
+
+        let result = manager.trim_context(msgs, "unknown-small-model").unwrap();
+        // Only the newest message should remain (the old one gets dropped)
+        assert_eq!(result.len(), 1);
+        // The kept message should be the newest (z's, not y's)
+        if let Some(MessageContent::Text(ref text)) = result[0].content {
+            assert!(text.starts_with('z'));
+        } else {
+            panic!("Expected text content");
+        }
+    }
+
+    #[test]
+    fn test_trim_context_keeps_system_messages() {
+        let manager = make_manager();
+        let big_msg = "z".repeat(500_000);
+        let msgs = vec![
+            make_text_msg("system", "Important system prompt"),
+            make_text_msg("user", &big_msg), // big old message
+            make_text_msg("user", "latest"), // small recent message
+        ];
+
+        let result = manager.trim_context(msgs, "unknown-small-model").unwrap();
+        // System message should always be present
+        assert_eq!(result[0].role, "system");
+        assert!(
+            result[0]
+                .content
+                .as_ref()
+                .unwrap()
+                .to_string()
+                .contains("Important")
+        );
+    }
+
+    #[test]
+    fn test_trim_context_uses_model_specific_limit() {
+        let manager = make_manager();
+        // Claude 4 has 500K window → 450K after safety factor
+        // Claude 3 has 200K window → 180K after safety factor
+        // A message of ~200K tokens should fit in Claude 4 but not Claude 3
+        let medium_msg = "m".repeat(650_000); // ~195K tokens
+
+        let result_c4 = manager.trim_context(
+            vec![make_text_msg("user", &medium_msg)],
+            "claude-sonnet-4-20250514",
+        );
+        assert!(result_c4.is_ok(), "Should fit in Claude 4 (450K limit)");
+
+        let result_c3 = manager.trim_context(
+            vec![make_text_msg("user", &medium_msg)],
+            "claude-3-7-sonnet-20250219",
+        );
+        assert!(
+            result_c3.is_err(),
+            "Should NOT fit in Claude 3.7 (180K limit)"
+        );
+    }
+
+    // Helper for MessageContent display
+    impl std::fmt::Display for MessageContent {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            match self {
+                MessageContent::Text(t) => write!(f, "{}", t),
+                MessageContent::Array(parts) => write!(f, "[{} parts]", parts.len()),
+            }
+        }
+    }
 }

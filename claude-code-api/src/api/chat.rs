@@ -9,7 +9,7 @@ use crate::{
     api::streaming_handler::handle_enhanced_streaming_response,
     core::claude_manager::ClaudeManager,
     models::{
-        claude::{CliErrorKind, ClaudeCodeOutput},
+        claude::{ClaudeCodeOutput, CliErrorKind},
         error::{ApiError, ApiResult},
         openai::{
             ChatChoice, ChatCompletionRequest, ChatCompletionResponse, ChatMessage, MessageContent,
@@ -375,11 +375,9 @@ async fn handle_non_streaming_response(
                     cli_error = Some(match parsed.kind {
                         CliErrorKind::ContextLengthExceeded => {
                             ApiError::ContextLengthExceeded(parsed.message)
-                        }
+                        },
                         CliErrorKind::RateLimit => ApiError::RateLimit(parsed.message),
-                        CliErrorKind::Overloaded => {
-                            ApiError::ServiceUnavailable(parsed.message)
-                        }
+                        CliErrorKind::Overloaded => ApiError::ServiceUnavailable(parsed.message),
                         CliErrorKind::Unknown(_) => ApiError::ClaudeProcess(parsed.message),
                     });
                     break;
