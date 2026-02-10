@@ -1,11 +1,39 @@
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::fmt;
 use std::sync::Arc;
 use tracing::info;
 
 use crate::core::storage::{ConversationStore, InMemoryConversationStore};
+use crate::models::claude::ClaudeModel;
 use crate::models::openai::{ChatMessage, MessageContent};
+
+/// Error type for context preparation failures
+#[derive(Debug)]
+pub enum ContextError {
+    /// A single message exceeds the model's context window
+    SingleMessageTooLong {
+        estimated_tokens: usize,
+        max_tokens: usize,
+    },
+}
+
+impl fmt::Display for ContextError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ContextError::SingleMessageTooLong {
+                estimated_tokens,
+                max_tokens,
+            } => write!(
+                f,
+                "The last message is too long (~{} tokens estimated). \
+                 Maximum context length for this model is {} tokens.",
+                estimated_tokens, max_tokens
+            ),
+        }
+    }
+}
 
 /// Type alias for the default ConversationManager using in-memory storage
 pub type DefaultConversationManager = ConversationManager<InMemoryConversationStore>;
@@ -13,6 +41,9 @@ pub type DefaultConversationManager = ConversationManager<InMemoryConversationSt
 /// Configuration for the conversation manager
 #[derive(Clone)]
 pub struct ConversationConfig {
+    /// Legacy field — kept for backward compatibility. The actual token limit
+    /// is now determined dynamically by `ClaudeModel::context_window_for_model()`.
+    #[allow(dead_code)]
     pub max_context_tokens: usize,
     pub session_timeout_minutes: i64,
 }
@@ -85,23 +116,33 @@ impl<S: ConversationStore + 'static> ConversationManager<S> {
         self.store.get(conversation_id).await.ok().flatten()
     }
 
-    /// Get context messages for a conversation, including new messages
+    /// Get context messages for a conversation, including new messages.
+    /// Uses the model's context window (with safety factor) to determine limits.
+    /// Returns an error if the last user message alone exceeds the context window.
     pub async fn get_context_messages(
         &self,
         conversation_id: &str,
         new_messages: &[ChatMessage],
-    ) -> Vec<ChatMessage> {
+        model_id: &str,
+    ) -> std::result::Result<Vec<ChatMessage>, ContextError> {
         if let Some(conversation) = self.get_conversation(conversation_id).await {
             let mut context = conversation.messages;
             context.extend_from_slice(new_messages);
-            self.trim_context(context)
+            self.trim_context(context, model_id)
         } else {
-            new_messages.to_vec()
+            self.trim_context(new_messages.to_vec(), model_id)
         }
     }
 
-    /// Trim context to fit within token limits
-    fn trim_context(&self, messages: Vec<ChatMessage>) -> Vec<ChatMessage> {
+    /// Trim context to fit within token limits for the given model.
+    /// Uses ClaudeModel::context_window_for_model() with a 90% safety factor.
+    fn trim_context(
+        &self,
+        messages: Vec<ChatMessage>,
+        model_id: &str,
+    ) -> std::result::Result<Vec<ChatMessage>, ContextError> {
+        let max_tokens = ClaudeModel::context_window_for_model(model_id);
+
         let mut system_messages = Vec::new();
         let mut other_messages = Vec::new();
 
@@ -113,24 +154,25 @@ impl<S: ConversationStore + 'static> ConversationManager<S> {
             }
         }
 
-        // Estimate tokens (simplified: ~0.25 tokens per character)
-        let estimate_tokens = |msgs: &[ChatMessage]| -> usize {
-            msgs.iter()
-                .map(|m| match &m.content {
-                    Some(MessageContent::Text(text)) => text.len() / 4,
-                    Some(MessageContent::Array(parts)) => parts.len() * 100,
-                    None => 50,
-                })
-                .sum()
-        };
-
         let mut result = system_messages;
         let mut token_count = estimate_tokens(&result);
+
+        // Validate: if the last message alone exceeds the limit, we can't trim it
+        if let Some(last_msg) = other_messages.last() {
+            let last_msg_tokens = estimate_tokens(std::slice::from_ref(last_msg));
+            let system_tokens = token_count;
+            if system_tokens + last_msg_tokens > max_tokens {
+                return Err(ContextError::SingleMessageTooLong {
+                    estimated_tokens: last_msg_tokens,
+                    max_tokens,
+                });
+            }
+        }
 
         // Add messages from newest to oldest
         for msg in other_messages.into_iter().rev() {
             let msg_tokens = estimate_tokens(std::slice::from_ref(&msg));
-            if token_count + msg_tokens > self.config.max_context_tokens {
+            if token_count + msg_tokens > max_tokens {
                 break;
             }
             result.push(msg);
@@ -143,7 +185,7 @@ impl<S: ConversationStore + 'static> ConversationManager<S> {
             result[system_count..].reverse();
         }
 
-        result
+        Ok(result)
     }
 
     /// Update conversation metadata
@@ -183,4 +225,25 @@ impl<S: ConversationStore + 'static> ConversationManager<S> {
             }
         }
     }
+}
+
+/// Estimate token count for a slice of messages.
+/// Uses character count (Unicode-aware) with a conservative ratio of 0.3 tokens/char
+/// which better approximates real tokenizer behavior for code and multilingual text.
+/// For content arrays (images etc.), estimates 1600 tokens per item (one JPEG tile).
+fn estimate_tokens(msgs: &[ChatMessage]) -> usize {
+    msgs.iter()
+        .map(|m| match &m.content {
+            Some(MessageContent::Text(text)) => {
+                // Use chars().count() for proper UTF-8 handling
+                // Ratio of ~0.3 tokens per character is more conservative than len()/4
+                (text.chars().count() as f64 * 0.3).ceil() as usize
+            }
+            Some(MessageContent::Array(parts)) => {
+                // Estimate 1600 tokens per content part (one image tile)
+                parts.len() * 1600
+            }
+            None => 50,
+        })
+        .sum()
 }

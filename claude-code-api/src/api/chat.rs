@@ -118,8 +118,9 @@ pub async fn chat_completions(
 
     let context_messages = state
         .conversation_manager
-        .get_context_messages(&conversation_id, &request.messages)
-        .await;
+        .get_context_messages(&conversation_id, &request.messages, &request.model)
+        .await
+        .map_err(|e| ApiError::ContextLengthExceeded(e.to_string()))?;
 
     if !request.stream.unwrap_or(false) {
         let cache_key = ResponseCache::generate_key(&request.model, &context_messages);
