@@ -19,7 +19,7 @@ async fn main() -> Result<()> {
 
     print!("Claude: ");
     for msg in &messages {
-        if let nexus_claude::Message::Assistant { message } = msg {
+        if let nexus_claude::Message::Assistant { message, .. } = msg {
             for content in &message.content {
                 if let ContentBlock::Text(text) = content {
                     print!("{}", text.text);
@@ -37,7 +37,7 @@ async fn main() -> Result<()> {
 
     print!("Claude: ");
     for msg in &messages {
-        if let nexus_claude::Message::Assistant { message } = msg {
+        if let nexus_claude::Message::Assistant { message, .. } = msg {
             for content in &message.content {
                 if let ContentBlock::Text(text) = content {
                     print!("{}", text.text);
@@ -55,7 +55,7 @@ async fn main() -> Result<()> {
 
     print!("Claude: ");
     for msg in &messages {
-        if let nexus_claude::Message::Assistant { message } = msg {
+        if let nexus_claude::Message::Assistant { message, .. } = msg {
             for content in &message.content {
                 if let ContentBlock::Text(text) = content {
                     print!("{}", text.text);

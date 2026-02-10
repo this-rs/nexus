@@ -5,6 +5,7 @@ use crate::models::{
 use chrono::Utc;
 use uuid::Uuid;
 
+#[allow(dead_code)]
 pub fn claude_to_openai_stream(
     claude_output: ClaudeCodeOutput,
     model: &str,
@@ -27,6 +28,7 @@ pub fn claude_to_openai_stream(
                                 delta: DeltaMessage {
                                     role: Some("assistant".to_string()),
                                     content: Some(text.to_string()),
+                                    tool_calls: None,
                                 },
                                 finish_reason: None,
                             }],
@@ -71,6 +73,7 @@ fn convert_claude_event_to_openai(
                 delta: DeltaMessage {
                     role: Some("assistant".to_string()),
                     content: None,
+                    tool_calls: None,
                 },
                 finish_reason: None,
             }],
@@ -86,6 +89,7 @@ fn convert_claude_event_to_openai(
                     delta: DeltaMessage {
                         role: None,
                         content: Some(text),
+                        tool_calls: None,
                     },
                     finish_reason: None,
                 }],

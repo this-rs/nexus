@@ -48,8 +48,10 @@ async fn test_streaming_flow() {
         let _ = tx
             .send(Ok(Message::User {
                 message: nexus_claude::UserMessage {
+                    content_blocks: None,
                     content: "Test".to_string(),
                 },
+                parent_tool_use_id: None,
             }))
             .await;
 
@@ -57,6 +59,7 @@ async fn test_streaming_flow() {
         let _ = tx
             .send(Ok(Message::Assistant {
                 message: nexus_claude::AssistantMessage { content: vec![] },
+                parent_tool_use_id: None,
             }))
             .await;
 
@@ -105,13 +108,16 @@ async fn test_receive_response_stops_after_result() {
         yield Ok::<Message, nexus_claude::SdkError>(Message::User {
             message: nexus_claude::UserMessage {
                 content: "Test".to_string(),
+                content_blocks: None,
             },
+            parent_tool_use_id: None,
         });
 
         yield Ok::<Message, nexus_claude::SdkError>(Message::Assistant {
             message: nexus_claude::AssistantMessage {
                 content: vec![],
             },
+            parent_tool_use_id: None,
         });
 
         yield Ok::<Message, nexus_claude::SdkError>(Message::Result {
@@ -131,7 +137,9 @@ async fn test_receive_response_stops_after_result() {
         yield Ok::<Message, nexus_claude::SdkError>(Message::User {
             message: nexus_claude::UserMessage {
                 content: "Should not see this".to_string(),
+                content_blocks: None,
             },
+            parent_tool_use_id: None,
         });
     };
 

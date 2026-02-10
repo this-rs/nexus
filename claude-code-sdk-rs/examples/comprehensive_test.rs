@@ -67,7 +67,7 @@ async fn test_plan_mode_scenarios() -> Result<()> {
 
     let mut _plan_found = false;
     while let Some(msg) = messages.next().await {
-        if let Ok(Message::Assistant { message }) = msg {
+        if let Ok(Message::Assistant { message, .. }) = msg {
             for block in message.content {
                 if let ContentBlock::Text(_) = block {
                     _plan_found = true;
@@ -100,7 +100,7 @@ async fn test_plan_mode_scenarios() -> Result<()> {
     let mut _plan_found = false;
 
     while let Some(msg) = messages.next().await {
-        if let Ok(Message::Assistant { message }) = msg {
+        if let Ok(Message::Assistant { message, .. }) = msg {
             for block in message.content {
                 match block {
                     ContentBlock::Thinking(thinking) => {
@@ -246,7 +246,7 @@ async fn test_thinking_content() -> Result<()> {
 
     while let Some(msg) = messages.next().await {
         match msg? {
-            Message::Assistant { message } => {
+            Message::Assistant { message, .. } => {
                 for block in message.content {
                     match block {
                         ContentBlock::Thinking(thinking) => {

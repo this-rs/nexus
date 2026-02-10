@@ -23,7 +23,7 @@ async fn main() -> Result<()> {
 
     while let Some(msg) = messages.next().await {
         match msg? {
-            Message::Assistant { message } => {
+            Message::Assistant { message, .. } => {
                 for block in &message.content {
                     println!("Assistant: {block:?}");
                 }
@@ -52,7 +52,7 @@ async fn main() -> Result<()> {
 
     while let Some(msg) = messages.next().await {
         match msg? {
-            Message::Assistant { message } => {
+            Message::Assistant { message, .. } => {
                 for block in &message.content {
                     println!("Assistant: {block:?}");
                 }

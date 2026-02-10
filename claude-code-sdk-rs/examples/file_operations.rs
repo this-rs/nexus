@@ -45,7 +45,7 @@ async fn main() -> Result<()> {
     let mut messages = client.receive_messages().await;
     while let Some(msg) = messages.next().await {
         match msg? {
-            Message::Assistant { message } => {
+            Message::Assistant { message, .. } => {
                 for block in &message.content {
                     if let nexus_claude::ContentBlock::Text(text) = block {
                         println!("Claude: {}", text.text);
@@ -74,7 +74,7 @@ async fn main() -> Result<()> {
     let mut messages = client.receive_messages().await;
     while let Some(msg) = messages.next().await {
         match msg? {
-            Message::Assistant { message } => {
+            Message::Assistant { message, .. } => {
                 for block in &message.content {
                     match block {
                         nexus_claude::ContentBlock::Text(text) => {
@@ -112,7 +112,7 @@ async fn main() -> Result<()> {
     let mut messages = client.receive_messages().await;
     while let Some(msg) = messages.next().await {
         match msg? {
-            Message::Assistant { message } => {
+            Message::Assistant { message, .. } => {
                 for block in &message.content {
                     if let nexus_claude::ContentBlock::Text(text) = block {
                         println!("Claude: {}", text.text);

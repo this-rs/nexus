@@ -1477,11 +1477,19 @@ pub enum Message {
     User {
         /// Message content
         message: UserMessage,
+        /// Parent tool use ID — links this message to a parent Task tool call (sidechain).
+        /// None = top-level message, Some(id) = message from a subagent execution.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        parent_tool_use_id: Option<String>,
     },
     /// Assistant message
     Assistant {
         /// Message content
         message: AssistantMessage,
+        /// Parent tool use ID — links this message to a parent Task tool call (sidechain).
+        /// None = top-level message, Some(id) = message from a subagent execution.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        parent_tool_use_id: Option<String>,
     },
     /// System message
     System {
@@ -1526,7 +1534,40 @@ pub enum Message {
         /// Session ID
         #[serde(skip_serializing_if = "Option::is_none")]
         session_id: Option<String>,
+        /// Parent tool use ID — links this event to a parent Task tool call (sidechain).
+        /// None = top-level event, Some(id) = event from a subagent execution.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        parent_tool_use_id: Option<String>,
     },
+}
+
+impl Message {
+    /// Returns the parent_tool_use_id if this message is from a subagent sidechain.
+    /// Returns None for top-level messages, System messages, and Result messages.
+    pub fn parent_tool_use_id(&self) -> Option<&str> {
+        match self {
+            Message::User {
+                parent_tool_use_id, ..
+            } => parent_tool_use_id.as_deref(),
+            Message::Assistant {
+                parent_tool_use_id, ..
+            } => parent_tool_use_id.as_deref(),
+            Message::StreamEvent {
+                parent_tool_use_id, ..
+            } => parent_tool_use_id.as_deref(),
+            Message::System { .. } | Message::Result { .. } => None,
+        }
+    }
+
+    /// Returns true if this message is from a subagent sidechain (has a parent_tool_use_id).
+    pub fn is_sidechain(&self) -> bool {
+        self.parent_tool_use_id().is_some()
+    }
+
+    /// Returns true if this message is a top-level message (not from a subagent).
+    pub fn is_top_level(&self) -> bool {
+        !self.is_sidechain()
+    }
 }
 
 /// Stream event data for real-time token streaming
@@ -1590,11 +1631,22 @@ pub enum StreamDelta {
     },
 }
 
-/// User message content
+/// User message content.
+///
+/// The CLI emits two kinds of user messages:
+/// 1. **Text prompts**: `{ "content": "Hello" }` — simple string content
+/// 2. **Tool results**: `{ "content": [{ "type": "tool_result", ... }] }` — array of content blocks
+///
+/// The `content` field holds the text for simple messages (empty string for tool-result-only messages).
+/// The `content_blocks` field holds the structured content blocks when present.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct UserMessage {
-    /// Message content
+    /// Text content (empty for tool-result-only messages)
     pub content: String,
+    /// Structured content blocks (tool_result, etc.) — present when the CLI
+    /// sends a user message with array content (e.g. after executing a tool).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content_blocks: Option<Vec<ContentBlock>>,
 }
 
 /// Assistant message content
@@ -1885,7 +1937,9 @@ mod tests {
         let msg = Message::User {
             message: UserMessage {
                 content: "Hello".to_string(),
+                content_blocks: None,
             },
+            parent_tool_use_id: None,
         };
 
         let json = serde_json::to_string(&msg).unwrap();

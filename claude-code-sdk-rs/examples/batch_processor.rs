@@ -112,7 +112,7 @@ async fn process_single_question(
 
     // Check if Claude successfully created the project
     let success = messages.iter().any(|msg| {
-        if let nexus_claude::Message::Assistant { message } = msg {
+        if let nexus_claude::Message::Assistant { message, .. } = msg {
             message.content.iter().any(|content| {
                 if let ContentBlock::Text(text) = content {
                     text.text.contains("created") || text.text.contains("successfully")

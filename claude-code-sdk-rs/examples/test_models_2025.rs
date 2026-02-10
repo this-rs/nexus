@@ -20,7 +20,7 @@ async fn test_opus_4_1() -> Result<()> {
     let mut found_response = false;
     while let Some(msg) = messages.next().await {
         match msg? {
-            Message::Assistant { message } => {
+            Message::Assistant { message, .. } => {
                 for block in message.content {
                     if let nexus_claude::ContentBlock::Text(text) = block {
                         println!("Response: {}", text.text);
@@ -58,7 +58,7 @@ async fn test_sonnet_4() -> Result<()> {
     let mut found_response = false;
     while let Some(msg) = messages.next().await {
         match msg? {
-            Message::Assistant { message } => {
+            Message::Assistant { message, .. } => {
                 for block in message.content {
                     if let nexus_claude::ContentBlock::Text(text) = block {
                         println!("Response: {}", text.text);

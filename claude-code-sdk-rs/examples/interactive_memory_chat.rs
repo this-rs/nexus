@@ -734,7 +734,7 @@ async fn main() -> Result<()> {
 
         while let Some(msg_result) = stream.next().await {
             match msg_result {
-                Ok(Message::Assistant { message }) => {
+                Ok(Message::Assistant { message, .. }) => {
                     if first_token {
                         stop_spinner(spinner.clone());
                         print!("\x1b[1;34mClaude>\x1b[0m ");

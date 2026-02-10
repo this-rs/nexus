@@ -52,7 +52,7 @@ async fn use_opus_4_1() -> Result<()> {
 
     while let Some(msg) = messages.next().await {
         match msg? {
-            Message::Assistant { message } => {
+            Message::Assistant { message, .. } => {
                 for block in message.content {
                     if let nexus_claude::ContentBlock::Text(text) = block {
                         println!("Opus 4.1: {}", text.text);
@@ -91,7 +91,7 @@ async fn use_sonnet_4() -> Result<()> {
     .await?;
 
     while let Some(msg) = messages.next().await {
-        if let Message::Assistant { message } = msg? {
+        if let Message::Assistant { message, .. } = msg? {
             for block in message.content {
                 if let nexus_claude::ContentBlock::Text(text) = block {
                     println!("Sonnet 4: {}", text.text);
@@ -145,7 +145,7 @@ async fn interactive_with_model_choice() -> Result<()> {
         .await?;
 
     for msg in messages {
-        if let Message::Assistant { message } = msg {
+        if let Message::Assistant { message, .. } = msg {
             for block in message.content {
                 if let nexus_claude::ContentBlock::Text(text) = block {
                     println!("{}", text.text);
@@ -175,7 +175,7 @@ async fn with_fallback() -> Result<()> {
                 println!("Success with model: {model}");
 
                 while let Some(msg) = stream.next().await {
-                    if let Ok(Message::Assistant { message }) = msg {
+                    if let Ok(Message::Assistant { message, .. }) = msg {
                         for block in message.content {
                             if let nexus_claude::ContentBlock::Text(text) = block {
                                 println!("{}", text.text);

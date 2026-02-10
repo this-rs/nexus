@@ -2,7 +2,7 @@ use axum::{Json, extract::State, response::IntoResponse};
 use chrono::Utc;
 use std::sync::Arc;
 use tokio::sync::mpsc;
-use tracing::{error, info};
+use tracing::{debug, error, info};
 use uuid::Uuid;
 
 use crate::{
@@ -16,7 +16,7 @@ use crate::{
             Usage,
         },
     },
-    utils::{parser::claude_to_openai_stream, streaming::create_sse_stream},
+    utils::streaming::create_sse_stream,
 };
 use once_cell::sync::Lazy;
 use parking_lot::Mutex;
@@ -347,9 +347,11 @@ async fn handle_non_streaming_response(
     timeout_seconds: u64,
     requested_tools: Option<Vec<crate::models::openai::Tool>>,
 ) -> ApiResult<Json<ChatCompletionResponse>> {
+    use crate::models::openai::{FunctionCall, ToolCall};
     use tokio::time::{Duration, timeout};
 
     let mut full_content = String::new();
+    let mut tool_calls: Vec<ToolCall> = Vec::new();
     let mut token_count = 0;
 
     info!(
@@ -363,21 +365,110 @@ async fn handle_non_streaming_response(
     loop {
         match timeout(Duration::from_secs(5), rx.recv()).await {
             Ok(Some(output)) => {
-                info!("Received output from Claude");
-                if let Some(response) = claude_to_openai_stream(output, &model)
-                    && let Some(content) = response
-                        .choices
-                        .first()
-                        .and_then(|c| c.delta.content.as_ref())
-                {
-                    full_content.push_str(content);
-                    token_count += content.split_whitespace().count() as i32;
+                // Skip messages from subagent sidechains (Task tool executions).
+                // Only top-level messages (parent_tool_use_id == None) should be
+                // accumulated into the response content.
+                if output.is_sidechain() {
+                    debug!(
+                        "Skipping sidechain message (parent_tool_use_id: {:?})",
+                        output.parent_tool_use_id()
+                    );
+                    continue;
+                }
+
+                info!("Received output from Claude (type: {})", output.r#type);
+
+                match output.r#type.as_str() {
+                    "assistant" => {
+                        // Parse content blocks structurally from the assistant message
+                        if let Some(message) = output.data.get("message")
+                            && let Some(content_array) =
+                                message.get("content").and_then(|c| c.as_array())
+                        {
+                            for content_block in content_array {
+                                let block_type = content_block
+                                    .get("type")
+                                    .and_then(|t| t.as_str())
+                                    .unwrap_or("");
+
+                                match block_type {
+                                    "text" => {
+                                        if let Some(text) =
+                                            content_block.get("text").and_then(|t| t.as_str())
+                                        {
+                                            full_content.push_str(text);
+                                            token_count += text.split_whitespace().count() as i32;
+                                        }
+                                    },
+                                    "tool_use" => {
+                                        // Extract tool_use structurally → OpenAI ToolCall
+                                        let tool_id = content_block
+                                            .get("id")
+                                            .and_then(|v| v.as_str())
+                                            .unwrap_or("")
+                                            .to_string();
+                                        let tool_name = content_block
+                                            .get("name")
+                                            .and_then(|v| v.as_str())
+                                            .unwrap_or("")
+                                            .to_string();
+                                        let tool_input = content_block
+                                            .get("input")
+                                            .cloned()
+                                            .unwrap_or(serde_json::json!({}));
+
+                                        info!(
+                                            "Extracted tool_use: id={}, name={}",
+                                            tool_id, tool_name
+                                        );
+
+                                        tool_calls.push(ToolCall {
+                                            id: if tool_id.is_empty() {
+                                                format!("call_{}", uuid::Uuid::new_v4())
+                                            } else {
+                                                tool_id
+                                            },
+                                            tool_type: "function".to_string(),
+                                            function: FunctionCall {
+                                                name: tool_name,
+                                                arguments: tool_input.to_string(),
+                                            },
+                                        });
+                                    },
+                                    "tool_result" => {
+                                        // Tool results are informational — we log them but
+                                        // they don't directly map to OpenAI response format
+                                        // (OpenAI expects tool results as separate messages)
+                                        debug!(
+                                            "Received tool_result block (tool_use_id: {:?})",
+                                            content_block.get("tool_use_id")
+                                        );
+                                    },
+                                    _ => {
+                                        debug!("Ignoring content block type: {}", block_type);
+                                    },
+                                }
+                            }
+                        }
+                    },
+                    "result" => {
+                        // End of response
+                        info!(
+                            "Claude response complete, content_len={}, tool_calls={}",
+                            full_content.len(),
+                            tool_calls.len()
+                        );
+                    },
+                    _ => {
+                        debug!("Ignoring output type: {}", output.r#type);
+                    },
                 }
             },
             Ok(None) => {
                 info!(
-                    "Claude stream ended, total content length: {}",
-                    full_content.len()
+                    "Claude stream ended, total content length: {}, tool_calls: {}",
+                    full_content.len(),
+                    tool_calls.len()
                 );
                 break;
             },
@@ -404,32 +495,63 @@ async fn handle_non_streaming_response(
 
     let _ = claude_manager.close_session(&session_id).await;
 
-    // Check if the response should be formatted as tool calls
-    let message = if let Some(function_call) =
-        crate::utils::function_calling::detect_and_convert_tool_call(
-            &full_content,
-            &requested_tools,
-        ) {
-        // Always use tool_calls format
-        let tool_call = crate::models::openai::ToolCall {
+    // Build the response message:
+    // 1. If structural tool_calls were extracted, use them directly (preferred)
+    // 2. Else, fall back to text heuristic detection (legacy path)
+    // 3. Else, return plain text response
+    let message = if !tool_calls.is_empty() {
+        // Structural tool_calls extracted from content blocks — the reliable path
+        info!("Returning {} structural tool call(s)", tool_calls.len());
+        let finish = if full_content.is_empty() {
+            "tool_calls"
+        } else {
+            "stop"
+        };
+        let content = if full_content.is_empty() {
+            None
+        } else {
+            Some(MessageContent::Text(full_content))
+        };
+        (
+            ChatMessage {
+                role: "assistant".to_string(),
+                content,
+                name: None,
+                tool_calls: Some(tool_calls),
+            },
+            finish,
+        )
+    } else if let Some(function_call) = crate::utils::function_calling::detect_and_convert_tool_call(
+        &full_content,
+        &requested_tools,
+    ) {
+        // Fallback: heuristic text detection for legacy tool call patterns
+        info!("Fallback: detected tool call via text heuristic");
+        let tool_call = ToolCall {
             id: format!("call_{}", uuid::Uuid::new_v4()),
             tool_type: "function".to_string(),
             function: function_call,
         };
-        ChatMessage {
-            role: "assistant".to_string(),
-            content: None,
-            name: None,
-            tool_calls: Some(vec![tool_call]),
-        }
+        (
+            ChatMessage {
+                role: "assistant".to_string(),
+                content: None,
+                name: None,
+                tool_calls: Some(vec![tool_call]),
+            },
+            "tool_calls",
+        )
     } else {
-        // Return a regular text response
-        ChatMessage {
-            role: "assistant".to_string(),
-            content: Some(MessageContent::Text(full_content)),
-            name: None,
-            tool_calls: None,
-        }
+        // Regular text response (no tool calls)
+        (
+            ChatMessage {
+                role: "assistant".to_string(),
+                content: Some(MessageContent::Text(full_content)),
+                name: None,
+                tool_calls: None,
+            },
+            "stop",
+        )
     };
 
     let response = ChatCompletionResponse {
@@ -439,8 +561,8 @@ async fn handle_non_streaming_response(
         model,
         choices: vec![ChatChoice {
             index: 0,
-            message: message.clone(),
-            finish_reason: Some("stop".to_string()),
+            message: message.0.clone(),
+            finish_reason: Some(message.1.to_string()),
         }],
         usage: Usage {
             prompt_tokens: 0,
@@ -452,10 +574,11 @@ async fn handle_non_streaming_response(
 
     // Log the response for debugging
     info!(
-        "Returning response with message: role={}, has_content={}, has_tool_calls={}",
-        message.role,
-        message.content.is_some(),
-        message.tool_calls.is_some()
+        "Returning response with message: role={}, has_content={}, has_tool_calls={}, finish_reason={}",
+        message.0.role,
+        message.0.content.is_some(),
+        message.0.tool_calls.is_some(),
+        message.1
     );
 
     Ok(Json(response))

@@ -197,7 +197,7 @@ async fn main() -> Result<()> {
         for message in messages {
             match message {
                 Message::User { .. } => {},
-                Message::Assistant { message } => {
+                Message::Assistant { message, .. } => {
                     for content in message.content {
                         match content {
                             nexus_claude::ContentBlock::Text(text) => {

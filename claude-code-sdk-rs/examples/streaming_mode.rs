@@ -19,10 +19,10 @@ use tokio::time::sleep;
 /// Display a message in a standardized format
 fn display_message(msg: &Message) {
     match msg {
-        Message::User { message } => {
+        Message::User { message, .. } => {
             println!("User: {}", message.content);
         },
-        Message::Assistant { message } => {
+        Message::Assistant { message, .. } => {
             for block in &message.content {
                 if let ContentBlock::Text(TextContent { text }) = block {
                     println!("Claude: {text}");

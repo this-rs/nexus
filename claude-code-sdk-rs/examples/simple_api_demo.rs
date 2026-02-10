@@ -44,6 +44,7 @@ impl MockClient {
             message: AssistantMessage {
                 content: vec![ContentBlock::Text(TextContent { text: response })],
             },
+            parent_tool_use_id: None,
         };
 
         // Add result message
@@ -133,7 +134,7 @@ async fn demo_oneshot_mode() -> Result<()> {
 
         info!("Query: {}", query);
         for msg in messages {
-            if let Message::Assistant { message } = msg {
+            if let Message::Assistant { message, .. } = msg {
                 for content in message.content {
                     if let ContentBlock::Text(text) = content {
                         info!("Response: {}", text.text);
@@ -176,7 +177,7 @@ async fn demo_batch_mode() -> Result<()> {
     for (i, result) in results.iter().take(3).enumerate() {
         if let Ok(messages) = result {
             for msg in messages {
-                if let Message::Assistant { message } = msg {
+                if let Message::Assistant { message, .. } = msg {
                     for content in &message.content {
                         if let ContentBlock::Text(text) = content {
                             info!("Result {}: {}", i + 1, text.text);

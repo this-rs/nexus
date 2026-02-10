@@ -557,7 +557,7 @@ impl ClaudeSDKClient {
 
         while let Some(msg_result) = messages.next().await {
             match msg_result? {
-                Message::Assistant { message } => {
+                Message::Assistant { message, .. } => {
                     for block in message.content {
                         if let ContentBlock::Text(text) = block {
                             account_info.push_str(&text.text);

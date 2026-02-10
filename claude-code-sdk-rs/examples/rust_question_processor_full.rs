@@ -269,7 +269,7 @@ impl QuestionSetProcessor {
 
 fn print_response_summary(messages: &[nexus_claude::Message]) {
     for msg in messages {
-        if let nexus_claude::Message::Assistant { message } = msg {
+        if let nexus_claude::Message::Assistant { message, .. } = msg {
             for content in &message.content {
                 if let ContentBlock::Text(text) = content {
                     // Print first 200 chars or look for completion indicators

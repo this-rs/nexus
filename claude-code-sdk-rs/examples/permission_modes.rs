@@ -84,7 +84,7 @@ async fn run_query(prompt: &str, options: ClaudeCodeOptions) -> Result<()> {
 
     while let Some(msg) = messages.next().await {
         match msg? {
-            Message::Assistant { message } => {
+            Message::Assistant { message, .. } => {
                 for block in &message.content {
                     match block {
                         nexus_claude::ContentBlock::Text(text) => {

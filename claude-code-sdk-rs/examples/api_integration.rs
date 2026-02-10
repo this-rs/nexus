@@ -37,6 +37,7 @@ impl ClaudeAPI {
                 for msg in messages {
                     if let nexus_claude::Message::Assistant {
                         message: assistant_msg,
+                        ..
                     } = msg
                     {
                         for content in &assistant_msg.content {
