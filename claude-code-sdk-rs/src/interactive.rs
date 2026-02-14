@@ -21,6 +21,14 @@ pub struct InteractiveClient {
 }
 
 impl InteractiveClient {
+    /// Create a client from a pre-built transport (for testing or custom transports)
+    pub fn from_transport(transport: Box<dyn Transport + Send>) -> Self {
+        Self {
+            transport: Arc::new(Mutex::new(transport)),
+            connected: false,
+        }
+    }
+
     /// Create a new client
     pub fn new(options: ClaudeCodeOptions) -> Result<Self> {
         unsafe {
@@ -31,6 +39,21 @@ impl InteractiveClient {
             transport: Arc::new(Mutex::new(transport)),
             connected: false,
         })
+    }
+
+    /// Take the SDK control receiver for handling inbound control requests
+    /// (e.g., `can_use_tool` permission requests) from the Claude CLI subprocess.
+    ///
+    /// This can only be called once — subsequent calls return `None`.
+    /// The receiver yields raw JSON values representing SDK control protocol messages.
+    ///
+    /// Use this to listen for permission requests when running in non-BypassPermissions
+    /// modes and handle them via `send_control_response()`.
+    pub async fn take_sdk_control_receiver(
+        &self,
+    ) -> Option<tokio::sync::mpsc::Receiver<serde_json::Value>> {
+        let mut transport = self.transport.lock().await;
+        transport.take_sdk_control_receiver()
     }
 
     /// Connect to Claude
@@ -111,6 +134,31 @@ impl InteractiveClient {
         drop(transport);
 
         debug!("Message sent");
+        Ok(())
+    }
+
+    /// Send a raw SDK control response to the Claude CLI subprocess.
+    ///
+    /// This is used to respond to control protocol requests (e.g., `can_use_tool`
+    /// permission requests) that arrive when running in non-BypassPermissions mode.
+    /// The response is written directly to stdin as a JSON control_response message.
+    ///
+    /// # Arguments
+    /// * `response` - The control response payload, e.g. `{"allow": true}` or
+    ///   `{"allow": false, "reason": "User denied"}`. The transport wraps this in
+    ///   `{"type": "control_response", "response": <payload>}` automatically.
+    pub async fn send_control_response(&mut self, response: serde_json::Value) -> Result<()> {
+        if !self.connected {
+            return Err(SdkError::InvalidState {
+                message: "Not connected".into(),
+            });
+        }
+
+        let mut transport = self.transport.lock().await;
+        transport.send_sdk_control_response(response).await?;
+        drop(transport);
+
+        debug!("Control response sent");
         Ok(())
     }
 
@@ -323,6 +371,66 @@ impl InteractiveClient {
                 }
             }
         }
+    }
+
+    /// Change the permission mode of the active CLI subprocess session.
+    ///
+    /// Sends a `set_permission_mode` control request to the Claude CLI process,
+    /// which takes effect on the next tool use. The mode change does NOT interrupt
+    /// any ongoing streaming response.
+    ///
+    /// # Valid modes
+    /// - `"default"` — prompts for dangerous tools (Bash, Edit, Write)
+    /// - `"acceptEdits"` — auto-approves file edits, prompts for Bash
+    /// - `"bypassPermissions"` — auto-approves all tools
+    /// - `"plan"` — read-only, blocks all write operations
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// # use nexus_claude::{InteractiveClient, ClaudeCodeOptions};
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// let mut client = InteractiveClient::new(ClaudeCodeOptions::default())?;
+    /// client.connect().await?;
+    /// // Switch to bypass mode mid-session
+    /// client.set_permission_mode("bypassPermissions").await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn set_permission_mode(&mut self, mode: &str) -> Result<()> {
+        if !self.connected {
+            return Err(SdkError::InvalidState {
+                message: "Not connected".into(),
+            });
+        }
+
+        // Validate mode
+        const VALID_MODES: &[&str] = &["default", "acceptEdits", "bypassPermissions", "plan"];
+        if !VALID_MODES.contains(&mode) {
+            return Err(SdkError::InvalidState {
+                message: format!(
+                    "Invalid permission mode '{}'. Valid modes: {}",
+                    mode,
+                    VALID_MODES.join(", ")
+                ),
+            });
+        }
+
+        let request = serde_json::json!({
+            "type": "control_request",
+            "request_id": uuid::Uuid::new_v4().to_string(),
+            "request": {
+                "subtype": "set_permission_mode",
+                "mode": mode
+            }
+        });
+
+        let mut transport = self.transport.lock().await;
+        transport.send_sdk_control_request(request).await?;
+        drop(transport);
+
+        info!(mode = %mode, "Permission mode change request sent");
+        Ok(())
     }
 
     /// Send interrupt signal to cancel current operation
