@@ -21,6 +21,14 @@ pub struct InteractiveClient {
 }
 
 impl InteractiveClient {
+    /// Create a client from a pre-built transport (for testing or custom transports)
+    pub fn from_transport(transport: Box<dyn Transport + Send>) -> Self {
+        Self {
+            transport: Arc::new(Mutex::new(transport)),
+            connected: false,
+        }
+    }
+
     /// Create a new client
     pub fn new(options: ClaudeCodeOptions) -> Result<Self> {
         unsafe {
@@ -363,6 +371,66 @@ impl InteractiveClient {
                 }
             }
         }
+    }
+
+    /// Change the permission mode of the active CLI subprocess session.
+    ///
+    /// Sends a `set_permission_mode` control request to the Claude CLI process,
+    /// which takes effect on the next tool use. The mode change does NOT interrupt
+    /// any ongoing streaming response.
+    ///
+    /// # Valid modes
+    /// - `"default"` — prompts for dangerous tools (Bash, Edit, Write)
+    /// - `"acceptEdits"` — auto-approves file edits, prompts for Bash
+    /// - `"bypassPermissions"` — auto-approves all tools
+    /// - `"plan"` — read-only, blocks all write operations
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// # use nexus_claude::{InteractiveClient, ClaudeCodeOptions};
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// let mut client = InteractiveClient::new(ClaudeCodeOptions::default())?;
+    /// client.connect().await?;
+    /// // Switch to bypass mode mid-session
+    /// client.set_permission_mode("bypassPermissions").await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn set_permission_mode(&mut self, mode: &str) -> Result<()> {
+        if !self.connected {
+            return Err(SdkError::InvalidState {
+                message: "Not connected".into(),
+            });
+        }
+
+        // Validate mode
+        const VALID_MODES: &[&str] = &["default", "acceptEdits", "bypassPermissions", "plan"];
+        if !VALID_MODES.contains(&mode) {
+            return Err(SdkError::InvalidState {
+                message: format!(
+                    "Invalid permission mode '{}'. Valid modes: {}",
+                    mode,
+                    VALID_MODES.join(", ")
+                ),
+            });
+        }
+
+        let request = serde_json::json!({
+            "type": "control_request",
+            "request_id": uuid::Uuid::new_v4().to_string(),
+            "request": {
+                "subtype": "set_permission_mode",
+                "mode": mode
+            }
+        });
+
+        let mut transport = self.transport.lock().await;
+        transport.send_sdk_control_request(request).await?;
+        drop(transport);
+
+        info!(mode = %mode, "Permission mode change request sent");
+        Ok(())
     }
 
     /// Send interrupt signal to cancel current operation
