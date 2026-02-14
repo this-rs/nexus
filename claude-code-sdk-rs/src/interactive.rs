@@ -33,6 +33,21 @@ impl InteractiveClient {
         })
     }
 
+    /// Take the SDK control receiver for handling inbound control requests
+    /// (e.g., `can_use_tool` permission requests) from the Claude CLI subprocess.
+    ///
+    /// This can only be called once — subsequent calls return `None`.
+    /// The receiver yields raw JSON values representing SDK control protocol messages.
+    ///
+    /// Use this to listen for permission requests when running in non-BypassPermissions
+    /// modes and handle them via `send_control_response()`.
+    pub async fn take_sdk_control_receiver(
+        &self,
+    ) -> Option<tokio::sync::mpsc::Receiver<serde_json::Value>> {
+        let mut transport = self.transport.lock().await;
+        transport.take_sdk_control_receiver()
+    }
+
     /// Connect to Claude
     pub async fn connect(&mut self) -> Result<()> {
         if self.connected {
@@ -111,6 +126,31 @@ impl InteractiveClient {
         drop(transport);
 
         debug!("Message sent");
+        Ok(())
+    }
+
+    /// Send a raw SDK control response to the Claude CLI subprocess.
+    ///
+    /// This is used to respond to control protocol requests (e.g., `can_use_tool`
+    /// permission requests) that arrive when running in non-BypassPermissions mode.
+    /// The response is written directly to stdin as a JSON control_response message.
+    ///
+    /// # Arguments
+    /// * `response` - The control response payload, e.g. `{"allow": true}` or
+    ///   `{"allow": false, "reason": "User denied"}`. The transport wraps this in
+    ///   `{"type": "control_response", "response": <payload>}` automatically.
+    pub async fn send_control_response(&mut self, response: serde_json::Value) -> Result<()> {
+        if !self.connected {
+            return Err(SdkError::InvalidState {
+                message: "Not connected".into(),
+            });
+        }
+
+        let mut transport = self.transport.lock().await;
+        transport.send_sdk_control_response(response).await?;
+        drop(transport);
+
+        debug!("Control response sent");
         Ok(())
     }
 
