@@ -3,11 +3,14 @@
 //! Validates that the method sends the correct JSON control request
 //! format and rejects invalid mode strings.
 
-use nexus_claude::transport::mock::MockTransport;
 use nexus_claude::InteractiveClient;
+use nexus_claude::transport::mock::MockTransport;
 
 /// Helper: create an InteractiveClient backed by MockTransport
-fn make_client() -> (InteractiveClient, nexus_claude::transport::mock::MockTransportHandle) {
+fn make_client() -> (
+    InteractiveClient,
+    nexus_claude::transport::mock::MockTransportHandle,
+) {
     let (transport, handle) = MockTransport::pair();
     let client = InteractiveClient::from_transport(transport);
     (client, handle)
