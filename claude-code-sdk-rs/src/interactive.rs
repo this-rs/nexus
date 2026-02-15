@@ -56,6 +56,14 @@ impl InteractiveClient {
         transport.take_sdk_control_receiver()
     }
 
+    /// Clone the stdin sender for writing control responses without holding
+    /// the client lock. This allows `send_permission_response` to write to
+    /// the CLI subprocess while `stream_response` holds the client lock.
+    pub async fn clone_stdin_sender(&self) -> Option<tokio::sync::mpsc::Sender<String>> {
+        let transport = self.transport.lock().await;
+        transport.clone_stdin_sender()
+    }
+
     /// Connect to Claude
     pub async fn connect(&mut self) -> Result<()> {
         if self.connected {

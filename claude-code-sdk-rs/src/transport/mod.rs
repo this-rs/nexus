@@ -105,6 +105,16 @@ pub trait Transport: Send + Sync {
         None
     }
 
+    /// Clone the stdin sender for writing to the CLI subprocess without holding
+    /// the transport lock. This is critical for sending control responses (e.g.,
+    /// permission allow/deny) while `stream_response` holds the transport lock
+    /// for the duration of streaming.
+    ///
+    /// Returns `None` if the transport doesn't support stdin (e.g., mock).
+    fn clone_stdin_sender(&self) -> Option<tokio::sync::mpsc::Sender<String>> {
+        None
+    }
+
     /// Check if the transport is connected
     #[allow(dead_code)]
     fn is_connected(&self) -> bool;

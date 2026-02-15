@@ -1079,6 +1079,10 @@ impl Transport for SubprocessTransport {
         self.sdk_control_rx.take()
     }
 
+    fn clone_stdin_sender(&self) -> Option<tokio::sync::mpsc::Sender<String>> {
+        self.stdin_tx.clone()
+    }
+
     async fn end_input(&mut self) -> Result<()> {
         // Close stdin channel to signal end of input
         self.stdin_tx.take();
