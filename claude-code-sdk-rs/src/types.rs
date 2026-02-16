@@ -1273,6 +1273,45 @@ impl ClaudeCodeOptionsBuilder {
         self
     }
 
+    /// Set hook configurations (replaces any existing hooks)
+    ///
+    /// Hooks allow intercepting CLI events (PreToolUse, PostToolUse, PreCompact, etc.)
+    /// and executing custom callbacks before or after the event is processed.
+    ///
+    /// # Arguments
+    ///
+    /// * `hooks` - Map of event names (PascalCase) to their matchers and callbacks
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// # use nexus_claude::{ClaudeCodeOptions, HookMatcher};
+    /// # use std::collections::HashMap;
+    /// let mut hooks = HashMap::new();
+    /// // hooks.insert("PreCompact".into(), vec![matcher]);
+    /// let options = ClaudeCodeOptions::builder()
+    ///     .hooks(hooks)
+    ///     .build();
+    /// ```
+    pub fn hooks(mut self, hooks: HashMap<String, Vec<HookMatcher>>) -> Self {
+        self.options.hooks = Some(hooks);
+        self
+    }
+
+    /// Add a single hook matcher for an event
+    ///
+    /// Appends to existing matchers for this event, or creates a new entry.
+    /// Event names must be PascalCase: "PreToolUse", "PostToolUse",
+    /// "UserPromptSubmit", "Stop", "SubagentStop", "PreCompact".
+    pub fn add_hook(mut self, event_name: impl Into<String>, matcher: HookMatcher) -> Self {
+        let hooks = self.options.hooks.get_or_insert_with(HashMap::new);
+        hooks
+            .entry(event_name.into())
+            .or_insert_with(Vec::new)
+            .push(matcher);
+        self
+    }
+
     /// Set CLI channel buffer size
     ///
     /// Controls the size of internal communication channels (message, control, stdin buffers).
