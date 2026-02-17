@@ -3,13 +3,18 @@
 use crate::{
     errors::{Result, SdkError},
     transport::{InputMessage, SubprocessTransport, Transport},
-    types::{ClaudeCodeOptions, ControlRequest, Message},
+    types::{
+        ClaudeCodeOptions, ControlRequest, HookCallback, HookContext, HookInput, HookJSONOutput,
+        HookMatcher, Message, SDKControlInitializeRequest, SDKControlRequest,
+        SDKHookCallbackRequest,
+    },
 };
 use futures::{Stream, StreamExt};
+use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, RwLock};
 use tokio_stream::wrappers::ReceiverStream;
-use tracing::{debug, info};
+use tracing::{debug, error, info, warn};
 
 /// Interactive client for stateful conversations with Claude
 ///
@@ -18,6 +23,12 @@ use tracing::{debug, info};
 pub struct InteractiveClient {
     transport: Arc<Mutex<Box<dyn Transport + Send>>>,
     connected: bool,
+    /// Hook configurations from ClaudeCodeOptions (used by initialize_hooks)
+    hooks: Option<HashMap<String, Vec<HookMatcher>>>,
+    /// Registered hook callbacks keyed by callback_id (populated by initialize_hooks)
+    hook_callbacks: Arc<RwLock<HashMap<String, Arc<dyn HookCallback>>>>,
+    /// Counter for generating unique callback IDs
+    callback_counter: Arc<Mutex<u64>>,
 }
 
 impl InteractiveClient {
@@ -26,6 +37,23 @@ impl InteractiveClient {
         Self {
             transport: Arc::new(Mutex::new(transport)),
             connected: false,
+            hooks: None,
+            hook_callbacks: Arc::new(RwLock::new(HashMap::new())),
+            callback_counter: Arc::new(Mutex::new(0)),
+        }
+    }
+
+    /// Create a client from a pre-built transport with hooks (for testing)
+    pub fn from_transport_with_hooks(
+        transport: Box<dyn Transport + Send>,
+        hooks: HashMap<String, Vec<HookMatcher>>,
+    ) -> Self {
+        Self {
+            transport: Arc::new(Mutex::new(transport)),
+            connected: false,
+            hooks: Some(hooks),
+            hook_callbacks: Arc::new(RwLock::new(HashMap::new())),
+            callback_counter: Arc::new(Mutex::new(0)),
         }
     }
 
@@ -34,10 +62,14 @@ impl InteractiveClient {
         unsafe {
             std::env::set_var("CLAUDE_CODE_ENTRYPOINT", "sdk-rust");
         }
+        let hooks = options.hooks.clone();
         let transport: Box<dyn Transport + Send> = Box::new(SubprocessTransport::new(options)?);
         Ok(Self {
             transport: Arc::new(Mutex::new(transport)),
             connected: false,
+            hooks,
+            hook_callbacks: Arc::new(RwLock::new(HashMap::new())),
+            callback_counter: Arc::new(Mutex::new(0)),
         })
     }
 
@@ -54,6 +86,15 @@ impl InteractiveClient {
     ) -> Option<tokio::sync::mpsc::Receiver<serde_json::Value>> {
         let mut transport = self.transport.lock().await;
         transport.take_sdk_control_receiver()
+    }
+
+    /// Get a clone of the hook callbacks registry.
+    ///
+    /// This allows the caller (e.g., PO backend `stream_response`) to dispatch
+    /// hook callbacks **without** holding the client lock. The returned Arc can
+    /// be used with the standalone `dispatch_hook_callback_from_registry()` helper.
+    pub fn hook_callbacks(&self) -> Arc<RwLock<HashMap<String, Arc<dyn HookCallback>>>> {
+        self.hook_callbacks.clone()
     }
 
     /// Clone the stdin sender for writing control responses without holding
@@ -441,6 +482,240 @@ impl InteractiveClient {
         Ok(())
     }
 
+    // ========================================================================
+    // Hook lifecycle — initialize, dispatch, respond
+    // ========================================================================
+
+    /// Initialize the control protocol and register hooks with the CLI.
+    ///
+    /// This reproduces the logic from `Query::initialize()`: it generates unique
+    /// callback IDs for each `HookCallback`, stores them locally, and sends an
+    /// `SDKControlRequest::Initialize` message to the CLI subprocess so it knows
+    /// which hooks to trigger.
+    ///
+    /// **Must be called after `connect()` and before `take_sdk_control_receiver()`.**
+    /// The init message expects a response on the SDK control channel. If the
+    /// receiver has already been taken, the response will be lost.
+    ///
+    /// No-op if no hooks were configured in `ClaudeCodeOptions`.
+    pub async fn initialize_hooks(&self) -> Result<()> {
+        let hooks = match &self.hooks {
+            Some(h) if !h.is_empty() => h,
+            _ => {
+                debug!("No hooks configured — skipping initialize_hooks");
+                return Ok(());
+            },
+        };
+
+        // Generate callback IDs and register callbacks (mirrors Query::initialize)
+        let mut counter = self.callback_counter.lock().await;
+        let mut callbacks_map = self.hook_callbacks.write().await;
+
+        let hooks_json: HashMap<String, serde_json::Value> = hooks
+            .iter()
+            .map(|(event_name, matchers)| {
+                let matchers_with_ids: Vec<serde_json::Value> = matchers
+                    .iter()
+                    .map(|matcher| {
+                        let callback_ids: Vec<String> = matcher
+                            .hooks
+                            .iter()
+                            .map(|hook_cb| {
+                                *counter += 1;
+                                let callback_id =
+                                    format!("hook_{}_{}", *counter, uuid::Uuid::new_v4().simple());
+                                callbacks_map.insert(callback_id.clone(), hook_cb.clone());
+                                callback_id
+                            })
+                            .collect();
+
+                        serde_json::json!({
+                            "matcher": matcher.matcher.clone(),
+                            "hookCallbackIds": callback_ids
+                        })
+                    })
+                    .collect();
+
+                (event_name.clone(), serde_json::json!(matchers_with_ids))
+            })
+            .collect();
+
+        drop(callbacks_map);
+        drop(counter);
+
+        // Build the initialize control request
+        let init_request = SDKControlRequest::Initialize(SDKControlInitializeRequest {
+            subtype: "initialize".to_string(),
+            hooks: Some(hooks_json),
+        });
+
+        let request_id = uuid::Uuid::new_v4().to_string();
+        let control_msg = serde_json::json!({
+            "type": "control_request",
+            "request_id": request_id,
+            "request": init_request
+        });
+
+        // Send via transport stdin
+        {
+            let mut transport = self.transport.lock().await;
+            transport.send_sdk_control_request(control_msg).await?;
+        }
+
+        info!("initialize_hooks: sent init with hook callback IDs to CLI");
+        Ok(())
+    }
+
+    /// Dispatch an inbound `hook_callback` control message to the registered callback.
+    ///
+    /// This is the counterpart of `Query::start_control_handler()` for the hook_callback
+    /// subtype. The caller (PO backend's `stream_response`) reads raw JSON from
+    /// `sdk_control_rx`, detects `subtype: "hook_callback"`, and calls this method.
+    ///
+    /// Returns `Some(Ok(output))` if the callback was found and executed successfully,
+    /// `Some(Err(..))` if the callback failed, or `None` if the message is not a
+    /// hook_callback or the callback_id is unknown.
+    ///
+    /// **Lock-free**: does NOT acquire the transport mutex. Safe to call while
+    /// `stream_response` holds the client lock.
+    pub async fn dispatch_hook_callback(
+        &self,
+        control_msg: &serde_json::Value,
+    ) -> Option<std::result::Result<HookJSONOutput, SdkError>> {
+        // Try to extract hook_callback fields — support both formats:
+        // 1. Top-level: { "subtype": "hook_callback", "callback_id": ..., "input": ... }
+        // 2. Nested:    { "request": { "subtype": "hook_callback", ... } }
+        let request_data = control_msg.get("request").unwrap_or(control_msg);
+
+        let subtype = request_data
+            .get("subtype")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if subtype != "hook_callback" {
+            return None;
+        }
+
+        // Try structured deserialization first, then fallback to manual field access
+        let (callback_id, input, tool_use_id) = if let Ok(req) =
+            serde_json::from_value::<SDKHookCallbackRequest>(request_data.clone())
+        {
+            (req.callback_id, req.input, req.tool_use_id)
+        } else {
+            let cb_id = request_data
+                .get("callback_id")
+                .or_else(|| request_data.get("callbackId"))
+                .and_then(|v| v.as_str())?;
+            let input = request_data
+                .get("input")
+                .cloned()
+                .unwrap_or(serde_json::json!({}));
+            let tool_use_id = request_data
+                .get("tool_use_id")
+                .or_else(|| request_data.get("toolUseId"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            (cb_id.to_string(), input, tool_use_id)
+        };
+
+        // Look up the callback
+        let callbacks = self.hook_callbacks.read().await;
+        let callback = match callbacks.get(&callback_id) {
+            Some(cb) => cb.clone(),
+            None => {
+                warn!("No hook callback found for ID: {}", callback_id);
+                return None;
+            },
+        };
+        drop(callbacks);
+
+        // Parse HookInput and execute
+        let context = HookContext { signal: None };
+        let result = match serde_json::from_value::<HookInput>(input.clone()) {
+            Ok(hook_input) => {
+                callback
+                    .execute(&hook_input, tool_use_id.as_deref(), &context)
+                    .await
+            },
+            Err(parse_err) => {
+                error!("Failed to parse hook input: {}", parse_err);
+                Err(SdkError::MessageParseError {
+                    error: format!("Invalid hook input: {parse_err}"),
+                    raw: input.to_string(),
+                })
+            },
+        };
+
+        Some(result)
+    }
+
+    /// Send the result of a hook callback back to the CLI subprocess.
+    ///
+    /// Writes a `control_response` JSON message to stdin with the serialized
+    /// `HookJSONOutput`. Uses `clone_stdin_sender()` internally so it does NOT
+    /// acquire the transport mutex — safe to call while streaming.
+    ///
+    /// # Arguments
+    /// * `request_id` - The request_id from the original hook_callback control message
+    /// * `output` - The result from `dispatch_hook_callback`
+    pub async fn send_hook_response(
+        &self,
+        request_id: &str,
+        output: &std::result::Result<HookJSONOutput, SdkError>,
+    ) -> Result<()> {
+        let response_json = match output {
+            Ok(hook_output) => {
+                let output_value = serde_json::to_value(hook_output).unwrap_or_else(|e| {
+                    error!("Failed to serialize hook output: {}", e);
+                    serde_json::json!({})
+                });
+                serde_json::json!({
+                    "type": "control_response",
+                    "response": {
+                        "subtype": "success",
+                        "request_id": request_id,
+                        "response": output_value
+                    }
+                })
+            },
+            Err(e) => {
+                serde_json::json!({
+                    "type": "control_response",
+                    "response": {
+                        "subtype": "error",
+                        "request_id": request_id,
+                        "error": e.to_string()
+                    }
+                })
+            },
+        };
+
+        // Use stdin_tx directly (lock-free path) if available
+        let stdin_tx = {
+            let transport = self.transport.lock().await;
+            transport.clone_stdin_sender()
+        };
+
+        if let Some(tx) = stdin_tx {
+            let json = serde_json::to_string(&response_json)?;
+            tx.send(json).await.map_err(|e| {
+                SdkError::ConnectionError(format!("Failed to send hook response: {}", e))
+            })?;
+            debug!("Hook response sent for request_id={}", request_id);
+            Ok(())
+        } else {
+            // Fallback: send via transport (takes lock, but only briefly)
+            let mut transport = self.transport.lock().await;
+            transport
+                .send_sdk_control_response(
+                    response_json
+                        .get("response")
+                        .cloned()
+                        .unwrap_or(serde_json::json!({})),
+                )
+                .await
+        }
+    }
+
     /// Send interrupt signal to cancel current operation
     pub async fn interrupt(&mut self) -> Result<()> {
         if !self.connected {
@@ -473,5 +748,481 @@ impl InteractiveClient {
         self.connected = false;
         info!("Disconnected from Claude CLI");
         Ok(())
+    }
+}
+
+// ============================================================================
+// Standalone hook helpers (for use without client lock)
+// ============================================================================
+
+/// Check if a raw SDK control JSON message is a `hook_callback`.
+///
+/// Inspects the `subtype` field (supports both top-level and nested `request`).
+/// This is a cheap check that can be done before dispatching.
+pub fn is_hook_callback(control_msg: &serde_json::Value) -> bool {
+    let request_data = control_msg.get("request").unwrap_or(control_msg);
+    request_data.get("subtype").and_then(|v| v.as_str()) == Some("hook_callback")
+}
+
+/// Dispatch a `hook_callback` control message using a pre-cloned callbacks registry.
+///
+/// This is the lock-free counterpart of `InteractiveClient::dispatch_hook_callback`.
+/// Use this when the client mutex is held (e.g., during `stream_response`) and you
+/// already have a cloned `hook_callbacks` Arc from `InteractiveClient::hook_callbacks()`.
+///
+/// Returns `Some(Ok(output))` if the callback executed, `Some(Err(..))` on error,
+/// or `None` if the callback_id is unknown.
+pub async fn dispatch_hook_from_registry(
+    control_msg: &serde_json::Value,
+    hook_callbacks: &RwLock<HashMap<String, Arc<dyn HookCallback>>>,
+) -> Option<std::result::Result<HookJSONOutput, SdkError>> {
+    let request_data = control_msg.get("request").unwrap_or(control_msg);
+
+    let subtype = request_data
+        .get("subtype")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    if subtype != "hook_callback" {
+        return None;
+    }
+
+    // Extract fields
+    let (callback_id, input, tool_use_id) =
+        if let Ok(req) = serde_json::from_value::<SDKHookCallbackRequest>(request_data.clone()) {
+            (req.callback_id, req.input, req.tool_use_id)
+        } else {
+            let cb_id = request_data
+                .get("callback_id")
+                .or_else(|| request_data.get("callbackId"))
+                .and_then(|v| v.as_str())?;
+            let input = request_data
+                .get("input")
+                .cloned()
+                .unwrap_or(serde_json::json!({}));
+            let tool_use_id = request_data
+                .get("tool_use_id")
+                .or_else(|| request_data.get("toolUseId"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            (cb_id.to_string(), input, tool_use_id)
+        };
+
+    // Look up
+    let callbacks = hook_callbacks.read().await;
+    let callback = match callbacks.get(&callback_id) {
+        Some(cb) => cb.clone(),
+        None => {
+            warn!("No hook callback found for ID: {}", callback_id);
+            return None;
+        },
+    };
+    drop(callbacks);
+
+    // Execute
+    let context = HookContext { signal: None };
+    let result = match serde_json::from_value::<HookInput>(input.clone()) {
+        Ok(hook_input) => {
+            callback
+                .execute(&hook_input, tool_use_id.as_deref(), &context)
+                .await
+        },
+        Err(parse_err) => {
+            error!("Failed to parse hook input: {}", parse_err);
+            Err(SdkError::MessageParseError {
+                error: format!("Invalid hook input: {parse_err}"),
+                raw: input.to_string(),
+            })
+        },
+    };
+
+    Some(result)
+}
+
+/// Build the JSON control_response for a hook callback result.
+///
+/// Returns the serialized JSON string ready to be sent via `stdin_tx`.
+/// This avoids needing access to the client or transport.
+pub fn build_hook_response_json(
+    request_id: &str,
+    output: &std::result::Result<HookJSONOutput, SdkError>,
+) -> String {
+    let response_json = match output {
+        Ok(hook_output) => {
+            let output_value = serde_json::to_value(hook_output).unwrap_or_else(|e| {
+                error!("Failed to serialize hook output: {}", e);
+                serde_json::json!({})
+            });
+            serde_json::json!({
+                "type": "control_response",
+                "response": {
+                    "subtype": "success",
+                    "request_id": request_id,
+                    "response": output_value
+                }
+            })
+        },
+        Err(e) => {
+            serde_json::json!({
+                "type": "control_response",
+                "response": {
+                    "subtype": "error",
+                    "request_id": request_id,
+                    "error": e.to_string()
+                }
+            })
+        },
+    };
+    serde_json::to_string(&response_json).unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::transport::mock::MockTransport;
+    use crate::types::{
+        HookCallback, HookContext, HookInput, HookJSONOutput, HookMatcher, SyncHookJSONOutput,
+    };
+    use std::sync::Arc;
+
+    /// A simple test callback that records calls and returns continue: true
+    #[derive(Clone)]
+    struct TestHookCallback {
+        call_count: Arc<Mutex<u32>>,
+    }
+
+    impl TestHookCallback {
+        fn new() -> Self {
+            Self {
+                call_count: Arc::new(Mutex::new(0)),
+            }
+        }
+
+        async fn calls(&self) -> u32 {
+            *self.call_count.lock().await
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl HookCallback for TestHookCallback {
+        async fn execute(
+            &self,
+            _input: &HookInput,
+            _tool_use_id: Option<&str>,
+            _context: &HookContext,
+        ) -> std::result::Result<HookJSONOutput, SdkError> {
+            let mut count = self.call_count.lock().await;
+            *count += 1;
+            Ok(HookJSONOutput::Sync(SyncHookJSONOutput {
+                continue_: Some(true),
+                suppress_output: None,
+                stop_reason: None,
+                decision: None,
+                system_message: None,
+                reason: None,
+                hook_specific_output: None,
+            }))
+        }
+    }
+
+    fn make_hooks_with_callback(
+        event: &str,
+        callback: Arc<dyn HookCallback>,
+    ) -> HashMap<String, Vec<HookMatcher>> {
+        let mut hooks = HashMap::new();
+        hooks.insert(
+            event.to_string(),
+            vec![HookMatcher {
+                matcher: None,
+                hooks: vec![callback],
+            }],
+        );
+        hooks
+    }
+
+    #[tokio::test]
+    async fn test_initialize_hooks_sends_init_message() {
+        let (transport, mut handle) = MockTransport::pair();
+        let callback = Arc::new(TestHookCallback::new());
+        let hooks = make_hooks_with_callback("PreCompact", callback);
+
+        let client = InteractiveClient::from_transport_with_hooks(transport, hooks);
+
+        // initialize_hooks should send a control_request via the transport
+        client.initialize_hooks().await.unwrap();
+
+        // The init message should be observable via outbound_control_request_rx
+        let msg = handle
+            .outbound_control_request_rx
+            .recv()
+            .await
+            .expect("Should have received init message");
+
+        // Verify structure
+        assert_eq!(msg["type"], "control_request");
+        let request = &msg["request"];
+        assert_eq!(request["subtype"], "initialize");
+        // hooks should be present with PreCompact key
+        let hooks_json = request["hooks"]
+            .as_object()
+            .expect("hooks should be object");
+        assert!(
+            hooks_json.contains_key("PreCompact"),
+            "Should contain PreCompact key"
+        );
+        // Should contain a matcher with hookCallbackIds
+        let matchers = hooks_json["PreCompact"]
+            .as_array()
+            .expect("PreCompact should be array");
+        assert_eq!(matchers.len(), 1);
+        let callback_ids = matchers[0]["hookCallbackIds"]
+            .as_array()
+            .expect("hookCallbackIds should be array");
+        assert_eq!(callback_ids.len(), 1);
+        // Callback ID should start with "hook_"
+        let cb_id = callback_ids[0].as_str().unwrap();
+        assert!(
+            cb_id.starts_with("hook_"),
+            "Callback ID should start with hook_"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_initialize_hooks_noop_when_no_hooks() {
+        let (transport, mut handle) = MockTransport::pair();
+        // No hooks configured
+        let client = InteractiveClient::from_transport(transport);
+
+        client.initialize_hooks().await.unwrap();
+
+        // No message should have been sent
+        let result = tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            handle.outbound_control_request_rx.recv(),
+        )
+        .await;
+        assert!(result.is_err(), "Should timeout — no message sent");
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_hook_callback_executes_callback() {
+        let (transport, _handle) = MockTransport::pair();
+        let callback = Arc::new(TestHookCallback::new());
+        let hooks = make_hooks_with_callback("PreCompact", callback.clone());
+
+        let client = InteractiveClient::from_transport_with_hooks(transport, hooks);
+
+        // First, initialize to populate callback IDs
+        client.initialize_hooks().await.unwrap();
+
+        // Get the registered callback ID
+        let callbacks = client.hook_callbacks.read().await;
+        let (cb_id, _) = callbacks.iter().next().expect("Should have one callback");
+        let cb_id = cb_id.clone();
+        drop(callbacks);
+
+        // Simulate a hook_callback control message from CLI
+        // HookInput uses internally-tagged enum: { "hook_event_name": "PreCompact", ...fields }
+        let control_msg = serde_json::json!({
+            "type": "control_request",
+            "request_id": "req-123",
+            "request": {
+                "subtype": "hook_callback",
+                "callback_id": cb_id,
+                "input": {
+                    "hook_event_name": "PreCompact",
+                    "session_id": "sess-1",
+                    "transcript_path": "/tmp/transcript.json",
+                    "cwd": "/home/user",
+                    "trigger": "auto"
+                }
+            }
+        });
+
+        let result = client.dispatch_hook_callback(&control_msg).await;
+        assert!(result.is_some(), "Should dispatch successfully");
+        let output = result.unwrap();
+        assert!(output.is_ok(), "Callback should succeed");
+
+        // Verify callback was actually executed
+        assert_eq!(callback.calls().await, 1);
+
+        // Verify output is Sync with continue: true
+        match output.unwrap() {
+            HookJSONOutput::Sync(sync_out) => {
+                assert_eq!(sync_out.continue_, Some(true));
+            },
+            _ => panic!("Expected Sync output"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_unknown_callback_returns_none() {
+        let (transport, _handle) = MockTransport::pair();
+        let callback = Arc::new(TestHookCallback::new());
+        let hooks = make_hooks_with_callback("PreCompact", callback.clone());
+
+        let client = InteractiveClient::from_transport_with_hooks(transport, hooks);
+        client.initialize_hooks().await.unwrap();
+
+        // Send a hook_callback with an unknown callback_id
+        let control_msg = serde_json::json!({
+            "request": {
+                "subtype": "hook_callback",
+                "callback_id": "unknown_callback_id",
+                "input": {
+                    "hook_event_name": "PreCompact",
+                    "session_id": "sess-1",
+                    "transcript_path": "/tmp/t.json",
+                    "cwd": "/home",
+                    "trigger": "auto"
+                }
+            }
+        });
+
+        let result = client.dispatch_hook_callback(&control_msg).await;
+        assert!(result.is_none(), "Unknown callback should return None");
+
+        // Original callback should NOT have been called
+        assert_eq!(callback.calls().await, 0);
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_non_hook_message_returns_none() {
+        let (transport, _handle) = MockTransport::pair();
+        let client = InteractiveClient::from_transport(transport);
+
+        // Send a non-hook control message
+        let control_msg = serde_json::json!({
+            "request": {
+                "subtype": "can_use_tool",
+                "tool_name": "Bash",
+                "input": {}
+            }
+        });
+
+        let result = client.dispatch_hook_callback(&control_msg).await;
+        assert!(result.is_none(), "Non-hook message should return None");
+    }
+
+    #[tokio::test]
+    async fn test_send_hook_response_success_format() {
+        let (transport, mut handle) = MockTransport::pair();
+        let client = InteractiveClient::from_transport(transport);
+
+        let output = Ok(HookJSONOutput::Sync(SyncHookJSONOutput {
+            continue_: Some(true),
+            suppress_output: None,
+            stop_reason: None,
+            decision: None,
+            system_message: None,
+            reason: None,
+            hook_specific_output: None,
+        }));
+
+        // send_hook_response falls back to send_sdk_control_response (no stdin_tx in mock)
+        client.send_hook_response("req-456", &output).await.unwrap();
+
+        // The response should be observable via outbound_control_rx
+        let msg = handle
+            .outbound_control_rx
+            .recv()
+            .await
+            .expect("Should have received response");
+
+        // MockTransport wraps in {"type": "control_response", "response": ...}
+        assert_eq!(msg["type"], "control_response");
+        let response = &msg["response"];
+        assert_eq!(response["subtype"], "success");
+        assert_eq!(response["request_id"], "req-456");
+        // The inner response should have the hook output
+        let inner = &response["response"];
+        assert_eq!(inner["continue"], true);
+    }
+
+    #[tokio::test]
+    async fn test_send_hook_response_error_format() {
+        let (transport, mut handle) = MockTransport::pair();
+        let client = InteractiveClient::from_transport(transport);
+
+        let output: std::result::Result<HookJSONOutput, SdkError> =
+            Err(SdkError::ConnectionError("Hook failed".to_string()));
+
+        client.send_hook_response("req-789", &output).await.unwrap();
+
+        let msg = handle
+            .outbound_control_rx
+            .recv()
+            .await
+            .expect("Should have received error response");
+
+        assert_eq!(msg["type"], "control_response");
+        let response = &msg["response"];
+        assert_eq!(response["subtype"], "error");
+        assert_eq!(response["request_id"], "req-789");
+        // Error string should be present
+        let error_str = response["error"].as_str().unwrap();
+        assert!(
+            error_str.contains("Hook failed"),
+            "Error should contain message"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_initialize_hooks_multiple_events_and_matchers() {
+        let (transport, mut handle) = MockTransport::pair();
+
+        let cb1 = Arc::new(TestHookCallback::new()) as Arc<dyn HookCallback>;
+        let cb2 = Arc::new(TestHookCallback::new()) as Arc<dyn HookCallback>;
+        let cb3 = Arc::new(TestHookCallback::new()) as Arc<dyn HookCallback>;
+
+        let mut hooks: HashMap<String, Vec<HookMatcher>> = HashMap::new();
+        hooks.insert(
+            "PreCompact".to_string(),
+            vec![HookMatcher {
+                matcher: None,
+                hooks: vec![cb1],
+            }],
+        );
+        hooks.insert(
+            "PreToolUse".to_string(),
+            vec![
+                HookMatcher {
+                    matcher: Some(serde_json::json!({"tool_name": "Bash"})),
+                    hooks: vec![cb2],
+                },
+                HookMatcher {
+                    matcher: None,
+                    hooks: vec![cb3],
+                },
+            ],
+        );
+
+        let client = InteractiveClient::from_transport_with_hooks(transport, hooks);
+        client.initialize_hooks().await.unwrap();
+
+        let msg = handle.outbound_control_request_rx.recv().await.unwrap();
+
+        let hooks_json = msg["request"]["hooks"].as_object().unwrap();
+        assert!(hooks_json.contains_key("PreCompact"));
+        assert!(hooks_json.contains_key("PreToolUse"));
+
+        // PreCompact: 1 matcher, 1 callback
+        let pc = hooks_json["PreCompact"].as_array().unwrap();
+        assert_eq!(pc.len(), 1);
+        assert_eq!(pc[0]["hookCallbackIds"].as_array().unwrap().len(), 1);
+
+        // PreToolUse: 2 matchers, 1 callback each
+        let ptu = hooks_json["PreToolUse"].as_array().unwrap();
+        assert_eq!(ptu.len(), 2);
+        assert_eq!(ptu[0]["hookCallbackIds"].as_array().unwrap().len(), 1);
+        assert_eq!(ptu[1]["hookCallbackIds"].as_array().unwrap().len(), 1);
+        // First matcher should have the tool_name filter
+        assert_eq!(ptu[0]["matcher"]["tool_name"], "Bash");
+        // Second matcher should be null
+        assert!(ptu[1]["matcher"].is_null());
+
+        // Total callbacks registered: 3
+        let callbacks = client.hook_callbacks.read().await;
+        assert_eq!(callbacks.len(), 3);
     }
 }

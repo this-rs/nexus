@@ -61,6 +61,7 @@ pub use client::ClaudeSDKClient;
 pub use client_working::ClaudeSDKClientWorking;
 pub use errors::{Result, SdkError};
 pub use interactive::InteractiveClient;
+pub use interactive::{build_hook_response_json, dispatch_hook_from_registry, is_hook_callback};
 pub use internal_query::Query;
 pub use query::query;
 // Keep the old name as an alias for backward compatibility
