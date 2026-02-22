@@ -49,3 +49,6 @@ Thumbs.db
 IMPROVEMENTS.md
 
 .claude/
+
+# Embedding cache (fastembed)
+.fastembed_cache/
