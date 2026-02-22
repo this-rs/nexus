@@ -1418,16 +1418,17 @@ mod tests {
     #[tokio::test]
     async fn test_get_cli_version_with_real_cli() {
         // Try to find the real CLI — skip gracefully if not installed
-        if let Ok(cli_path) = find_claude_cli() {
-            if let Some(version) = get_cli_version(&cli_path).await {
-                assert!(
-                    version.major >= 2,
-                    "Claude CLI should be at least version 2.x, got {}",
-                    version
-                );
-            }
-            // None is acceptable if the CLI exists but --version fails
+        if let Ok(cli_path) = find_claude_cli()
+            && let Some(version) = get_cli_version(&cli_path).await
+        {
+            assert!(
+                version.major >= 2,
+                "Claude CLI should be at least version 2.x, got {}",
+                version
+            );
         }
+        // None is acceptable if the CLI exists but --version fails
+        // If CLI not found, test passes silently (no assertion)
         // If CLI not found, test passes silently (no assertion)
     }
 
