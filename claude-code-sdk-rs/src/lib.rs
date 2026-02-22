@@ -165,7 +165,9 @@ pub use transport::SubprocessTransport;
 pub use transport::subprocess::{SemVer, find_claude_cli, get_cli_version};
 
 // Re-export CLI download utilities
-pub use cli_download::{check_latest_npm_version, download_cli, get_cached_cli_path, is_cli_cached};
+pub use cli_download::{
+    check_latest_npm_version, download_cli, get_cached_cli_path, is_cli_cached,
+};
 
 // Re-export SDK MCP types
 pub use sdk_mcp::{

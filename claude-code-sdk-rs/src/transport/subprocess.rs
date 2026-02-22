@@ -655,10 +655,7 @@ impl SubprocessTransport {
             if semver < min_version {
                 warn!(
                     "⚠️  Claude CLI version {} is below minimum required version {}.{}.{}",
-                    semver,
-                    MIN_CLI_VERSION.0,
-                    MIN_CLI_VERSION.1,
-                    MIN_CLI_VERSION.2
+                    semver, MIN_CLI_VERSION.0, MIN_CLI_VERSION.1, MIN_CLI_VERSION.2
                 );
                 warn!(
                     "   Some features may not work correctly. Please upgrade with: npm install -g @anthropic-ai/claude-code@latest"

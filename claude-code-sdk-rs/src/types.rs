@@ -2551,14 +2551,8 @@ mod tests {
             options.env.get("PATH"),
             Some(&"/usr/local/bin:/usr/bin".to_string())
         );
-        assert_eq!(
-            options.env.get("RUST_LOG"),
-            Some(&"debug".to_string())
-        );
-        assert_eq!(
-            options.env.get("HOME"),
-            Some(&"/home/user".to_string())
-        );
+        assert_eq!(options.env.get("RUST_LOG"), Some(&"debug".to_string()));
+        assert_eq!(options.env.get("HOME"), Some(&"/home/user".to_string()));
     }
 
     #[test]
