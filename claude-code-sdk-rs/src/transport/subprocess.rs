@@ -24,15 +24,25 @@ const CHANNEL_BUFFER_SIZE: usize = 100;
 const MIN_CLI_VERSION: (u32, u32, u32) = (2, 0, 0);
 
 /// Simple semantic version struct
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
-struct SemVer {
-    major: u32,
-    minor: u32,
-    patch: u32,
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct SemVer {
+    /// Major version number.
+    pub major: u32,
+    /// Minor version number.
+    pub minor: u32,
+    /// Patch version number.
+    pub patch: u32,
+}
+
+impl std::fmt::Display for SemVer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}.{}.{}", self.major, self.minor, self.patch)
+    }
 }
 
 impl SemVer {
-    fn new(major: u32, minor: u32, patch: u32) -> Self {
+    /// Create a new `SemVer` from major, minor, patch components.
+    pub fn new(major: u32, minor: u32, patch: u32) -> Self {
         Self {
             major,
             minor,
@@ -41,7 +51,7 @@ impl SemVer {
     }
 
     /// Parse semantic version from string (e.g., "2.0.0" or "v2.0.0")
-    fn parse(version: &str) -> Option<Self> {
+    pub fn parse(version: &str) -> Option<Self> {
         let version = version.trim().trim_start_matches('v');
 
         // Handle versions like "@anthropic-ai/claude-code/2.0.0"
@@ -62,6 +72,39 @@ impl SemVer {
             patch: parts.get(2).and_then(|p| p.parse().ok()).unwrap_or(0),
         })
     }
+}
+
+/// Get the installed Claude CLI version by running `<cli_path> --version`.
+///
+/// Returns `None` if the CLI is not found, the command fails, or the version
+/// string cannot be parsed. Never panics. Timeout: 5 seconds.
+///
+/// # Example
+///
+/// ```rust,no_run
+/// # use nexus_claude::transport::subprocess::{get_cli_version, find_claude_cli};
+/// # async fn example() {
+/// if let Ok(cli_path) = find_claude_cli() {
+///     if let Some(version) = get_cli_version(&cli_path).await {
+///         println!("Claude CLI version: {}", version);
+///     }
+/// }
+/// # }
+/// ```
+pub async fn get_cli_version(cli_path: &std::path::Path) -> Option<SemVer> {
+    let output = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        tokio::process::Command::new(cli_path)
+            .arg("--version")
+            .stderr(std::process::Stdio::null())
+            .output(),
+    )
+    .await
+    .ok()?
+    .ok()?;
+
+    let version_str = String::from_utf8_lossy(&output.stdout);
+    SemVer::parse(version_str.trim())
 }
 
 /// Subprocess-based transport for Claude CLI
@@ -92,7 +135,12 @@ pub struct SubprocessTransport {
 impl SubprocessTransport {
     /// Create a new subprocess transport
     pub fn new(options: ClaudeCodeOptions) -> Result<Self> {
-        let cli_path = find_claude_cli()?;
+        let cli_path = if let Some(ref explicit_path) = options.cli_path {
+            debug!("Using explicit CLI path: {:?}", explicit_path);
+            explicit_path.clone()
+        } else {
+            find_claude_cli()?
+        };
         Ok(Self {
             options,
             cli_path,
@@ -112,13 +160,18 @@ impl SubprocessTransport {
     /// This version supports auto-downloading the CLI if `auto_download_cli` is enabled
     /// in the options and the CLI is not found.
     pub async fn new_async(options: ClaudeCodeOptions) -> Result<Self> {
-        let cli_path = match find_claude_cli() {
-            Ok(path) => path,
-            Err(_) if options.auto_download_cli => {
-                info!("Claude CLI not found, attempting automatic download...");
-                crate::cli_download::download_cli(None, None).await?
-            },
-            Err(e) => return Err(e),
+        let cli_path = if let Some(ref explicit_path) = options.cli_path {
+            debug!("Using explicit CLI path: {:?}", explicit_path);
+            explicit_path.clone()
+        } else {
+            match find_claude_cli() {
+                Ok(path) => path,
+                Err(_) if options.auto_download_cli => {
+                    info!("Claude CLI not found, attempting automatic download...");
+                    crate::cli_download::download_cli(None, None).await?
+                },
+                Err(e) => return Err(e),
+            }
         };
 
         Ok(Self {
@@ -596,54 +649,22 @@ impl SubprocessTransport {
 
     /// Check CLI version and warn if below minimum required version
     async fn check_cli_version(&self) -> Result<()> {
-        // Run the CLI with --version flag (with a timeout to avoid hanging)
-        let output = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            tokio::process::Command::new(&self.cli_path)
-                .arg("--version")
-                .output(),
-        )
-        .await;
-
-        let output = match output {
-            Ok(Ok(output)) => output,
-            Ok(Err(e)) => {
-                warn!("Failed to check CLI version: {}", e);
-                return Ok(()); // Don't fail connection, just warn
-            },
-            Err(_) => {
-                warn!("CLI version check timed out after 5 seconds");
-                return Ok(());
-            },
-        };
-
-        let version_str = String::from_utf8_lossy(&output.stdout);
-        let version_str = version_str.trim();
-
-        if let Some(semver) = SemVer::parse(version_str) {
+        if let Some(semver) = get_cli_version(&self.cli_path).await {
             let min_version = SemVer::new(MIN_CLI_VERSION.0, MIN_CLI_VERSION.1, MIN_CLI_VERSION.2);
 
             if semver < min_version {
                 warn!(
-                    "⚠️  Claude CLI version {}.{}.{} is below minimum required version {}.{}.{}",
-                    semver.major,
-                    semver.minor,
-                    semver.patch,
-                    MIN_CLI_VERSION.0,
-                    MIN_CLI_VERSION.1,
-                    MIN_CLI_VERSION.2
+                    "⚠️  Claude CLI version {} is below minimum required version {}.{}.{}",
+                    semver, MIN_CLI_VERSION.0, MIN_CLI_VERSION.1, MIN_CLI_VERSION.2
                 );
                 warn!(
                     "   Some features may not work correctly. Please upgrade with: npm install -g @anthropic-ai/claude-code@latest"
                 );
             } else {
-                info!(
-                    "Claude CLI version: {}.{}.{}",
-                    semver.major, semver.minor, semver.patch
-                );
+                info!("Claude CLI version: {}", semver);
             }
         } else {
-            debug!("Could not parse CLI version: {}", version_str);
+            debug!("Could not determine CLI version for {:?}", self.cli_path);
         }
 
         Ok(())
@@ -1378,5 +1399,42 @@ mod tests {
         assert!(SemVer::new(1, 9, 9) < min_version);
         assert!(SemVer::new(2, 0, 0) >= min_version);
         assert!(SemVer::new(2, 1, 0) >= min_version);
+    }
+
+    #[test]
+    fn test_semver_display() {
+        assert_eq!(SemVer::new(2, 5, 1).to_string(), "2.5.1");
+        assert_eq!(SemVer::new(0, 0, 0).to_string(), "0.0.0");
+        assert_eq!(SemVer::new(10, 20, 30).to_string(), "10.20.30");
+    }
+
+    #[test]
+    fn test_semver_clone() {
+        let v1 = SemVer::new(2, 5, 1);
+        let v2 = v1.clone();
+        assert_eq!(v1, v2);
+    }
+
+    #[tokio::test]
+    async fn test_get_cli_version_with_real_cli() {
+        // Try to find the real CLI — skip gracefully if not installed
+        if let Ok(cli_path) = find_claude_cli()
+            && let Some(version) = get_cli_version(&cli_path).await
+        {
+            assert!(
+                version.major >= 2,
+                "Claude CLI should be at least version 2.x, got {}",
+                version
+            );
+        }
+        // None is acceptable if the CLI exists but --version fails
+        // If CLI not found, test passes silently (no assertion)
+        // If CLI not found, test passes silently (no assertion)
+    }
+
+    #[tokio::test]
+    async fn test_get_cli_version_nonexistent_binary() {
+        let result = get_cli_version(std::path::Path::new("/nonexistent/binary/claude")).await;
+        assert!(result.is_none(), "Nonexistent binary should return None");
     }
 }

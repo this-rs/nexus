@@ -394,6 +394,47 @@ async fn install_cli_windows(
     })
 }
 
+/// Query the npm registry for the latest published version of `@anthropic-ai/claude-code`.
+///
+/// Returns `None` if the registry is unreachable, the response is malformed,
+/// or the version string cannot be parsed. Never panics.
+///
+/// # Example
+///
+/// ```rust,no_run
+/// # async fn example() {
+/// if let Some(latest) = nexus_claude::cli_download::check_latest_npm_version().await {
+///     println!("Latest Claude Code CLI: {}", latest);
+/// }
+/// # }
+/// ```
+pub async fn check_latest_npm_version() -> Option<crate::transport::subprocess::SemVer> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .ok()?;
+
+    let resp = client
+        .get("https://registry.npmjs.org/@anthropic-ai/claude-code/latest")
+        .header("Accept", "application/json")
+        .send()
+        .await
+        .ok()?;
+
+    if !resp.status().is_success() {
+        debug!(
+            "npm registry returned status {} for version check",
+            resp.status()
+        );
+        return None;
+    }
+
+    let body = resp.text().await.ok()?;
+    let json: serde_json::Value = serde_json::from_str(&body).ok()?;
+    let version = json.get("version")?.as_str()?;
+    crate::transport::subprocess::SemVer::parse(version)
+}
+
 /// Ensure the CLI is available, downloading if necessary
 ///
 /// This is the main entry point for CLI management.
@@ -521,5 +562,15 @@ mod tests {
         } else {
             assert_eq!(cli_name, "claude");
         }
+    }
+
+    #[tokio::test]
+    #[ignore] // Requires network access — run with `cargo test -- --ignored`
+    async fn test_check_latest_npm_version_network() {
+        let version = check_latest_npm_version().await;
+        // Should successfully parse a version from npm
+        assert!(version.is_some(), "Should get a version from npm registry");
+        let v = version.unwrap();
+        assert!(v.major >= 2, "Latest Claude CLI should be >= 2.0.0");
     }
 }

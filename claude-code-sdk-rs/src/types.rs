@@ -1005,6 +1005,13 @@ pub struct ClaudeCodeOptions {
     /// ```
     pub auto_download_cli: bool,
 
+    /// Explicit path to the Claude CLI binary
+    ///
+    /// When set, the SDK will use this path directly instead of searching
+    /// via `find_claude_cli()`. Useful when the CLI is installed in a
+    /// non-standard location.
+    pub cli_path: Option<PathBuf>,
+
     // ========== Memory System Options ==========
     /// Enable persistent memory for cross-conversation context
     ///
@@ -1465,6 +1472,69 @@ impl ClaudeCodeOptionsBuilder {
     /// ```
     pub fn auto_download_cli(mut self, enable: bool) -> Self {
         self.options.auto_download_cli = enable;
+        self
+    }
+
+    // ========== Environment & CLI Path ==========
+
+    /// Set a single environment variable for the Claude Code subprocess
+    ///
+    /// The variable will be passed to the child process via `Command::env()`.
+    /// Calling this multiple times accumulates entries. If the same key is set
+    /// twice, the last value wins.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// # use nexus_claude::ClaudeCodeOptions;
+    /// let options = ClaudeCodeOptions::builder()
+    ///     .env("PATH", "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin")
+    ///     .env("RUST_LOG", "debug")
+    ///     .build();
+    /// ```
+    pub fn env(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.options.env.insert(key.into(), value.into());
+        self
+    }
+
+    /// Set multiple environment variables for the Claude Code subprocess
+    ///
+    /// Merges the provided map into the existing environment variables.
+    /// Existing keys are overwritten by the new values.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// # use nexus_claude::ClaudeCodeOptions;
+    /// # use std::collections::HashMap;
+    /// let mut vars = HashMap::new();
+    /// vars.insert("PATH".into(), "/usr/local/bin:/usr/bin".into());
+    /// vars.insert("HOME".into(), "/home/user".into());
+    /// let options = ClaudeCodeOptions::builder()
+    ///     .envs(vars)
+    ///     .build();
+    /// ```
+    pub fn envs(mut self, vars: HashMap<String, String>) -> Self {
+        self.options.env.extend(vars);
+        self
+    }
+
+    /// Set an explicit path to the Claude CLI binary
+    ///
+    /// When set, the SDK will use this path directly instead of searching
+    /// via `find_claude_cli()`. Useful when the CLI is installed in a
+    /// non-standard location or when you want to pin a specific binary.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// # use nexus_claude::ClaudeCodeOptions;
+    /// let options = ClaudeCodeOptions::builder()
+    ///     .cli_path("/opt/homebrew/bin/claude")
+    ///     .build();
+    /// ```
+    pub fn cli_path(mut self, path: impl Into<PathBuf>) -> Self {
+        self.options.cli_path = Some(path.into());
         self
     }
 
@@ -2452,5 +2522,82 @@ mod tests {
         // Note: auto_download_cli defaults to false (Rust bool default)
         // Users should explicitly enable it with .auto_download_cli(true)
         assert!(!options.auto_download_cli);
+        assert!(options.cli_path.is_none());
+    }
+
+    #[test]
+    fn test_builder_env_single() {
+        let options = ClaudeCodeOptions::builder()
+            .env("PATH", "/usr/local/bin:/usr/bin:/bin")
+            .build();
+
+        assert_eq!(options.env.len(), 1);
+        assert_eq!(
+            options.env.get("PATH"),
+            Some(&"/usr/local/bin:/usr/bin:/bin".to_string())
+        );
+    }
+
+    #[test]
+    fn test_builder_env_multiple() {
+        let options = ClaudeCodeOptions::builder()
+            .env("PATH", "/usr/local/bin:/usr/bin")
+            .env("RUST_LOG", "debug")
+            .env("HOME", "/home/user")
+            .build();
+
+        assert_eq!(options.env.len(), 3);
+        assert_eq!(
+            options.env.get("PATH"),
+            Some(&"/usr/local/bin:/usr/bin".to_string())
+        );
+        assert_eq!(options.env.get("RUST_LOG"), Some(&"debug".to_string()));
+        assert_eq!(options.env.get("HOME"), Some(&"/home/user".to_string()));
+    }
+
+    #[test]
+    fn test_builder_env_overwrite() {
+        let options = ClaudeCodeOptions::builder()
+            .env("PATH", "/first")
+            .env("PATH", "/second")
+            .build();
+
+        assert_eq!(options.env.len(), 1);
+        assert_eq!(options.env.get("PATH"), Some(&"/second".to_string()));
+    }
+
+    #[test]
+    fn test_builder_envs_hashmap() {
+        let mut vars = HashMap::new();
+        vars.insert("PATH".into(), "/usr/bin".into());
+        vars.insert("HOME".into(), "/home/user".into());
+
+        let options = ClaudeCodeOptions::builder()
+            .env("EXISTING", "value")
+            .envs(vars)
+            .build();
+
+        assert_eq!(options.env.len(), 3);
+        assert_eq!(options.env.get("EXISTING"), Some(&"value".to_string()));
+        assert_eq!(options.env.get("PATH"), Some(&"/usr/bin".to_string()));
+        assert_eq!(options.env.get("HOME"), Some(&"/home/user".to_string()));
+    }
+
+    #[test]
+    fn test_builder_cli_path() {
+        let options = ClaudeCodeOptions::builder()
+            .cli_path("/opt/homebrew/bin/claude")
+            .build();
+
+        assert_eq!(
+            options.cli_path,
+            Some(PathBuf::from("/opt/homebrew/bin/claude"))
+        );
+    }
+
+    #[test]
+    fn test_builder_cli_path_default_none() {
+        let options = ClaudeCodeOptions::builder().build();
+        assert!(options.cli_path.is_none());
     }
 }
