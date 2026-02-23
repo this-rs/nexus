@@ -161,12 +161,12 @@ async fn install_cli_for_platform(
 /// The official Anthropic install script typically installs to `~/.local/bin/claude`.
 /// This function checks common locations that may not be in the current process PATH
 /// (especially when running inside a Tauri desktop app).
-#[cfg(unix)]
+#[cfg(all(unix, feature = "auto-download"))]
 fn find_cli_in_known_locations() -> Option<PathBuf> {
     let home = dirs::home_dir()?;
     let known_paths = [
         home.join(".local/bin/claude"),
-        home.join(".claude/local/bin/claude"),
+        home.join(".claude/local/claude"),
         PathBuf::from("/usr/local/bin/claude"),
     ];
 
