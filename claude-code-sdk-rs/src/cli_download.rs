@@ -157,6 +157,9 @@ async fn install_cli_for_platform(
 }
 
 /// Install CLI on Unix systems (macOS, Linux)
+///
+/// Tries the official Anthropic install script first (no Node.js dependency),
+/// then falls back to npm if the script fails.
 #[cfg(all(unix, feature = "auto-download"))]
 async fn install_cli_unix(
     version: &str,
@@ -169,9 +172,63 @@ async fn install_cli_unix(
         progress(0, None);
     }
 
-    // Method 1: Try using npm to install and copy
+    // Method 1: Try using the official install script (curl — no Node.js required)
+    debug!("Attempting to install via official Anthropic install script...");
+
+    let install_script_url = "https://claude.ai/install.sh";
+
+    let script_result: Option<PathBuf> = async {
+        let client = reqwest::Client::new();
+        let response = client.get(install_script_url).send().await.ok()?;
+
+        if !response.status().is_success() {
+            warn!("Install script HTTP {}", response.status());
+            return None;
+        }
+
+        let script_content = response.text().await.ok()?;
+
+        let parent_dir = target_path.parent()?;
+
+        let output = Command::new("bash")
+            .arg("-c")
+            .arg(&script_content)
+            .env("CLAUDE_INSTALL_DIR", parent_dir)
+            .output()
+            .await
+            .ok()?;
+
+        if output.status.success() {
+            // The official script installs to ~/.local/bin/claude — check both
+            // the target_path (cc-sdk cache) and the standard install location.
+            if target_path.exists() {
+                info!("Official install script succeeded → {}", target_path.display());
+                return Some(target_path.clone());
+            }
+
+            // The script may have installed to ~/.local/bin/claude instead of target_path.
+            // Try to find it via find_claude_cli after install.
+            if let Ok(found) = crate::find_claude_cli() {
+                info!("Official install script succeeded → found CLI at {}", found.display());
+                return Some(found);
+            }
+        } else {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            warn!("Official install script failed: {}", stderr);
+        }
+        None
+    }.await;
+
+    if let Some(path) = script_result {
+        if let Some(ref progress) = on_progress {
+            progress(100, Some(100));
+        }
+        return Ok(path);
+    }
+
+    // Method 2: Fallback — try using npm to install and copy
     if which::which("npm").is_ok() {
-        debug!("Attempting to install via npm...");
+        debug!("Falling back to npm install...");
 
         let npm_package = if version == "latest" {
             "@anthropic-ai/claude-code".to_string()
@@ -233,57 +290,15 @@ async fn install_cli_unix(
         let _ = std::fs::remove_dir_all(&temp_dir);
     }
 
-    // Method 2: Try using the official install script
-    debug!("Attempting to install via official script...");
-
-    let install_script_url = "https://claude.ai/install.sh";
-
-    let client = reqwest::Client::new();
-    let response = client.get(install_script_url).send().await.map_err(|e| {
-        SdkError::ConnectionError(format!("Failed to download install script: {}", e))
-    })?;
-
-    if !response.status().is_success() {
-        return Err(SdkError::ConnectionError(format!(
-            "Failed to download install script: HTTP {}",
-            response.status()
-        )));
-    }
-
-    let script_content = response
-        .text()
-        .await
-        .map_err(|e| SdkError::ConnectionError(format!("Failed to read install script: {}", e)))?;
-
-    let parent_dir = target_path
-        .parent()
-        .ok_or_else(|| SdkError::ConfigError("Invalid target path".to_string()))?;
-
-    let output = Command::new("bash")
-        .arg("-c")
-        .arg(&script_content)
-        .env("CLAUDE_INSTALL_DIR", parent_dir)
-        .output()
-        .await
-        .map_err(SdkError::ProcessError)?;
-
-    if output.status.success() && target_path.exists() {
-        if let Some(ref progress) = on_progress {
-            progress(100, Some(100));
-        }
-        return Ok(target_path.clone());
-    }
-
     Err(SdkError::CliNotFound {
         searched_paths: format!(
             "Failed to automatically download Claude Code CLI.\n\
             Please install manually:\n\n\
-            Option 1 (npm):\n\
-            npm install -g @anthropic-ai/claude-code\n\n\
-            Option 2 (official script):\n\
+            Option 1 (recommended — official script):\n\
             curl -fsSL https://claude.ai/install.sh | bash\n\n\
-            Error details: {}",
-            String::from_utf8_lossy(&output.stderr)
+            Option 2 (npm):\n\
+            npm install -g @anthropic-ai/claude-code\n\n\
+            Error details: install script and npm both failed"
         ),
     })
 }
