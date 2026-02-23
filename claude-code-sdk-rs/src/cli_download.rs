@@ -156,6 +156,30 @@ async fn install_cli_for_platform(
     }
 }
 
+/// Check known installation locations for the Claude CLI binary.
+///
+/// The official Anthropic install script typically installs to `~/.local/bin/claude`.
+/// This function checks common locations that may not be in the current process PATH
+/// (especially when running inside a Tauri desktop app).
+#[cfg(unix)]
+fn find_cli_in_known_locations() -> Option<PathBuf> {
+    let home = dirs::home_dir()?;
+    let known_paths = [
+        home.join(".local/bin/claude"),
+        home.join(".claude/local/bin/claude"),
+        PathBuf::from("/usr/local/bin/claude"),
+    ];
+
+    for path in &known_paths {
+        if path.exists() && path.is_file() {
+            info!("CLI found in known location: {}", path.display());
+            return Some(path.clone());
+        }
+    }
+
+    None
+}
+
 /// Install CLI on Unix systems (macOS, Linux)
 ///
 /// Tries the official Anthropic install script first (no Node.js dependency),
@@ -202,14 +226,31 @@ async fn install_cli_unix(
             // The official script installs to ~/.local/bin/claude — check both
             // the target_path (cc-sdk cache) and the standard install location.
             if target_path.exists() {
-                info!("Official install script succeeded → {}", target_path.display());
+                info!(
+                    "Official install script succeeded → {}",
+                    target_path.display()
+                );
                 return Some(target_path.clone());
             }
 
             // The script may have installed to ~/.local/bin/claude instead of target_path.
-            // Try to find it via find_claude_cli after install.
+            // Try to find it via find_claude_cli (process PATH) after install.
             if let Ok(found) = crate::find_claude_cli() {
-                info!("Official install script succeeded → found CLI at {}", found.display());
+                info!(
+                    "Official install script succeeded → found CLI at {}",
+                    found.display()
+                );
+                return Some(found);
+            }
+
+            // Last resort: check known installation locations directly.
+            // This handles the case where the Tauri desktop process PATH does not
+            // include ~/.local/bin (common on macOS/Linux desktop environments).
+            if let Some(found) = find_cli_in_known_locations() {
+                info!(
+                    "Official install script succeeded → found CLI in known location: {}",
+                    found.display()
+                );
                 return Some(found);
             }
         } else {
@@ -217,7 +258,8 @@ async fn install_cli_unix(
             warn!("Official install script failed: {}", stderr);
         }
         None
-    }.await;
+    }
+    .await;
 
     if let Some(path) = script_result {
         if let Some(ref progress) = on_progress {
@@ -291,15 +333,14 @@ async fn install_cli_unix(
     }
 
     Err(SdkError::CliNotFound {
-        searched_paths: format!(
-            "Failed to automatically download Claude Code CLI.\n\
+        searched_paths: "Failed to automatically download Claude Code CLI.\n\
             Please install manually:\n\n\
             Option 1 (recommended — official script):\n\
             curl -fsSL https://claude.ai/install.sh | bash\n\n\
             Option 2 (npm):\n\
             npm install -g @anthropic-ai/claude-code\n\n\
             Error details: install script and npm both failed"
-        ),
+            .to_string(),
     })
 }
 
