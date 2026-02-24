@@ -180,6 +180,36 @@ fn find_cli_in_known_locations() -> Option<PathBuf> {
     None
 }
 
+/// Check known installation locations for the Claude CLI binary on Windows.
+///
+/// Checks common Windows installation paths that may not be in the current process PATH
+/// (especially when running inside a Tauri desktop app).
+#[cfg(all(windows, feature = "auto-download"))]
+fn find_cli_in_known_locations() -> Option<PathBuf> {
+    let known_paths: Vec<PathBuf> = vec![
+        // Anthropic official installer (PowerShell)
+        dirs::data_local_dir().map(|d| d.join("Programs").join("claude").join("claude.exe")),
+        // npm global install (%APPDATA%\npm\claude.cmd)
+        dirs::config_dir().map(|d| d.join("npm").join("claude.cmd")),
+        // User-local compat path
+        dirs::home_dir().map(|h| h.join(".local").join("bin").join("claude.exe")),
+        // Claude local directory
+        dirs::home_dir().map(|h| h.join(".claude").join("local").join("claude.exe")),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+
+    for path in &known_paths {
+        if path.exists() && path.is_file() {
+            info!("CLI found in known Windows location: {}", path.display());
+            return Some(path.clone());
+        }
+    }
+
+    None
+}
+
 /// Install CLI on Unix systems (macOS, Linux)
 ///
 /// Tries the official Anthropic install script first (no Node.js dependency),
@@ -434,6 +464,23 @@ async fn install_cli_windows(
             progress(100, Some(100));
         }
         return Ok(target_path.clone());
+    }
+
+    // Fallback: check known install locations (the install script may have
+    // succeeded but installed to a location not in PATH)
+    if let Some(found) = find_cli_in_known_locations() {
+        if let Some(ref progress) = on_progress {
+            progress(100, Some(100));
+        }
+        return Ok(found);
+    }
+
+    // Also try find_claude_cli() which checks PATH + SDK cache
+    if let Ok(found) = crate::transport::subprocess::find_claude_cli() {
+        if let Some(ref progress) = on_progress {
+            progress(100, Some(100));
+        }
+        return Ok(found);
     }
 
     Err(SdkError::CliNotFound {

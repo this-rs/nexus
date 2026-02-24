@@ -1128,7 +1128,12 @@ impl Drop for SubprocessTransport {
 /// 3. Common installation locations
 pub fn find_claude_cli() -> Result<PathBuf> {
     // First check if it's in PATH - try both 'claude' and 'claude-code'
-    for cmd_name in &["claude", "claude-code"] {
+    #[cfg(unix)]
+    let cmd_names: &[&str] = &["claude", "claude-code"];
+    #[cfg(windows)]
+    let cmd_names: &[&str] = &["claude", "claude.exe", "claude-code", "claude-code.exe"];
+
+    for cmd_name in cmd_names {
         if let Ok(path) = which::which(cmd_name) {
             debug!("Found Claude CLI in PATH at: {}", path.display());
             return Ok(path);
@@ -1149,6 +1154,7 @@ pub fn find_claude_cli() -> Result<PathBuf> {
         searched_paths: "Unable to determine home directory".into(),
     })?;
 
+    #[cfg(unix)]
     let locations = vec![
         // npm global installations
         home.join(".npm-global/bin/claude"),
@@ -1169,6 +1175,42 @@ pub fn find_claude_cli() -> Result<PathBuf> {
         // Claude local directory
         home.join(".claude/local/claude"),
     ];
+
+    #[cfg(windows)]
+    let locations = {
+        let mut locs = vec![
+            // npm global (via %APPDATA%\npm\)
+            home.join("AppData")
+                .join("Roaming")
+                .join("npm")
+                .join("claude.cmd"),
+            home.join("AppData")
+                .join("Roaming")
+                .join("npm")
+                .join("claude"),
+            // Anthropic official installer
+            home.join("AppData")
+                .join("Local")
+                .join("Programs")
+                .join("claude")
+                .join("claude.exe"),
+            // User-local compat
+            home.join(".local").join("bin").join("claude.exe"),
+            home.join(".local").join("bin").join("claude"),
+            // Yarn
+            home.join(".yarn").join("bin").join("claude.cmd"),
+            // Claude local directory
+            home.join(".claude").join("local").join("claude.exe"),
+        ];
+        // Also add via dirs:: for robustness (in case AppData is relocated)
+        if let Some(config_dir) = dirs::config_dir() {
+            locs.push(config_dir.join("npm").join("claude.cmd"));
+        }
+        if let Some(local_dir) = dirs::data_local_dir() {
+            locs.push(local_dir.join("Programs").join("claude").join("claude.exe"));
+        }
+        locs
+    };
 
     let mut searched = Vec::new();
     for path in &locations {
