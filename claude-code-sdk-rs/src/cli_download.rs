@@ -188,17 +188,13 @@ fn find_cli_in_known_locations() -> Option<PathBuf> {
 fn find_cli_in_known_locations() -> Option<PathBuf> {
     let known_paths: Vec<PathBuf> = vec![
         // Anthropic official installer (PowerShell)
-        dirs::data_local_dir()
-            .map(|d| d.join("Programs").join("claude").join("claude.exe")),
+        dirs::data_local_dir().map(|d| d.join("Programs").join("claude").join("claude.exe")),
         // npm global install (%APPDATA%\npm\claude.cmd)
-        dirs::config_dir()
-            .map(|d| d.join("npm").join("claude.cmd")),
+        dirs::config_dir().map(|d| d.join("npm").join("claude.cmd")),
         // User-local compat path
-        dirs::home_dir()
-            .map(|h| h.join(".local").join("bin").join("claude.exe")),
+        dirs::home_dir().map(|h| h.join(".local").join("bin").join("claude.exe")),
         // Claude local directory
-        dirs::home_dir()
-            .map(|h| h.join(".claude").join("local").join("claude.exe")),
+        dirs::home_dir().map(|h| h.join(".claude").join("local").join("claude.exe")),
     ]
     .into_iter()
     .flatten()

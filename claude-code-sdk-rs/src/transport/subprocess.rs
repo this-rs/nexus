@@ -1180,10 +1180,20 @@ pub fn find_claude_cli() -> Result<PathBuf> {
     let locations = {
         let mut locs = vec![
             // npm global (via %APPDATA%\npm\)
-            home.join("AppData").join("Roaming").join("npm").join("claude.cmd"),
-            home.join("AppData").join("Roaming").join("npm").join("claude"),
+            home.join("AppData")
+                .join("Roaming")
+                .join("npm")
+                .join("claude.cmd"),
+            home.join("AppData")
+                .join("Roaming")
+                .join("npm")
+                .join("claude"),
             // Anthropic official installer
-            home.join("AppData").join("Local").join("Programs").join("claude").join("claude.exe"),
+            home.join("AppData")
+                .join("Local")
+                .join("Programs")
+                .join("claude")
+                .join("claude.exe"),
             // User-local compat
             home.join(".local").join("bin").join("claude.exe"),
             home.join(".local").join("bin").join("claude"),
