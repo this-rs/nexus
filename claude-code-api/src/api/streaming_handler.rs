@@ -1,6 +1,7 @@
 //! Enhanced streaming handler with real chunking support
 
 use crate::{
+    core::interactive_session::InteractiveSessionManager,
     models::{
         claude::ClaudeCodeOutput,
         openai::{
@@ -13,17 +14,102 @@ use crate::{
 use chrono::Utc;
 use futures::stream::{Stream, StreamExt};
 use std::pin::Pin;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use tokio::sync::mpsc;
-use tracing::debug;
+use tracing::{debug, info, warn};
 use uuid::Uuid;
 
-/// Handle streaming response with text chunking for better UX
+/// Guard that auto-interrupts the CLI session when the SSE stream is dropped.
+///
+/// When the HTTP client disconnects (Escape, close tab, network drop), Axum
+/// drops the SSE response stream. This guard detects that drop and sends an
+/// interrupt to the CLI process so it stops generating tokens.
+///
+/// The guard is "defused" (no interrupt) when the stream completes normally
+/// (i.e. a `result` message was received from the CLI).
+struct SseDisconnectGuard {
+    session_manager: Arc<InteractiveSessionManager>,
+    conversation_id: String,
+    /// Set to `true` when the stream completes normally (result received).
+    /// When `false` at drop time, the guard fires an interrupt.
+    completed_normally: Arc<AtomicBool>,
+}
+
+impl Drop for SseDisconnectGuard {
+    fn drop(&mut self) {
+        if self.completed_normally.load(Ordering::SeqCst) {
+            debug!(
+                "SSE stream completed normally for session {}, no interrupt needed",
+                self.conversation_id
+            );
+            return;
+        }
+
+        // Client disconnected before the stream finished — interrupt the CLI
+        let session_manager = self.session_manager.clone();
+        let conversation_id = self.conversation_id.clone();
+
+        warn!(
+            "SSE client disconnected for session {}, sending interrupt to CLI",
+            conversation_id
+        );
+
+        // We can't await in Drop, so spawn a task.
+        // interrupt_session() is synchronous (uses read lock + try_send),
+        // but we still spawn to avoid blocking the drop.
+        tokio::spawn(async move {
+            match session_manager.interrupt_session(&conversation_id) {
+                Ok(true) => {
+                    info!(
+                        "Auto-interrupted session {} on SSE disconnect",
+                        conversation_id
+                    );
+                },
+                Ok(false) => {
+                    debug!(
+                        "Session {} not found for auto-interrupt (already closed?)",
+                        conversation_id
+                    );
+                },
+                Err(e) => {
+                    warn!(
+                        "Failed to auto-interrupt session {} on SSE disconnect: {}",
+                        conversation_id, e
+                    );
+                },
+            }
+        });
+    }
+}
+
+/// Handle streaming response with text chunking for better UX.
+///
+/// When `session_manager` and `conversation_id` are provided, an
+/// [`SseDisconnectGuard`] is installed that auto-interrupts the CLI if the
+/// HTTP client drops the SSE connection before the stream finishes.
 pub async fn handle_enhanced_streaming_response(
     model: String,
     mut rx: mpsc::Receiver<ClaudeCodeOutput>,
+    session_manager: Option<Arc<InteractiveSessionManager>>,
+    conversation_id: Option<String>,
 ) -> Pin<Box<dyn Stream<Item = ChatCompletionStreamResponse> + Send>> {
     let stream = async_stream::stream! {
         let stream_id = Uuid::new_v4().to_string();
+
+        // Install disconnect guard if session info is provided.
+        // The guard is held alive for the lifetime of the stream.
+        // If the stream is dropped (client disconnect), the guard fires.
+        let completed_flag = Arc::new(AtomicBool::new(false));
+        let _guard = session_manager.zip(conversation_id).map(|(sm, cid)| {
+            SseDisconnectGuard {
+                session_manager: sm,
+                conversation_id: cid,
+                completed_normally: completed_flag.clone(),
+            }
+        });
 
         // First, send the initial message with role
         yield ChatCompletionStreamResponse {
@@ -150,6 +236,9 @@ pub async fn handle_enhanced_streaming_response(
                     }
                 }
                 "result" => {
+                    // Defuse the disconnect guard — stream completed normally
+                    completed_flag.store(true, Ordering::SeqCst);
+
                     // Send the final chunk with finish_reason
                     yield ChatCompletionStreamResponse {
                         id: stream_id.clone(),
