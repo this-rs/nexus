@@ -115,6 +115,16 @@ pub trait Transport: Send + Sync {
         None
     }
 
+    /// Return the PID of the CLI subprocess, if available.
+    ///
+    /// This is used to send Unix signals (e.g., SIGINT) to the CLI's process
+    /// group during interrupt, which cascades to all child processes (bash,
+    /// find, sleep, etc.). Returns `None` for transports without a subprocess
+    /// (e.g., mock) or if the process has not been spawned yet.
+    fn child_pid(&self) -> Option<u32> {
+        None
+    }
+
     /// Check if the transport is connected
     #[allow(dead_code)]
     fn is_connected(&self) -> bool;

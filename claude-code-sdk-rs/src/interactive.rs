@@ -97,6 +97,20 @@ impl InteractiveClient {
         self.hook_callbacks.clone()
     }
 
+    /// Return the PID of the CLI subprocess, if available.
+    ///
+    /// This is used to send Unix signals (e.g., SIGINT) to the CLI's process
+    /// group during interrupt, cascading to all child processes (bash, find,
+    /// sleep, etc.). Call this **once** after `connect()` and store the result —
+    /// the PID is stable for the lifetime of the connection.
+    ///
+    /// Returns `None` for transports without a subprocess (mock) or before
+    /// `connect()` has been called.
+    pub async fn child_pid(&self) -> Option<u32> {
+        let transport = self.transport.lock().await;
+        transport.child_pid()
+    }
+
     /// Clone the stdin sender for writing control responses without holding
     /// the client lock. This allows `send_permission_response` to write to
     /// the CLI subprocess while `stream_response` holds the client lock.

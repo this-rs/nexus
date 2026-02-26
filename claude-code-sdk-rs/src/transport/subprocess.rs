@@ -1080,6 +1080,10 @@ impl Transport for SubprocessTransport {
         }
     }
 
+    fn child_pid(&self) -> Option<u32> {
+        self.child.as_ref().and_then(|c| c.id())
+    }
+
     fn is_connected(&self) -> bool {
         self.state == TransportState::Connected
     }

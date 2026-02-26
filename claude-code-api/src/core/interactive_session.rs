@@ -642,9 +642,13 @@ impl InteractiveSessionManager {
 
     /// Interrupt the active request in a session without closing it.
     ///
-    /// Sends a `control_request` interrupt to the CLI via `stdin_tx` (lock-free,
-    /// does not require the interaction lock). The CLI will abort the current
-    /// tool execution (Bash, Read, etc.) and emit a `result` message.
+    /// Uses a dual mechanism for maximum reliability:
+    /// 1. Sends a `control_request` interrupt to the CLI via `stdin_tx` (lock-free)
+    /// 2. Sends SIGINT to the CLI's process group to kill child processes (find, sleep, etc.)
+    ///
+    /// The control_request tells the CLI to abort the current tool execution.
+    /// The SIGINT cascades to all child processes in the same process group
+    /// (created via `setpgid(0, 0)` at spawn time), ensuring no orphans.
     ///
     /// Returns `Ok(true)` if the session was found and the interrupt was sent,
     /// `Ok(false)` if no session exists for this conversation_id.
@@ -661,33 +665,53 @@ impl InteractiveSessionManager {
             })
             .to_string();
 
-            // Send via stdin_tx — lock-free, non-blocking
-            match session.stdin_tx.try_send(interrupt_json) {
+            // 1. Send control_request via stdin_tx — lock-free, non-blocking
+            let stdin_result = match session.stdin_tx.try_send(interrupt_json) {
                 Ok(()) => {
                     info!(
-                        "Sent interrupt to session: {} (conversation_id={})",
+                        "Sent interrupt control_request to session: {} (conversation_id={})",
                         session.id, conversation_id
                     );
-                    Ok(true)
+                    true
                 },
                 Err(mpsc::error::TrySendError::Full(_)) => {
                     warn!(
                         "Stdin channel full for session {}, interrupt may be delayed",
                         conversation_id
                     );
-                    // Channel is full but message will be processed eventually
-                    Ok(true)
+                    true
                 },
                 Err(mpsc::error::TrySendError::Closed(_)) => {
                     warn!(
                         "Stdin channel closed for session {}, process may have died",
                         conversation_id
                     );
-                    Err(anyhow!(
-                        "Session {} stdin channel is closed",
-                        conversation_id
-                    ))
+                    false
                 },
+            };
+
+            // 2. Send SIGINT to the process group — kills child processes (find, sleep, etc.)
+            // The CLI process (group leader) handles SIGINT gracefully by aborting the
+            // current tool. Child processes receive SIGINT and terminate immediately.
+            #[cfg(unix)]
+            if let Some(pid) = session.child.id() {
+                unsafe {
+                    let pgid = -(pid as i32);
+                    libc::kill(pgid, libc::SIGINT);
+                }
+                info!(
+                    "Sent SIGINT to process group (pid={}) for session: {} (conversation_id={})",
+                    pid, session.id, conversation_id
+                );
+            }
+
+            if stdin_result {
+                Ok(true)
+            } else {
+                Err(anyhow!(
+                    "Session {} stdin channel is closed",
+                    conversation_id
+                ))
             }
         } else {
             Ok(false)
