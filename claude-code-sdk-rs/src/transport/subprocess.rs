@@ -1109,7 +1109,10 @@ impl Transport for SubprocessTransport {
                 unsafe {
                     libc::kill(pgid, libc::SIGINT);
                 }
-                debug!("Sent SIGINT to CLI process group (pid={}, pgid={})", pid, pgid);
+                debug!(
+                    "Sent SIGINT to CLI process group (pid={}, pgid={})",
+                    pid, pgid
+                );
 
                 // Wait 200ms for graceful shutdown
                 match tokio::time::timeout(std::time::Duration::from_millis(200), child.wait())
@@ -1140,7 +1143,10 @@ impl Transport for SubprocessTransport {
                 unsafe {
                     libc::kill(pgid, libc::SIGTERM);
                 }
-                debug!("Sent SIGTERM to CLI process group (pid={}, pgid={})", pid, pgid);
+                debug!(
+                    "Sent SIGTERM to CLI process group (pid={}, pgid={})",
+                    pid, pgid
+                );
 
                 match tokio::time::timeout(std::time::Duration::from_millis(500), child.wait())
                     .await
@@ -1173,7 +1179,10 @@ impl Transport for SubprocessTransport {
                 #[cfg(unix)]
                 if let Some(pid) = child.id() {
                     let pgid = -(pid as i32);
-                    warn!("Sending SIGKILL to CLI process group (pid={}, pgid={})", pid, pgid);
+                    warn!(
+                        "Sending SIGKILL to CLI process group (pid={}, pgid={})",
+                        pid, pgid
+                    );
                     unsafe {
                         libc::kill(pgid, libc::SIGKILL);
                     }

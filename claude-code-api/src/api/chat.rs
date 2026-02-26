@@ -1,4 +1,8 @@
-use axum::{Json, extract::{Path, State}, response::IntoResponse};
+use axum::{
+    Json,
+    extract::{Path, State},
+    response::IntoResponse,
+};
 use chrono::Utc;
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -221,21 +225,27 @@ pub async fn interrupt_session(
             info!("Session interrupted: {}", conversation_id);
             (
                 axum::http::StatusCode::OK,
-                Json(serde_json::json!({"status": "interrupted", "conversation_id": conversation_id})),
+                Json(
+                    serde_json::json!({"status": "interrupted", "conversation_id": conversation_id}),
+                ),
             )
         },
         Ok(false) => {
             info!("Session not found for interrupt: {}", conversation_id);
             (
                 axum::http::StatusCode::NOT_FOUND,
-                Json(serde_json::json!({"error": "session not found", "conversation_id": conversation_id})),
+                Json(
+                    serde_json::json!({"error": "session not found", "conversation_id": conversation_id}),
+                ),
             )
         },
         Err(e) => {
             error!("Failed to interrupt session {}: {}", conversation_id, e);
             (
                 axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": e.to_string(), "conversation_id": conversation_id})),
+                Json(
+                    serde_json::json!({"error": e.to_string(), "conversation_id": conversation_id}),
+                ),
             )
         },
     }
@@ -387,13 +397,9 @@ async fn handle_streaming_response(
     // Use enhanced streaming with text chunking for better UX.
     // Pass session_manager + conversation_id so the disconnect guard
     // can auto-interrupt the CLI if the SSE client drops the connection.
-    let stream = handle_enhanced_streaming_response(
-        model,
-        rx,
-        Some(session_manager),
-        Some(conversation_id),
-    )
-    .await;
+    let stream =
+        handle_enhanced_streaming_response(model, rx, Some(session_manager), Some(conversation_id))
+            .await;
     Ok(create_sse_stream(stream))
 }
 
