@@ -633,6 +633,18 @@ impl SubprocessTransport {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 
+        // Create a new process group so we can kill the entire tree
+        // (CLI + its child processes like bash, find, sleep, etc.)
+        // Using setpgid(0, 0) makes the child the leader of a new group.
+        #[cfg(unix)]
+        // SAFETY: setpgid is async-signal-safe (POSIX.1-2017)
+        unsafe {
+            cmd.pre_exec(|| {
+                libc::setpgid(0, 0);
+                Ok(())
+            });
+        }
+
         // Set environment variables to indicate SDK usage and version
         cmd.env("CLAUDE_CODE_ENTRYPOINT", "sdk-rust");
         cmd.env("CLAUDE_AGENT_SDK_VERSION", env!("CARGO_PKG_VERSION"));
@@ -1085,14 +1097,19 @@ impl Transport for SubprocessTransport {
         // Graceful shutdown escalation: SIGINT → SIGTERM → SIGKILL
         // Mirrors the pattern used by Claude Code for MCP servers.
         // Total max wait: 200ms + 500ms = 700ms before SIGKILL.
+        //
+        // Signals are sent to the PROCESS GROUP (negative PID) so that
+        // child processes (bash, find, sleep, etc.) are also terminated.
         if let Some(ref mut child) = self.child {
             #[cfg(unix)]
             if let Some(pid) = child.id() {
+                let pgid = -(pid as i32);
+
                 // Stage 1: SIGINT — give the CLI a chance to handle Ctrl-C gracefully
                 unsafe {
-                    libc::kill(pid as i32, libc::SIGINT);
+                    libc::kill(pgid, libc::SIGINT);
                 }
-                debug!("Sent SIGINT to CLI process (pid={})", pid);
+                debug!("Sent SIGINT to CLI process group (pid={}, pgid={})", pid, pgid);
 
                 // Wait 200ms for graceful shutdown
                 match tokio::time::timeout(std::time::Duration::from_millis(200), child.wait())
@@ -1121,9 +1138,9 @@ impl Transport for SubprocessTransport {
 
                 // Stage 2: SIGTERM — stronger signal, still allows cleanup
                 unsafe {
-                    libc::kill(pid as i32, libc::SIGTERM);
+                    libc::kill(pgid, libc::SIGTERM);
                 }
-                debug!("Sent SIGTERM to CLI process (pid={})", pid);
+                debug!("Sent SIGTERM to CLI process group (pid={}, pgid={})", pid, pgid);
 
                 match tokio::time::timeout(std::time::Duration::from_millis(500), child.wait())
                     .await
@@ -1151,9 +1168,17 @@ impl Transport for SubprocessTransport {
                 }
             }
 
-            // Stage 3: SIGKILL — last resort (also the only option on non-unix)
+            // Stage 3: SIGKILL — last resort
             if let Some(mut child) = self.child.take() {
-                warn!("Sending SIGKILL to CLI process");
+                #[cfg(unix)]
+                if let Some(pid) = child.id() {
+                    let pgid = -(pid as i32);
+                    warn!("Sending SIGKILL to CLI process group (pid={}, pgid={})", pid, pgid);
+                    unsafe {
+                        libc::kill(pgid, libc::SIGKILL);
+                    }
+                }
+                // Fallback / non-unix: kill the child directly
                 match child.kill().await {
                     Ok(()) => info!("CLI process terminated via SIGKILL"),
                     Err(e) => warn!("Failed to kill CLI process: {}", e),
@@ -1185,7 +1210,14 @@ impl Transport for SubprocessTransport {
 impl Drop for SubprocessTransport {
     fn drop(&mut self) {
         if let Some(mut child) = self.child.take() {
-            // Try to kill the process
+            // Kill the entire process group to avoid orphan child processes
+            #[cfg(unix)]
+            if let Some(pid) = child.id() {
+                unsafe {
+                    libc::kill(-(pid as i32), libc::SIGKILL);
+                }
+            }
+            // Fallback: kill the child directly
             let _ = child.start_kill();
         }
     }

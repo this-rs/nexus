@@ -58,6 +58,7 @@ dashmap = "6"
 parking_lot = "0.12"
 sha2 = "0.10"
 once_cell = "1"
+libc = "0.2.182"
 
 [dev-dependencies]
 axum-test = "15"
