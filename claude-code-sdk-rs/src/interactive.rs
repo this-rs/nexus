@@ -735,6 +735,40 @@ impl InteractiveClient {
         Ok(())
     }
 
+    /// Build the JSON string for an interrupt control request.
+    ///
+    /// This produces the exact same wire format as
+    /// [`SubprocessTransport::send_control_request`] for the `Interrupt` variant:
+    ///
+    /// ```json
+    /// {"type":"control_request","request":{"type":"interrupt","request_id":"<uuid>"}}
+    /// ```
+    ///
+    /// **Use case**: The PO Backend can send interrupts via a cloned `stdin_tx`
+    /// (obtained from [`Transport::clone_stdin_sender`]) without acquiring the
+    /// client Mutex lock. This avoids duplicating the wire format outside of
+    /// the SDK.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use nexus_claude::InteractiveClient;
+    ///
+    /// let json = InteractiveClient::build_interrupt_json();
+    /// // Send directly via stdin_tx.try_send(json) — no client lock needed
+    /// ```
+    pub fn build_interrupt_json() -> String {
+        let request_id = uuid::Uuid::new_v4().to_string();
+        serde_json::to_string(&serde_json::json!({
+            "type": "control_request",
+            "request": {
+                "type": "interrupt",
+                "request_id": request_id
+            }
+        }))
+        .expect("interrupt JSON serialization cannot fail")
+    }
+
     /// Disconnect
     pub async fn disconnect(&mut self) -> Result<()> {
         if !self.connected {
@@ -1224,5 +1258,91 @@ mod tests {
         // Total callbacks registered: 3
         let callbacks = client.hook_callbacks.read().await;
         assert_eq!(callbacks.len(), 3);
+    }
+
+    // ================================================================
+    // Tests for build_interrupt_json()
+    // ================================================================
+
+    #[test]
+    fn test_build_interrupt_json_has_correct_structure() {
+        let json_str = InteractiveClient::build_interrupt_json();
+        let parsed: serde_json::Value =
+            serde_json::from_str(&json_str).expect("should be valid JSON");
+
+        // Top-level type must be "control_request"
+        assert_eq!(parsed["type"], "control_request");
+
+        // Must have a "request" object
+        let request = parsed.get("request").expect("should have 'request' field");
+        assert!(request.is_object(), "'request' should be an object");
+
+        // request.type must be "interrupt"
+        assert_eq!(request["type"], "interrupt");
+
+        // request.request_id must be a non-empty string (UUID)
+        let request_id = request["request_id"]
+            .as_str()
+            .expect("request_id should be a string");
+        assert!(!request_id.is_empty(), "request_id should not be empty");
+
+        // request_id should be a valid UUID
+        uuid::Uuid::parse_str(request_id).expect("request_id should be a valid UUID");
+    }
+
+    #[test]
+    fn test_build_interrupt_json_matches_transport_format() {
+        // The wire format produced by build_interrupt_json() must be identical
+        // to what SubprocessTransport::send_control_request() produces for
+        // ControlRequest::Interrupt.
+        //
+        // The transport builds:
+        // {
+        //   "type": "control_request",
+        //   "request": {
+        //     "type": "interrupt",
+        //     "request_id": "<uuid>"
+        //   }
+        // }
+        let json_str = InteractiveClient::build_interrupt_json();
+        let parsed: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+
+        // Verify exact key set at top level: only "type" and "request"
+        let obj = parsed.as_object().unwrap();
+        assert_eq!(obj.len(), 2, "top-level should have exactly 2 keys");
+        assert!(obj.contains_key("type"));
+        assert!(obj.contains_key("request"));
+
+        // Verify exact key set in request: only "type" and "request_id"
+        let request = parsed["request"].as_object().unwrap();
+        assert_eq!(request.len(), 2, "request should have exactly 2 keys");
+        assert!(request.contains_key("type"));
+        assert!(request.contains_key("request_id"));
+    }
+
+    #[test]
+    fn test_build_interrupt_json_generates_unique_ids() {
+        let json1 = InteractiveClient::build_interrupt_json();
+        let json2 = InteractiveClient::build_interrupt_json();
+
+        let parsed1: serde_json::Value = serde_json::from_str(&json1).unwrap();
+        let parsed2: serde_json::Value = serde_json::from_str(&json2).unwrap();
+
+        let id1 = parsed1["request"]["request_id"].as_str().unwrap();
+        let id2 = parsed2["request"]["request_id"].as_str().unwrap();
+
+        assert_ne!(id1, id2, "Each call should produce a unique request_id");
+    }
+
+    #[test]
+    fn test_build_interrupt_json_is_sendable_via_stdin() {
+        // Verify the output is a single-line JSON string (no newlines)
+        // that can be sent directly via stdin_tx
+        let json_str = InteractiveClient::build_interrupt_json();
+        assert!(
+            !json_str.contains('\n'),
+            "JSON should be a single line for stdin transport"
+        );
+        assert!(!json_str.is_empty(), "JSON should not be empty");
     }
 }

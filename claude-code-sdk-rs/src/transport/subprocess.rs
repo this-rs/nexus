@@ -1079,14 +1079,85 @@ impl Transport for SubprocessTransport {
 
         self.state = TransportState::Disconnecting;
 
-        // Close stdin channel
+        // Close stdin channel — signals EOF to the CLI process
         self.stdin_tx.take();
 
-        // Kill the child process
-        if let Some(mut child) = self.child.take() {
-            match child.kill().await {
-                Ok(()) => info!("Claude CLI process terminated"),
-                Err(e) => warn!("Failed to kill Claude CLI process: {}", e),
+        // Graceful shutdown escalation: SIGINT → SIGTERM → SIGKILL
+        // Mirrors the pattern used by Claude Code for MCP servers.
+        // Total max wait: 200ms + 500ms = 700ms before SIGKILL.
+        if let Some(ref mut child) = self.child {
+            #[cfg(unix)]
+            if let Some(pid) = child.id() {
+                // Stage 1: SIGINT — give the CLI a chance to handle Ctrl-C gracefully
+                unsafe {
+                    libc::kill(pid as i32, libc::SIGINT);
+                }
+                debug!("Sent SIGINT to CLI process (pid={})", pid);
+
+                // Wait 200ms for graceful shutdown
+                match tokio::time::timeout(std::time::Duration::from_millis(200), child.wait())
+                    .await
+                {
+                    Ok(Ok(status)) => {
+                        info!(
+                            "CLI process terminated gracefully via SIGINT (pid={}, status={})",
+                            pid, status
+                        );
+                        self.child.take();
+                        self.state = TransportState::Disconnected;
+                        return Ok(());
+                    },
+                    Ok(Err(e)) => {
+                        warn!("Error waiting for CLI process after SIGINT: {}", e);
+                        // Fall through to SIGTERM
+                    },
+                    Err(_) => {
+                        debug!(
+                            "CLI process did not exit within 200ms after SIGINT, escalating to SIGTERM"
+                        );
+                        // Fall through to SIGTERM
+                    },
+                }
+
+                // Stage 2: SIGTERM — stronger signal, still allows cleanup
+                unsafe {
+                    libc::kill(pid as i32, libc::SIGTERM);
+                }
+                debug!("Sent SIGTERM to CLI process (pid={})", pid);
+
+                match tokio::time::timeout(std::time::Duration::from_millis(500), child.wait())
+                    .await
+                {
+                    Ok(Ok(status)) => {
+                        info!(
+                            "CLI process terminated via SIGTERM (pid={}, status={})",
+                            pid, status
+                        );
+                        self.child.take();
+                        self.state = TransportState::Disconnected;
+                        return Ok(());
+                    },
+                    Ok(Err(e)) => {
+                        warn!("Error waiting for CLI process after SIGTERM: {}", e);
+                        // Fall through to SIGKILL
+                    },
+                    Err(_) => {
+                        warn!(
+                            "CLI process did not exit within 500ms after SIGTERM, escalating to SIGKILL (pid={})",
+                            pid
+                        );
+                        // Fall through to SIGKILL
+                    },
+                }
+            }
+
+            // Stage 3: SIGKILL — last resort (also the only option on non-unix)
+            if let Some(mut child) = self.child.take() {
+                warn!("Sending SIGKILL to CLI process");
+                match child.kill().await {
+                    Ok(()) => info!("CLI process terminated via SIGKILL"),
+                    Err(e) => warn!("Failed to kill CLI process: {}", e),
+                }
             }
         }
 

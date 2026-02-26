@@ -107,12 +107,14 @@ impl Transport for MockTransport {
     }
 
     async fn send_control_request(&mut self, request: ControlRequest) -> Result<()> {
-        // Record as JSON for tests
+        // Record as JSON for tests — must match SubprocessTransport wire format exactly
         let json = match request {
             ControlRequest::Interrupt { request_id } => serde_json::json!({
                 "type": "control_request",
-                "request": {"type":"interrupt"},
-                "request_id": request_id,
+                "request": {
+                    "type": "interrupt",
+                    "request_id": request_id
+                }
             }),
         };
         let _ = self.outbound_control_request_tx.send(json).await;
