@@ -886,11 +886,6 @@ mod tests {
         tokio::spawn(async move { while stdin_rx.recv().await.is_some() {} });
         drop(stdin);
 
-        // Set last_used far in the past
-        let last_used = Arc::new(parking_lot::Mutex::new(
-            std::time::Instant::now() - std::time::Duration::from_secs(7200),
-        ));
-
         let session = InteractiveSession {
             id: "test-id".to_string(),
             conversation_id: "conv-expired".to_string(),
@@ -899,14 +894,15 @@ mod tests {
             output_tx,
             model: "test".to_string(),
             created_at: std::time::Instant::now(),
-            last_used,
+            last_used: Arc::new(parking_lot::Mutex::new(std::time::Instant::now())),
             interaction_lock: Arc::new(tokio::sync::Mutex::new(())),
         };
 
         sessions.write().insert("conv-expired".to_string(), session);
 
-        // Cleanup with 30 min timeout — should remove the 2h-idle session
-        InteractiveSessionManager::cleanup_expired_sessions(sessions.clone(), 30).await;
+        // Use timeout_minutes=0 so ANY session is immediately "expired".
+        // This avoids Instant subtraction overflow on Windows.
+        InteractiveSessionManager::cleanup_expired_sessions(sessions.clone(), 0).await;
 
         assert_eq!(
             sessions.read().len(),
