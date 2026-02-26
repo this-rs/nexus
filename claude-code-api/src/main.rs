@@ -127,6 +127,10 @@ async fn create_app(settings: Settings) -> Result<Router> {
 
     let api_routes = Router::new()
         .route("/v1/chat/completions", post(api::chat::chat_completions))
+        .route(
+            "/v1/sessions/:conversation_id/interrupt",
+            post(api::chat::interrupt_session),
+        )
         .with_state(chat_state);
 
     let conversation_routes = Router::new()

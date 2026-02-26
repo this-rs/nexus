@@ -1,4 +1,8 @@
-use axum::{Json, extract::State, response::IntoResponse};
+use axum::{
+    Json,
+    extract::{Path, State},
+    response::IntoResponse,
+};
 use chrono::Utc;
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -153,9 +157,14 @@ pub async fn chat_completions(
     };
 
     if request.stream.unwrap_or(false) {
-        Ok(handle_streaming_response(request.model, rx)
-            .await?
-            .into_response())
+        Ok(handle_streaming_response(
+            request.model,
+            rx,
+            state.interactive_session_manager.clone(),
+            conversation_id.clone(),
+        )
+        .await?
+        .into_response())
     } else {
         let cache_key = ResponseCache::generate_key(&request.model, &context_messages);
         let response = handle_non_streaming_response(
@@ -190,6 +199,55 @@ pub async fn chat_completions(
         state.cache.put(cache_key.clone(), response_data.clone());
 
         Ok(Json(response_data).into_response())
+    }
+}
+
+/// Interrupt the active request in an interactive session.
+///
+/// `POST /v1/sessions/:conversation_id/interrupt`
+///
+/// Sends a control_request interrupt to the CLI process without closing the
+/// session. Returns 200 if the interrupt was sent, 404 if no session exists.
+pub async fn interrupt_session(
+    Path(conversation_id): Path<String>,
+    State(state): State<ChatState>,
+) -> impl IntoResponse {
+    info!(
+        "Received interrupt request for session: {}",
+        conversation_id
+    );
+
+    match state
+        .interactive_session_manager
+        .interrupt_session(&conversation_id)
+    {
+        Ok(true) => {
+            info!("Session interrupted: {}", conversation_id);
+            (
+                axum::http::StatusCode::OK,
+                Json(
+                    serde_json::json!({"status": "interrupted", "conversation_id": conversation_id}),
+                ),
+            )
+        },
+        Ok(false) => {
+            info!("Session not found for interrupt: {}", conversation_id);
+            (
+                axum::http::StatusCode::NOT_FOUND,
+                Json(
+                    serde_json::json!({"error": "session not found", "conversation_id": conversation_id}),
+                ),
+            )
+        },
+        Err(e) => {
+            error!("Failed to interrupt session {}: {}", conversation_id, e);
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                Json(
+                    serde_json::json!({"error": e.to_string(), "conversation_id": conversation_id}),
+                ),
+            )
+        },
     }
 }
 
@@ -333,9 +391,15 @@ async fn download_image(url: &str) -> ApiResult<String> {
 async fn handle_streaming_response(
     model: String,
     rx: mpsc::Receiver<ClaudeCodeOutput>,
+    session_manager: Arc<crate::core::interactive_session::InteractiveSessionManager>,
+    conversation_id: String,
 ) -> ApiResult<impl IntoResponse> {
-    // Use enhanced streaming with text chunking for better UX
-    let stream = handle_enhanced_streaming_response(model, rx).await;
+    // Use enhanced streaming with text chunking for better UX.
+    // Pass session_manager + conversation_id so the disconnect guard
+    // can auto-interrupt the CLI if the SSE client drops the connection.
+    let stream =
+        handle_enhanced_streaming_response(model, rx, Some(session_manager), Some(conversation_id))
+            .await;
     Ok(create_sse_stream(stream))
 }
 

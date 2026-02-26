@@ -363,6 +363,16 @@ impl InteractiveSessionManager {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 
+        // Create a new process group so we can kill the entire tree
+        // (CLI + its child processes like bash, find, sleep, etc.)
+        #[cfg(unix)]
+        unsafe {
+            cmd.pre_exec(|| {
+                libc::setpgid(0, 0);
+                Ok(())
+            });
+        }
+
         info!(
             "Starting interactive Claude session with command: {:?}",
             cmd
@@ -619,7 +629,68 @@ impl InteractiveSessionManager {
             } else {
                 info!("Cleaning up expired session: {} (idle timeout)", id);
             }
+            // Kill the entire process group to avoid orphan child processes
+            #[cfg(unix)]
+            if let Some(pid) = session.child.id() {
+                unsafe {
+                    libc::kill(-(pid as i32), libc::SIGKILL);
+                }
+            }
             let _ = session.child.kill().await;
+        }
+    }
+
+    /// Interrupt the active request in a session without closing it.
+    ///
+    /// Sends a `control_request` interrupt to the CLI via `stdin_tx` (lock-free,
+    /// does not require the interaction lock). The CLI will abort the current
+    /// tool execution (Bash, Read, etc.) and emit a `result` message.
+    ///
+    /// Returns `Ok(true)` if the session was found and the interrupt was sent,
+    /// `Ok(false)` if no session exists for this conversation_id.
+    pub fn interrupt_session(&self, conversation_id: &str) -> Result<bool> {
+        let sessions = self.sessions.read();
+        if let Some(session) = sessions.get(conversation_id) {
+            // Build the interrupt control_request JSON
+            let interrupt_json = serde_json::json!({
+                "type": "control_request",
+                "request": {
+                    "type": "interrupt",
+                    "request_id": Uuid::new_v4().to_string()
+                }
+            })
+            .to_string();
+
+            // Send via stdin_tx — lock-free, non-blocking
+            match session.stdin_tx.try_send(interrupt_json) {
+                Ok(()) => {
+                    info!(
+                        "Sent interrupt to session: {} (conversation_id={})",
+                        session.id, conversation_id
+                    );
+                    Ok(true)
+                },
+                Err(mpsc::error::TrySendError::Full(_)) => {
+                    warn!(
+                        "Stdin channel full for session {}, interrupt may be delayed",
+                        conversation_id
+                    );
+                    // Channel is full but message will be processed eventually
+                    Ok(true)
+                },
+                Err(mpsc::error::TrySendError::Closed(_)) => {
+                    warn!(
+                        "Stdin channel closed for session {}, process may have died",
+                        conversation_id
+                    );
+                    Err(anyhow!(
+                        "Session {} stdin channel is closed",
+                        conversation_id
+                    ))
+                },
+            }
+        } else {
+            Ok(false)
         }
     }
 
@@ -632,6 +703,13 @@ impl InteractiveSessionManager {
         };
         if let Some(mut session) = session_opt {
             info!("Closing session: {}", conversation_id);
+            // Kill the entire process group to avoid orphan child processes
+            #[cfg(unix)]
+            if let Some(pid) = session.child.id() {
+                unsafe {
+                    libc::kill(-(pid as i32), libc::SIGKILL);
+                }
+            }
             session.child.kill().await?;
             Ok(())
         } else {
@@ -661,6 +739,14 @@ impl Drop for InteractiveSessionManager {
         let mut sessions = self.sessions.write();
         for (id, mut session) in sessions.drain() {
             info!("Cleaning up session on shutdown: {}", id);
+            // Kill the entire process group to avoid orphan child processes
+            #[cfg(unix)]
+            if let Some(pid) = session.child.id() {
+                unsafe {
+                    libc::kill(-(pid as i32), libc::SIGKILL);
+                }
+            }
+            // Fallback: kill the child directly.
             // Note: In Drop we can't await, so we start the kill and let it complete.
             // The process will be cleaned up by the OS regardless.
             #[allow(clippy::let_underscore_future)]
