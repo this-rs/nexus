@@ -42,10 +42,10 @@ async fn test_interrupt_sends_signal_immediately() {
     // The MockTransport records ControlRequest::Interrupt as JSON
     assert_eq!(sent["type"], "control_request");
     assert_eq!(sent["request"]["type"], "interrupt");
-    // request_id should be a UUID string
+    // request_id should be a UUID string inside "request"
     assert!(
-        sent["request_id"].is_string(),
-        "request_id should be a string"
+        sent["request"]["request_id"].is_string(),
+        "request_id should be a string inside 'request'"
     );
 
     client.disconnect().await.unwrap();
