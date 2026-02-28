@@ -362,8 +362,8 @@ fn test_pre_tool_use_additional_context_deserialization() {
         "additionalContext": "Injected skill context"
     });
 
-    let deserialized: HookSpecificOutput =
-        serde_json::from_value(json_input).expect("Failed to deserialize PreToolUse with additionalContext");
+    let deserialized: HookSpecificOutput = serde_json::from_value(json_input)
+        .expect("Failed to deserialize PreToolUse with additionalContext");
 
     match deserialized {
         HookSpecificOutput::PreToolUse(output) => {
@@ -375,7 +375,7 @@ fn test_pre_tool_use_additional_context_deserialization() {
             assert!(output.permission_decision.is_none());
             assert!(output.permission_decision_reason.is_none());
             assert!(output.updated_input.is_none());
-        }
+        },
         _ => panic!("Expected PreToolUse variant"),
     }
 }
@@ -389,8 +389,8 @@ fn test_pre_tool_use_additional_context_backward_compatible() {
         "permissionDecision": "allow"
     });
 
-    let deserialized: HookSpecificOutput =
-        serde_json::from_value(json_input).expect("Failed to deserialize PreToolUse without additionalContext");
+    let deserialized: HookSpecificOutput = serde_json::from_value(json_input)
+        .expect("Failed to deserialize PreToolUse without additionalContext");
 
     match deserialized {
         HookSpecificOutput::PreToolUse(output) => {
@@ -399,7 +399,7 @@ fn test_pre_tool_use_additional_context_backward_compatible() {
                 "additionalContext should be None when not in JSON"
             );
             assert_eq!(output.permission_decision, Some("allow".to_string()));
-        }
+        },
         _ => panic!("Expected PreToolUse variant"),
     }
 }
@@ -415,7 +415,10 @@ fn test_sync_hook_output_with_pre_tool_use_additional_context() {
                 permission_decision: None,
                 permission_decision_reason: None,
                 updated_input: None,
-                additional_context: Some("## Skill: Rust Error Handling\nAlways use anyhow::Result for public APIs.".to_string()),
+                additional_context: Some(
+                    "## Skill: Rust Error Handling\nAlways use anyhow::Result for public APIs."
+                        .to_string(),
+                ),
             },
         )),
         ..Default::default()
@@ -426,12 +429,18 @@ fn test_sync_hook_output_with_pre_tool_use_additional_context() {
 
     assert_eq!(json["continue"], true);
     assert_eq!(json["hookSpecificOutput"]["hookEventName"], "PreToolUse");
-    assert!(json["hookSpecificOutput"]["additionalContext"]
-        .as_str()
-        .unwrap()
-        .contains("Rust Error Handling"));
+    assert!(
+        json["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap()
+            .contains("Rust Error Handling")
+    );
     // No permission fields — this is pure context injection
-    assert!(json["hookSpecificOutput"].get("permissionDecision").is_none());
+    assert!(
+        json["hookSpecificOutput"]
+            .get("permissionDecision")
+            .is_none()
+    );
 }
 
 #[test]
