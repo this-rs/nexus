@@ -115,6 +115,17 @@ pub trait Transport: Send + Sync {
         None
     }
 
+    /// Get the PID of the child process, if available.
+    ///
+    /// Returns `Some(pid)` when the transport wraps a running subprocess,
+    /// `None` otherwise (e.g., mock transport, or process has already exited).
+    ///
+    /// This is useful for sending signals to the Claude CLI process tree
+    /// (e.g., SIGINT to the process group for interrupt cascading).
+    fn child_pid(&self) -> Option<u32> {
+        None
+    }
+
     /// Check if the transport is connected
     #[allow(dead_code)]
     fn is_connected(&self) -> bool;

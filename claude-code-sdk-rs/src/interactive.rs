@@ -716,6 +716,28 @@ impl InteractiveClient {
         }
     }
 
+    /// Get the PID of the Claude CLI child process.
+    ///
+    /// Returns `Some(pid)` when the subprocess is running, `None` otherwise.
+    /// Useful for sending signals directly to the process group (e.g.,
+    /// cascading SIGINT to all descendant processes).
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// # async fn example(client: &nexus_claude::InteractiveClient) {
+    /// if let Some(pid) = client.child_pid().await {
+    ///     // Send SIGINT to the process group
+    ///     #[cfg(unix)]
+    ///     unsafe { libc::kill(-(pid as i32), libc::SIGINT); }
+    /// }
+    /// # }
+    /// ```
+    pub async fn child_pid(&self) -> Option<u32> {
+        let transport = self.transport.lock().await;
+        transport.child_pid()
+    }
+
     /// Send interrupt signal to cancel current operation
     pub async fn interrupt(&mut self) -> Result<()> {
         if !self.connected {
