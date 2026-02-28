@@ -221,6 +221,7 @@ fn test_pre_tool_use_hook_specific_output() {
         permission_decision: Some("deny".to_string()),
         permission_decision_reason: Some("Tool not allowed".to_string()),
         updated_input: Some(json!({"modified": true})),
+        additional_context: None,
     });
 
     let json = serde_json::to_value(&specific_output)
@@ -265,6 +266,7 @@ fn test_hook_specific_output_discriminated_union() {
         permission_decision: Some("allow".to_string()),
         permission_decision_reason: None,
         updated_input: None,
+        additional_context: None,
     });
 
     let json = serde_json::to_value(&pre_tool_use).expect("Failed to serialize HookSpecificOutput");
@@ -293,6 +295,7 @@ fn test_sync_hook_output_with_hook_specific() {
                 permission_decision: Some("ask".to_string()),
                 permission_decision_reason: Some("Requires confirmation".to_string()),
                 updated_input: None,
+                additional_context: None,
             },
         )),
         ..Default::default()
@@ -303,6 +306,141 @@ fn test_sync_hook_output_with_hook_specific() {
     assert_eq!(json["continue"], true);
     assert_eq!(json["hookSpecificOutput"]["hookEventName"], "PreToolUse");
     assert_eq!(json["hookSpecificOutput"]["permissionDecision"], "ask");
+}
+
+#[test]
+fn test_pre_tool_use_additional_context_serialization() {
+    // Test that additionalContext is correctly serialized when present
+    let specific_output = HookSpecificOutput::PreToolUse(PreToolUseHookSpecificOutput {
+        permission_decision: None,
+        permission_decision_reason: None,
+        updated_input: None,
+        additional_context: Some("Skill context: always use ULID for IDs".to_string()),
+    });
+
+    let json = serde_json::to_value(&specific_output)
+        .expect("Failed to serialize PreToolUseHookSpecificOutput with additionalContext");
+
+    assert_eq!(json["hookEventName"], "PreToolUse");
+    assert_eq!(
+        json["additionalContext"],
+        "Skill context: always use ULID for IDs"
+    );
+    // Permission fields should NOT be present when None (skip_serializing_if)
+    assert!(json.get("permissionDecision").is_none());
+    assert!(json.get("permissionDecisionReason").is_none());
+    assert!(json.get("updatedInput").is_none());
+}
+
+#[test]
+fn test_pre_tool_use_additional_context_none_not_serialized() {
+    // Test that additionalContext is NOT present in JSON when None (retro-compatible)
+    let specific_output = HookSpecificOutput::PreToolUse(PreToolUseHookSpecificOutput {
+        permission_decision: Some("allow".to_string()),
+        permission_decision_reason: None,
+        updated_input: None,
+        additional_context: None,
+    });
+
+    let json = serde_json::to_value(&specific_output)
+        .expect("Failed to serialize PreToolUseHookSpecificOutput without additionalContext");
+
+    assert_eq!(json["hookEventName"], "PreToolUse");
+    assert_eq!(json["permissionDecision"], "allow");
+    // additionalContext must NOT appear in JSON when None
+    assert!(
+        json.get("additionalContext").is_none(),
+        "additionalContext should not be serialized when None"
+    );
+}
+
+#[test]
+fn test_pre_tool_use_additional_context_deserialization() {
+    // Test round-trip: JSON with additionalContext → deserialize → verify
+    let json_input = json!({
+        "hookEventName": "PreToolUse",
+        "additionalContext": "Injected skill context"
+    });
+
+    let deserialized: HookSpecificOutput = serde_json::from_value(json_input)
+        .expect("Failed to deserialize PreToolUse with additionalContext");
+
+    match deserialized {
+        HookSpecificOutput::PreToolUse(output) => {
+            assert_eq!(
+                output.additional_context,
+                Some("Injected skill context".to_string())
+            );
+            // Other fields should be None when not in JSON
+            assert!(output.permission_decision.is_none());
+            assert!(output.permission_decision_reason.is_none());
+            assert!(output.updated_input.is_none());
+        },
+        _ => panic!("Expected PreToolUse variant"),
+    }
+}
+
+#[test]
+fn test_pre_tool_use_additional_context_backward_compatible() {
+    // Test that JSON WITHOUT additionalContext still deserializes correctly
+    // (backward compatibility with older Claude Code versions)
+    let json_input = json!({
+        "hookEventName": "PreToolUse",
+        "permissionDecision": "allow"
+    });
+
+    let deserialized: HookSpecificOutput = serde_json::from_value(json_input)
+        .expect("Failed to deserialize PreToolUse without additionalContext");
+
+    match deserialized {
+        HookSpecificOutput::PreToolUse(output) => {
+            assert!(
+                output.additional_context.is_none(),
+                "additionalContext should be None when not in JSON"
+            );
+            assert_eq!(output.permission_decision, Some("allow".to_string()));
+        },
+        _ => panic!("Expected PreToolUse variant"),
+    }
+}
+
+#[test]
+fn test_sync_hook_output_with_pre_tool_use_additional_context() {
+    // Test the full SyncHookJSONOutput with PreToolUse additionalContext
+    // This is the exact shape SkillActivationHook will produce
+    let output = SyncHookJSONOutput {
+        continue_: Some(true),
+        hook_specific_output: Some(HookSpecificOutput::PreToolUse(
+            PreToolUseHookSpecificOutput {
+                permission_decision: None,
+                permission_decision_reason: None,
+                updated_input: None,
+                additional_context: Some(
+                    "## Skill: Rust Error Handling\nAlways use anyhow::Result for public APIs."
+                        .to_string(),
+                ),
+            },
+        )),
+        ..Default::default()
+    };
+
+    let json = serde_json::to_value(&output)
+        .expect("Failed to serialize SyncHookJSONOutput with PreToolUse additionalContext");
+
+    assert_eq!(json["continue"], true);
+    assert_eq!(json["hookSpecificOutput"]["hookEventName"], "PreToolUse");
+    assert!(
+        json["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap()
+            .contains("Rust Error Handling")
+    );
+    // No permission fields — this is pure context injection
+    assert!(
+        json["hookSpecificOutput"]
+            .get("permissionDecision")
+            .is_none()
+    );
 }
 
 #[test]

@@ -694,6 +694,9 @@ pub struct PreToolUseHookSpecificOutput {
     /// Updated input parameters for the tool
     #[serde(rename = "updatedInput", skip_serializing_if = "Option::is_none")]
     pub updated_input: Option<serde_json::Value>,
+    /// Additional context to provide to Claude (e.g. skill activation context)
+    #[serde(rename = "additionalContext", skip_serializing_if = "Option::is_none")]
+    pub additional_context: Option<String>,
 }
 
 /// Hook-specific output for PostToolUse events
