@@ -118,8 +118,8 @@ For maintainers setting up the repository:
 
 1. Update version in `Cargo.toml` files
 2. Create a PR to merge into version branch (e.g., `v0.5`)
-3. After merge, create a version tag: `git tag v0.0.7`
-4. Push the tag: `git push origin v0.0.7`
+3. After merge, create a version tag: `git tag v0.5.0`
+4. Push the tag: `git push origin v0.5.0`
 5. The release workflow will automatically:
    - Create a GitHub release with changelog
    - Build and upload binaries
@@ -132,7 +132,7 @@ We follow [Semantic Versioning](https://semver.org/):
 - MINOR: New features, backward compatible
 - PATCH: Bug fixes, backward compatible
 
-Pre-release versions: `v0.0.7-alpha.1`, `v0.0.7-beta.1`, `v0.0.7-rc.1`
+Pre-release versions: `v0.5.0-alpha.1`, `v0.5.0-beta.1`, `v0.5.0-rc.1`
 
 ## Code of Conduct
 

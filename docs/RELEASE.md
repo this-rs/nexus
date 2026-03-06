@@ -10,7 +10,7 @@ Nexus uses semantic versioning (SemVer) and automated release workflows.
 v{MAJOR}.{MINOR}.{PATCH}[-{PRERELEASE}]
 
 Examples:
-- v0.0.7       - Stable release
+- v0.5.0       - Stable release
 - v0.5.1       - Patch release
 - v0.6.0-alpha.1 - Pre-release
 ```
@@ -129,7 +129,7 @@ git push origin main
 
 After each minor release, a version branch is created:
 
-- `v0.5` - Contains v0.0.7, v0.5.1, v0.5.2, etc.
+- `v0.5` - Contains v0.5.0, v0.5.1, v0.5.2, etc.
 - `v0.6` - Contains v0.6.0, v0.6.1, etc.
 
 These branches receive hotfixes and are the base for patch releases.

@@ -29,7 +29,7 @@ Steps to reproduce the behavior:
 
 - **OS**: [e.g., macOS 14.0, Ubuntu 22.04, Windows 11]
 - **Rust Version**: [e.g., 1.75.0]
-- **nexus-claude Version**: [e.g., 0.0.7]
+- **nexus-claude Version**: [e.g., 0.5.0]
 - **Claude Code CLI Version**: [e.g., 1.0.0]
 
 ## Code Sample

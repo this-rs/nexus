@@ -47,7 +47,7 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-nexus-claude = "0.0.7"
+nexus-claude = "0.5.0"
 tokio = { version = "1.0", features = ["full"] }
 futures = "0.3"
 ```
@@ -58,7 +58,7 @@ To enable the memory system (requires Meilisearch):
 
 ```toml
 [dependencies]
-nexus-claude = { version = "0.0.7", features = ["memory"] }
+nexus-claude = { version = "0.5.0", features = ["memory"] }
 ```
 
 ## Quick Start
