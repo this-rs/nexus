@@ -6,7 +6,7 @@
 
 一个用于与 Claude Code CLI 交互的 Rust SDK，提供简单查询接口和完整的交互式客户端功能。
 
-> **v0.5.0**: 🎉 **与 Python SDK v0.1.14 实现 100% 功能对等** - 包括自动下载 CLI 和持久记忆！
+> **v0.0.7**: 🎉 **与 Python SDK v0.1.14 实现 100% 功能对等** - 包括自动下载 CLI 和持久记忆！
 
 > **Fork 声明**：本项目是 [ZhangHanDong/claude-code-api-rs](https://github.com/ZhangHanDong/claude-code-api-rs)（`cc-sdk`）的 fork，增加了持久记忆功能。
 
@@ -24,7 +24,7 @@
 - 📥 **自动下载 CLI** - 未找到时自动下载 Claude Code CLI（v0.4.0+）
 - 📁 **文件检查点** - 将文件更改回退到对话中的任意点（v0.4.0+）
 - 📊 **结构化输出** - 响应的 JSON Schema 验证（v0.4.0+）
-- 🧠 **持久记忆** - 对话存储和索引以供将来检索（v0.5.0+）
+- 🧠 **持久记忆** - 对话存储和索引以供将来检索（v0.0.7+）
 
 ## Python SDK 功能对等（v0.4.0）
 
@@ -119,7 +119,7 @@ println!("Tokens: {}, 成本: ${:.2}", usage.total_tokens(), usage.total_cost_us
 
 ```toml
 [dependencies]
-nexus-claude = "0.5.0"
+nexus-claude = "0.0.7"
 tokio = { version = "1.0", features = ["full"] }
 futures = "0.3"
 ```
@@ -128,7 +128,7 @@ futures = "0.3"
 
 ```toml
 [dependencies]
-nexus-claude = { version = "0.5.0", features = ["memory"] }
+nexus-claude = { version = "0.0.7", features = ["memory"] }
 ```
 
 ### 自动下载 CLI（默认启用）
@@ -150,7 +150,7 @@ CLI 缓存在平台特定位置：
 
 ```toml
 [dependencies]
-nexus-claude = { version = "0.5.0", default-features = false }
+nexus-claude = { version = "0.0.7", default-features = false }
 ```
 
 ## 前置要求
