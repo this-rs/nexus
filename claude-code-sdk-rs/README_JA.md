@@ -6,7 +6,7 @@
 
 Claude Code CLIと対話するためのRust SDKです。シンプルなクエリインターフェースと完全なインタラクティブクライアント機能を提供しています。
 
-> **v0.5.0**: 🎉 **Python SDK v0.1.14と100%機能同等** - CLI自動ダウンロードと永続メモリ対応！
+> **v0.0.9**: 🎉 **Python SDK v0.1.14と100%機能同等** - CLI自動ダウンロードと永続メモリ対応！
 
 > **Fork 通知**：このプロジェクトは [ZhangHanDong/claude-code-api-rs](https://github.com/ZhangHanDong/claude-code-api-rs)（`cc-sdk`）のフォークで、永続メモリ機能を追加しています。
 
@@ -24,7 +24,7 @@ Claude Code CLIと対話するためのRust SDKです。シンプルなクエリ
 - 📥 **CLI自動ダウンロード** - 見つからない場合に自動ダウンロード（v0.4.0+）
 - 📁 **ファイルチェックポイント** - 会話の任意の時点にファイル変更を巻き戻し（v0.4.0+）
 - 📊 **構造化出力** - レスポンスのJSONスキーマ検証（v0.4.0+）
-- 🧠 **永続メモリ** - 会話を保存してインデックス化し、将来の取得に使用（v0.5.0+）
+- 🧠 **永続メモリ** - 会話を保存してインデックス化し、将来の取得に使用（v0.0.9+）
 
 ## Python SDK機能同等（v0.4.0）
 
@@ -58,7 +58,7 @@ Claude Code CLIと対話するためのRust SDKです。シンプルなクエリ
 
 ```toml
 [dependencies]
-nexus-claude = "0.5.0"
+nexus-claude = "0.0.9"
 tokio = { version = "1.0", features = ["full"] }
 futures = "0.3"
 ```
@@ -67,7 +67,7 @@ futures = "0.3"
 
 ```toml
 [dependencies]
-nexus-claude = { version = "0.5.0", features = ["memory"] }
+nexus-claude = { version = "0.0.9", features = ["memory"] }
 ```
 
 ### CLI自動ダウンロード（デフォルト有効）
@@ -89,7 +89,7 @@ CLIはプラットフォーム固有の場所にキャッシュされます：
 
 ```toml
 [dependencies]
-nexus-claude = { version = "0.5.0", default-features = false }
+nexus-claude = { version = "0.0.9", default-features = false }
 ```
 
 ## 前提条件

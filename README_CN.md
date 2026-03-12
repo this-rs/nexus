@@ -1,6 +1,6 @@
 # Nexus - Claude Code SDK & API
 
-[![版本](https://img.shields.io/badge/版本-0.5.0-blue.svg)](https://github.com/this-rs/nexus)
+[![版本](https://img.shields.io/badge/版本-0.0.9-blue.svg)](https://github.com/this-rs/nexus)
 [![许可证](https://img.shields.io/badge/许可证-MIT-green.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.75+-orange.svg)](https://www.rust-lang.org)
 
@@ -8,7 +8,7 @@
 
 ---
 
-## nexus-claude v0.5.0 - 带持久记忆的 Rust SDK
+## nexus-claude v0.0.9 - 带持久记忆的 Rust SDK
 
 [![Crates.io](https://img.shields.io/crates/v/nexus-claude.svg)](https://crates.io/crates/nexus-claude)
 [![Documentation](https://docs.rs/nexus-claude/badge.svg)](https://docs.rs/nexus-claude)
@@ -231,7 +231,7 @@ CLAUDE_CODE__CACHE__TTL_SECONDS=3600
 
 ```toml
 [dependencies]
-nexus-claude = "0.5.0"
+nexus-claude = "0.0.9"
 tokio = { version = "1.0", features = ["full"] }
 ```
 
@@ -239,7 +239,7 @@ tokio = { version = "1.0", features = ["full"] }
 
 ```toml
 [dependencies]
-nexus-claude = { version = "0.5.0", features = ["memory"] }
+nexus-claude = { version = "0.0.9", features = ["memory"] }
 ```
 
 ## API 端点

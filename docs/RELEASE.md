@@ -10,8 +10,8 @@ Nexus uses semantic versioning (SemVer) and automated release workflows.
 v{MAJOR}.{MINOR}.{PATCH}[-{PRERELEASE}]
 
 Examples:
-- v0.5.0       - Stable release
-- v0.5.1       - Patch release
+- v0.0.0       - Stable release
+- v0.0.1       - Patch release
 - v0.6.0-alpha.1 - Pre-release
 ```
 
@@ -83,7 +83,7 @@ When the tag is pushed, GitHub Actions will automatically:
 4. **Publish to crates.io**:
    - `nexus-claude` (SDK)
    - `claude-code-api` (API server)
-5. **Update version branch** (e.g., `v0.5`)
+5. **Update version branch** (e.g., `v0.0`)
 
 ## Pre-releases
 
@@ -102,26 +102,26 @@ For critical fixes to released versions:
 
 ```bash
 # Checkout the version branch
-git checkout v0.5
-git pull origin v0.5
+git checkout v0.0
+git pull origin v0.0
 
 # Create hotfix branch
-git checkout -b hotfix/v0.5.1
+git checkout -b hotfix/v0.0.1
 
 # Make fixes, then:
 git commit -m "fix: critical security issue"
-git push origin hotfix/v0.5.1
+git push origin hotfix/v0.0.1
 
-# Create PR to v0.5 branch
+# Create PR to v0.0 branch
 # After merge, tag the release
-git checkout v0.5
-git pull origin v0.5
-git tag v0.5.1
-git push origin v0.5.1
+git checkout v0.0
+git pull origin v0.0
+git tag v0.0.1
+git push origin v0.0.1
 
 # Also merge to main if applicable
 git checkout main
-git merge v0.5
+git merge v0.0
 git push origin main
 ```
 
@@ -129,7 +129,7 @@ git push origin main
 
 After each minor release, a version branch is created:
 
-- `v0.5` - Contains v0.5.0, v0.5.1, v0.5.2, etc.
+- `v0.0` - Contains v0.0.0, v0.0.1, v0.0.2, etc.
 - `v0.6` - Contains v0.6.0, v0.6.1, etc.
 
 These branches receive hotfixes and are the base for patch releases.

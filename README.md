@@ -2,13 +2,13 @@
 
 [![CI](https://github.com/this-rs/nexus/actions/workflows/ci.yml/badge.svg)](https://github.com/this-rs/nexus/actions/workflows/ci.yml)
 [![codecov](https://codecov.io/gh/this-rs/nexus/branch/main/graph/badge.svg)](https://codecov.io/gh/this-rs/nexus)
-[![Version](https://img.shields.io/badge/version-0.5.0-blue.svg)](https://github.com/this-rs/nexus)
+[![Version](https://img.shields.io/badge/version-0.0.9-blue.svg)](https://github.com/this-rs/nexus)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.88+-orange.svg)](https://www.rust-lang.org)
 
 ---
 
-## nexus-claude v0.5.0 - Rust SDK with Persistent Memory
+## nexus-claude v0.0.9 - Rust SDK with Persistent Memory
 
 [![Crates.io](https://img.shields.io/crates/v/nexus-claude.svg)](https://crates.io/crates/nexus-claude)
 [![Documentation](https://docs.rs/nexus-claude/badge.svg)](https://docs.rs/nexus-claude)
@@ -349,7 +349,7 @@ If you prefer to build your own integration, you can use the SDK directly:
 
 ```toml
 [dependencies]
-nexus-claude = "0.5.0"
+nexus-claude = "0.0.9"
 tokio = { version = "1.0", features = ["full"] }
 ```
 
@@ -357,7 +357,7 @@ With persistent memory:
 
 ```toml
 [dependencies]
-nexus-claude = { version = "0.5.0", features = ["memory"] }
+nexus-claude = { version = "0.0.9", features = ["memory"] }
 ```
 
 ```rust

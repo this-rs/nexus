@@ -12,8 +12,8 @@ v{MAJOR}.{MINOR}.{PATCH}[-{PRERELEASE}][+{BUILD}]
 
 | Version | Meaning |
 |---------|---------|
-| `v0.5.0` | Current stable release |
-| `v0.5.1` | Patch release with bug fixes |
+| `v0.0.0` | Current stable release |
+| `v0.0.1` | Patch release with bug fixes |
 | `v0.6.0` | Minor release with new features |
 | `v1.0.0` | Major release (breaking changes) |
 | `v0.6.0-alpha.1` | Alpha pre-release |
@@ -70,10 +70,10 @@ v0.6.0-rc.2
 
 ```
 main                 ← Stable releases only
- ├── v0.5           ← Version 0.5.x maintenance
- │    ├── v0.5.0    (tag)
- │    ├── v0.5.1    (tag)
- │    └── v0.5.2    (tag)
+ ├── v0.0           ← Version 0.0.x maintenance
+ │    ├── v0.0.0    (tag)
+ │    ├── v0.0.1    (tag)
+ │    └── v0.0.2    (tag)
  ├── v0.6           ← Version 0.6.x development
  │    ├── v0.6.0-alpha.1 (tag)
  │    ├── v0.6.0    (tag)
@@ -151,12 +151,12 @@ v1.0.0 - `old_api()` removed
 
 | Nexus Version | CLI Version |
 |---------------|-------------|
-| 0.5.x | 1.x |
+| 0.0.x | 1.x |
 | 0.4.x | 1.x |
 
 ### With Rust
 
 | Nexus Version | Rust Version |
 |---------------|--------------|
-| 0.5.x | 1.88+ |
+| 0.0.x | 1.88+ |
 | 0.4.x | 1.75+ |

@@ -1,6 +1,6 @@
 [package]
 name = "nexus-claude"
-version = "0.5.0"
+version = "0.0.9"
 edition = "2024"
 authors = [
     "Original: ZhangHanDong <psiace@outlook.com>",

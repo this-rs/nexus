@@ -1,6 +1,6 @@
 # Nexus - Claude Code SDK & API
 
-[![バージョン](https://img.shields.io/badge/バージョン-0.5.0-blue.svg)](https://github.com/this-rs/nexus)
+[![バージョン](https://img.shields.io/badge/バージョン-0.0.9-blue.svg)](https://github.com/this-rs/nexus)
 [![ライセンス](https://img.shields.io/badge/ライセンス-MIT-green.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.75+-orange.svg)](https://www.rust-lang.org)
 
@@ -8,7 +8,7 @@
 
 ---
 
-## nexus-claude v0.5.0 - 永続メモリ付き Rust SDK
+## nexus-claude v0.0.9 - 永続メモリ付き Rust SDK
 
 [![Crates.io](https://img.shields.io/crates/v/nexus-claude.svg)](https://crates.io/crates/nexus-claude)
 [![Documentation](https://docs.rs/nexus-claude/badge.svg)](https://docs.rs/nexus-claude)
@@ -231,7 +231,7 @@ CLAUDE_CODE__CACHE__TTL_SECONDS=3600
 
 ```toml
 [dependencies]
-nexus-claude = "0.5.0"
+nexus-claude = "0.0.9"
 tokio = { version = "1.0", features = ["full"] }
 ```
 
@@ -239,7 +239,7 @@ tokio = { version = "1.0", features = ["full"] }
 
 ```toml
 [dependencies]
-nexus-claude = { version = "0.5.0", features = ["memory"] }
+nexus-claude = { version = "0.0.9", features = ["memory"] }
 ```
 
 ## API エンドポイント
