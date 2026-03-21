@@ -1,5 +1,4 @@
 pub mod chat;
-pub mod confidence;
 pub mod conversations;
 pub mod models;
 pub mod projects;

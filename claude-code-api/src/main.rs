@@ -152,19 +152,6 @@ async fn create_app(settings: Settings) -> Result<Router> {
         .route("/stats", get(api::stats::get_stats))
         .with_state(stats_state);
 
-    // Self-evaluation confidence routes (ELL 2025 — 4th pillar)
-    let confidence_state = api::confidence::ConfidenceState::new();
-    let confidence_routes = Router::new()
-        .route(
-            "/api/projects/:slug/confidence",
-            get(api::confidence::get_project_confidence),
-        )
-        .route(
-            "/api/projects/:slug/confidence/feedback",
-            post(api::confidence::post_prediction_feedback),
-        )
-        .with_state(confidence_state);
-
     // 组合所有路由
     let app = Router::new()
         .route("/health", get(health_check))
@@ -172,7 +159,6 @@ async fn create_app(settings: Settings) -> Result<Router> {
         .merge(api_routes)
         .merge(conversation_routes)
         .merge(stats_routes)
-        .merge(confidence_routes)
         .layer(middleware::from_fn(request_id::add_request_id))
         .layer(middleware::from_fn(error_handler::handle_errors))
         .layer(cors);
