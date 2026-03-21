@@ -1,5 +1,5 @@
 /// Self-evolving knowledge system with mutation critic, episodic memory replay,
-/// self-evaluation confidence system, and privacy-preserving anonymization.
+/// and self-evaluation confidence system.
 ///
 /// # References
 /// - EvoFSM (2026) — "Controllable Self-Evolution for Deep Research with FSMs"
@@ -10,9 +10,6 @@
 ///   — Stimulus/process/outcome episodic structure.
 /// - ELL (2025) — "Experience-driven Lifelong Learning"
 ///   4th pillar: self-evaluation with calibrated confidence and feedback loops.
-/// - "Episodic Memory in AI Agents Poses Risks That Should Be Studied and Mitigated" (2025)
-///   — Privacy and manipulation risks in episodic memory; addressed by anonymization pipeline.
-pub mod anonymize;
 pub mod confidence;
 pub mod critic;
 pub mod episodes;
@@ -28,11 +25,6 @@ pub use critic::{GraphBasedCritic, MutationCritic};
 pub use episodes::{
     generate_from_notes, generate_synthetic_episodes, DetectedPattern, EpisodeData,
     EpisodeOutcome, GateResult, KnowledgeNote, NoteType, OutcomeType,
-};
-pub use anonymize::{
-    consent_gate_export, AnonymizationPipeline, AnonymizationStage, EntityGeneralizer,
-    ExportError, MetricNoise, PathStripper, PipelineConfig, SecretDetector, SharingPolicy,
-    StageConfig,
 };
 pub use evolve::EvolutionEngine;
 pub use types::*;
