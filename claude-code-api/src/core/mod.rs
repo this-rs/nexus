@@ -5,6 +5,7 @@ pub mod config;
 pub mod conversation;
 pub mod hooks;
 pub mod interactive_session;
+pub mod learning;
 pub mod memory;
 pub mod process_pool;
 pub mod retry;
