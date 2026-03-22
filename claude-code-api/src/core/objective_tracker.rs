@@ -65,16 +65,19 @@ mod tests {
     #[test]
     fn test_reminder_injected_when_no_tools_and_pending_objectives() {
         let result = check_objective_reminder(
-            false,   // had_tool_use
-            true,    // tracking_enabled
-            5,       // turns_since_last_reminder (past cooldown)
-            3,       // cooldown_turns
+            false, // had_tool_use
+            true,  // tracking_enabled
+            5,     // turns_since_last_reminder (past cooldown)
+            3,     // cooldown_turns
             "- Task T4: Write integration tests\n- Task T5: Update frontend",
         );
 
         assert!(result.is_some(), "Should inject a reminder");
         let msg = result.unwrap();
-        assert!(msg.contains("SystemHint"), "Should contain SystemHint marker");
+        assert!(
+            msg.contains("SystemHint"),
+            "Should contain SystemHint marker"
+        );
         assert!(
             msg.contains("Task T4"),
             "Should contain the pending objectives"
@@ -86,10 +89,10 @@ mod tests {
     #[test]
     fn test_no_reminder_with_tools() {
         let result = check_objective_reminder(
-            true,    // had_tool_use — agent used tools
-            true,    // tracking_enabled
-            10,      // turns_since_last_reminder
-            3,       // cooldown_turns
+            true, // had_tool_use — agent used tools
+            true, // tracking_enabled
+            10,   // turns_since_last_reminder
+            3,    // cooldown_turns
             "- Task T4: Write integration tests",
         );
 
@@ -104,38 +107,36 @@ mod tests {
     #[test]
     fn test_cooldown_respected() {
         // Turn 0: just sent a reminder
-        let result = check_objective_reminder(
-            false, true, 0, 3, "- Task T4: Write tests",
+        let result = check_objective_reminder(false, true, 0, 3, "- Task T4: Write tests");
+        assert!(
+            result.is_none(),
+            "Should NOT remind at turn 0 (just reminded)"
         );
-        assert!(result.is_none(), "Should NOT remind at turn 0 (just reminded)");
 
         // Turn 1: still in cooldown
-        let result = check_objective_reminder(
-            false, true, 1, 3, "- Task T4: Write tests",
-        );
+        let result = check_objective_reminder(false, true, 1, 3, "- Task T4: Write tests");
         assert!(result.is_none(), "Should NOT remind at turn 1");
 
         // Turn 2: still in cooldown
-        let result = check_objective_reminder(
-            false, true, 2, 3, "- Task T4: Write tests",
-        );
+        let result = check_objective_reminder(false, true, 2, 3, "- Task T4: Write tests");
         assert!(result.is_none(), "Should NOT remind at turn 2");
 
         // Turn 3: cooldown expired, should remind
-        let result = check_objective_reminder(
-            false, true, 3, 3, "- Task T4: Write tests",
+        let result = check_objective_reminder(false, true, 3, 3, "- Task T4: Write tests");
+        assert!(
+            result.is_some(),
+            "Should remind at turn 3 (cooldown expired)"
         );
-        assert!(result.is_some(), "Should remind at turn 3 (cooldown expired)");
     }
 
     /// Test 4: When objective_tracking is disabled, no reminder is ever sent.
     #[test]
     fn test_disabled_tracking() {
         let result = check_objective_reminder(
-            false,   // had_tool_use
-            false,   // tracking_enabled — DISABLED
-            10,      // turns_since_last_reminder
-            3,       // cooldown_turns
+            false, // had_tool_use
+            false, // tracking_enabled — DISABLED
+            10,    // turns_since_last_reminder
+            3,     // cooldown_turns
             "- Task T4: Write integration tests",
         );
 
@@ -150,15 +151,11 @@ mod tests {
     #[test]
     fn test_no_plans_pending() {
         // Empty string
-        let result = check_objective_reminder(
-            false, true, 10, 3, "",
-        );
+        let result = check_objective_reminder(false, true, 10, 3, "");
         assert!(result.is_none(), "Should NOT remind with empty objectives");
 
         // Whitespace only
-        let result = check_objective_reminder(
-            false, true, 10, 3, "   \n  ",
-        );
+        let result = check_objective_reminder(false, true, 10, 3, "   \n  ");
         assert!(
             result.is_none(),
             "Should NOT remind with whitespace-only objectives"
