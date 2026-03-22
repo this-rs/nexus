@@ -9,4 +9,5 @@ pub mod memory;
 pub mod process_pool;
 pub mod retry;
 pub mod session_manager;
+pub mod objective_tracker;
 pub mod storage;
