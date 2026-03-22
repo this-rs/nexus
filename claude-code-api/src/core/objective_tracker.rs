@@ -21,6 +21,7 @@
 /// * `turns_since_last_reminder` - How many turns since the last reminder was sent
 /// * `cooldown_turns` - Minimum turns between reminders (typically 3)
 /// * `pending_objectives` - Description of pending objectives (empty string = no objectives)
+#[allow(dead_code)] // Will be called from session_manager once objective tracking is wired in
 pub fn check_objective_reminder(
     had_tool_use: bool,
     tracking_enabled: bool,
