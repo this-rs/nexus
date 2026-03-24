@@ -3003,7 +3003,7 @@ mod tests {
             (PermissionUpdateDestination::Session, "session"),
         ];
         for (variant, expected) in cases {
-            let val = serde_json::to_value(&variant).unwrap();
+            let val = serde_json::to_value(variant).unwrap();
             assert_eq!(val, serde_json::json!(expected), "serialize {:?}", variant);
             let back: PermissionUpdateDestination = serde_json::from_value(val).unwrap();
             assert_eq!(back, variant);
@@ -3019,7 +3019,7 @@ mod tests {
             (PermissionBehavior::Ask, "ask"),
         ];
         for (variant, expected) in cases {
-            let val = serde_json::to_value(&variant).unwrap();
+            let val = serde_json::to_value(variant).unwrap();
             assert_eq!(val, serde_json::json!(expected), "serialize {:?}", variant);
             let back: PermissionBehavior = serde_json::from_value(val).unwrap();
             assert_eq!(back, variant);
@@ -3038,7 +3038,7 @@ mod tests {
             (PermissionUpdateType::RemoveDirectories, "removeDirectories"),
         ];
         for (variant, expected) in cases {
-            let val = serde_json::to_value(&variant).unwrap();
+            let val = serde_json::to_value(variant).unwrap();
             assert_eq!(val, serde_json::json!(expected), "serialize {:?}", variant);
             let back: PermissionUpdateType = serde_json::from_value(val).unwrap();
             assert_eq!(back, variant);
@@ -3389,7 +3389,7 @@ mod tests {
             (SettingSource::Local, "local"),
         ];
         for (variant, expected) in cases {
-            let val = serde_json::to_value(&variant).unwrap();
+            let val = serde_json::to_value(variant).unwrap();
             assert_eq!(val, serde_json::json!(expected), "serialize {:?}", variant);
             let back: SettingSource = serde_json::from_value(val).unwrap();
             assert_eq!(back, variant);
