@@ -366,4 +366,234 @@ mod tests {
         let response = server.handle_message(call_msg).await.unwrap();
         assert_eq!(response["result"]["content"][0]["text"], "Hello, Alice!");
     }
+
+    // --- Helper handler for tests ---
+
+    struct EchoHandler;
+
+    #[async_trait]
+    impl ToolHandler for EchoHandler {
+        async fn execute(&self, args: Value) -> Result<ToolResult> {
+            Ok(ToolResult {
+                content: vec![ToolResultContent::Text {
+                    text: args.to_string(),
+                }],
+                is_error: None,
+            })
+        }
+    }
+
+    fn make_echo_tool(name: &str) -> ToolDefinition {
+        ToolDefinition {
+            name: name.to_string(),
+            description: format!("Echo tool {name}"),
+            input_schema: ToolInputSchema {
+                schema_type: "object".to_string(),
+                properties: HashMap::new(),
+                required: None,
+            },
+            handler: Arc::new(EchoHandler),
+        }
+    }
+
+    fn make_server_with_echo() -> SdkMcpServer {
+        let mut server = SdkMcpServer::new("test-server", "1.0.0");
+        server.add_tool(make_echo_tool("echo"));
+        server
+    }
+
+    // 1. Missing "method" field
+    #[tokio::test]
+    async fn test_handle_message_missing_method() {
+        let server = make_server_with_echo();
+        let msg = json!({"jsonrpc": "2.0", "id": 1});
+        let err = server.handle_message(msg).await.unwrap_err();
+        assert!(
+            matches!(err, SdkError::InvalidState { .. }),
+            "expected InvalidState, got: {err:?}"
+        );
+    }
+
+    // 2. notifications/initialized
+    #[tokio::test]
+    async fn test_handle_message_notifications_initialized() {
+        let server = make_server_with_echo();
+        let msg = json!({"jsonrpc": "2.0", "method": "notifications/initialized"});
+        let response = server.handle_message(msg).await.unwrap();
+        assert_eq!(response["jsonrpc"], "2.0");
+        assert_eq!(response["result"], json!({}));
+    }
+
+    // 3. Unknown method
+    #[tokio::test]
+    async fn test_handle_message_unknown_method() {
+        let server = make_server_with_echo();
+        let msg = json!({"jsonrpc": "2.0", "id": 1, "method": "bogus/method"});
+        let response = server.handle_message(msg).await.unwrap();
+        assert_eq!(response["error"]["code"], -32601);
+        assert!(response["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("bogus/method"));
+    }
+
+    // 4. tools/call missing params
+    #[tokio::test]
+    async fn test_handle_message_tools_call_missing_params() {
+        let server = make_server_with_echo();
+        let msg = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call"});
+        let err = server.handle_message(msg).await.unwrap_err();
+        assert!(matches!(err, SdkError::InvalidState { .. }));
+    }
+
+    // 5. tools/call missing tool name
+    #[tokio::test]
+    async fn test_handle_message_tools_call_missing_tool_name() {
+        let server = make_server_with_echo();
+        let msg = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {"arguments": {}}
+        });
+        let err = server.handle_message(msg).await.unwrap_err();
+        assert!(matches!(err, SdkError::InvalidState { .. }));
+    }
+
+    // 6. tools/call for non-existent tool
+    #[tokio::test]
+    async fn test_handle_message_tools_call_nonexistent_tool() {
+        let server = make_server_with_echo();
+        let msg = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {"name": "no_such_tool"}
+        });
+        let err = server.handle_message(msg).await.unwrap_err();
+        assert!(matches!(err, SdkError::InvalidState { .. }));
+    }
+
+    // 7. tools/call with no arguments (uses empty default)
+    #[tokio::test]
+    async fn test_handle_message_tools_call_no_arguments() {
+        let server = make_server_with_echo();
+        let msg = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {"name": "echo"}
+        });
+        let response = server.handle_message(msg).await.unwrap();
+        // EchoHandler serialises args; with no arguments the default is {}
+        assert_eq!(response["result"]["content"][0]["text"], "{}");
+    }
+
+    // 8. SdkMcpServerBuilder
+    #[tokio::test]
+    async fn test_builder_new_version_tool_build() {
+        let server = SdkMcpServerBuilder::new("builder-server")
+            .version("2.0.0")
+            .tool(make_echo_tool("echo"))
+            .build();
+
+        assert_eq!(server.name, "builder-server");
+        assert_eq!(server.version, "2.0.0");
+        assert_eq!(server.tools.len(), 1);
+        assert_eq!(server.tools[0].name, "echo");
+
+        // Verify the built server actually works
+        let msg = json!({"jsonrpc": "2.0", "id": 1, "method": "initialize"});
+        let resp = server.handle_message(msg).await.unwrap();
+        assert_eq!(resp["result"]["serverInfo"]["name"], "builder-server");
+        assert_eq!(resp["result"]["serverInfo"]["version"], "2.0.0");
+    }
+
+    // 9. ToolDefinition Debug impl
+    #[test]
+    fn test_tool_definition_debug() {
+        let tool = make_echo_tool("dbg-tool");
+        let debug_str = format!("{tool:?}");
+        assert!(debug_str.contains("dbg-tool"));
+        assert!(debug_str.contains("<Arc<dyn ToolHandler>>"));
+    }
+
+    // 10. ToolResultContent::Image serialization
+    #[test]
+    fn test_tool_result_content_image_serialization() {
+        let content = ToolResultContent::Image {
+            data: "iVBOR...".to_string(),
+            mime_type: "image/png".to_string(),
+        };
+        let json = serde_json::to_value(&content).unwrap();
+        assert_eq!(json["type"], "image");
+        assert_eq!(json["data"], "iVBOR...");
+        assert_eq!(json["mimeType"], "image/png");
+    }
+
+    // 11. ToolResult with is_error: Some(true)
+    #[test]
+    fn test_tool_result_is_error_serialization() {
+        let result = ToolResult {
+            content: vec![ToolResultContent::Text {
+                text: "something went wrong".to_string(),
+            }],
+            is_error: Some(true),
+        };
+        let json = serde_json::to_value(&result).unwrap();
+        assert_eq!(json["is_error"], true);
+        assert_eq!(json["content"][0]["text"], "something went wrong");
+
+        // Also verify None is skipped
+        let result_ok = ToolResult {
+            content: vec![],
+            is_error: None,
+        };
+        let json_ok = serde_json::to_value(&result_ok).unwrap();
+        assert!(json_ok.get("is_error").is_none());
+    }
+
+    // 12. SdkMcpServer::to_config
+    #[test]
+    fn test_to_config() {
+        let server = SdkMcpServer::new("cfg-server", "1.0.0");
+        let config = server.to_config();
+        match &config {
+            crate::types::McpServerConfig::Sdk { name, .. } => {
+                assert_eq!(name, "cfg-server");
+            }
+            other => panic!("Expected Sdk variant, got: {other:?}"),
+        }
+    }
+
+    // 13. create_simple_tool - error case in handler
+    #[tokio::test]
+    async fn test_create_simple_tool_error_handler() {
+        let tool = create_simple_tool(
+            "fail-tool",
+            "A tool that always fails",
+            ToolInputSchema {
+                schema_type: "object".to_string(),
+                properties: HashMap::new(),
+                required: None,
+            },
+            |_args| async move {
+                Err(SdkError::InvalidState {
+                    message: "intentional failure".to_string(),
+                })
+            },
+        );
+
+        let mut server = SdkMcpServer::new("err-server", "1.0.0");
+        server.add_tool(tool);
+
+        let msg = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {"name": "fail-tool", "arguments": {}}
+        });
+        let err = server.handle_message(msg).await.unwrap_err();
+        assert!(matches!(err, SdkError::InvalidState { .. }));
+    }
 }

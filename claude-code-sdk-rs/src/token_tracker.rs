@@ -355,4 +355,218 @@ mod tests {
         manager.update_usage(300, 300, 0.05).await;
         assert!(manager.is_exceeded().await);
     }
+
+    #[test]
+    fn test_avg_tokens_per_session_zero_sessions() {
+        let tracker = TokenUsageTracker::new();
+        assert_eq!(tracker.avg_tokens_per_session(), 0.0);
+    }
+
+    #[test]
+    fn test_avg_tokens_per_session_with_sessions() {
+        let mut tracker = TokenUsageTracker::new();
+        tracker.update(100, 200, 0.05); // 300 tokens
+        tracker.update(200, 100, 0.03); // 300 tokens
+        // Total: 600 tokens over 2 sessions = 300.0 avg
+        assert_eq!(tracker.avg_tokens_per_session(), 300.0);
+    }
+
+    #[test]
+    fn test_avg_cost_per_session_zero_sessions() {
+        let tracker = TokenUsageTracker::new();
+        assert_eq!(tracker.avg_cost_per_session(), 0.0);
+    }
+
+    #[test]
+    fn test_avg_cost_per_session_with_sessions() {
+        let mut tracker = TokenUsageTracker::new();
+        tracker.update(100, 200, 0.10);
+        tracker.update(200, 100, 0.20);
+        // Total: $0.30 over 2 sessions = $0.15 avg
+        assert!((tracker.avg_cost_per_session() - 0.15).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_reset() {
+        let mut tracker = TokenUsageTracker::new();
+        tracker.update(100, 200, 0.05);
+        tracker.update(50, 50, 0.02);
+        assert_eq!(tracker.session_count, 2);
+
+        tracker.reset();
+        assert_eq!(tracker.total_input_tokens, 0);
+        assert_eq!(tracker.total_output_tokens, 0);
+        assert_eq!(tracker.total_cost_usd, 0.0);
+        assert_eq!(tracker.session_count, 0);
+        assert_eq!(tracker.total_tokens(), 0);
+    }
+
+    #[test]
+    fn test_budget_limit_with_tokens_exceeded() {
+        let limit = BudgetLimit::with_tokens(500);
+        let mut tracker = TokenUsageTracker::new();
+        tracker.update(300, 300, 0.05); // 600 tokens > 500 limit
+        assert!(matches!(
+            limit.check_limits(&tracker),
+            BudgetStatus::Exceeded
+        ));
+    }
+
+    #[test]
+    fn test_budget_limit_with_both_token_exceeds_first() {
+        // Cost well under limit, but tokens exceed
+        let limit = BudgetLimit::with_both(10.0, 500);
+        let mut tracker = TokenUsageTracker::new();
+        tracker.update(300, 300, 0.01); // 600 tokens > 500, cost $0.01 < $10
+        assert!(matches!(
+            limit.check_limits(&tracker),
+            BudgetStatus::Exceeded
+        ));
+    }
+
+    #[test]
+    fn test_budget_limit_with_warning_threshold_custom() {
+        let limit = BudgetLimit::with_cost(1.0).with_warning_threshold(0.5);
+        assert_eq!(limit.warning_threshold, 0.5);
+
+        let mut tracker = TokenUsageTracker::new();
+        tracker.update(100, 100, 0.55); // 55% > 50% threshold
+        assert!(matches!(
+            limit.check_limits(&tracker),
+            BudgetStatus::Warning { .. }
+        ));
+    }
+
+    #[test]
+    fn test_budget_limit_token_warning() {
+        let limit = BudgetLimit::with_tokens(1000).with_warning_threshold(0.8);
+        let mut tracker = TokenUsageTracker::new();
+        tracker.update(450, 400, 0.0); // 850 tokens = 85% > 80% threshold
+        match limit.check_limits(&tracker) {
+            BudgetStatus::Warning {
+                current_ratio,
+                message,
+            } => {
+                assert!((current_ratio - 0.85).abs() < 0.001);
+                assert!(message.contains("Token usage"));
+            }
+            other => panic!("Expected Warning, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_budget_limit_cost_exceeded_overrides_token_warning() {
+        // Cost exceeds, tokens only at warning level
+        let limit = BudgetLimit::with_both(1.0, 1000).with_warning_threshold(0.8);
+        let mut tracker = TokenUsageTracker::new();
+        // cost $1.50 >= $1.0 (exceeded), tokens 850/1000 = 85% (warning)
+        tracker.update(450, 400, 1.50);
+        // Cost is checked first and sets Exceeded; token check keeps Exceeded
+        assert!(matches!(
+            limit.check_limits(&tracker),
+            BudgetStatus::Exceeded
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_budget_manager_set_warning_callback_fires_on_warning() {
+        let manager = BudgetManager::new();
+        let called = Arc::new(std::sync::Mutex::new(false));
+        let called_clone = called.clone();
+
+        manager
+            .set_limit(BudgetLimit::with_cost(1.0).with_warning_threshold(0.8))
+            .await;
+        manager
+            .set_warning_callback(Arc::new(move |_msg| {
+                *called_clone.lock().unwrap() = true;
+            }))
+            .await;
+
+        // Push past 80% threshold
+        manager.update_usage(100, 100, 0.85).await;
+        assert!(*called.lock().unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_budget_manager_clear_limit() {
+        let manager = BudgetManager::new();
+        manager.set_limit(BudgetLimit::with_tokens(100)).await;
+        manager.update_usage(200, 200, 0.0).await;
+        assert!(manager.is_exceeded().await);
+
+        manager.clear_limit().await;
+        assert!(!manager.is_exceeded().await);
+    }
+
+    #[tokio::test]
+    async fn test_budget_manager_reset_usage() {
+        let manager = BudgetManager::new();
+        manager.set_limit(BudgetLimit::with_tokens(1000)).await;
+        manager.update_usage(500, 500, 0.10).await;
+
+        let usage = manager.get_usage().await;
+        assert_eq!(usage.total_tokens(), 1000);
+
+        manager.reset_usage().await;
+
+        let usage = manager.get_usage().await;
+        assert_eq!(usage.total_tokens(), 0);
+        assert_eq!(usage.total_cost_usd, 0.0);
+        assert_eq!(usage.session_count, 0);
+        assert!(!manager.is_exceeded().await);
+    }
+
+    #[tokio::test]
+    async fn test_budget_manager_warning_callback_fires_only_once() {
+        let manager = BudgetManager::new();
+        let call_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let count_clone = call_count.clone();
+
+        manager
+            .set_limit(BudgetLimit::with_cost(1.0).with_warning_threshold(0.8))
+            .await;
+        manager
+            .set_warning_callback(Arc::new(move |_msg| {
+                count_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }))
+            .await;
+
+        // First update pushes past warning threshold
+        manager.update_usage(100, 100, 0.85).await;
+        assert_eq!(call_count.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        // Second update still in warning range but callback should NOT fire again
+        manager.update_usage(10, 10, 0.05).await;
+        assert_eq!(call_count.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn test_budget_manager_exceeded_fires_callback() {
+        let manager = BudgetManager::new();
+        let message = Arc::new(std::sync::Mutex::new(String::new()));
+        let msg_clone = message.clone();
+
+        manager
+            .set_limit(BudgetLimit::with_cost(1.0))
+            .await;
+        manager
+            .set_warning_callback(Arc::new(move |msg| {
+                *msg_clone.lock().unwrap() = msg.to_string();
+            }))
+            .await;
+
+        // Exceed budget directly
+        manager.update_usage(100, 100, 1.50).await;
+        assert!(manager.is_exceeded().await);
+        assert_eq!(*message.lock().unwrap(), "Budget limit exceeded");
+    }
+
+    #[tokio::test]
+    async fn test_budget_manager_is_exceeded_no_limit() {
+        let manager = BudgetManager::new();
+        // No limit set, even with high usage should return false
+        manager.update_usage(999999, 999999, 999.0).await;
+        assert!(!manager.is_exceeded().await);
+    }
 }

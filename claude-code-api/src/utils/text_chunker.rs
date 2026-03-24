@@ -132,6 +132,8 @@ pub fn split_text_into_chunks(text: &str, config: &ChunkConfig) -> Vec<String> {
 mod tests {
     use super::*;
 
+    // ── split_text_into_chunks: basic (no word boundary) ──
+
     #[test]
     fn test_split_text_basic() {
         let text = "Hello world, this is a test message.";
@@ -147,6 +149,60 @@ mod tests {
     }
 
     #[test]
+    fn test_split_basic_reassembles_to_original() {
+        let text = "Hello world, this is a test message.";
+        let config = ChunkConfig {
+            chunk_size: 10,
+            chunk_delay_ms: 0,
+            word_boundary: false,
+        };
+        let chunks = split_text_into_chunks(text, &config);
+        let reassembled: String = chunks.into_iter().collect();
+        assert_eq!(reassembled, text);
+    }
+
+    #[test]
+    fn test_split_basic_exact_chunk_size() {
+        // Text length is exactly chunk_size
+        let text = "0123456789";
+        let config = ChunkConfig {
+            chunk_size: 10,
+            chunk_delay_ms: 0,
+            word_boundary: false,
+        };
+        let chunks = split_text_into_chunks(text, &config);
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0], "0123456789");
+    }
+
+    #[test]
+    fn test_split_basic_smaller_than_chunk() {
+        let text = "Hi";
+        let config = ChunkConfig {
+            chunk_size: 10,
+            chunk_delay_ms: 0,
+            word_boundary: false,
+        };
+        let chunks = split_text_into_chunks(text, &config);
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0], "Hi");
+    }
+
+    #[test]
+    fn test_split_basic_chunk_size_one() {
+        let text = "abc";
+        let config = ChunkConfig {
+            chunk_size: 1,
+            chunk_delay_ms: 0,
+            word_boundary: false,
+        };
+        let chunks = split_text_into_chunks(text, &config);
+        assert_eq!(chunks, vec!["a", "b", "c"]);
+    }
+
+    // ── split_text_into_chunks: word boundary mode ──
+
+    #[test]
     fn test_split_text_word_boundary() {
         let text = "Hello world, this is a test message.";
         let config = ChunkConfig {
@@ -158,5 +214,190 @@ mod tests {
         let chunks = split_text_into_chunks(text, &config);
         assert_eq!(chunks[0], "Hello ");
         assert_eq!(chunks[1], "world, ");
+    }
+
+    #[test]
+    fn test_split_word_boundary_reassembles() {
+        let text = "Hello world, this is a test message.";
+        let config = ChunkConfig {
+            chunk_size: 10,
+            chunk_delay_ms: 0,
+            word_boundary: true,
+        };
+        let chunks = split_text_into_chunks(text, &config);
+        let reassembled: String = chunks.into_iter().collect();
+        assert_eq!(reassembled, text);
+    }
+
+    #[test]
+    fn test_split_word_boundary_long_word_no_space_in_chunk() {
+        // A word longer than chunk_size: should look forward for next space
+        let text = "superlongword next";
+        let config = ChunkConfig {
+            chunk_size: 5,
+            chunk_delay_ms: 0,
+            word_boundary: true,
+        };
+        let chunks = split_text_into_chunks(text, &config);
+        // No space in first 5 chars, so it looks forward and finds space at index 13
+        assert_eq!(chunks[0], "superlongword ");
+        assert_eq!(chunks[1], "next");
+    }
+
+    #[test]
+    fn test_split_word_boundary_single_long_word() {
+        // A single word with no space at all — should return entire text as one chunk
+        let text = "abcdefghijklmnopqrstuvwxyz";
+        let config = ChunkConfig {
+            chunk_size: 5,
+            chunk_delay_ms: 0,
+            word_boundary: true,
+        };
+        let chunks = split_text_into_chunks(text, &config);
+        // No space found at all, so chunk_end stays at 5 (no space backward or forward)
+        // Actually the forward search finds nothing, so chunk_end remains at 5
+        assert_eq!(chunks.len(), 6); // 26 chars / 5 = 5 full + 1 partial
+        let reassembled: String = chunks.into_iter().collect();
+        assert_eq!(reassembled, text);
+    }
+
+    #[test]
+    fn test_split_word_boundary_space_at_start() {
+        // rfind(' ') returns index 0 which is NOT > 0, so it won't use that boundary
+        // BUT since rfind returned Some, we are in the `if let Some` arm, NOT the `else if` arm.
+        // So chunk_end stays at 5 (the original min(chunk_size, remaining.len())).
+        let text = " hello world";
+        let config = ChunkConfig {
+            chunk_size: 5,
+            chunk_delay_ms: 0,
+            word_boundary: true,
+        };
+        let chunks = split_text_into_chunks(text, &config);
+        assert_eq!(chunks[0], " hell");
+        let reassembled: String = chunks.into_iter().collect();
+        assert_eq!(reassembled, text);
+    }
+
+    #[test]
+    fn test_split_word_boundary_last_chunk_shorter() {
+        // When the remaining text is shorter than chunk_size, word_boundary
+        // logic is skipped (chunk_end == remaining.len(), so guard fails)
+        let text = "aaaa bb";
+        let config = ChunkConfig {
+            chunk_size: 5,
+            chunk_delay_ms: 0,
+            word_boundary: true,
+        };
+        let chunks = split_text_into_chunks(text, &config);
+        assert_eq!(chunks[0], "aaaa ");
+        assert_eq!(chunks[1], "bb");
+    }
+
+    // ── empty input ──
+
+    #[test]
+    fn test_split_empty_string() {
+        let config = ChunkConfig {
+            chunk_size: 10,
+            chunk_delay_ms: 0,
+            word_boundary: false,
+        };
+        let chunks = split_text_into_chunks("", &config);
+        assert!(chunks.is_empty());
+    }
+
+    #[test]
+    fn test_split_empty_string_word_boundary() {
+        let config = ChunkConfig {
+            chunk_size: 10,
+            chunk_delay_ms: 0,
+            word_boundary: true,
+        };
+        let chunks = split_text_into_chunks("", &config);
+        assert!(chunks.is_empty());
+    }
+
+    // ── ChunkConfig::default ──
+
+    #[test]
+    fn test_chunk_config_default() {
+        let config = ChunkConfig::default();
+        assert_eq!(config.chunk_size, 20);
+        assert_eq!(config.chunk_delay_ms, 50);
+        assert!(config.word_boundary);
+    }
+
+    // ── TextChunker::next_chunk (needs tokio runtime for Interval) ──
+
+    #[tokio::test]
+    async fn test_next_chunk_basic() {
+        let config = ChunkConfig {
+            chunk_size: 5,
+            chunk_delay_ms: 1,
+            word_boundary: false,
+        };
+        let mut chunker = TextChunker::new("Hello World!".to_string(), config);
+
+        assert_eq!(chunker.next_chunk(), Some("Hello".to_string()));
+        assert_eq!(chunker.next_chunk(), Some(" Worl".to_string()));
+        assert_eq!(chunker.next_chunk(), Some("d!".to_string()));
+        assert_eq!(chunker.next_chunk(), None);
+    }
+
+    #[tokio::test]
+    async fn test_next_chunk_word_boundary() {
+        let config = ChunkConfig {
+            chunk_size: 8,
+            chunk_delay_ms: 1,
+            word_boundary: true,
+        };
+        let mut chunker = TextChunker::new("one two three four".to_string(), config);
+
+        let mut collected = Vec::new();
+        while let Some(chunk) = chunker.next_chunk() {
+            collected.push(chunk);
+        }
+        let reassembled: String = collected.into_iter().collect();
+        assert_eq!(reassembled, "one two three four");
+    }
+
+    #[tokio::test]
+    async fn test_next_chunk_empty_text() {
+        let config = ChunkConfig {
+            chunk_size: 10,
+            chunk_delay_ms: 1,
+            word_boundary: false,
+        };
+        let mut chunker = TextChunker::new(String::new(), config);
+        assert_eq!(chunker.next_chunk(), None);
+    }
+
+    #[tokio::test]
+    async fn test_next_chunk_returns_none_after_exhausted() {
+        let config = ChunkConfig {
+            chunk_size: 100,
+            chunk_delay_ms: 1,
+            word_boundary: false,
+        };
+        let mut chunker = TextChunker::new("short".to_string(), config);
+        assert_eq!(chunker.next_chunk(), Some("short".to_string()));
+        assert_eq!(chunker.next_chunk(), None);
+        assert_eq!(chunker.next_chunk(), None); // stays None
+    }
+
+    // ── Large text stress test ──
+
+    #[test]
+    fn test_split_large_text_reassembles() {
+        let text = "word ".repeat(500);
+        let text = text.trim_end(); // remove trailing space
+        let config = ChunkConfig {
+            chunk_size: 20,
+            chunk_delay_ms: 0,
+            word_boundary: true,
+        };
+        let chunks = split_text_into_chunks(text, &config);
+        let reassembled: String = chunks.into_iter().collect();
+        assert_eq!(reassembled, text);
     }
 }

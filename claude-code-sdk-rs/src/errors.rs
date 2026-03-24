@@ -244,4 +244,229 @@ mod tests {
         assert!(error_str.contains("Failed to decode JSON from CLI output"));
         assert!(error_str.contains(&line));
     }
+
+    #[test]
+    fn test_parse_error_constructor() {
+        let err = SdkError::parse_error("bad json", r#"{"broken"#);
+        match &err {
+            SdkError::MessageParseError { error, raw } => {
+                assert_eq!(error, "bad json");
+                assert_eq!(raw, r#"{"broken"#);
+            }
+            _ => panic!("expected MessageParseError"),
+        }
+        let msg = err.to_string();
+        assert!(msg.contains("bad json"));
+        assert!(msg.contains(r#"{"broken"#));
+    }
+
+    #[test]
+    fn test_timeout_constructor() {
+        let err = SdkError::timeout(60);
+        match &err {
+            SdkError::Timeout { seconds } => assert_eq!(*seconds, 60),
+            _ => panic!("expected Timeout"),
+        }
+        assert!(err.to_string().contains("60"));
+    }
+
+    #[test]
+    fn test_unexpected_response_constructor() {
+        let err = SdkError::unexpected_response("text", "json");
+        match &err {
+            SdkError::UnexpectedResponse { expected, actual } => {
+                assert_eq!(expected, "text");
+                assert_eq!(actual, "json");
+            }
+            _ => panic!("expected UnexpectedResponse"),
+        }
+    }
+
+    #[test]
+    fn test_cli_error_constructor_with_code() {
+        let err = SdkError::cli_error("something broke", Some("E001".into()));
+        match &err {
+            SdkError::CliError { message, code } => {
+                assert_eq!(message, "something broke");
+                assert_eq!(code.as_deref(), Some("E001"));
+            }
+            _ => panic!("expected CliError"),
+        }
+    }
+
+    #[test]
+    fn test_cli_error_constructor_without_code() {
+        let err = SdkError::cli_error("no code", None);
+        match &err {
+            SdkError::CliError { message, code } => {
+                assert_eq!(message, "no code");
+                assert!(code.is_none());
+            }
+            _ => panic!("expected CliError"),
+        }
+    }
+
+    #[test]
+    fn test_invalid_state_constructor() {
+        let err = SdkError::invalid_state("bad state");
+        match &err {
+            SdkError::InvalidState { message } => assert_eq!(message, "bad state"),
+            _ => panic!("expected InvalidState"),
+        }
+    }
+
+    #[test]
+    fn test_is_recoverable_for_all_recoverable_variants() {
+        assert!(SdkError::timeout(10).is_recoverable());
+        assert!(SdkError::ChannelClosed.is_recoverable());
+        assert!(SdkError::UnexpectedStreamEnd.is_recoverable());
+        assert!(
+            SdkError::ProcessExited { code: Some(1) }.is_recoverable()
+        );
+        assert!(
+            SdkError::ProcessExited { code: None }.is_recoverable()
+        );
+    }
+
+    #[test]
+    fn test_is_recoverable_returns_false_for_non_recoverable() {
+        assert!(!SdkError::ConnectionError("err".into()).is_recoverable());
+        assert!(!SdkError::TransportError("err".into()).is_recoverable());
+        assert!(!SdkError::ConfigError("err".into()).is_recoverable());
+        assert!(!SdkError::ChannelSendError.is_recoverable());
+        assert!(!SdkError::invalid_state("x").is_recoverable());
+        assert!(
+            !SdkError::NotSupported {
+                feature: "x".into()
+            }
+            .is_recoverable()
+        );
+        assert!(
+            !SdkError::parse_error("e", "r").is_recoverable()
+        );
+        assert!(
+            !SdkError::unexpected_response("a", "b").is_recoverable()
+        );
+        assert!(
+            !SdkError::cli_error("m", None).is_recoverable()
+        );
+    }
+
+    #[test]
+    fn test_is_config_error_for_not_supported() {
+        assert!(
+            SdkError::NotSupported {
+                feature: "streaming".into()
+            }
+            .is_config_error()
+        );
+    }
+
+    #[test]
+    fn test_display_connection_error() {
+        let err = SdkError::ConnectionError("refused".into());
+        assert_eq!(err.to_string(), "Failed to connect to Claude CLI: refused");
+    }
+
+    #[test]
+    fn test_display_transport_error() {
+        let err = SdkError::TransportError("broken pipe".into());
+        assert_eq!(err.to_string(), "Transport error: broken pipe");
+    }
+
+    #[test]
+    fn test_display_session_not_found() {
+        let err = SdkError::SessionNotFound("abc-123".into());
+        assert_eq!(err.to_string(), "Session not found: abc-123");
+    }
+
+    #[test]
+    fn test_display_control_request_error() {
+        let err = SdkError::ControlRequestError("denied".into());
+        assert_eq!(err.to_string(), "Control request failed: denied");
+    }
+
+    #[test]
+    fn test_display_invalid_state() {
+        let err = SdkError::invalid_state("not ready");
+        assert_eq!(err.to_string(), "Invalid state: not ready");
+    }
+
+    #[test]
+    fn test_display_process_exited() {
+        let err = SdkError::ProcessExited { code: Some(1) };
+        assert!(err.to_string().contains("1"));
+        let err2 = SdkError::ProcessExited { code: None };
+        assert!(err2.to_string().contains("None"));
+    }
+
+    #[test]
+    fn test_display_unexpected_stream_end() {
+        let err = SdkError::UnexpectedStreamEnd;
+        assert_eq!(err.to_string(), "Stream ended unexpectedly");
+    }
+
+    #[test]
+    fn test_display_not_supported() {
+        let err = SdkError::NotSupported {
+            feature: "mcp".into(),
+        };
+        assert_eq!(err.to_string(), "Feature not supported: mcp");
+    }
+
+    #[test]
+    fn test_display_channel_send_error() {
+        let err = SdkError::ChannelSendError;
+        assert_eq!(err.to_string(), "Failed to send message through channel");
+    }
+
+    #[test]
+    fn test_display_channel_closed() {
+        let err = SdkError::ChannelClosed;
+        assert_eq!(err.to_string(), "Channel closed unexpectedly");
+    }
+
+    #[test]
+    fn test_from_io_error() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "file missing");
+        let sdk_err: SdkError = io_err.into();
+        match &sdk_err {
+            SdkError::ProcessError(_) => {}
+            _ => panic!("expected ProcessError from io::Error"),
+        }
+        assert!(sdk_err.to_string().contains("file missing"));
+    }
+
+    #[test]
+    fn test_from_serde_json_error() {
+        let json_err = serde_json::from_str::<serde_json::Value>("not json").unwrap_err();
+        let sdk_err: SdkError = json_err.into();
+        match &sdk_err {
+            SdkError::JsonError(_) => {}
+            _ => panic!("expected JsonError from serde_json::Error"),
+        }
+    }
+
+    #[test]
+    fn test_from_send_error() {
+        let (tx, _rx) = tokio::sync::mpsc::channel::<i32>(1);
+        // Drop the receiver so send would fail, but we construct SendError directly
+        let send_err = tokio::sync::mpsc::error::SendError(42);
+        let sdk_err: SdkError = send_err.into();
+        let _ = tx; // keep tx alive to avoid warning
+        match &sdk_err {
+            SdkError::ChannelSendError => {}
+            _ => panic!("expected ChannelSendError from SendError"),
+        }
+    }
+
+    #[test]
+    fn test_from_recv_error() {
+        let recv_err = tokio::sync::broadcast::error::RecvError::Closed;
+        let sdk_err: SdkError = recv_err.into();
+        match &sdk_err {
+            SdkError::ChannelClosed => {}
+            _ => panic!("expected ChannelClosed from RecvError"),
+        }
+    }
 }

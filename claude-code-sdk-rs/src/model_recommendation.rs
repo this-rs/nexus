@@ -276,4 +276,115 @@ mod tests {
         assert_eq!(latest_sonnet(), "claude-sonnet-4-5-20250929");
         assert_eq!(best_model(), "opus");
     }
+
+    #[test]
+    fn test_cost_multiplier_haiku_full_name() {
+        assert_eq!(estimate_cost_multiplier("claude-3-5-haiku-20241022"), 1.0);
+    }
+
+    #[test]
+    fn test_cost_multiplier_sonnet_4_5_full_name() {
+        assert_eq!(
+            estimate_cost_multiplier("claude-sonnet-4-5-20250929"),
+            5.0
+        );
+    }
+
+    #[test]
+    fn test_cost_multiplier_sonnet_4_full_name() {
+        assert_eq!(estimate_cost_multiplier("claude-sonnet-4-20250514"), 5.0);
+    }
+
+    #[test]
+    fn test_cost_multiplier_sonnet_3_5_full_name() {
+        assert_eq!(
+            estimate_cost_multiplier("claude-3-5-sonnet-20241022"),
+            5.0
+        );
+    }
+
+    #[test]
+    fn test_cost_multiplier_opus_full_name() {
+        assert_eq!(
+            estimate_cost_multiplier("claude-opus-4-1-20250805"),
+            15.0
+        );
+    }
+
+    #[test]
+    fn test_cost_multiplier_unknown_model() {
+        assert_eq!(estimate_cost_multiplier("gpt-4o"), 5.0);
+        assert_eq!(estimate_cost_multiplier("unknown-model-xyz"), 5.0);
+    }
+
+    #[test]
+    fn test_task_types_returns_all_keys() {
+        let recommender = ModelRecommendation::with_defaults();
+        let mut types = recommender.task_types();
+        types.sort();
+        let expected = vec![
+            "advanced", "balanced", "best", "cheap", "complex", "critical", "fast", "general",
+            "latest", "normal", "quality", "quick", "simple", "standard",
+        ];
+        assert_eq!(types, expected);
+    }
+
+    #[test]
+    fn test_all_recommendations_returns_hashmap() {
+        let recommender = ModelRecommendation::with_defaults();
+        let all = recommender.all_recommendations();
+        assert_eq!(all.len(), 14);
+        assert_eq!(
+            all.get("simple").map(|s| s.as_str()),
+            Some("claude-3-5-haiku-20241022")
+        );
+        assert_eq!(
+            all.get("complex").map(|s| s.as_str()),
+            Some("opus")
+        );
+        assert_eq!(
+            all.get("balanced").map(|s| s.as_str()),
+            Some("claude-sonnet-4-5-20250929")
+        );
+    }
+
+    #[test]
+    fn test_with_defaults_all_mappings() {
+        let recommender = ModelRecommendation::with_defaults();
+
+        // cheap/quick → haiku
+        assert_eq!(
+            recommender.suggest("cheap"),
+            Some("claude-3-5-haiku-20241022")
+        );
+        assert_eq!(
+            recommender.suggest("quick"),
+            Some("claude-3-5-haiku-20241022")
+        );
+
+        // normal/standard → sonnet 4.5
+        assert_eq!(
+            recommender.suggest("normal"),
+            Some("claude-sonnet-4-5-20250929")
+        );
+        assert_eq!(
+            recommender.suggest("standard"),
+            Some("claude-sonnet-4-5-20250929")
+        );
+
+        // best/quality/critical/advanced → opus
+        assert_eq!(recommender.suggest("best"), Some("opus"));
+        assert_eq!(recommender.suggest("quality"), Some("opus"));
+        assert_eq!(recommender.suggest("critical"), Some("opus"));
+        assert_eq!(recommender.suggest("advanced"), Some("opus"));
+    }
+
+    #[test]
+    fn test_suggest_general_returns_sonnet_4_5() {
+        let recommender = ModelRecommendation::with_defaults();
+        assert_eq!(
+            recommender.suggest("general"),
+            Some("claude-sonnet-4-5-20250929")
+        );
+    }
 }

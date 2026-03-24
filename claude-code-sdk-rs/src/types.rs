@@ -2603,4 +2603,1266 @@ mod tests {
         let options = ClaudeCodeOptions::builder().build();
         assert!(options.cli_path.is_none());
     }
+
+    // ============== Coverage expansion tests ==============
+
+    // --- PermissionMode: all variants ---
+    #[test]
+    fn test_permission_mode_all_variants_serde() {
+        let cases = vec![
+            (PermissionMode::Default, r#""default""#),
+            (PermissionMode::AcceptEdits, r#""acceptEdits""#),
+            (PermissionMode::Plan, r#""plan""#),
+            (PermissionMode::BypassPermissions, r#""bypassPermissions""#),
+        ];
+        for (variant, expected_json) in cases {
+            let json = serde_json::to_string(&variant).unwrap();
+            assert_eq!(json, expected_json, "serialize {:?}", variant);
+            let round: PermissionMode = serde_json::from_str(&json).unwrap();
+            assert_eq!(round, variant, "round-trip {:?}", variant);
+        }
+    }
+
+    #[test]
+    fn test_permission_mode_default_trait() {
+        assert_eq!(PermissionMode::default(), PermissionMode::Default);
+    }
+
+    // --- SdkBeta: Display + round-trip ---
+    #[test]
+    fn test_sdk_beta_display_and_roundtrip() {
+        let beta = SdkBeta::Context1M;
+        assert_eq!(beta.to_string(), "context-1m-2025-08-07");
+        let json = serde_json::to_value(&beta).unwrap();
+        assert_eq!(json, serde_json::json!("context-1m-2025-08-07"));
+        let back: SdkBeta = serde_json::from_value(json).unwrap();
+        assert_eq!(back, SdkBeta::Context1M);
+    }
+
+    // --- ToolsConfig: serde round-trip for both variants ---
+    #[test]
+    fn test_tools_config_serde_roundtrip() {
+        // List variant
+        let list = ToolsConfig::list(vec!["Read".into(), "Edit".into(), "Bash".into()]);
+        let val = serde_json::to_value(&list).unwrap();
+        assert_eq!(val, serde_json::json!(["Read", "Edit", "Bash"]));
+        let back: ToolsConfig = serde_json::from_value(val).unwrap();
+        match back {
+            ToolsConfig::List(v) => assert_eq!(v, vec!["Read", "Edit", "Bash"]),
+            _ => panic!("expected List"),
+        }
+
+        // none()
+        let none = ToolsConfig::none();
+        let val = serde_json::to_value(&none).unwrap();
+        assert_eq!(val, serde_json::json!([]));
+
+        // Preset variant
+        let preset = ToolsConfig::claude_code_preset();
+        let val = serde_json::to_value(&preset).unwrap();
+        assert_eq!(
+            val,
+            serde_json::json!({"type": "preset", "preset": "claude_code"})
+        );
+        let back: ToolsConfig = serde_json::from_value(val).unwrap();
+        match back {
+            ToolsConfig::Preset(p) => {
+                assert_eq!(p.preset_type, "preset");
+                assert_eq!(p.preset, "claude_code");
+            },
+            _ => panic!("expected Preset"),
+        }
+    }
+
+    // --- SandboxNetworkConfig: Default ---
+    #[test]
+    fn test_sandbox_network_config_default() {
+        let cfg = SandboxNetworkConfig::default();
+        assert!(cfg.allow_unix_sockets.is_none());
+        assert!(cfg.allow_all_unix_sockets.is_none());
+        assert!(cfg.allow_local_binding.is_none());
+        assert!(cfg.http_proxy_port.is_none());
+        assert!(cfg.socks_proxy_port.is_none());
+
+        // default serializes to empty object (skip_serializing_if)
+        let json = serde_json::to_value(&cfg).unwrap();
+        assert_eq!(json, serde_json::json!({}));
+    }
+
+    // --- SandboxSettings: Default + full serde ---
+    #[test]
+    fn test_sandbox_settings_default_serde() {
+        let s = SandboxSettings::default();
+        let val = serde_json::to_value(&s).unwrap();
+        assert_eq!(val, serde_json::json!({}));
+        let back: SandboxSettings = serde_json::from_value(val).unwrap();
+        assert!(back.enabled.is_none());
+        assert!(back.network.is_none());
+        assert!(back.ignore_violations.is_none());
+        assert!(back.enable_weaker_nested_sandbox.is_none());
+    }
+
+    #[test]
+    fn test_sandbox_settings_full_serde_roundtrip() {
+        let val = serde_json::json!({
+            "enabled": true,
+            "autoAllowBashIfSandboxed": false,
+            "excludedCommands": ["git"],
+            "allowUnsandboxedCommands": true,
+            "network": {
+                "allowUnixSockets": ["/tmp/sock"],
+                "allowAllUnixSockets": true,
+                "allowLocalBinding": false,
+                "httpProxyPort": 9090,
+                "socksProxyPort": 1081
+            },
+            "ignoreViolations": {
+                "file": ["/tmp"],
+                "network": ["example.com"]
+            },
+            "enableWeakerNestedSandbox": true
+        });
+        let s: SandboxSettings = serde_json::from_value(val.clone()).unwrap();
+        assert_eq!(s.enabled, Some(true));
+        assert_eq!(s.auto_allow_bash_if_sandboxed, Some(false));
+        assert_eq!(s.excluded_commands.as_ref().unwrap(), &vec!["git".to_string()]);
+        assert_eq!(s.allow_unsandboxed_commands, Some(true));
+        assert_eq!(s.enable_weaker_nested_sandbox, Some(true));
+        let net = s.network.as_ref().unwrap();
+        assert_eq!(net.http_proxy_port, Some(9090));
+        assert_eq!(net.socks_proxy_port, Some(1081));
+        assert_eq!(net.allow_all_unix_sockets, Some(true));
+        assert_eq!(net.allow_local_binding, Some(false));
+        let ig = s.ignore_violations.as_ref().unwrap();
+        assert_eq!(ig.file.as_ref().unwrap(), &vec!["/tmp".to_string()]);
+        assert_eq!(ig.network.as_ref().unwrap(), &vec!["example.com".to_string()]);
+
+        // re-serialize and verify round-trip
+        let back = serde_json::to_value(&s).unwrap();
+        assert_eq!(back, val);
+    }
+
+    // --- SdkPluginConfig::Local serde ---
+    #[test]
+    fn test_sdk_plugin_config_local_roundtrip() {
+        let plugin = SdkPluginConfig::Local {
+            path: "/home/user/my-plugin".to_string(),
+        };
+        let val = serde_json::to_value(&plugin).unwrap();
+        assert_eq!(val, serde_json::json!({"type": "local", "path": "/home/user/my-plugin"}));
+        let back: SdkPluginConfig = serde_json::from_value(val).unwrap();
+        match back {
+            SdkPluginConfig::Local { path } => assert_eq!(path, "/home/user/my-plugin"),
+        }
+    }
+
+    // --- ControlProtocolFormat: Default + equality ---
+    #[test]
+    fn test_control_protocol_format_default_and_eq() {
+        let d = ControlProtocolFormat::default();
+        assert_eq!(d, ControlProtocolFormat::Legacy);
+        assert_ne!(d, ControlProtocolFormat::Control);
+        assert_ne!(d, ControlProtocolFormat::Auto);
+        assert_eq!(ControlProtocolFormat::Control, ControlProtocolFormat::Control);
+        assert_eq!(ControlProtocolFormat::Auto, ControlProtocolFormat::Auto);
+    }
+
+    // --- McpServerConfig: Debug for all variants ---
+    #[test]
+    fn test_mcp_server_config_debug_stdio() {
+        let cfg = McpServerConfig::Stdio {
+            command: "node".into(),
+            args: Some(vec!["server.js".into()]),
+            env: Some({
+                let mut m = HashMap::new();
+                m.insert("PORT".into(), "3000".into());
+                m
+            }),
+        };
+        let dbg = format!("{:?}", cfg);
+        assert!(dbg.contains("Stdio"));
+        assert!(dbg.contains("node"));
+        assert!(dbg.contains("server.js"));
+        assert!(dbg.contains("PORT"));
+    }
+
+    #[test]
+    fn test_mcp_server_config_debug_sse() {
+        let cfg = McpServerConfig::Sse {
+            url: "https://example.com/sse".into(),
+            headers: Some({
+                let mut m = HashMap::new();
+                m.insert("Authorization".into(), "Bearer tok".into());
+                m
+            }),
+        };
+        let dbg = format!("{:?}", cfg);
+        assert!(dbg.contains("Sse"));
+        assert!(dbg.contains("https://example.com/sse"));
+        assert!(dbg.contains("Authorization"));
+    }
+
+    #[test]
+    fn test_mcp_server_config_debug_http() {
+        let cfg = McpServerConfig::Http {
+            url: "https://example.com/http".into(),
+            headers: None,
+        };
+        let dbg = format!("{:?}", cfg);
+        assert!(dbg.contains("Http"));
+        assert!(dbg.contains("https://example.com/http"));
+    }
+
+    #[test]
+    fn test_mcp_server_config_debug_sdk() {
+        let cfg = McpServerConfig::Sdk {
+            name: "my-server".into(),
+            instance: Arc::new(42_u32),
+        };
+        let dbg = format!("{:?}", cfg);
+        assert!(dbg.contains("Sdk"));
+        assert!(dbg.contains("my-server"));
+        assert!(dbg.contains("<Arc<dyn Any>>"));
+    }
+
+    // --- McpServerConfig: Serialize all variants ---
+    #[test]
+    fn test_mcp_server_config_serialize_stdio() {
+        let cfg = McpServerConfig::Stdio {
+            command: "npx".into(),
+            args: Some(vec!["-y".into(), "server".into()]),
+            env: Some({
+                let mut m = HashMap::new();
+                m.insert("KEY".into(), "VAL".into());
+                m
+            }),
+        };
+        let val = serde_json::to_value(&cfg).unwrap();
+        assert_eq!(val["type"], "stdio");
+        assert_eq!(val["command"], "npx");
+        assert_eq!(val["args"], serde_json::json!(["-y", "server"]));
+        assert_eq!(val["env"]["KEY"], "VAL");
+    }
+
+    #[test]
+    fn test_mcp_server_config_serialize_stdio_no_optionals() {
+        let cfg = McpServerConfig::Stdio {
+            command: "cmd".into(),
+            args: None,
+            env: None,
+        };
+        let val = serde_json::to_value(&cfg).unwrap();
+        assert_eq!(val["type"], "stdio");
+        assert_eq!(val["command"], "cmd");
+        assert!(val.get("args").is_none());
+        assert!(val.get("env").is_none());
+    }
+
+    #[test]
+    fn test_mcp_server_config_serialize_sse() {
+        let cfg = McpServerConfig::Sse {
+            url: "https://sse.example.com".into(),
+            headers: Some({
+                let mut m = HashMap::new();
+                m.insert("X-Custom".into(), "val".into());
+                m
+            }),
+        };
+        let val = serde_json::to_value(&cfg).unwrap();
+        assert_eq!(val["type"], "sse");
+        assert_eq!(val["url"], "https://sse.example.com");
+        assert_eq!(val["headers"]["X-Custom"], "val");
+    }
+
+    #[test]
+    fn test_mcp_server_config_serialize_sse_no_headers() {
+        let cfg = McpServerConfig::Sse {
+            url: "https://sse.example.com".into(),
+            headers: None,
+        };
+        let val = serde_json::to_value(&cfg).unwrap();
+        assert_eq!(val["type"], "sse");
+        assert!(val.get("headers").is_none());
+    }
+
+    #[test]
+    fn test_mcp_server_config_serialize_http() {
+        let cfg = McpServerConfig::Http {
+            url: "https://http.example.com".into(),
+            headers: Some({
+                let mut m = HashMap::new();
+                m.insert("Auth".into(), "Bearer x".into());
+                m
+            }),
+        };
+        let val = serde_json::to_value(&cfg).unwrap();
+        assert_eq!(val["type"], "http");
+        assert_eq!(val["url"], "https://http.example.com");
+        assert_eq!(val["headers"]["Auth"], "Bearer x");
+    }
+
+    #[test]
+    fn test_mcp_server_config_serialize_http_no_headers() {
+        let cfg = McpServerConfig::Http {
+            url: "https://http.example.com".into(),
+            headers: None,
+        };
+        let val = serde_json::to_value(&cfg).unwrap();
+        assert_eq!(val["type"], "http");
+        assert!(val.get("headers").is_none());
+    }
+
+    #[test]
+    fn test_mcp_server_config_serialize_sdk() {
+        let cfg = McpServerConfig::Sdk {
+            name: "sdk-srv".into(),
+            instance: Arc::new("opaque"),
+        };
+        let val = serde_json::to_value(&cfg).unwrap();
+        assert_eq!(val["type"], "sdk");
+        assert_eq!(val["name"], "sdk-srv");
+        // instance is not serialized (no way to serialize Arc<dyn Any>)
+        assert!(val.get("instance").is_none());
+    }
+
+    // --- McpServerConfig: Deserialize Stdio/Sse/Http ---
+    #[test]
+    fn test_mcp_server_config_deserialize_stdio() {
+        let val = serde_json::json!({
+            "type": "stdio",
+            "command": "node",
+            "args": ["index.js"],
+            "env": {"NODE_ENV": "production"}
+        });
+        let cfg: McpServerConfig = serde_json::from_value(val).unwrap();
+        match cfg {
+            McpServerConfig::Stdio { command, args, env } => {
+                assert_eq!(command, "node");
+                assert_eq!(args.unwrap(), vec!["index.js".to_string()]);
+                assert_eq!(env.unwrap().get("NODE_ENV").unwrap(), "production");
+            },
+            _ => panic!("expected Stdio"),
+        }
+    }
+
+    #[test]
+    fn test_mcp_server_config_deserialize_sse() {
+        let val = serde_json::json!({
+            "type": "sse",
+            "url": "https://sse.test.com",
+            "headers": {"X-Key": "abc"}
+        });
+        let cfg: McpServerConfig = serde_json::from_value(val).unwrap();
+        match cfg {
+            McpServerConfig::Sse { url, headers } => {
+                assert_eq!(url, "https://sse.test.com");
+                assert_eq!(headers.unwrap().get("X-Key").unwrap(), "abc");
+            },
+            _ => panic!("expected Sse"),
+        }
+    }
+
+    #[test]
+    fn test_mcp_server_config_deserialize_http() {
+        let val = serde_json::json!({
+            "type": "http",
+            "url": "https://http.test.com"
+        });
+        let cfg: McpServerConfig = serde_json::from_value(val).unwrap();
+        match cfg {
+            McpServerConfig::Http { url, headers } => {
+                assert_eq!(url, "https://http.test.com");
+                assert!(headers.is_none());
+            },
+            _ => panic!("expected Http"),
+        }
+    }
+
+    // --- PermissionUpdateDestination: all variants ---
+    #[test]
+    fn test_permission_update_destination_serde() {
+        let cases = vec![
+            (PermissionUpdateDestination::UserSettings, "userSettings"),
+            (PermissionUpdateDestination::ProjectSettings, "projectSettings"),
+            (PermissionUpdateDestination::LocalSettings, "localSettings"),
+            (PermissionUpdateDestination::Session, "session"),
+        ];
+        for (variant, expected) in cases {
+            let val = serde_json::to_value(&variant).unwrap();
+            assert_eq!(val, serde_json::json!(expected), "serialize {:?}", variant);
+            let back: PermissionUpdateDestination = serde_json::from_value(val).unwrap();
+            assert_eq!(back, variant);
+        }
+    }
+
+    // --- PermissionBehavior: all variants ---
+    #[test]
+    fn test_permission_behavior_serde() {
+        let cases = vec![
+            (PermissionBehavior::Allow, "allow"),
+            (PermissionBehavior::Deny, "deny"),
+            (PermissionBehavior::Ask, "ask"),
+        ];
+        for (variant, expected) in cases {
+            let val = serde_json::to_value(&variant).unwrap();
+            assert_eq!(val, serde_json::json!(expected), "serialize {:?}", variant);
+            let back: PermissionBehavior = serde_json::from_value(val).unwrap();
+            assert_eq!(back, variant);
+        }
+    }
+
+    // --- PermissionUpdateType: all variants ---
+    #[test]
+    fn test_permission_update_type_serde() {
+        let cases = vec![
+            (PermissionUpdateType::AddRules, "addRules"),
+            (PermissionUpdateType::ReplaceRules, "replaceRules"),
+            (PermissionUpdateType::RemoveRules, "removeRules"),
+            (PermissionUpdateType::SetMode, "setMode"),
+            (PermissionUpdateType::AddDirectories, "addDirectories"),
+            (PermissionUpdateType::RemoveDirectories, "removeDirectories"),
+        ];
+        for (variant, expected) in cases {
+            let val = serde_json::to_value(&variant).unwrap();
+            assert_eq!(val, serde_json::json!(expected), "serialize {:?}", variant);
+            let back: PermissionUpdateType = serde_json::from_value(val).unwrap();
+            assert_eq!(back, variant);
+        }
+    }
+
+    // --- HookInput: serde round-trip for all variants ---
+    #[test]
+    fn test_hook_input_pre_tool_use_serde() {
+        let input = HookInput::PreToolUse(PreToolUseHookInput {
+            session_id: "s1".into(),
+            transcript_path: "/tmp/t.json".into(),
+            cwd: "/home".into(),
+            permission_mode: Some("default".into()),
+            tool_name: "Bash".into(),
+            tool_input: serde_json::json!({"command": "ls"}),
+        });
+        let val = serde_json::to_value(&input).unwrap();
+        assert_eq!(val["hook_event_name"], "PreToolUse");
+        assert_eq!(val["tool_name"], "Bash");
+        assert_eq!(val["tool_input"]["command"], "ls");
+        let back: HookInput = serde_json::from_value(val).unwrap();
+        match back {
+            HookInput::PreToolUse(p) => {
+                assert_eq!(p.tool_name, "Bash");
+                assert_eq!(p.session_id, "s1");
+            },
+            _ => panic!("expected PreToolUse"),
+        }
+    }
+
+    #[test]
+    fn test_hook_input_post_tool_use_serde() {
+        let input = HookInput::PostToolUse(PostToolUseHookInput {
+            session_id: "s2".into(),
+            transcript_path: "/tmp/t2.json".into(),
+            cwd: "/work".into(),
+            permission_mode: None,
+            tool_name: "Read".into(),
+            tool_input: serde_json::json!({"path": "/etc/hosts"}),
+            tool_response: serde_json::json!({"content": "127.0.0.1 localhost"}),
+        });
+        let val = serde_json::to_value(&input).unwrap();
+        assert_eq!(val["hook_event_name"], "PostToolUse");
+        assert_eq!(val["tool_response"]["content"], "127.0.0.1 localhost");
+        let back: HookInput = serde_json::from_value(val).unwrap();
+        match back {
+            HookInput::PostToolUse(p) => assert_eq!(p.tool_name, "Read"),
+            _ => panic!("expected PostToolUse"),
+        }
+    }
+
+    #[test]
+    fn test_hook_input_user_prompt_submit_serde() {
+        let input = HookInput::UserPromptSubmit(UserPromptSubmitHookInput {
+            session_id: "s3".into(),
+            transcript_path: "/tmp/t3.json".into(),
+            cwd: "/proj".into(),
+            permission_mode: Some("plan".into()),
+            prompt: "fix the bug".into(),
+        });
+        let val = serde_json::to_value(&input).unwrap();
+        assert_eq!(val["hook_event_name"], "UserPromptSubmit");
+        assert_eq!(val["prompt"], "fix the bug");
+        let back: HookInput = serde_json::from_value(val).unwrap();
+        match back {
+            HookInput::UserPromptSubmit(p) => assert_eq!(p.prompt, "fix the bug"),
+            _ => panic!("expected UserPromptSubmit"),
+        }
+    }
+
+    #[test]
+    fn test_hook_input_stop_serde() {
+        let input = HookInput::Stop(StopHookInput {
+            session_id: "s4".into(),
+            transcript_path: "/tmp/t4.json".into(),
+            cwd: "/".into(),
+            permission_mode: None,
+            stop_hook_active: true,
+        });
+        let val = serde_json::to_value(&input).unwrap();
+        assert_eq!(val["hook_event_name"], "Stop");
+        assert_eq!(val["stop_hook_active"], true);
+        let back: HookInput = serde_json::from_value(val).unwrap();
+        match back {
+            HookInput::Stop(s) => assert!(s.stop_hook_active),
+            _ => panic!("expected Stop"),
+        }
+    }
+
+    #[test]
+    fn test_hook_input_subagent_stop_serde() {
+        let input = HookInput::SubagentStop(SubagentStopHookInput {
+            session_id: "s5".into(),
+            transcript_path: "/tmp/t5.json".into(),
+            cwd: "/sub".into(),
+            permission_mode: None,
+            stop_hook_active: false,
+        });
+        let val = serde_json::to_value(&input).unwrap();
+        assert_eq!(val["hook_event_name"], "SubagentStop");
+        assert_eq!(val["stop_hook_active"], false);
+        let back: HookInput = serde_json::from_value(val).unwrap();
+        match back {
+            HookInput::SubagentStop(s) => assert!(!s.stop_hook_active),
+            _ => panic!("expected SubagentStop"),
+        }
+    }
+
+    #[test]
+    fn test_hook_input_pre_compact_serde() {
+        let input = HookInput::PreCompact(PreCompactHookInput {
+            session_id: "s6".into(),
+            transcript_path: "/tmp/t6.json".into(),
+            cwd: "/compact".into(),
+            permission_mode: None,
+            trigger: "auto".into(),
+            custom_instructions: Some("keep tool calls".into()),
+        });
+        let val = serde_json::to_value(&input).unwrap();
+        assert_eq!(val["hook_event_name"], "PreCompact");
+        assert_eq!(val["trigger"], "auto");
+        assert_eq!(val["custom_instructions"], "keep tool calls");
+        let back: HookInput = serde_json::from_value(val).unwrap();
+        match back {
+            HookInput::PreCompact(p) => {
+                assert_eq!(p.trigger, "auto");
+                assert_eq!(p.custom_instructions.unwrap(), "keep tool calls");
+            },
+            _ => panic!("expected PreCompact"),
+        }
+    }
+
+    #[test]
+    fn test_hook_input_pre_compact_no_custom_instructions() {
+        let input = HookInput::PreCompact(PreCompactHookInput {
+            session_id: "s7".into(),
+            transcript_path: "/tmp/t7.json".into(),
+            cwd: "/".into(),
+            permission_mode: None,
+            trigger: "manual".into(),
+            custom_instructions: None,
+        });
+        let val = serde_json::to_value(&input).unwrap();
+        assert!(val.get("custom_instructions").is_none());
+        let back: HookInput = serde_json::from_value(val).unwrap();
+        match back {
+            HookInput::PreCompact(p) => assert!(p.custom_instructions.is_none()),
+            _ => panic!("expected PreCompact"),
+        }
+    }
+
+    // --- HookJSONOutput: Async and Sync variants ---
+    #[test]
+    fn test_hook_json_output_async_serde() {
+        let output = HookJSONOutput::Async(AsyncHookJSONOutput {
+            async_: true,
+            async_timeout: Some(5000),
+        });
+        let val = serde_json::to_value(&output).unwrap();
+        assert_eq!(val["async"], true);
+        assert_eq!(val["asyncTimeout"], 5000);
+        let back: HookJSONOutput = serde_json::from_value(val).unwrap();
+        match back {
+            // untagged enum: async field present -> Async variant tried first
+            HookJSONOutput::Async(a) => {
+                assert!(a.async_);
+                assert_eq!(a.async_timeout, Some(5000));
+            },
+            _ => panic!("expected Async"),
+        }
+    }
+
+    #[test]
+    fn test_hook_json_output_sync_serde() {
+        let output = HookJSONOutput::Sync(SyncHookJSONOutput {
+            continue_: Some(false),
+            suppress_output: Some(true),
+            stop_reason: Some("hook blocked".into()),
+            decision: Some("block".into()),
+            system_message: Some("Blocked by policy".into()),
+            reason: Some("security".into()),
+            hook_specific_output: None,
+        });
+        let val = serde_json::to_value(&output).unwrap();
+        assert_eq!(val["continue"], false);
+        assert_eq!(val["suppressOutput"], true);
+        assert_eq!(val["stopReason"], "hook blocked");
+        assert_eq!(val["decision"], "block");
+        assert_eq!(val["systemMessage"], "Blocked by policy");
+        assert_eq!(val["reason"], "security");
+        let back: HookJSONOutput = serde_json::from_value(val).unwrap();
+        match back {
+            HookJSONOutput::Sync(s) => {
+                assert_eq!(s.continue_, Some(false));
+                assert_eq!(s.decision.as_deref(), Some("block"));
+            },
+            _ => panic!("expected Sync"),
+        }
+    }
+
+    #[test]
+    fn test_hook_json_output_sync_default() {
+        let output = SyncHookJSONOutput::default();
+        assert!(output.continue_.is_none());
+        assert!(output.suppress_output.is_none());
+        assert!(output.stop_reason.is_none());
+        assert!(output.decision.is_none());
+        assert!(output.system_message.is_none());
+        assert!(output.reason.is_none());
+        assert!(output.hook_specific_output.is_none());
+    }
+
+    // --- HookSpecificOutput: all variants ---
+    #[test]
+    fn test_hook_specific_output_pre_tool_use_serde() {
+        let out = HookSpecificOutput::PreToolUse(PreToolUseHookSpecificOutput {
+            permission_decision: Some("deny".into()),
+            permission_decision_reason: Some("not allowed".into()),
+            updated_input: Some(serde_json::json!({"command": "echo hi"})),
+            additional_context: Some("extra info".into()),
+        });
+        let val = serde_json::to_value(&out).unwrap();
+        assert_eq!(val["hookEventName"], "PreToolUse");
+        assert_eq!(val["permissionDecision"], "deny");
+        assert_eq!(val["permissionDecisionReason"], "not allowed");
+        assert_eq!(val["updatedInput"]["command"], "echo hi");
+        assert_eq!(val["additionalContext"], "extra info");
+        let back: HookSpecificOutput = serde_json::from_value(val).unwrap();
+        match back {
+            HookSpecificOutput::PreToolUse(p) => {
+                assert_eq!(p.permission_decision.as_deref(), Some("deny"));
+            },
+            _ => panic!("expected PreToolUse"),
+        }
+    }
+
+    #[test]
+    fn test_hook_specific_output_post_tool_use_serde() {
+        let out = HookSpecificOutput::PostToolUse(PostToolUseHookSpecificOutput {
+            additional_context: Some("post context".into()),
+        });
+        let val = serde_json::to_value(&out).unwrap();
+        assert_eq!(val["hookEventName"], "PostToolUse");
+        assert_eq!(val["additionalContext"], "post context");
+        let back: HookSpecificOutput = serde_json::from_value(val).unwrap();
+        match back {
+            HookSpecificOutput::PostToolUse(p) => {
+                assert_eq!(p.additional_context.as_deref(), Some("post context"));
+            },
+            _ => panic!("expected PostToolUse"),
+        }
+    }
+
+    #[test]
+    fn test_hook_specific_output_user_prompt_submit_serde() {
+        let out = HookSpecificOutput::UserPromptSubmit(UserPromptSubmitHookSpecificOutput {
+            additional_context: None,
+        });
+        let val = serde_json::to_value(&out).unwrap();
+        assert_eq!(val["hookEventName"], "UserPromptSubmit");
+        assert!(val.get("additionalContext").is_none());
+        let back: HookSpecificOutput = serde_json::from_value(val).unwrap();
+        match back {
+            HookSpecificOutput::UserPromptSubmit(p) => assert!(p.additional_context.is_none()),
+            _ => panic!("expected UserPromptSubmit"),
+        }
+    }
+
+    #[test]
+    fn test_hook_specific_output_session_start_serde() {
+        let out = HookSpecificOutput::SessionStart(SessionStartHookSpecificOutput {
+            additional_context: Some("session ctx".into()),
+        });
+        let val = serde_json::to_value(&out).unwrap();
+        assert_eq!(val["hookEventName"], "SessionStart");
+        assert_eq!(val["additionalContext"], "session ctx");
+        let back: HookSpecificOutput = serde_json::from_value(val).unwrap();
+        match back {
+            HookSpecificOutput::SessionStart(s) => {
+                assert_eq!(s.additional_context.as_deref(), Some("session ctx"));
+            },
+            _ => panic!("expected SessionStart"),
+        }
+    }
+
+    // --- SystemPrompt: String and Preset variants ---
+    #[test]
+    fn test_system_prompt_string_serde() {
+        let prompt = SystemPrompt::String("You are a helpful assistant.".into());
+        let val = serde_json::to_value(&prompt).unwrap();
+        assert_eq!(val, serde_json::json!("You are a helpful assistant."));
+        let back: SystemPrompt = serde_json::from_value(val).unwrap();
+        match back {
+            SystemPrompt::String(s) => assert_eq!(s, "You are a helpful assistant."),
+            _ => panic!("expected String variant"),
+        }
+    }
+
+    #[test]
+    fn test_system_prompt_preset_serde() {
+        let prompt = SystemPrompt::Preset {
+            preset_type: "preset".into(),
+            preset: "claude_code".into(),
+            append: Some("Also be concise.".into()),
+        };
+        let val = serde_json::to_value(&prompt).unwrap();
+        assert_eq!(val["type"], "preset");
+        assert_eq!(val["preset"], "claude_code");
+        assert_eq!(val["append"], "Also be concise.");
+        let back: SystemPrompt = serde_json::from_value(val).unwrap();
+        match back {
+            SystemPrompt::Preset {
+                preset_type,
+                preset,
+                append,
+            } => {
+                assert_eq!(preset_type, "preset");
+                assert_eq!(preset, "claude_code");
+                assert_eq!(append.as_deref(), Some("Also be concise."));
+            },
+            _ => panic!("expected Preset variant"),
+        }
+    }
+
+    #[test]
+    fn test_system_prompt_preset_no_append_serde() {
+        let prompt = SystemPrompt::Preset {
+            preset_type: "preset".into(),
+            preset: "claude_code".into(),
+            append: None,
+        };
+        let val = serde_json::to_value(&prompt).unwrap();
+        assert!(val.get("append").is_none());
+        let back: SystemPrompt = serde_json::from_value(val).unwrap();
+        match back {
+            SystemPrompt::Preset { append, .. } => assert!(append.is_none()),
+            _ => panic!("expected Preset variant"),
+        }
+    }
+
+    // --- SettingSource: all variants ---
+    #[test]
+    fn test_setting_source_serde() {
+        let cases = vec![
+            (SettingSource::User, "user"),
+            (SettingSource::Project, "project"),
+            (SettingSource::Local, "local"),
+        ];
+        for (variant, expected) in cases {
+            let val = serde_json::to_value(&variant).unwrap();
+            assert_eq!(val, serde_json::json!(expected), "serialize {:?}", variant);
+            let back: SettingSource = serde_json::from_value(val).unwrap();
+            assert_eq!(back, variant);
+        }
+    }
+
+    // --- AgentDefinition: serde round-trip ---
+    #[test]
+    fn test_agent_definition_serde_full() {
+        let agent = AgentDefinition {
+            description: "A code review agent".into(),
+            prompt: "Review the code for bugs.".into(),
+            tools: Some(vec!["Read".into(), "Grep".into()]),
+            model: Some("claude-3-opus".into()),
+        };
+        let val = serde_json::to_value(&agent).unwrap();
+        assert_eq!(val["description"], "A code review agent");
+        assert_eq!(val["prompt"], "Review the code for bugs.");
+        assert_eq!(val["tools"], serde_json::json!(["Read", "Grep"]));
+        assert_eq!(val["model"], "claude-3-opus");
+
+        let back: AgentDefinition = serde_json::from_value(val).unwrap();
+        assert_eq!(back.description, "A code review agent");
+        assert_eq!(back.tools.unwrap(), vec!["Read", "Grep"]);
+        assert_eq!(back.model.unwrap(), "claude-3-opus");
+    }
+
+    #[test]
+    fn test_agent_definition_serde_minimal() {
+        let agent = AgentDefinition {
+            description: "Minimal".into(),
+            prompt: "Do something.".into(),
+            tools: None,
+            model: None,
+        };
+        let val = serde_json::to_value(&agent).unwrap();
+        assert!(val.get("tools").is_none());
+        assert!(val.get("model").is_none());
+
+        let back: AgentDefinition = serde_json::from_value(val).unwrap();
+        assert!(back.tools.is_none());
+        assert!(back.model.is_none());
+    }
+
+    // --- Message helpers: is_sidechain, is_top_level, parent_tool_use_id ---
+    #[test]
+    fn test_message_user_top_level() {
+        let msg = Message::User {
+            message: UserMessage {
+                content: "hi".into(),
+                content_blocks: None,
+            },
+            parent_tool_use_id: None,
+        };
+        assert!(msg.is_top_level());
+        assert!(!msg.is_sidechain());
+        assert!(msg.parent_tool_use_id().is_none());
+    }
+
+    #[test]
+    fn test_message_user_sidechain() {
+        let msg = Message::User {
+            message: UserMessage {
+                content: "sub".into(),
+                content_blocks: None,
+            },
+            parent_tool_use_id: Some("tool_123".into()),
+        };
+        assert!(msg.is_sidechain());
+        assert!(!msg.is_top_level());
+        assert_eq!(msg.parent_tool_use_id(), Some("tool_123"));
+    }
+
+    #[test]
+    fn test_message_assistant_top_level() {
+        let msg = Message::Assistant {
+            message: AssistantMessage {
+                content: vec![],
+            },
+            parent_tool_use_id: None,
+        };
+        assert!(msg.is_top_level());
+        assert!(msg.parent_tool_use_id().is_none());
+    }
+
+    #[test]
+    fn test_message_assistant_sidechain() {
+        let msg = Message::Assistant {
+            message: AssistantMessage {
+                content: vec![],
+            },
+            parent_tool_use_id: Some("tool_456".into()),
+        };
+        assert!(msg.is_sidechain());
+        assert_eq!(msg.parent_tool_use_id(), Some("tool_456"));
+    }
+
+    #[test]
+    fn test_message_system_always_top_level() {
+        let msg = Message::System {
+            subtype: "info".into(),
+            data: serde_json::json!({}),
+        };
+        assert!(msg.is_top_level());
+        assert!(!msg.is_sidechain());
+        assert!(msg.parent_tool_use_id().is_none());
+    }
+
+    #[test]
+    fn test_message_result_always_top_level() {
+        let msg = Message::Result {
+            subtype: "success".into(),
+            duration_ms: 100,
+            duration_api_ms: 80,
+            is_error: false,
+            num_turns: 1,
+            session_id: "sess".into(),
+            total_cost_usd: Some(0.01),
+            usage: None,
+            result: Some("done".into()),
+            structured_output: None,
+        };
+        assert!(msg.is_top_level());
+        assert!(!msg.is_sidechain());
+        assert!(msg.parent_tool_use_id().is_none());
+    }
+
+    #[test]
+    fn test_message_stream_event_top_level() {
+        let msg = Message::StreamEvent {
+            event: StreamEventData::MessageStop,
+            session_id: Some("s1".into()),
+            parent_tool_use_id: None,
+        };
+        assert!(msg.is_top_level());
+        assert!(msg.parent_tool_use_id().is_none());
+    }
+
+    #[test]
+    fn test_message_stream_event_sidechain() {
+        let msg = Message::StreamEvent {
+            event: StreamEventData::MessageStop,
+            session_id: None,
+            parent_tool_use_id: Some("tool_789".into()),
+        };
+        assert!(msg.is_sidechain());
+        assert_eq!(msg.parent_tool_use_id(), Some("tool_789"));
+    }
+
+    // --- Builder methods not yet tested ---
+    #[test]
+    #[allow(deprecated)]
+    fn test_builder_append_system_prompt() {
+        let opts = ClaudeCodeOptions::builder()
+            .append_system_prompt("extra instructions")
+            .build();
+        assert_eq!(opts.append_system_prompt, Some("extra instructions".to_string()));
+    }
+
+    #[test]
+    fn test_builder_disallowed_tools() {
+        let opts = ClaudeCodeOptions::builder()
+            .disallowed_tools(vec!["Bash".into(), "WebSearch".into()])
+            .build();
+        assert_eq!(opts.disallowed_tools, vec!["Bash", "WebSearch"]);
+    }
+
+    #[test]
+    fn test_builder_disallow_tool() {
+        let opts = ClaudeCodeOptions::builder()
+            .disallow_tool("Bash")
+            .disallow_tool("WebSearch")
+            .build();
+        assert_eq!(opts.disallowed_tools, vec!["Bash", "WebSearch"]);
+    }
+
+    #[test]
+    fn test_builder_mcp_servers() {
+        let mut servers = HashMap::new();
+        servers.insert(
+            "test".into(),
+            McpServerConfig::Stdio {
+                command: "node".into(),
+                args: None,
+                env: None,
+            },
+        );
+        let opts = ClaudeCodeOptions::builder()
+            .mcp_servers(servers)
+            .build();
+        assert_eq!(opts.mcp_servers.len(), 1);
+        assert!(opts.mcp_servers.contains_key("test"));
+    }
+
+    #[test]
+    fn test_builder_add_mcp_server() {
+        let opts = ClaudeCodeOptions::builder()
+            .add_mcp_server(
+                "srv1",
+                McpServerConfig::Sse {
+                    url: "https://example.com".into(),
+                    headers: None,
+                },
+            )
+            .build();
+        assert_eq!(opts.mcp_servers.len(), 1);
+    }
+
+    #[test]
+    fn test_builder_mcp_tools() {
+        let opts = ClaudeCodeOptions::builder()
+            .mcp_tools(vec!["mcp_tool1".into(), "mcp_tool2".into()])
+            .build();
+        assert_eq!(opts.mcp_tools, vec!["mcp_tool1", "mcp_tool2"]);
+    }
+
+    #[test]
+    fn test_builder_max_thinking_tokens() {
+        let opts = ClaudeCodeOptions::builder()
+            .max_thinking_tokens(8000)
+            .build();
+        assert_eq!(opts.max_thinking_tokens, 8000);
+    }
+
+    #[test]
+    fn test_builder_max_output_tokens_clamp() {
+        // Within range
+        let opts = ClaudeCodeOptions::builder().max_output_tokens(16000).build();
+        assert_eq!(opts.max_output_tokens, Some(16000));
+
+        // Above max, should clamp to 32000
+        let opts = ClaudeCodeOptions::builder().max_output_tokens(50000).build();
+        assert_eq!(opts.max_output_tokens, Some(32000));
+
+        // Below min, should clamp to 1
+        let opts = ClaudeCodeOptions::builder().max_output_tokens(0).build();
+        assert_eq!(opts.max_output_tokens, Some(1));
+    }
+
+    #[test]
+    fn test_builder_cwd() {
+        let opts = ClaudeCodeOptions::builder()
+            .cwd("/tmp/work")
+            .build();
+        assert_eq!(opts.cwd, Some(PathBuf::from("/tmp/work")));
+    }
+
+    #[test]
+    fn test_builder_continue_conversation() {
+        let opts = ClaudeCodeOptions::builder()
+            .continue_conversation(true)
+            .build();
+        assert!(opts.continue_conversation);
+    }
+
+    #[test]
+    fn test_builder_resume() {
+        let opts = ClaudeCodeOptions::builder()
+            .resume("session-abc-123")
+            .build();
+        assert_eq!(opts.resume, Some("session-abc-123".to_string()));
+    }
+
+    #[test]
+    fn test_builder_permission_prompt_tool_name() {
+        let opts = ClaudeCodeOptions::builder()
+            .permission_prompt_tool_name("my_tool")
+            .build();
+        assert_eq!(opts.permission_prompt_tool_name, Some("my_tool".to_string()));
+    }
+
+    #[test]
+    fn test_builder_settings() {
+        let opts = ClaudeCodeOptions::builder()
+            .settings("/path/to/settings.json")
+            .build();
+        assert_eq!(opts.settings, Some("/path/to/settings.json".to_string()));
+    }
+
+    #[test]
+    fn test_builder_add_dirs() {
+        let opts = ClaudeCodeOptions::builder()
+            .add_dirs(vec![PathBuf::from("/dir1"), PathBuf::from("/dir2")])
+            .build();
+        assert_eq!(opts.add_dirs.len(), 2);
+    }
+
+    #[test]
+    fn test_builder_add_dir() {
+        let opts = ClaudeCodeOptions::builder()
+            .add_dir("/dir1")
+            .add_dir("/dir2")
+            .build();
+        assert_eq!(opts.add_dirs, vec![PathBuf::from("/dir1"), PathBuf::from("/dir2")]);
+    }
+
+    #[test]
+    fn test_builder_control_protocol_format() {
+        let opts = ClaudeCodeOptions::builder()
+            .control_protocol_format(ControlProtocolFormat::Control)
+            .build();
+        assert_eq!(opts.control_protocol_format, ControlProtocolFormat::Control);
+    }
+
+    #[test]
+    fn test_builder_include_partial_messages() {
+        let opts = ClaudeCodeOptions::builder()
+            .include_partial_messages(true)
+            .build();
+        assert!(opts.include_partial_messages);
+    }
+
+    #[test]
+    fn test_builder_fork_session() {
+        let opts = ClaudeCodeOptions::builder()
+            .fork_session(true)
+            .build();
+        assert!(opts.fork_session);
+    }
+
+    #[test]
+    fn test_builder_setting_sources() {
+        let opts = ClaudeCodeOptions::builder()
+            .setting_sources(vec![SettingSource::User, SettingSource::Project])
+            .build();
+        let sources = opts.setting_sources.unwrap();
+        assert_eq!(sources, vec![SettingSource::User, SettingSource::Project]);
+    }
+
+    #[test]
+    fn test_builder_agents() {
+        let mut agents = HashMap::new();
+        agents.insert(
+            "reviewer".into(),
+            AgentDefinition {
+                description: "Code reviewer".into(),
+                prompt: "Review code.".into(),
+                tools: None,
+                model: None,
+            },
+        );
+        let opts = ClaudeCodeOptions::builder().agents(agents).build();
+        assert!(opts.agents.unwrap().contains_key("reviewer"));
+    }
+
+    #[test]
+    fn test_builder_cli_channel_buffer_size() {
+        let opts = ClaudeCodeOptions::builder()
+            .cli_channel_buffer_size(500)
+            .build();
+        assert_eq!(opts.cli_channel_buffer_size, Some(500));
+    }
+
+    #[test]
+    fn test_builder_user() {
+        let opts = ClaudeCodeOptions::builder()
+            .user("nobody")
+            .build();
+        assert_eq!(opts.user, Some("nobody".to_string()));
+    }
+
+    #[test]
+    fn test_builder_memory_options() {
+        let opts = ClaudeCodeOptions::builder()
+            .memory_enabled(true)
+            .memory_threshold(0.5)
+            .max_context_items(10)
+            .memory_token_budget(4000)
+            .build();
+        assert!(opts.memory_enabled);
+        assert_eq!(opts.memory_threshold, Some(0.5));
+        assert_eq!(opts.max_context_items, Some(10));
+        assert_eq!(opts.memory_token_budget, Some(4000));
+    }
+
+    #[test]
+    fn test_builder_memory_threshold_clamp() {
+        let opts = ClaudeCodeOptions::builder()
+            .memory_threshold(1.5)
+            .build();
+        assert_eq!(opts.memory_threshold, Some(1.0));
+
+        let opts = ClaudeCodeOptions::builder()
+            .memory_threshold(-0.5)
+            .build();
+        assert_eq!(opts.memory_threshold, Some(0.0));
+    }
+
+    #[test]
+    fn test_builder_system_prompt_v2() {
+        let opts = ClaudeCodeOptions::builder().build();
+        // system_prompt_v2 is set via tools field, verify default is None
+        assert!(opts.system_prompt_v2.is_none());
+    }
+
+    // --- ClaudeCodeOptions Debug impl ---
+    #[test]
+    fn test_claude_code_options_debug() {
+        let opts = ClaudeCodeOptions::builder()
+            .model("claude-3-opus")
+            .max_turns(5)
+            .build();
+        let dbg = format!("{:?}", opts);
+        assert!(dbg.contains("ClaudeCodeOptions"));
+        assert!(dbg.contains("claude-3-opus"));
+        assert!(dbg.contains("max_turns"));
+    }
+
+    // --- Stream event data serde ---
+    #[test]
+    fn test_stream_event_data_message_stop_serde() {
+        let data = StreamEventData::MessageStop;
+        let val = serde_json::to_value(&data).unwrap();
+        assert_eq!(val["type"], "message_stop");
+        let back: StreamEventData = serde_json::from_value(val).unwrap();
+        assert_eq!(back, StreamEventData::MessageStop);
+    }
+
+    #[test]
+    fn test_stream_delta_text_delta_serde() {
+        let delta = StreamDelta::TextDelta {
+            text: "Hello".into(),
+        };
+        let val = serde_json::to_value(&delta).unwrap();
+        assert_eq!(val["type"], "text_delta");
+        assert_eq!(val["text"], "Hello");
+        let back: StreamDelta = serde_json::from_value(val).unwrap();
+        assert_eq!(back, delta);
+    }
+
+    #[test]
+    fn test_stream_delta_thinking_delta_serde() {
+        let delta = StreamDelta::ThinkingDelta {
+            thinking: "pondering...".into(),
+        };
+        let val = serde_json::to_value(&delta).unwrap();
+        assert_eq!(val["type"], "thinking_delta");
+        assert_eq!(val["thinking"], "pondering...");
+        let back: StreamDelta = serde_json::from_value(val).unwrap();
+        assert_eq!(back, delta);
+    }
+
+    #[test]
+    fn test_stream_delta_input_json_delta_serde() {
+        let delta = StreamDelta::InputJsonDelta {
+            partial_json: r#"{"key":"#.into(),
+        };
+        let val = serde_json::to_value(&delta).unwrap();
+        assert_eq!(val["type"], "input_json_delta");
+        assert_eq!(val["partial_json"], r#"{"key":"#);
+        let back: StreamDelta = serde_json::from_value(val).unwrap();
+        assert_eq!(back, delta);
+    }
+
+    // --- PermissionUpdate serde ---
+    #[test]
+    fn test_permission_update_serde_roundtrip() {
+        let update = PermissionUpdate {
+            update_type: PermissionUpdateType::AddRules,
+            rules: Some(vec![PermissionRuleValue {
+                tool_name: "Bash".into(),
+                rule_content: Some("git:*".into()),
+            }]),
+            behavior: Some(PermissionBehavior::Allow),
+            mode: None,
+            directories: None,
+            destination: Some(PermissionUpdateDestination::ProjectSettings),
+        };
+        let val = serde_json::to_value(&update).unwrap();
+        assert_eq!(val["type"], "addRules");
+        assert_eq!(val["rules"][0]["tool_name"], "Bash");
+        assert_eq!(val["rules"][0]["rule_content"], "git:*");
+        assert_eq!(val["behavior"], "allow");
+        assert_eq!(val["destination"], "projectSettings");
+        assert!(val.get("mode").is_none());
+        assert!(val.get("directories").is_none());
+
+        let back: PermissionUpdate = serde_json::from_value(val).unwrap();
+        assert_eq!(back.update_type, PermissionUpdateType::AddRules);
+        assert_eq!(back.rules.as_ref().unwrap().len(), 1);
+        assert_eq!(back.behavior, Some(PermissionBehavior::Allow));
+    }
+
+    // --- SDKControlRewindFilesRequest::new ---
+    #[test]
+    fn test_sdk_control_rewind_files_request_new() {
+        let req = SDKControlRewindFilesRequest::new("msg_abc");
+        assert_eq!(req.subtype, "rewind_files");
+        assert_eq!(req.user_message_id, "msg_abc");
+    }
 }
