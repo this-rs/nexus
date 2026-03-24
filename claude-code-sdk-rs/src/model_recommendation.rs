@@ -284,10 +284,7 @@ mod tests {
 
     #[test]
     fn test_cost_multiplier_sonnet_4_5_full_name() {
-        assert_eq!(
-            estimate_cost_multiplier("claude-sonnet-4-5-20250929"),
-            5.0
-        );
+        assert_eq!(estimate_cost_multiplier("claude-sonnet-4-5-20250929"), 5.0);
     }
 
     #[test]
@@ -297,18 +294,12 @@ mod tests {
 
     #[test]
     fn test_cost_multiplier_sonnet_3_5_full_name() {
-        assert_eq!(
-            estimate_cost_multiplier("claude-3-5-sonnet-20241022"),
-            5.0
-        );
+        assert_eq!(estimate_cost_multiplier("claude-3-5-sonnet-20241022"), 5.0);
     }
 
     #[test]
     fn test_cost_multiplier_opus_full_name() {
-        assert_eq!(
-            estimate_cost_multiplier("claude-opus-4-1-20250805"),
-            15.0
-        );
+        assert_eq!(estimate_cost_multiplier("claude-opus-4-1-20250805"), 15.0);
     }
 
     #[test]
@@ -338,10 +329,7 @@ mod tests {
             all.get("simple").map(|s| s.as_str()),
             Some("claude-3-5-haiku-20241022")
         );
-        assert_eq!(
-            all.get("complex").map(|s| s.as_str()),
-            Some("opus")
-        );
+        assert_eq!(all.get("complex").map(|s| s.as_str()), Some("opus"));
         assert_eq!(
             all.get("balanced").map(|s| s.as_str()),
             Some("claude-sonnet-4-5-20250929")

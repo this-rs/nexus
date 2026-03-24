@@ -865,7 +865,10 @@ mod tests {
         let result = parse_message(json).unwrap().unwrap();
         if let Message::User { message, .. } = &result {
             assert!(message.content.is_empty());
-            assert!(message.content_blocks.is_none(), "Empty blocks should become None");
+            assert!(
+                message.content_blocks.is_none(),
+                "Empty blocks should become None"
+            );
         } else {
             panic!("Expected Message::User");
         }
@@ -1156,7 +1159,11 @@ mod tests {
         });
         let result = parse_message(json).unwrap().unwrap();
         if let Message::StreamEvent { event, .. } = result {
-            if let StreamEventData::ContentBlockStart { index, content_block } = event {
+            if let StreamEventData::ContentBlockStart {
+                index,
+                content_block,
+            } = event
+            {
                 assert_eq!(index, 0);
                 assert_eq!(content_block["type"], "text");
             } else {
@@ -1184,7 +1191,12 @@ mod tests {
         if let Message::StreamEvent { event, .. } = result {
             if let StreamEventData::ContentBlockDelta { index, delta } = event {
                 assert_eq!(index, 1);
-                assert_eq!(delta, StreamDelta::TextDelta { text: "Hello".to_string() });
+                assert_eq!(
+                    delta,
+                    StreamDelta::TextDelta {
+                        text: "Hello".to_string()
+                    }
+                );
             } else {
                 panic!("Expected ContentBlockDelta");
             }
@@ -1209,7 +1221,12 @@ mod tests {
         let result = parse_message(json).unwrap().unwrap();
         if let Message::StreamEvent { event, .. } = result {
             if let StreamEventData::ContentBlockDelta { delta, .. } = event {
-                assert_eq!(delta, StreamDelta::ThinkingDelta { thinking: "Let me think...".to_string() });
+                assert_eq!(
+                    delta,
+                    StreamDelta::ThinkingDelta {
+                        thinking: "Let me think...".to_string()
+                    }
+                );
             } else {
                 panic!("Expected ContentBlockDelta");
             }
@@ -1235,7 +1252,12 @@ mod tests {
         if let Message::StreamEvent { event, .. } = result {
             if let StreamEventData::ContentBlockDelta { index, delta } = event {
                 assert_eq!(index, 2);
-                assert_eq!(delta, StreamDelta::InputJsonDelta { partial_json: "{\"path\":".to_string() });
+                assert_eq!(
+                    delta,
+                    StreamDelta::InputJsonDelta {
+                        partial_json: "{\"path\":".to_string()
+                    }
+                );
             } else {
                 panic!("Expected ContentBlockDelta");
             }
@@ -1261,7 +1283,12 @@ mod tests {
         if let Message::StreamEvent { event, .. } = result {
             if let StreamEventData::ContentBlockDelta { delta, .. } = event {
                 // Unknown delta type falls back to TextDelta
-                assert_eq!(delta, StreamDelta::TextDelta { text: "fallback text".to_string() });
+                assert_eq!(
+                    delta,
+                    StreamDelta::TextDelta {
+                        text: "fallback text".to_string()
+                    }
+                );
             } else {
                 panic!("Expected ContentBlockDelta");
             }

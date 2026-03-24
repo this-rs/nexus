@@ -301,7 +301,9 @@ mod tests {
             backoff_multiplier: 2.0,
             jitter_factor: 0.0,
         };
-        let result = config.retry(|| async { Ok::<_, crate::errors::SdkError>(42) }).await;
+        let result = config
+            .retry(|| async { Ok::<_, crate::errors::SdkError>(42) })
+            .await;
         assert_eq!(result.unwrap(), 42);
     }
 
@@ -344,7 +346,9 @@ mod tests {
         };
         let result: crate::errors::Result<i32> = config
             .retry(|| async {
-                Err(crate::errors::SdkError::ConnectionError("always fails".into()))
+                Err(crate::errors::SdkError::ConnectionError(
+                    "always fails".into(),
+                ))
             })
             .await;
         assert!(result.is_err());

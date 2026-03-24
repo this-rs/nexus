@@ -2725,7 +2725,10 @@ mod tests {
         let s: SandboxSettings = serde_json::from_value(val.clone()).unwrap();
         assert_eq!(s.enabled, Some(true));
         assert_eq!(s.auto_allow_bash_if_sandboxed, Some(false));
-        assert_eq!(s.excluded_commands.as_ref().unwrap(), &vec!["git".to_string()]);
+        assert_eq!(
+            s.excluded_commands.as_ref().unwrap(),
+            &vec!["git".to_string()]
+        );
         assert_eq!(s.allow_unsandboxed_commands, Some(true));
         assert_eq!(s.enable_weaker_nested_sandbox, Some(true));
         let net = s.network.as_ref().unwrap();
@@ -2735,7 +2738,10 @@ mod tests {
         assert_eq!(net.allow_local_binding, Some(false));
         let ig = s.ignore_violations.as_ref().unwrap();
         assert_eq!(ig.file.as_ref().unwrap(), &vec!["/tmp".to_string()]);
-        assert_eq!(ig.network.as_ref().unwrap(), &vec!["example.com".to_string()]);
+        assert_eq!(
+            ig.network.as_ref().unwrap(),
+            &vec!["example.com".to_string()]
+        );
 
         // re-serialize and verify round-trip
         let back = serde_json::to_value(&s).unwrap();
@@ -2749,7 +2755,10 @@ mod tests {
             path: "/home/user/my-plugin".to_string(),
         };
         let val = serde_json::to_value(&plugin).unwrap();
-        assert_eq!(val, serde_json::json!({"type": "local", "path": "/home/user/my-plugin"}));
+        assert_eq!(
+            val,
+            serde_json::json!({"type": "local", "path": "/home/user/my-plugin"})
+        );
         let back: SdkPluginConfig = serde_json::from_value(val).unwrap();
         match back {
             SdkPluginConfig::Local { path } => assert_eq!(path, "/home/user/my-plugin"),
@@ -2763,7 +2772,10 @@ mod tests {
         assert_eq!(d, ControlProtocolFormat::Legacy);
         assert_ne!(d, ControlProtocolFormat::Control);
         assert_ne!(d, ControlProtocolFormat::Auto);
-        assert_eq!(ControlProtocolFormat::Control, ControlProtocolFormat::Control);
+        assert_eq!(
+            ControlProtocolFormat::Control,
+            ControlProtocolFormat::Control
+        );
         assert_eq!(ControlProtocolFormat::Auto, ControlProtocolFormat::Auto);
     }
 
@@ -2983,7 +2995,10 @@ mod tests {
     fn test_permission_update_destination_serde() {
         let cases = vec![
             (PermissionUpdateDestination::UserSettings, "userSettings"),
-            (PermissionUpdateDestination::ProjectSettings, "projectSettings"),
+            (
+                PermissionUpdateDestination::ProjectSettings,
+                "projectSettings",
+            ),
             (PermissionUpdateDestination::LocalSettings, "localSettings"),
             (PermissionUpdateDestination::Session, "session"),
         ];
@@ -3451,9 +3466,7 @@ mod tests {
     #[test]
     fn test_message_assistant_top_level() {
         let msg = Message::Assistant {
-            message: AssistantMessage {
-                content: vec![],
-            },
+            message: AssistantMessage { content: vec![] },
             parent_tool_use_id: None,
         };
         assert!(msg.is_top_level());
@@ -3463,9 +3476,7 @@ mod tests {
     #[test]
     fn test_message_assistant_sidechain() {
         let msg = Message::Assistant {
-            message: AssistantMessage {
-                content: vec![],
-            },
+            message: AssistantMessage { content: vec![] },
             parent_tool_use_id: Some("tool_456".into()),
         };
         assert!(msg.is_sidechain());
@@ -3531,7 +3542,10 @@ mod tests {
         let opts = ClaudeCodeOptions::builder()
             .append_system_prompt("extra instructions")
             .build();
-        assert_eq!(opts.append_system_prompt, Some("extra instructions".to_string()));
+        assert_eq!(
+            opts.append_system_prompt,
+            Some("extra instructions".to_string())
+        );
     }
 
     #[test]
@@ -3562,9 +3576,7 @@ mod tests {
                 env: None,
             },
         );
-        let opts = ClaudeCodeOptions::builder()
-            .mcp_servers(servers)
-            .build();
+        let opts = ClaudeCodeOptions::builder().mcp_servers(servers).build();
         assert_eq!(opts.mcp_servers.len(), 1);
         assert!(opts.mcp_servers.contains_key("test"));
     }
@@ -3602,11 +3614,15 @@ mod tests {
     #[test]
     fn test_builder_max_output_tokens_clamp() {
         // Within range
-        let opts = ClaudeCodeOptions::builder().max_output_tokens(16000).build();
+        let opts = ClaudeCodeOptions::builder()
+            .max_output_tokens(16000)
+            .build();
         assert_eq!(opts.max_output_tokens, Some(16000));
 
         // Above max, should clamp to 32000
-        let opts = ClaudeCodeOptions::builder().max_output_tokens(50000).build();
+        let opts = ClaudeCodeOptions::builder()
+            .max_output_tokens(50000)
+            .build();
         assert_eq!(opts.max_output_tokens, Some(32000));
 
         // Below min, should clamp to 1
@@ -3616,9 +3632,7 @@ mod tests {
 
     #[test]
     fn test_builder_cwd() {
-        let opts = ClaudeCodeOptions::builder()
-            .cwd("/tmp/work")
-            .build();
+        let opts = ClaudeCodeOptions::builder().cwd("/tmp/work").build();
         assert_eq!(opts.cwd, Some(PathBuf::from("/tmp/work")));
     }
 
@@ -3643,7 +3657,10 @@ mod tests {
         let opts = ClaudeCodeOptions::builder()
             .permission_prompt_tool_name("my_tool")
             .build();
-        assert_eq!(opts.permission_prompt_tool_name, Some("my_tool".to_string()));
+        assert_eq!(
+            opts.permission_prompt_tool_name,
+            Some("my_tool".to_string())
+        );
     }
 
     #[test]
@@ -3668,7 +3685,10 @@ mod tests {
             .add_dir("/dir1")
             .add_dir("/dir2")
             .build();
-        assert_eq!(opts.add_dirs, vec![PathBuf::from("/dir1"), PathBuf::from("/dir2")]);
+        assert_eq!(
+            opts.add_dirs,
+            vec![PathBuf::from("/dir1"), PathBuf::from("/dir2")]
+        );
     }
 
     #[test]
@@ -3689,9 +3709,7 @@ mod tests {
 
     #[test]
     fn test_builder_fork_session() {
-        let opts = ClaudeCodeOptions::builder()
-            .fork_session(true)
-            .build();
+        let opts = ClaudeCodeOptions::builder().fork_session(true).build();
         assert!(opts.fork_session);
     }
 
@@ -3730,9 +3748,7 @@ mod tests {
 
     #[test]
     fn test_builder_user() {
-        let opts = ClaudeCodeOptions::builder()
-            .user("nobody")
-            .build();
+        let opts = ClaudeCodeOptions::builder().user("nobody").build();
         assert_eq!(opts.user, Some("nobody".to_string()));
     }
 
@@ -3752,14 +3768,10 @@ mod tests {
 
     #[test]
     fn test_builder_memory_threshold_clamp() {
-        let opts = ClaudeCodeOptions::builder()
-            .memory_threshold(1.5)
-            .build();
+        let opts = ClaudeCodeOptions::builder().memory_threshold(1.5).build();
         assert_eq!(opts.memory_threshold, Some(1.0));
 
-        let opts = ClaudeCodeOptions::builder()
-            .memory_threshold(-0.5)
-            .build();
+        let opts = ClaudeCodeOptions::builder().memory_threshold(-0.5).build();
         assert_eq!(opts.memory_threshold, Some(0.0));
     }
 

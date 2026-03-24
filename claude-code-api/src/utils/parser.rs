@@ -164,10 +164,7 @@ mod tests {
         let result = claude_to_openai_stream(output, "test-model");
         assert!(result.is_some());
         let resp = result.unwrap();
-        assert_eq!(
-            resp.choices[0].finish_reason.as_deref(),
-            Some("stop")
-        );
+        assert_eq!(resp.choices[0].finish_reason.as_deref(), Some("stop"));
     }
 
     #[test]
@@ -285,10 +282,7 @@ mod tests {
         let result = convert_claude_event_to_openai(event, "test-model");
         assert!(result.is_some());
         let resp = result.unwrap();
-        assert_eq!(
-            resp.choices[0].finish_reason.as_deref(),
-            Some("stop")
-        );
+        assert_eq!(resp.choices[0].finish_reason.as_deref(), Some("stop"));
     }
 
     #[test]

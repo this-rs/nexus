@@ -192,7 +192,9 @@ mod tests {
 
     #[test]
     fn test_should_retry_temporarily_unavailable() {
-        assert!(RetryPolicy::should_retry(&"Service temporarily unavailable"));
+        assert!(RetryPolicy::should_retry(
+            &"Service temporarily unavailable"
+        ));
     }
 
     #[test]

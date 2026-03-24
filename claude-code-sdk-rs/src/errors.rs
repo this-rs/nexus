@@ -252,7 +252,7 @@ mod tests {
             SdkError::MessageParseError { error, raw } => {
                 assert_eq!(error, "bad json");
                 assert_eq!(raw, r#"{"broken"#);
-            }
+            },
             _ => panic!("expected MessageParseError"),
         }
         let msg = err.to_string();
@@ -277,7 +277,7 @@ mod tests {
             SdkError::UnexpectedResponse { expected, actual } => {
                 assert_eq!(expected, "text");
                 assert_eq!(actual, "json");
-            }
+            },
             _ => panic!("expected UnexpectedResponse"),
         }
     }
@@ -289,7 +289,7 @@ mod tests {
             SdkError::CliError { message, code } => {
                 assert_eq!(message, "something broke");
                 assert_eq!(code.as_deref(), Some("E001"));
-            }
+            },
             _ => panic!("expected CliError"),
         }
     }
@@ -301,7 +301,7 @@ mod tests {
             SdkError::CliError { message, code } => {
                 assert_eq!(message, "no code");
                 assert!(code.is_none());
-            }
+            },
             _ => panic!("expected CliError"),
         }
     }
@@ -320,12 +320,8 @@ mod tests {
         assert!(SdkError::timeout(10).is_recoverable());
         assert!(SdkError::ChannelClosed.is_recoverable());
         assert!(SdkError::UnexpectedStreamEnd.is_recoverable());
-        assert!(
-            SdkError::ProcessExited { code: Some(1) }.is_recoverable()
-        );
-        assert!(
-            SdkError::ProcessExited { code: None }.is_recoverable()
-        );
+        assert!(SdkError::ProcessExited { code: Some(1) }.is_recoverable());
+        assert!(SdkError::ProcessExited { code: None }.is_recoverable());
     }
 
     #[test]
@@ -341,15 +337,9 @@ mod tests {
             }
             .is_recoverable()
         );
-        assert!(
-            !SdkError::parse_error("e", "r").is_recoverable()
-        );
-        assert!(
-            !SdkError::unexpected_response("a", "b").is_recoverable()
-        );
-        assert!(
-            !SdkError::cli_error("m", None).is_recoverable()
-        );
+        assert!(!SdkError::parse_error("e", "r").is_recoverable());
+        assert!(!SdkError::unexpected_response("a", "b").is_recoverable());
+        assert!(!SdkError::cli_error("m", None).is_recoverable());
     }
 
     #[test]
@@ -431,7 +421,7 @@ mod tests {
         let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "file missing");
         let sdk_err: SdkError = io_err.into();
         match &sdk_err {
-            SdkError::ProcessError(_) => {}
+            SdkError::ProcessError(_) => {},
             _ => panic!("expected ProcessError from io::Error"),
         }
         assert!(sdk_err.to_string().contains("file missing"));
@@ -442,7 +432,7 @@ mod tests {
         let json_err = serde_json::from_str::<serde_json::Value>("not json").unwrap_err();
         let sdk_err: SdkError = json_err.into();
         match &sdk_err {
-            SdkError::JsonError(_) => {}
+            SdkError::JsonError(_) => {},
             _ => panic!("expected JsonError from serde_json::Error"),
         }
     }
@@ -455,7 +445,7 @@ mod tests {
         let sdk_err: SdkError = send_err.into();
         let _ = tx; // keep tx alive to avoid warning
         match &sdk_err {
-            SdkError::ChannelSendError => {}
+            SdkError::ChannelSendError => {},
             _ => panic!("expected ChannelSendError from SendError"),
         }
     }
@@ -465,7 +455,7 @@ mod tests {
         let recv_err = tokio::sync::broadcast::error::RecvError::Closed;
         let sdk_err: SdkError = recv_err.into();
         match &sdk_err {
-            SdkError::ChannelClosed => {}
+            SdkError::ChannelClosed => {},
             _ => panic!("expected ChannelClosed from RecvError"),
         }
     }

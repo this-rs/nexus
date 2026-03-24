@@ -449,7 +449,7 @@ mod tests {
             } => {
                 assert!((current_ratio - 0.85).abs() < 0.001);
                 assert!(message.contains("Token usage"));
-            }
+            },
             other => panic!("Expected Warning, got {:?}", other),
         }
     }
@@ -547,9 +547,7 @@ mod tests {
         let message = Arc::new(std::sync::Mutex::new(String::new()));
         let msg_clone = message.clone();
 
-        manager
-            .set_limit(BudgetLimit::with_cost(1.0))
-            .await;
+        manager.set_limit(BudgetLimit::with_cost(1.0)).await;
         manager
             .set_warning_callback(Arc::new(move |msg| {
                 *msg_clone.lock().unwrap() = msg.to_string();

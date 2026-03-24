@@ -431,10 +431,12 @@ mod tests {
         let msg = json!({"jsonrpc": "2.0", "id": 1, "method": "bogus/method"});
         let response = server.handle_message(msg).await.unwrap();
         assert_eq!(response["error"]["code"], -32601);
-        assert!(response["error"]["message"]
-            .as_str()
-            .unwrap()
-            .contains("bogus/method"));
+        assert!(
+            response["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("bogus/method")
+        );
     }
 
     // 4. tools/call missing params
@@ -561,7 +563,7 @@ mod tests {
         match &config {
             crate::types::McpServerConfig::Sdk { name, .. } => {
                 assert_eq!(name, "cfg-server");
-            }
+            },
             other => panic!("Expected Sdk variant, got: {other:?}"),
         }
     }
