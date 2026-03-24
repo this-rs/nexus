@@ -242,4 +242,158 @@ mod tests {
         assert_eq!(metrics.average_latency_ms(), 150.0);
         assert!((metrics.success_rate() - 0.666).abs() < 0.01);
     }
+
+    #[test]
+    fn test_record_success_min_latency_set_on_first_call() {
+        let mut metrics = PerformanceMetrics::default();
+        assert_eq!(metrics.min_latency_ms, 0);
+        metrics.record_success(42);
+        assert_eq!(metrics.min_latency_ms, 42);
+    }
+
+    #[test]
+    fn test_record_success_min_latency_updates_correctly() {
+        let mut metrics = PerformanceMetrics::default();
+        metrics.record_success(100);
+        metrics.record_success(50);
+        metrics.record_success(200);
+        assert_eq!(metrics.min_latency_ms, 50);
+    }
+
+    #[test]
+    fn test_record_failure_counting() {
+        let mut metrics = PerformanceMetrics::default();
+        metrics.record_failure();
+        metrics.record_failure();
+        metrics.record_failure();
+        assert_eq!(metrics.failed_requests, 3);
+        assert_eq!(metrics.total_requests, 3);
+        assert_eq!(metrics.successful_requests, 0);
+    }
+
+    #[test]
+    fn test_average_latency_ms_zero_successful_requests() {
+        let metrics = PerformanceMetrics::default();
+        assert_eq!(metrics.average_latency_ms(), 0.0);
+    }
+
+    #[test]
+    fn test_success_rate_zero_total_requests() {
+        let metrics = PerformanceMetrics::default();
+        assert_eq!(metrics.success_rate(), 0.0);
+    }
+
+    #[test]
+    fn test_max_latency_ms_tracks_correctly() {
+        let mut metrics = PerformanceMetrics::default();
+        metrics.record_success(10);
+        metrics.record_success(500);
+        metrics.record_success(200);
+        assert_eq!(metrics.max_latency_ms, 500);
+    }
+
+    #[tokio::test]
+    async fn test_retry_succeeds_on_first_try() {
+        let config = RetryConfig {
+            max_retries: 3,
+            initial_delay: Duration::from_millis(1),
+            max_delay: Duration::from_millis(10),
+            backoff_multiplier: 2.0,
+            jitter_factor: 0.0,
+        };
+        let result = config
+            .retry(|| async { Ok::<_, crate::errors::SdkError>(42) })
+            .await;
+        assert_eq!(result.unwrap(), 42);
+    }
+
+    #[tokio::test]
+    async fn test_retry_fails_then_succeeds() {
+        let config = RetryConfig {
+            max_retries: 3,
+            initial_delay: Duration::from_millis(1),
+            max_delay: Duration::from_millis(10),
+            backoff_multiplier: 2.0,
+            jitter_factor: 0.0,
+        };
+        let attempt = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let attempt_clone = attempt.clone();
+        let result = config
+            .retry(move || {
+                let attempt = attempt_clone.clone();
+                async move {
+                    let n = attempt.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    if n < 2 {
+                        Err(crate::errors::SdkError::ConnectionError("transient".into()))
+                    } else {
+                        Ok(99)
+                    }
+                }
+            })
+            .await;
+        assert_eq!(result.unwrap(), 99);
+        assert_eq!(attempt.load(std::sync::atomic::Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn test_retry_max_retries_exhausted() {
+        let config = RetryConfig {
+            max_retries: 2,
+            initial_delay: Duration::from_millis(1),
+            max_delay: Duration::from_millis(10),
+            backoff_multiplier: 2.0,
+            jitter_factor: 0.0,
+        };
+        let result: crate::errors::Result<i32> = config
+            .retry(|| async {
+                Err(crate::errors::SdkError::ConnectionError(
+                    "always fails".into(),
+                ))
+            })
+            .await;
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_message_batcher_new() {
+        let (batcher, _tx, _rx) = MessageBatcher::new(10, Duration::from_millis(100));
+        assert_eq!(batcher.max_batch_size, 10);
+        assert_eq!(batcher.max_wait_time, Duration::from_millis(100));
+        assert!(batcher.buffer.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_message_batcher_emits_batch_on_channel_close() {
+        let (batcher, tx, mut rx) = MessageBatcher::new(10, Duration::from_secs(5));
+
+        let msg = Message::System {
+            subtype: "test".into(),
+            data: serde_json::json!({}),
+        };
+        tx.send(msg).await.unwrap();
+        drop(tx); // close the channel
+
+        tokio::spawn(async move { batcher.run().await });
+
+        let batch = rx.recv().await.unwrap();
+        assert_eq!(batch.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_message_batcher_emits_batch_when_max_size_reached() {
+        let (batcher, tx, mut rx) = MessageBatcher::new(2, Duration::from_secs(5));
+
+        tokio::spawn(async move { batcher.run().await });
+
+        for _ in 0..2 {
+            let msg = Message::System {
+                subtype: "test".into(),
+                data: serde_json::json!({}),
+            };
+            tx.send(msg).await.unwrap();
+        }
+
+        let batch = rx.recv().await.unwrap();
+        assert_eq!(batch.len(), 2);
+    }
 }

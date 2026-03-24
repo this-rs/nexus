@@ -173,65 +173,393 @@ fn json_matches_tool_schema(json: &Value, schema: &Value) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::openai::FunctionDefinition;
     use serde_json::json;
 
+    // ── Helper to build a Tool ──
+    fn make_tool(name: &str, params: Value) -> Tool {
+        Tool {
+            tool_type: "function".to_string(),
+            function: FunctionDefinition {
+                name: name.to_string(),
+                description: Some(format!("{name} tool")),
+                parameters: params,
+            },
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    //  extract_json_from_content
+    // ═══════════════════════════════════════════════════════════════
+
     #[test]
-    fn test_extract_json_from_content() {
-        // Test direct JSON
+    fn test_extract_json_direct() {
         let content = r#"{"url": "https://example.com", "action": "preview"}"#;
         let result = extract_json_from_content(content);
         assert!(result.is_some());
+        assert_eq!(result.unwrap()["url"], "https://example.com");
+    }
 
-        // Test JSON in markdown code block
-        let content = r#"Here's the result:
-```json
-{
-  "url": "https://example.com",
-  "action": "preview"
-}
-```"#;
+    #[test]
+    fn test_extract_json_direct_with_whitespace() {
+        let content = "   {\"key\": \"value\"}   ";
         let result = extract_json_from_content(content);
         assert!(result.is_some());
+        assert_eq!(result.unwrap()["key"], "value");
+    }
 
-        // Test JSON embedded in text
+    #[test]
+    fn test_extract_json_from_markdown_block() {
+        let content = "Here's the result:\n```json\n{\"url\": \"https://example.com\"}\n```";
+        let result = extract_json_from_content(content);
+        assert!(result.is_some());
+        assert_eq!(result.unwrap()["url"], "https://example.com");
+    }
+
+    #[test]
+    fn test_extract_json_from_markdown_block_multiline() {
+        let content = "Result:\n```json\n{\n  \"a\": 1,\n  \"b\": 2\n}\n```\nDone.";
+        let result = extract_json_from_content(content);
+        assert!(result.is_some());
+        let v = result.unwrap();
+        assert_eq!(v["a"], 1);
+        assert_eq!(v["b"], 2);
+    }
+
+    #[test]
+    fn test_extract_json_embedded_in_text() {
         let content = r#"The function call is {"url": "https://example.com"} for preview"#;
         let result = extract_json_from_content(content);
         assert!(result.is_some());
     }
 
     #[test]
-    fn test_detect_tool_name() {
-        // Test 1: JSON with action field
-        let json_with_action = json!({
-            "url": "https://example.com",
-            "action": "preview"
-        });
+    fn test_extract_json_nested_braces() {
+        let content = r#"Here: {"outer": {"inner": 42}}"#;
+        let result = extract_json_from_content(content);
+        assert!(result.is_some());
+        assert_eq!(result.unwrap()["outer"]["inner"], 42);
+    }
 
-        let result = detect_tool_name(&json_with_action, &None);
+    #[test]
+    fn test_extract_json_with_escaped_quotes() {
+        let content = r#"{"msg": "he said \"hello\""}"#;
+        let result = extract_json_from_content(content);
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn test_extract_json_no_json_returns_none() {
+        let content = "This is just plain text with no JSON.";
+        let result = extract_json_from_content(content);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_extract_json_invalid_json_returns_none() {
+        let content = "{not valid json at all}";
+        let result = extract_json_from_content(content);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_extract_json_empty_string() {
+        assert!(extract_json_from_content("").is_none());
+    }
+
+    #[test]
+    fn test_extract_json_array_direct() {
+        let content = r#"[1, 2, 3]"#;
+        let result = extract_json_from_content(content);
+        // Direct parse succeeds for arrays
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn test_extract_json_markdown_block_without_closing() {
+        // Unclosed markdown block — json block extraction fails, falls through to brace search
+        let content = "```json\n{\"a\": 1}\nno closing ticks";
+        let result = extract_json_from_content(content);
+        // The brace-matching fallback should still find the JSON
+        assert!(result.is_some());
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    //  find_matching_brace
+    // ═══════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_find_matching_brace_simple() {
+        assert_eq!(find_matching_brace("{}"), Some(1));
+    }
+
+    #[test]
+    fn test_find_matching_brace_nested() {
+        assert_eq!(find_matching_brace("{\"a\":{\"b\":1}}"), Some(12));
+    }
+
+    #[test]
+    fn test_find_matching_brace_with_string_braces() {
+        // Braces inside strings should be ignored
+        let s = r#"{"key": "val{ue}"}"#;
+        let result = find_matching_brace(s);
+        assert!(result.is_some());
+        // The entire object should be matched
+        assert_eq!(&s[..=result.unwrap()], s);
+    }
+
+    #[test]
+    fn test_find_matching_brace_unclosed() {
+        assert_eq!(find_matching_brace("{\"a\": 1"), None);
+    }
+
+    #[test]
+    fn test_find_matching_brace_empty_object() {
+        assert_eq!(find_matching_brace("{}"), Some(1));
+    }
+
+    #[test]
+    fn test_find_matching_brace_escaped_quote() {
+        // Escaped quote inside string should not toggle in_string
+        let s = r#"{"k": "val\"ue"}"#;
+        let result = find_matching_brace(s);
+        assert!(result.is_some());
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    //  detect_tool_name
+    // ═══════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_detect_tool_name_action_field() {
+        let json = json!({"url": "https://example.com", "action": "preview"});
+        let result = detect_tool_name(&json, &None);
         assert_eq!(result, Some("preview".to_string()));
+    }
 
-        // Test 2: JSON matching tool schema
-        let json_matching_schema = json!({
-            "url": "https://example.com"
-        });
+    #[test]
+    fn test_detect_tool_name_function_field() {
+        let json = json!({"function": "my_func", "arg": 1});
+        assert_eq!(detect_tool_name(&json, &None), Some("my_func".to_string()));
+    }
 
-        let tool = Tool {
-            tool_type: "function".to_string(),
-            function: crate::models::openai::FunctionDefinition {
-                name: "url_preview".to_string(),
-                description: Some("Preview a URL".to_string()),
-                parameters: json!({
-                    "type": "object",
-                    "properties": {
-                        "url": {"type": "string"}
-                    },
-                    "required": ["url"]
-                }),
-            },
-        };
+    #[test]
+    fn test_detect_tool_name_tool_field() {
+        let json = json!({"tool": "search", "query": "test"});
+        assert_eq!(detect_tool_name(&json, &None), Some("search".to_string()));
+    }
 
-        let tools = vec![tool];
-        let result = detect_tool_name(&json_matching_schema, &Some(tools));
+    #[test]
+    fn test_detect_tool_name_name_field() {
+        let json = json!({"name": "get_weather", "location": "Paris"});
+        assert_eq!(
+            detect_tool_name(&json, &None),
+            Some("get_weather".to_string())
+        );
+    }
+
+    #[test]
+    fn test_detect_tool_name_priority_function_over_action() {
+        // "function" is checked first
+        let json = json!({"function": "fn1", "action": "act1"});
+        assert_eq!(detect_tool_name(&json, &None), Some("fn1".to_string()));
+    }
+
+    #[test]
+    fn test_detect_tool_name_schema_match_with_required() {
+        let json = json!({"url": "https://example.com"});
+        let tool = make_tool(
+            "url_preview",
+            json!({
+                "type": "object",
+                "properties": {"url": {"type": "string"}},
+                "required": ["url"]
+            }),
+        );
+        let result = detect_tool_name(&json, &Some(vec![tool]));
         assert_eq!(result, Some("url_preview".to_string()));
+    }
+
+    #[test]
+    fn test_detect_tool_name_schema_match_missing_required() {
+        let json = json!({"other": "value"});
+        let tool = make_tool(
+            "url_preview",
+            json!({
+                "type": "object",
+                "properties": {"url": {"type": "string"}},
+                "required": ["url"]
+            }),
+        );
+        let result = detect_tool_name(&json, &Some(vec![tool]));
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_detect_tool_name_no_match_returns_none() {
+        let json = json!({"random": "data"});
+        let tool = make_tool(
+            "specific_tool",
+            json!({
+                "type": "object",
+                "properties": {"needed": {"type": "string"}},
+                "required": ["needed"]
+            }),
+        );
+        let result = detect_tool_name(&json, &Some(vec![tool]));
+        assert_eq!(result, None);
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    //  json_matches_tool_schema
+    // ═══════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_schema_match_all_required_present() {
+        let json = json!({"a": 1, "b": 2});
+        let schema = json!({
+            "type": "object",
+            "properties": {"a": {"type": "number"}, "b": {"type": "number"}},
+            "required": ["a", "b"]
+        });
+        assert!(json_matches_tool_schema(&json, &schema));
+    }
+
+    #[test]
+    fn test_schema_match_missing_one_required() {
+        let json = json!({"a": 1});
+        let schema = json!({
+            "type": "object",
+            "properties": {"a": {"type": "number"}, "b": {"type": "number"}},
+            "required": ["a", "b"]
+        });
+        assert!(!json_matches_tool_schema(&json, &schema));
+    }
+
+    #[test]
+    fn test_schema_match_no_required_field_50_percent_rule() {
+        // No "required" array — uses the >=50% property match heuristic
+        let json = json!({"a": 1, "b": 2});
+        let schema = json!({
+            "type": "object",
+            "properties": {"a": {}, "b": {}, "c": {}}
+        });
+        // 2 out of 3 matched (67%) → should match
+        assert!(json_matches_tool_schema(&json, &schema));
+    }
+
+    #[test]
+    fn test_schema_match_no_required_below_50_percent() {
+        let json = json!({"a": 1});
+        let schema = json!({
+            "type": "object",
+            "properties": {"a": {}, "b": {}, "c": {}}
+        });
+        // 1 out of 3 (33%) → should NOT match
+        assert!(!json_matches_tool_schema(&json, &schema));
+    }
+
+    #[test]
+    fn test_schema_match_no_required_zero_properties_matched() {
+        let json = json!({"x": 1});
+        let schema = json!({
+            "type": "object",
+            "properties": {"a": {}, "b": {}}
+        });
+        assert!(!json_matches_tool_schema(&json, &schema));
+    }
+
+    #[test]
+    fn test_schema_match_non_object_json() {
+        let json = json!("just a string");
+        let schema = json!({
+            "type": "object",
+            "properties": {"a": {}}
+        });
+        assert!(!json_matches_tool_schema(&json, &schema));
+    }
+
+    #[test]
+    fn test_schema_match_non_object_schema() {
+        let json = json!({"a": 1});
+        let schema = json!("not an object schema");
+        assert!(!json_matches_tool_schema(&json, &schema));
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    //  detect_and_convert_tool_call (integration of the above)
+    // ═══════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_detect_and_convert_no_tools_requested() {
+        let result = detect_and_convert_tool_call(r#"{"action": "test"}"#, &None);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_detect_and_convert_with_action_field() {
+        let tools = vec![make_tool(
+            "preview",
+            json!({"type": "object", "properties": {}}),
+        )];
+        let content = r#"{"action": "preview", "url": "https://example.com"}"#;
+        let result = detect_and_convert_tool_call(content, &Some(tools));
+        assert!(result.is_some());
+        let fc = result.unwrap();
+        assert_eq!(fc.name, "preview");
+    }
+
+    #[test]
+    fn test_detect_and_convert_falls_back_to_first_tool() {
+        // JSON is a valid object but has no function/action/tool/name fields
+        // and doesn't match schema required fields — falls back to first tool
+        let tools = vec![make_tool(
+            "default_tool",
+            json!({
+                "type": "object",
+                "properties": {"x": {"type": "number"}},
+                "required": ["x"]
+            }),
+        )];
+        // JSON has no "x" required field → schema match fails
+        // But JSON is a valid object, so falls back to first tool
+        let content = r#"{"something_else": 42}"#;
+        let result = detect_and_convert_tool_call(content, &Some(tools));
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().name, "default_tool");
+    }
+
+    #[test]
+    fn test_detect_and_convert_plain_text_returns_none() {
+        let tools = vec![make_tool(
+            "my_tool",
+            json!({"type": "object", "properties": {}}),
+        )];
+        let result = detect_and_convert_tool_call("Just some plain text", &Some(tools));
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_detect_and_convert_json_in_markdown() {
+        let tools = vec![make_tool(
+            "search",
+            json!({"type": "object", "properties": {"query": {}}, "required": ["query"]}),
+        )];
+        let content = "Result:\n```json\n{\"query\": \"test\"}\n```";
+        let result = detect_and_convert_tool_call(content, &Some(tools));
+        assert!(result.is_some());
+        let fc = result.unwrap();
+        assert_eq!(fc.name, "search");
+        // arguments should be the JSON string
+        let args: Value = serde_json::from_str(&fc.arguments).unwrap();
+        assert_eq!(args["query"], "test");
+    }
+
+    #[test]
+    fn test_detect_and_convert_empty_tools_vec() {
+        // Tools is Some but empty vec — should not crash, returns None for fallback
+        let content = r#"{"data": 1}"#;
+        let result = detect_and_convert_tool_call(content, &Some(vec![]));
+        assert!(result.is_none());
     }
 }

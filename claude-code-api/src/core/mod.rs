@@ -6,6 +6,7 @@ pub mod conversation;
 pub mod hooks;
 pub mod interactive_session;
 pub mod memory;
+pub mod objective_tracker;
 pub mod process_pool;
 pub mod retry;
 pub mod session_manager;
