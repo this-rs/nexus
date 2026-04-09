@@ -825,4 +825,582 @@ mod tests {
             panic!("Expected Message::User");
         }
     }
+
+    // === Additional coverage tests ===
+
+    #[test]
+    fn test_parse_message_missing_type_field() {
+        let json = json!({"data": "no type here"});
+        let result = parse_message(json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_user_message_missing_message_field() {
+        let json = json!({"type": "user"});
+        let result = parse_message(json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_user_message_invalid_content() {
+        let json = json!({
+            "type": "user",
+            "message": {
+                "content": 12345
+            }
+        });
+        let result = parse_message(json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_user_message_empty_array_content() {
+        let json = json!({
+            "type": "user",
+            "message": {
+                "content": []
+            }
+        });
+        let result = parse_message(json).unwrap().unwrap();
+        if let Message::User { message, .. } = &result {
+            assert!(message.content.is_empty());
+            assert!(
+                message.content_blocks.is_none(),
+                "Empty blocks should become None"
+            );
+        } else {
+            panic!("Expected Message::User");
+        }
+    }
+
+    #[test]
+    fn test_parse_assistant_message_missing_message_field() {
+        let json = json!({"type": "assistant"});
+        let result = parse_message(json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_assistant_message_content_not_array() {
+        let json = json!({
+            "type": "assistant",
+            "message": {
+                "content": "this is a string, not an array"
+            }
+        });
+        let result = parse_message(json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_content_block_text_missing_text() {
+        let json = json!({"type": "text"});
+        let result = parse_content_block(&json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_content_block_thinking_missing_thinking() {
+        let json = json!({"type": "thinking", "signature": "sig"});
+        let result = parse_content_block(&json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_content_block_thinking_missing_signature() {
+        let json = json!({"type": "thinking", "thinking": "hmm"});
+        let result = parse_content_block(&json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_content_block_tool_use_missing_id() {
+        let json = json!({"type": "tool_use", "name": "read_file", "input": {}});
+        let result = parse_content_block(&json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_content_block_tool_use_missing_name() {
+        let json = json!({"type": "tool_use", "id": "tool_1", "input": {}});
+        let result = parse_content_block(&json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_content_block_tool_use_no_input_defaults() {
+        let json = json!({"type": "tool_use", "id": "tool_1", "name": "my_tool"});
+        let result = parse_content_block(&json).unwrap().unwrap();
+        if let ContentBlock::ToolUse(tu) = result {
+            assert_eq!(tu.id, "tool_1");
+            assert_eq!(tu.name, "my_tool");
+            assert_eq!(tu.input, json!({}));
+        } else {
+            panic!("Expected ToolUse block");
+        }
+    }
+
+    #[test]
+    fn test_parse_content_block_tool_result_missing_tool_use_id() {
+        let json = json!({"type": "tool_result", "content": "result"});
+        let result = parse_content_block(&json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_content_block_tool_result_structured_content() {
+        let json = json!({
+            "type": "tool_result",
+            "tool_use_id": "toolu_1",
+            "content": [{"type": "text", "text": "structured"}]
+        });
+        let result = parse_content_block(&json).unwrap().unwrap();
+        if let ContentBlock::ToolResult(tr) = result {
+            assert_eq!(tr.tool_use_id, "toolu_1");
+            assert!(matches!(tr.content, Some(ContentValue::Structured(_))));
+        } else {
+            panic!("Expected ToolResult block");
+        }
+    }
+
+    #[test]
+    fn test_parse_content_block_tool_result_no_content() {
+        let json = json!({
+            "type": "tool_result",
+            "tool_use_id": "toolu_1"
+        });
+        let result = parse_content_block(&json).unwrap().unwrap();
+        if let ContentBlock::ToolResult(tr) = result {
+            assert_eq!(tr.tool_use_id, "toolu_1");
+            assert!(tr.content.is_none());
+        } else {
+            panic!("Expected ToolResult block");
+        }
+    }
+
+    #[test]
+    fn test_parse_content_block_unknown_type_returns_none() {
+        let json = json!({"type": "image", "data": "base64..."});
+        let result = parse_content_block(&json).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_parse_content_block_no_type_with_text_backward_compat() {
+        let json = json!({"text": "fallback text"});
+        let result = parse_content_block(&json).unwrap().unwrap();
+        if let ContentBlock::Text(t) = result {
+            assert_eq!(t.text, "fallback text");
+        } else {
+            panic!("Expected Text block");
+        }
+    }
+
+    #[test]
+    fn test_parse_content_block_no_type_no_text_returns_none() {
+        let json = json!({"something": "else"});
+        let result = parse_content_block(&json).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_parse_system_message_missing_subtype_defaults() {
+        let json = json!({
+            "type": "system",
+            "data": {"key": "value"}
+        });
+        let result = parse_message(json).unwrap().unwrap();
+        if let Message::System { subtype, data } = result {
+            assert_eq!(subtype, "unknown");
+            assert_eq!(data["key"], "value");
+        } else {
+            panic!("Expected System message");
+        }
+    }
+
+    #[test]
+    fn test_parse_system_message_missing_data_defaults() {
+        let json = json!({
+            "type": "system",
+            "subtype": "info"
+        });
+        let result = parse_message(json).unwrap().unwrap();
+        if let Message::System { subtype, data } = result {
+            assert_eq!(subtype, "info");
+            assert_eq!(data, json!({}));
+        } else {
+            panic!("Expected System message");
+        }
+    }
+
+    #[test]
+    fn test_parse_result_message_fallback_path() {
+        // Provide a JSON that will fail serde deserialization of Message
+        // (e.g., missing required fields that serde expects but the fallback handles).
+        // The serde path expects "type": "result" as the tag, but also needs
+        // all required fields. We add an extra unrecognized field structure
+        // that makes serde fail, triggering the fallback.
+        let json = json!({
+            "type": "result",
+            "subtype": "conversation_turn",
+            "duration_ms": 500,
+            "duration_api_ms": 400,
+            "is_error": true,
+            "num_turns": 3,
+            "session_id": "sess_fallback",
+            "total_cost_usd": 0.05,
+            "result": "some result text",
+            "usage": {"input_tokens": 100},
+            "structured_output": {"key": "val"}
+        });
+
+        // This should succeed via either serde or fallback
+        let result = parse_message(json).unwrap().unwrap();
+        if let Message::Result {
+            subtype,
+            duration_ms,
+            duration_api_ms,
+            is_error,
+            num_turns,
+            session_id,
+            total_cost_usd,
+            result,
+            ..
+        } = result
+        {
+            assert_eq!(subtype, "conversation_turn");
+            assert_eq!(duration_ms, 500);
+            assert_eq!(duration_api_ms, 400);
+            assert!(is_error);
+            assert_eq!(num_turns, 3);
+            assert_eq!(session_id, "sess_fallback");
+            assert_eq!(total_cost_usd, Some(0.05));
+            assert_eq!(result, Some("some result text".to_string()));
+        } else {
+            panic!("Expected Result message");
+        }
+    }
+
+    #[test]
+    fn test_parse_result_message_fallback_with_minimal_fields() {
+        // Force fallback by providing num_turns as a string (serde will reject it)
+        // but the fallback parses it manually with defaults
+        let json = json!({
+            "type": "result",
+            "num_turns": "not_a_number"
+        });
+        let result = parse_message(json).unwrap().unwrap();
+        if let Message::Result {
+            subtype,
+            duration_ms,
+            session_id,
+            num_turns,
+            is_error,
+            ..
+        } = result
+        {
+            assert_eq!(subtype, "unknown");
+            assert_eq!(duration_ms, 0);
+            assert_eq!(session_id, "unknown");
+            assert_eq!(num_turns, 0);
+            assert!(!is_error);
+        } else {
+            panic!("Expected Result message from fallback");
+        }
+    }
+
+    #[test]
+    fn test_parse_stream_event_missing_event_field() {
+        let json = json!({"type": "stream_event"});
+        let result = parse_message(json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_stream_event_missing_event_type() {
+        let json = json!({
+            "type": "stream_event",
+            "event": {}
+        });
+        let result = parse_message(json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_stream_event_message_start() {
+        let json = json!({
+            "type": "stream_event",
+            "event": {
+                "type": "message_start",
+                "message": {"id": "msg_1", "role": "assistant"}
+            }
+        });
+        let result = parse_message(json).unwrap().unwrap();
+        if let Message::StreamEvent { event, .. } = result {
+            assert!(matches!(event, StreamEventData::MessageStart { .. }));
+            if let StreamEventData::MessageStart { message } = event {
+                assert_eq!(message["id"], "msg_1");
+            }
+        } else {
+            panic!("Expected StreamEvent");
+        }
+    }
+
+    #[test]
+    fn test_parse_stream_event_content_block_start() {
+        let json = json!({
+            "type": "stream_event",
+            "event": {
+                "type": "content_block_start",
+                "index": 0,
+                "content_block": {"type": "text", "text": ""}
+            }
+        });
+        let result = parse_message(json).unwrap().unwrap();
+        if let Message::StreamEvent { event, .. } = result {
+            if let StreamEventData::ContentBlockStart {
+                index,
+                content_block,
+            } = event
+            {
+                assert_eq!(index, 0);
+                assert_eq!(content_block["type"], "text");
+            } else {
+                panic!("Expected ContentBlockStart");
+            }
+        } else {
+            panic!("Expected StreamEvent");
+        }
+    }
+
+    #[test]
+    fn test_parse_stream_event_content_block_delta_text() {
+        let json = json!({
+            "type": "stream_event",
+            "event": {
+                "type": "content_block_delta",
+                "index": 1,
+                "delta": {
+                    "type": "text_delta",
+                    "text": "Hello"
+                }
+            }
+        });
+        let result = parse_message(json).unwrap().unwrap();
+        if let Message::StreamEvent { event, .. } = result {
+            if let StreamEventData::ContentBlockDelta { index, delta } = event {
+                assert_eq!(index, 1);
+                assert_eq!(
+                    delta,
+                    StreamDelta::TextDelta {
+                        text: "Hello".to_string()
+                    }
+                );
+            } else {
+                panic!("Expected ContentBlockDelta");
+            }
+        } else {
+            panic!("Expected StreamEvent");
+        }
+    }
+
+    #[test]
+    fn test_parse_stream_event_content_block_delta_thinking() {
+        let json = json!({
+            "type": "stream_event",
+            "event": {
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": {
+                    "type": "thinking_delta",
+                    "thinking": "Let me think..."
+                }
+            }
+        });
+        let result = parse_message(json).unwrap().unwrap();
+        if let Message::StreamEvent { event, .. } = result {
+            if let StreamEventData::ContentBlockDelta { delta, .. } = event {
+                assert_eq!(
+                    delta,
+                    StreamDelta::ThinkingDelta {
+                        thinking: "Let me think...".to_string()
+                    }
+                );
+            } else {
+                panic!("Expected ContentBlockDelta");
+            }
+        } else {
+            panic!("Expected StreamEvent");
+        }
+    }
+
+    #[test]
+    fn test_parse_stream_event_content_block_delta_input_json() {
+        let json = json!({
+            "type": "stream_event",
+            "event": {
+                "type": "content_block_delta",
+                "index": 2,
+                "delta": {
+                    "type": "input_json_delta",
+                    "partial_json": "{\"path\":"
+                }
+            }
+        });
+        let result = parse_message(json).unwrap().unwrap();
+        if let Message::StreamEvent { event, .. } = result {
+            if let StreamEventData::ContentBlockDelta { index, delta } = event {
+                assert_eq!(index, 2);
+                assert_eq!(
+                    delta,
+                    StreamDelta::InputJsonDelta {
+                        partial_json: "{\"path\":".to_string()
+                    }
+                );
+            } else {
+                panic!("Expected ContentBlockDelta");
+            }
+        } else {
+            panic!("Expected StreamEvent");
+        }
+    }
+
+    #[test]
+    fn test_parse_stream_event_content_block_delta_unknown_type() {
+        let json = json!({
+            "type": "stream_event",
+            "event": {
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": {
+                    "type": "some_future_delta",
+                    "text": "fallback text"
+                }
+            }
+        });
+        let result = parse_message(json).unwrap().unwrap();
+        if let Message::StreamEvent { event, .. } = result {
+            if let StreamEventData::ContentBlockDelta { delta, .. } = event {
+                // Unknown delta type falls back to TextDelta
+                assert_eq!(
+                    delta,
+                    StreamDelta::TextDelta {
+                        text: "fallback text".to_string()
+                    }
+                );
+            } else {
+                panic!("Expected ContentBlockDelta");
+            }
+        } else {
+            panic!("Expected StreamEvent");
+        }
+    }
+
+    #[test]
+    fn test_parse_stream_event_content_block_delta_missing_delta() {
+        let json = json!({
+            "type": "stream_event",
+            "event": {
+                "type": "content_block_delta",
+                "index": 0
+            }
+        });
+        let result = parse_message(json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_stream_event_content_block_stop() {
+        let json = json!({
+            "type": "stream_event",
+            "event": {
+                "type": "content_block_stop",
+                "index": 3
+            }
+        });
+        let result = parse_message(json).unwrap().unwrap();
+        if let Message::StreamEvent { event, .. } = result {
+            assert_eq!(event, StreamEventData::ContentBlockStop { index: 3 });
+        } else {
+            panic!("Expected StreamEvent");
+        }
+    }
+
+    #[test]
+    fn test_parse_stream_event_message_delta() {
+        let json = json!({
+            "type": "stream_event",
+            "event": {
+                "type": "message_delta",
+                "delta": {"stop_reason": "end_turn"},
+                "usage": {"output_tokens": 50}
+            }
+        });
+        let result = parse_message(json).unwrap().unwrap();
+        if let Message::StreamEvent { event, .. } = result {
+            if let StreamEventData::MessageDelta { delta, usage } = event {
+                assert_eq!(delta["stop_reason"], "end_turn");
+                assert!(usage.is_some());
+                assert_eq!(usage.unwrap()["output_tokens"], 50);
+            } else {
+                panic!("Expected MessageDelta");
+            }
+        } else {
+            panic!("Expected StreamEvent");
+        }
+    }
+
+    #[test]
+    fn test_parse_stream_event_message_stop() {
+        let json = json!({
+            "type": "stream_event",
+            "event": {
+                "type": "message_stop"
+            }
+        });
+        let result = parse_message(json).unwrap().unwrap();
+        if let Message::StreamEvent { event, .. } = result {
+            assert_eq!(event, StreamEventData::MessageStop);
+        } else {
+            panic!("Expected StreamEvent");
+        }
+    }
+
+    #[test]
+    fn test_parse_stream_event_unknown_type_returns_none() {
+        let json = json!({
+            "type": "stream_event",
+            "event": {
+                "type": "some_future_event"
+            }
+        });
+        let result = parse_message(json).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_parse_stream_event_with_parent_tool_use_id() {
+        let json = json!({
+            "type": "stream_event",
+            "parent_tool_use_id": "toolu_sub123",
+            "session_id": "sess_abc",
+            "event": {
+                "type": "message_stop"
+            }
+        });
+        let result = parse_message(json).unwrap().unwrap();
+        if let Message::StreamEvent {
+            event,
+            session_id,
+            parent_tool_use_id,
+        } = result
+        {
+            assert_eq!(event, StreamEventData::MessageStop);
+            assert_eq!(session_id, Some("sess_abc".to_string()));
+            assert_eq!(parent_tool_use_id, Some("toolu_sub123".to_string()));
+        } else {
+            panic!("Expected StreamEvent");
+        }
+    }
 }
