@@ -883,6 +883,33 @@ impl SubprocessTransport {
                         callback.as_ref()(line.as_str());
                     }
 
+                    // Filter out non-actionable noise: hook callback errors and
+                    // AbortError from minified CLI JS.  These are expected during
+                    // session interrupts (the CLI aborts in-flight hooks) and would
+                    // otherwise spam ERROR logs + pollute the error_buffer which
+                    // triggers a System::error broadcast to consumers.
+                    if line.contains("Error in hook callback")
+                        || (line.contains("AbortError") && line.len() < 200)
+                        || line.starts_with("      at ")
+                    {
+                        debug!("Claude CLI stderr (filtered — hook abort noise): {}", line);
+                        continue;
+                    }
+
+                    // Skip minified JS source lines (long lines from bundled CLI code
+                    // that leak into stderr during hook crashes).  These carry zero
+                    // diagnostic value and can be thousands of characters long.
+                    if line.len() > 500
+                        && (line.contains("Symbol.for(\"react.memo_cache_sentinel\")")
+                            || line.contains("/$bunfs/root/src/entrypoints/cli.js"))
+                    {
+                        debug!(
+                            "Claude CLI stderr (filtered — minified JS, {} bytes)",
+                            line.len()
+                        );
+                        continue;
+                    }
+
                     error!("Claude CLI stderr: {}", line);
                     error_buffer.push(line.clone());
 
@@ -908,7 +935,7 @@ impl SubprocessTransport {
                 }
             }
 
-            // If we collected any errors, log them
+            // If we collected any actionable errors (after filtering), log and broadcast them.
             if !error_buffer.is_empty() {
                 let error_msg = error_buffer.join("\n");
                 error!("Claude CLI stderr output collected:\n{}", error_msg);
