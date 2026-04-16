@@ -329,7 +329,10 @@ mod tests {
             all.get("simple").map(|s| s.as_str()),
             Some("claude-3-5-haiku-20241022")
         );
-        assert_eq!(all.get("complex").map(|s| s.as_str()), Some("claude-opus-4-7"));
+        assert_eq!(
+            all.get("complex").map(|s| s.as_str()),
+            Some("claude-opus-4-7")
+        );
         assert_eq!(
             all.get("balanced").map(|s| s.as_str()),
             Some("claude-sonnet-4-5-20250929")
