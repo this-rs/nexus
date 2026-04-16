@@ -21,10 +21,12 @@ mod tests {
     #[test]
     fn test_claude_model_list() {
         let models = ClaudeModel::all();
-        assert_eq!(models.len(), 8); // 3 Claude 4 + 2 Claude 3.7 + 2 Claude 3.5 + 1 Claude 3
+        assert_eq!(models.len(), 10); // 5 Claude 4 + 2 Claude 3.7 + 2 Claude 3.5 + 1 Claude 3
 
         let model_ids: Vec<String> = models.iter().map(|m| m.id.clone()).collect();
         // Check Claude 4 models
+        assert!(model_ids.contains(&"claude-opus-4-7".to_string()));
+        assert!(model_ids.contains(&"claude-opus-4-6".to_string()));
         assert!(model_ids.contains(&"claude-opus-4-1-20250805".to_string()));
         assert!(model_ids.contains(&"claude-opus-4-20250514".to_string()));
         assert!(model_ids.contains(&"claude-sonnet-4-20250514".to_string()));
