@@ -568,18 +568,14 @@ async fn main() -> Result<()> {
                                             mgr.process_tool_call(&tool_use.name, &tool_use.input);
                                         }
                                     },
-                                    nexus_claude::ContentBlock::Thinking(thinking) => {
+                                    nexus_claude::ContentBlock::Thinking(thinking)
+                                        if config.verbose =>
+                                    {
                                         // Show thinking if verbose
-                                        if config.verbose {
-                                            println!(
-                                                "\n\x1b[2;3m  💭 {}\x1b[0m",
-                                                thinking
-                                                    .thinking
-                                                    .chars()
-                                                    .take(100)
-                                                    .collect::<String>()
-                                            );
-                                        }
+                                        println!(
+                                            "\n\x1b[2;3m  💭 {}\x1b[0m",
+                                            thinking.thinking.chars().take(100).collect::<String>()
+                                        );
                                     },
                                     _ => {},
                                 }

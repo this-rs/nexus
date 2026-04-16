@@ -789,14 +789,13 @@ async fn main() -> Result<()> {
                                     );
                                 }
                             },
-                            ContentBlock::Thinking(thinking) => {
-                                if config.verbose {
-                                    println!(
-                                        "\n\x1b[2;3m  💭 {}\x1b[0m",
-                                        thinking.thinking.chars().take(100).collect::<String>()
-                                    );
-                                }
+                            ContentBlock::Thinking(thinking) if config.verbose => {
+                                println!(
+                                    "\n\x1b[2;3m  💭 {}\x1b[0m",
+                                    thinking.thinking.chars().take(100).collect::<String>()
+                                );
                             },
+                            _ => {},
                         }
                     }
                 },
