@@ -768,35 +768,32 @@ async fn main() -> Result<()> {
                                     mgr.process_tool_call(&tool_use.name, &tool_use.input);
                                 }
                             },
-                            ContentBlock::ToolResult(tool_result) => {
-                                if config.verbose {
-                                    let preview = match &tool_result.content {
-                                        Some(nexus_claude::ContentValue::Text(text)) => {
-                                            if text.len() > 100 {
-                                                format!("{}...", &text[..100])
-                                            } else {
-                                                text.clone()
-                                            }
-                                        },
-                                        Some(nexus_claude::ContentValue::Structured(arr)) => {
-                                            format!("[{} items]", arr.len())
-                                        },
-                                        None => "(no content)".to_string(),
-                                    };
-                                    println!(
-                                        "\n\x1b[2m  📋 Tool result: {}\x1b[0m",
-                                        preview.replace('\n', " ")
-                                    );
-                                }
+                            ContentBlock::ToolResult(tool_result) if config.verbose => {
+                                let preview = match &tool_result.content {
+                                    Some(nexus_claude::ContentValue::Text(text)) => {
+                                        if text.len() > 100 {
+                                            format!("{}...", &text[..100])
+                                        } else {
+                                            text.clone()
+                                        }
+                                    },
+                                    Some(nexus_claude::ContentValue::Structured(arr)) => {
+                                        format!("[{} items]", arr.len())
+                                    },
+                                    None => "(no content)".to_string(),
+                                };
+                                println!(
+                                    "\n\x1b[2m  📋 Tool result: {}\x1b[0m",
+                                    preview.replace('\n', " ")
+                                );
                             },
-                            ContentBlock::Thinking(thinking) => {
-                                if config.verbose {
-                                    println!(
-                                        "\n\x1b[2;3m  💭 {}\x1b[0m",
-                                        thinking.thinking.chars().take(100).collect::<String>()
-                                    );
-                                }
+                            ContentBlock::Thinking(thinking) if config.verbose => {
+                                println!(
+                                    "\n\x1b[2;3m  💭 {}\x1b[0m",
+                                    thinking.thinking.chars().take(100).collect::<String>()
+                                );
                             },
+                            _ => {},
                         }
                     }
                 },

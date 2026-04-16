@@ -253,10 +253,8 @@ fn print_response(messages: &[nexus_claude::Message]) {
                     }
                 }
             },
-            nexus_claude::Message::System { subtype, .. } => {
-                if subtype != "thinking" {
-                    println!("[System: {subtype}]");
-                }
+            nexus_claude::Message::System { subtype, .. } if subtype != "thinking" => {
+                println!("[System: {subtype}]");
             },
             _ => {},
         }

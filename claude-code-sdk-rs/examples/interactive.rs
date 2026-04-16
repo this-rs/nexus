@@ -81,10 +81,8 @@ async fn main() -> Result<()> {
                     }
                     println!();
                 },
-                Message::System { subtype, data: _ } => {
-                    if subtype != "thinking" {
-                        println!("[System: {subtype}]");
-                    }
+                Message::System { subtype, data: _ } if subtype != "thinking" => {
+                    println!("[System: {subtype}]");
                 },
                 Message::Result {
                     duration_ms,

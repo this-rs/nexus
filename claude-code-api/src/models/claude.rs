@@ -174,7 +174,17 @@ pub struct ClaudeModel {
 impl ClaudeModel {
     pub fn all() -> Vec<Self> {
         vec![
-            // Claude 4 Series (2025)
+            // Claude 4 Series (2025-2026)
+            Self {
+                id: "claude-opus-4-7".to_string(),
+                display_name: "Claude Opus 4.7".to_string(),
+                context_window: 500000,
+            },
+            Self {
+                id: "claude-opus-4-6".to_string(),
+                display_name: "Claude Opus 4.6".to_string(),
+                context_window: 500000,
+            },
             Self {
                 id: "claude-opus-4-1-20250805".to_string(),
                 display_name: "Claude Opus 4.1".to_string(),

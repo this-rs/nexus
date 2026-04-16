@@ -100,7 +100,7 @@ fn test_model_recommendations() {
         recommender.suggest("balanced"),
         Some("claude-sonnet-4-5-20250929")
     );
-    assert_eq!(recommender.suggest("complex"), Some("opus"));
+    assert_eq!(recommender.suggest("complex"), Some("claude-opus-4-7"));
     assert_eq!(recommender.suggest("unknown"), None);
 }
 

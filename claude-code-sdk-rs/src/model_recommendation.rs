@@ -20,7 +20,7 @@ impl ModelRecommendation {
     /// Default mappings:
     /// - "simple" / "fast" / "cheap" → claude-3-5-haiku-20241022 (fastest, cheapest)
     /// - "balanced" / "general" / "latest" → claude-sonnet-4-5-20250929 (latest Sonnet, balanced performance/cost)
-    /// - "complex" / "best" / "quality" → opus (most capable)
+    /// - "complex" / "best" / "quality" → claude-opus-4-7 (most capable)
     ///
     /// # Example
     ///
@@ -65,12 +65,12 @@ impl ModelRecommendation {
             "claude-sonnet-4-5-20250929".to_string(),
         );
 
-        // Complex/critical tasks - use Opus (most capable)
-        map.insert("complex".to_string(), "opus".to_string());
-        map.insert("best".to_string(), "opus".to_string());
-        map.insert("quality".to_string(), "opus".to_string());
-        map.insert("critical".to_string(), "opus".to_string());
-        map.insert("advanced".to_string(), "opus".to_string());
+        // Complex/critical tasks - use Opus 4.7 (most capable, latest)
+        map.insert("complex".to_string(), "claude-opus-4-7".to_string());
+        map.insert("best".to_string(), "claude-opus-4-7".to_string());
+        map.insert("quality".to_string(), "claude-opus-4-7".to_string());
+        map.insert("critical".to_string(), "claude-opus-4-7".to_string());
+        map.insert("advanced".to_string(), "claude-opus-4-7".to_string());
 
         Self {
             recommendations: map,
@@ -109,8 +109,8 @@ impl ModelRecommendation {
     /// // For simple tasks, use Haiku
     /// assert_eq!(recommender.suggest("simple"), Some("claude-3-5-haiku-20241022"));
     ///
-    /// // For complex tasks, use Opus
-    /// assert_eq!(recommender.suggest("complex"), Some("opus"));
+    /// // For complex tasks, use Opus 4.7
+    /// assert_eq!(recommender.suggest("complex"), Some("claude-opus-4-7"));
     /// ```
     pub fn suggest(&self, task_type: &str) -> Option<&str> {
         self.recommendations.get(task_type).map(|s| s.as_str())
@@ -170,9 +170,9 @@ pub fn latest_sonnet() -> &'static str {
     "claude-sonnet-4-5-20250929"
 }
 
-/// Get the most capable model (Opus)
+/// Get the most capable model (Opus 4.7)
 pub fn best_model() -> &'static str {
-    "opus"
+    "claude-opus-4-7"
 }
 
 /// Estimate relative cost multiplier for different models
@@ -207,7 +207,7 @@ pub fn estimate_cost_multiplier(model: &str) -> f64 {
         => 5.0,
 
         // Opus - ~15x more expensive than Haiku
-        "opus" | "claude-opus-4-1-20250805" => 15.0,
+        "opus" | "claude-opus-4-7" | "claude-opus-4-6" | "claude-opus-4-1-20250805" => 15.0,
 
         // Unknown - assume Sonnet level
         _ => 5.0,
@@ -238,7 +238,7 @@ mod tests {
             recommender.suggest("latest"),
             Some("claude-sonnet-4-5-20250929")
         );
-        assert_eq!(recommender.suggest("complex"), Some("opus"));
+        assert_eq!(recommender.suggest("complex"), Some("claude-opus-4-7"));
         assert_eq!(recommender.suggest("unknown"), None);
     }
 
@@ -274,7 +274,7 @@ mod tests {
         assert_eq!(cheapest_model(), "claude-3-5-haiku-20241022");
         assert_eq!(balanced_model(), "claude-sonnet-4-5-20250929");
         assert_eq!(latest_sonnet(), "claude-sonnet-4-5-20250929");
-        assert_eq!(best_model(), "opus");
+        assert_eq!(best_model(), "claude-opus-4-7");
     }
 
     #[test]
@@ -329,7 +329,10 @@ mod tests {
             all.get("simple").map(|s| s.as_str()),
             Some("claude-3-5-haiku-20241022")
         );
-        assert_eq!(all.get("complex").map(|s| s.as_str()), Some("opus"));
+        assert_eq!(
+            all.get("complex").map(|s| s.as_str()),
+            Some("claude-opus-4-7")
+        );
         assert_eq!(
             all.get("balanced").map(|s| s.as_str()),
             Some("claude-sonnet-4-5-20250929")
@@ -360,11 +363,11 @@ mod tests {
             Some("claude-sonnet-4-5-20250929")
         );
 
-        // best/quality/critical/advanced → opus
-        assert_eq!(recommender.suggest("best"), Some("opus"));
-        assert_eq!(recommender.suggest("quality"), Some("opus"));
-        assert_eq!(recommender.suggest("critical"), Some("opus"));
-        assert_eq!(recommender.suggest("advanced"), Some("opus"));
+        // best/quality/critical/advanced → opus 4.7
+        assert_eq!(recommender.suggest("best"), Some("claude-opus-4-7"));
+        assert_eq!(recommender.suggest("quality"), Some("claude-opus-4-7"));
+        assert_eq!(recommender.suggest("critical"), Some("claude-opus-4-7"));
+        assert_eq!(recommender.suggest("advanced"), Some("claude-opus-4-7"));
     }
 
     #[test]
