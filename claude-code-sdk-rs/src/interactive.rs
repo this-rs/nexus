@@ -11,6 +11,7 @@ use crate::{
 };
 use futures::{Stream, StreamExt};
 use std::collections::HashMap;
+use std::pin::Pin;
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
 use tokio_stream::wrappers::ReceiverStream;
@@ -103,6 +104,29 @@ impl InteractiveClient {
     pub async fn clone_stdin_sender(&self) -> Option<tokio::sync::mpsc::Sender<String>> {
         let transport = self.transport.lock().await;
         transport.clone_stdin_sender()
+    }
+
+    /// Subscribe to the message broadcast for **out-of-band** consumption.
+    ///
+    /// Returns a `'static` stream that can be held by a long-lived task
+    /// running in parallel with `send_and_receive`/`send_and_receive_stream`
+    /// calls. Each subscriber sees every `Message` produced by the CLI
+    /// subprocess after `connect()`, including those emitted spontaneously
+    /// between turns (e.g. background tool notifications, system events).
+    ///
+    /// Unlike `receive_messages_stream` (which borrows `&mut self` for the
+    /// stream's lifetime), this method only borrows briefly while taking the
+    /// transport lock to call `subscribe_messages`. The returned stream is
+    /// independent of the transport lock and can survive arbitrary other
+    /// operations on the client.
+    ///
+    /// Returns `None` if the underlying transport doesn't expose a broadcast
+    /// (e.g. mock transport, or `connect()` was not called yet).
+    pub async fn subscribe_messages(
+        &self,
+    ) -> Option<Pin<Box<dyn Stream<Item = Result<Message>> + Send + 'static>>> {
+        let transport = self.transport.lock().await;
+        transport.subscribe_messages()
     }
 
     /// Connect to Claude

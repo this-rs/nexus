@@ -106,6 +106,32 @@ impl Transport for MockTransport {
         )
     }
 
+    /// Override the default `subscribe_messages()` (which returns `None`)
+    /// so out-of-band listeners and other broadcast subscribers can
+    /// observe Messages injected via `MockTransportHandle::inbound_message_tx`.
+    ///
+    /// Mirrors `SubprocessTransport::subscribe_messages` semantics: returns
+    /// a `'static` stream backed by `broadcast::Sender::subscribe()` so the
+    /// stream lives independently of any borrow on `&self`.
+    ///
+    /// Without this override, end-to-end tests that exercise
+    /// `chat::oob_listener::spawn_oob_listener` against a `MockTransport`
+    /// would short-circuit on `None` and never observe the injected
+    /// messages.
+    fn subscribe_messages(
+        &self,
+    ) -> Option<Pin<Box<dyn Stream<Item = Result<Message>> + Send + 'static>>> {
+        let rx = self.message_tx.subscribe();
+        Some(Box::pin(
+            tokio_stream::wrappers::BroadcastStream::new(rx).filter_map(|r| async move {
+                match r {
+                    Ok(m) => Some(Ok(m)),
+                    Err(_) => None,
+                }
+            }),
+        ))
+    }
+
     async fn send_control_request(&mut self, request: ControlRequest) -> Result<()> {
         // Record as JSON for tests — must match SubprocessTransport wire format exactly
         let json = match request {
