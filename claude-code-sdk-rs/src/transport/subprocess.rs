@@ -1032,6 +1032,15 @@ impl Transport for SubprocessTransport {
         }
     }
 
+    fn subscribe_messages(
+        &self,
+    ) -> Option<Pin<Box<dyn Stream<Item = Result<Message>> + Send + 'static>>> {
+        // Delegate to the inherent method on SubprocessTransport, which
+        // returns a `'static` stream subscribed to the long-lived broadcast.
+        // Fully-qualified path needed to disambiguate from the trait method.
+        SubprocessTransport::subscribe_messages(self)
+    }
+
     async fn send_control_request(&mut self, request: ControlRequest) -> Result<()> {
         if self.state != TransportState::Connected {
             return Err(SdkError::InvalidState {

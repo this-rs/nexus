@@ -86,6 +86,25 @@ pub trait Transport: Send + Sync {
     fn receive_messages(&mut self)
     -> Pin<Box<dyn Stream<Item = Result<Message>> + Send + 'static>>;
 
+    /// Subscribe to the message broadcast without holding a mutable borrow.
+    ///
+    /// Unlike `receive_messages`, this method takes `&self` and returns a
+    /// `'static` stream, so it can be held by a long-lived task that runs in
+    /// parallel with `send_message`/`receive_messages` calls (which require
+    /// `&mut self` and are therefore serialized through the transport's lock).
+    ///
+    /// This is the entry point for "out-of-band" event listeners that need to
+    /// observe spontaneous Messages emitted by the CLI subprocess between
+    /// turns (e.g. background tool notifications).
+    ///
+    /// Returns `None` for transports that don't expose a broadcast (e.g.
+    /// mock transports, or transports created without an active subscription).
+    fn subscribe_messages(
+        &self,
+    ) -> Option<Pin<Box<dyn Stream<Item = Result<Message>> + Send + 'static>>> {
+        None
+    }
+
     /// Send a control request (e.g., interrupt)
     async fn send_control_request(&mut self, request: ControlRequest) -> Result<()>;
 
