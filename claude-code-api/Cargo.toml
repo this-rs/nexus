@@ -50,7 +50,7 @@ bytes = "1"
 dotenv = "0.15"
 config = "0.14"
 argon2 = "0.5"
-jsonwebtoken = "9"
+jsonwebtoken = { version = "10", features = ["rust_crypto"] }
 base64 = "0.22"
 reqwest = { version = "0.12", features = ["json", "stream"] }
 tokio-stream = "0.1"
