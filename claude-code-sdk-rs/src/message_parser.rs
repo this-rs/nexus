@@ -235,10 +235,31 @@ fn parse_system_message(json: Value) -> Result<Option<Message>> {
         .unwrap_or("unknown")
         .to_string();
 
-    let data = json
-        .get("data")
-        .cloned()
-        .unwrap_or_else(|| Value::Object(serde_json::Map::new()));
+    // The CLI emits system messages in two shapes:
+    //   1. Nested: the payload lives under a "data" object.
+    //   2. Flat (current CLI): the payload is carried as top-level sibling fields,
+    //      with NO "data" key. This is how `init`, `status`, and ALL Dynamic
+    //      Workflow lifecycle events arrive — e.g.
+    //      `{"type":"system","subtype":"task_progress","task_id":"...",
+    //        "workflow_progress":[...],"usage":{...},...}`.
+    // The old code only copied "data", so flat messages surfaced as
+    // `System { subtype, data: {} }` — the subtype was kept but the entire
+    // payload (task ids, per-agent fan-out state, usage, completion status) was
+    // silently dropped, leaving consumers blind to workflow progress.
+    //
+    // Preserve the payload in BOTH shapes: prefer an explicit "data" object when
+    // present, otherwise gather every top-level field except the envelope keys
+    // ("type"/"subtype"). An envelope-only message still yields an empty object.
+    let data = if let Some(d) = json.get("data") {
+        d.clone()
+    } else if let Value::Object(map) = &json {
+        let mut payload = map.clone();
+        payload.remove("type");
+        payload.remove("subtype");
+        Value::Object(payload)
+    } else {
+        Value::Object(serde_json::Map::new())
+    };
 
     Ok(Some(Message::System { subtype, data }))
 }
@@ -1029,6 +1050,60 @@ mod tests {
         if let Message::System { subtype, data } = result {
             assert_eq!(subtype, "info");
             assert_eq!(data, json!({}));
+        } else {
+            panic!("Expected System message");
+        }
+    }
+
+    #[test]
+    fn test_parse_system_message_flat_workflow_event_preserves_payload() {
+        // Real shape emitted by Claude Code Dynamic Workflows (CLI >= 2.1.154):
+        // the payload is carried as TOP-LEVEL sibling fields, with no "data" key.
+        // The parser must preserve the full payload so consumers can observe
+        // workflow fan-out progress (task id, per-agent state, usage), not just
+        // the subtype.
+        let json = json!({
+            "type": "system",
+            "subtype": "task_progress",
+            "task_id": "wbk63ch2d",
+            "tool_use_id": "toolu_01EUAFxhpsLmYU8hJQN5ud8x",
+            "usage": { "total_tokens": 7681, "duration_ms": 1400 },
+            "workflow_progress": [
+                { "type": "workflow_agent", "index": 1, "state": "start" }
+            ],
+            "session_id": "bf72e564-78cd-41d3-9dba-35a75d77c0ce"
+        });
+        let result = parse_message(json).unwrap().unwrap();
+        if let Message::System { subtype, data } = result {
+            assert_eq!(subtype, "task_progress");
+            // Envelope keys are stripped...
+            assert!(data.get("type").is_none());
+            assert!(data.get("subtype").is_none());
+            // ...but the workflow payload is fully preserved.
+            assert_eq!(data["task_id"], "wbk63ch2d");
+            assert_eq!(data["usage"]["total_tokens"], 7681);
+            assert_eq!(data["workflow_progress"][0]["state"], "start");
+            assert_eq!(data["session_id"], "bf72e564-78cd-41d3-9dba-35a75d77c0ce");
+        } else {
+            panic!("Expected System message");
+        }
+    }
+
+    #[test]
+    fn test_parse_system_message_nested_data_still_wins() {
+        // Backward-compat: when an explicit "data" object IS present, it is used
+        // verbatim and sibling fields are NOT merged in.
+        let json = json!({
+            "type": "system",
+            "subtype": "status",
+            "data": { "status": "ready" },
+            "ignored_sibling": "should_not_leak"
+        });
+        let result = parse_message(json).unwrap().unwrap();
+        if let Message::System { subtype, data } = result {
+            assert_eq!(subtype, "status");
+            assert_eq!(data["status"], "ready");
+            assert!(data.get("ignored_sibling").is_none());
         } else {
             panic!("Expected System message");
         }
