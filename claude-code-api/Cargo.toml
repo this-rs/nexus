@@ -64,3 +64,6 @@ libc = "0.2.182"
 axum-test = "15"
 mockall = "0.12"
 tempfile = "3"
+# Transitive pin: time 0.3.48 (2026-06-12) breaks cookie 0.18.1 (E0119 conflicting
+# From impls), pulled in via axum-test. Remove once cookie ships a fixed release.
+time = ">=0.3.36, <0.3.48"
