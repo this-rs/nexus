@@ -41,6 +41,9 @@ jobs:
     name: Test (${{ matrix.os }} / ${{ matrix.toolchain }})
     runs-on: ${{ matrix.os }}
     needs: fmt
+    # Nightly is advisory only: rustc nightly is prone to ICEs (internal compiler
+    # errors) unrelated to our code — don't let a toolchain regression block CI.
+    continue-on-error: ${{ matrix.toolchain == 'nightly' }}
     strategy:
       fail-fast: false
       matrix:
