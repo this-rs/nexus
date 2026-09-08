@@ -172,9 +172,19 @@ pub struct ClaudeModel {
 }
 
 impl ClaudeModel {
+    /// Static fallback catalog of current Anthropic models.
+    ///
+    /// Used when the dynamic ModelRegistry cannot reach the Anthropic Models
+    /// API (no ANTHROPIC_API_KEY, network error). Keep in sync with
+    /// https://platform.claude.com/docs/en/about-claude/models/overview
     pub fn all() -> Vec<Self> {
         vec![
             // Claude 5 Series (2026)
+            Self {
+                id: "claude-fable-5".to_string(),
+                display_name: "Claude Fable 5".to_string(),
+                context_window: 1000000,
+            },
             Self {
                 id: "claude-opus-5".to_string(),
                 display_name: "Claude Opus 5".to_string(),
@@ -185,63 +195,40 @@ impl ClaudeModel {
                 display_name: "Claude Sonnet 5".to_string(),
                 context_window: 1000000,
             },
+            // Claude 4.x Series (2025-2026)
             Self {
-                id: "claude-fable-5".to_string(),
-                display_name: "Claude Fable 5".to_string(),
+                id: "claude-opus-4-8".to_string(),
+                display_name: "Claude Opus 4.8".to_string(),
                 context_window: 1000000,
             },
-            // Claude 4 Series (2025-2026)
             Self {
                 id: "claude-opus-4-7".to_string(),
                 display_name: "Claude Opus 4.7".to_string(),
-                context_window: 500000,
+                context_window: 1000000,
             },
             Self {
                 id: "claude-opus-4-6".to_string(),
                 display_name: "Claude Opus 4.6".to_string(),
-                context_window: 500000,
+                context_window: 1000000,
             },
             Self {
-                id: "claude-opus-4-1-20250805".to_string(),
-                display_name: "Claude Opus 4.1".to_string(),
-                context_window: 500000,
-            },
-            Self {
-                id: "claude-opus-4-20250514".to_string(),
-                display_name: "Claude Opus 4".to_string(),
-                context_window: 500000,
-            },
-            Self {
-                id: "claude-sonnet-4-20250514".to_string(),
-                display_name: "Claude Sonnet 4".to_string(),
-                context_window: 500000,
-            },
-            // Claude 3.7 Series (2025)
-            Self {
-                id: "claude-3-7-sonnet-20250219".to_string(),
-                display_name: "Claude Sonnet 3.7".to_string(),
+                id: "claude-opus-4-5".to_string(),
+                display_name: "Claude Opus 4.5".to_string(),
                 context_window: 200000,
             },
             Self {
-                id: "claude-3-7-sonnet-latest".to_string(),
-                display_name: "Claude Sonnet 3.7 (Latest)".to_string(),
-                context_window: 200000,
-            },
-            // Claude 3.5 Series (2024)
-            Self {
-                id: "claude-3-5-haiku-20241022".to_string(),
-                display_name: "Claude Haiku 3.5".to_string(),
-                context_window: 200000,
+                id: "claude-sonnet-4-6".to_string(),
+                display_name: "Claude Sonnet 4.6".to_string(),
+                context_window: 1000000,
             },
             Self {
-                id: "claude-3-5-haiku-latest".to_string(),
-                display_name: "Claude Haiku 3.5 (Latest)".to_string(),
+                id: "claude-sonnet-4-5".to_string(),
+                display_name: "Claude Sonnet 4.5".to_string(),
                 context_window: 200000,
             },
-            // Claude 3 Series (2024)
             Self {
-                id: "claude-3-haiku-20240307".to_string(),
-                display_name: "Claude Haiku 3".to_string(),
+                id: "claude-haiku-4-5".to_string(),
+                display_name: "Claude Haiku 4.5".to_string(),
                 context_window: 200000,
             },
         ]
