@@ -176,6 +176,11 @@ impl ClaudeModel {
         vec![
             // Claude 5 Series (2026)
             Self {
+                id: "claude-opus-5".to_string(),
+                display_name: "Claude Opus 5".to_string(),
+                context_window: 1000000,
+            },
+            Self {
                 id: "claude-sonnet-5".to_string(),
                 display_name: "Claude Sonnet 5".to_string(),
                 context_window: 1000000,
