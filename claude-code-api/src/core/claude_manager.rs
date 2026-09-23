@@ -370,7 +370,7 @@ impl ClaudeManager {
 impl Drop for ClaudeManager {
     fn drop(&mut self) {
         let processes = self.processes.read();
-        for (id, _) in processes.iter() {
+        for id in processes.keys() {
             error!("Warning: Claude process {} still running at shutdown", id);
         }
     }
