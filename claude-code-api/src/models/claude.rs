@@ -176,7 +176,7 @@ impl ClaudeModel {
     ///
     /// Used when the dynamic ModelRegistry cannot reach the Anthropic Models
     /// API (no ANTHROPIC_API_KEY, network error). Keep in sync with
-    /// https://platform.claude.com/docs/en/about-claude/models/overview
+    /// <https://platform.claude.com/docs/en/about-claude/models/overview>
     pub fn all() -> Vec<Self> {
         vec![
             // Claude 5 Series (2026)
