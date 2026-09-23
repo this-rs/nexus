@@ -61,9 +61,7 @@ impl ModelRegistry {
             .filter(|k| !k.trim().is_empty());
 
         if api_key.is_none() {
-            info!(
-                "ANTHROPIC_API_KEY not set — /v1/models will serve the static model catalog"
-            );
+            info!("ANTHROPIC_API_KEY not set — /v1/models will serve the static model catalog");
         }
 
         Self {
@@ -108,19 +106,19 @@ impl ModelRegistry {
                 cache.from_remote = true;
                 info!("Model registry refreshed from Anthropic Models API ({count} models)");
                 Ok(true)
-            }
+            },
             Ok(_) => {
                 warn!("Anthropic Models API returned an empty list; keeping current catalog");
                 let mut cache = self.cache.write().await;
                 cache.last_refresh = Some(Instant::now());
                 Err("Models API returned an empty list".to_string())
-            }
+            },
             Err(e) => {
                 warn!("Failed to refresh models from Anthropic API: {e}; keeping current catalog");
                 let mut cache = self.cache.write().await;
                 cache.last_refresh = Some(Instant::now());
                 Err(e)
-            }
+            },
         }
     }
 
@@ -164,14 +162,19 @@ impl ModelRegistry {
                 .await
                 .map_err(|e| format!("invalid response body: {e}"))?;
 
-            debug!("Fetched {} models from Anthropic Models API", page.data.len());
-            models.extend(page.data.into_iter().map(|m| ClaudeModel {
-                id: m.id,
-                display_name: m.display_name,
-                context_window: m
-                    .max_input_tokens
-                    .map(|v| v.clamp(0, i32::MAX as i64) as i32)
-                    .unwrap_or(DEFAULT_CONTEXT_WINDOW),
+            debug!(
+                "Fetched {} models from Anthropic Models API",
+                page.data.len()
+            );
+            models.extend(page.data.into_iter().map(|m| {
+                ClaudeModel {
+                    id: m.id,
+                    display_name: m.display_name,
+                    context_window: m
+                        .max_input_tokens
+                        .map(|v| v.clamp(0, i32::MAX as i64) as i32)
+                        .unwrap_or(DEFAULT_CONTEXT_WINDOW),
+                }
             }));
 
             if page.has_more {
