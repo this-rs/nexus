@@ -29,8 +29,11 @@ use tracing::{debug, info, warn};
 /// Called with (bytes_downloaded, total_bytes) where total_bytes may be None if unknown.
 pub type ProgressCallback = Box<dyn Fn(u64, Option<u64>) + Send + Sync>;
 
-/// Minimum CLI version required by this SDK
-pub const MIN_CLI_VERSION: &str = "2.0.0";
+/// Minimum CLI version recommended by this SDK.
+///
+/// Kept in sync with `transport::subprocess::MIN_CLI_VERSION`. See that constant
+/// for why this tracks the newest known-good CLI rather than a true floor.
+pub const MIN_CLI_VERSION: &str = "2.1.280";
 
 /// Default CLI version to download if not specified
 pub const DEFAULT_CLI_VERSION: &str = "latest";

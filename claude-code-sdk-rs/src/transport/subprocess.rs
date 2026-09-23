@@ -20,8 +20,18 @@ use tracing::{debug, error, info, warn};
 /// Default buffer size for channels
 const CHANNEL_BUFFER_SIZE: usize = 100;
 
-/// Minimum required CLI version
-const MIN_CLI_VERSION: (u32, u32, u32) = (2, 0, 0);
+/// Minimum required CLI version.
+///
+/// This is a *compatibility floor*, not a hard requirement: the CLI version a
+/// session actually needs depends on the model it targets. Recent models are
+/// gated server-side and the API rejects older CLIs with an opaque HTTP 400
+/// ("Claude Code X does not support this model"). That rejection can surface at
+/// any point in a session -- including mid-compaction, where it leaves the
+/// session wedged on "prompt is too long" with no way to recover.
+///
+/// Keeping this at the newest known-good version means we emit a clear warning
+/// at connect time instead of failing opaquely later.
+const MIN_CLI_VERSION: (u32, u32, u32) = (2, 1, 280);
 
 /// Simple semantic version struct
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -666,11 +676,14 @@ impl SubprocessTransport {
 
             if semver < min_version {
                 warn!(
-                    "⚠️  Claude CLI version {} is below minimum required version {}.{}.{}",
+                    "⚠️  Claude CLI version {} is below the recommended version {}.{}.{}",
                     semver, MIN_CLI_VERSION.0, MIN_CLI_VERSION.1, MIN_CLI_VERSION.2
                 );
                 warn!(
-                    "   Some features may not work correctly. Please upgrade with: npm install -g @anthropic-ai/claude-code@latest"
+                    "   Recent models are gated on CLI version: requests may fail with \
+                     HTTP 400 \"does not support this model\", including during \
+                     automatic compaction. Upgrade with `claude update` (native install) \
+                     or `npm install -g @anthropic-ai/claude-code@latest`."
                 );
             } else {
                 info!("Claude CLI version: {}", semver);
@@ -1548,6 +1561,25 @@ mod tests {
 
         assert!(!transport.is_connected());
         assert_eq!(transport.state, TransportState::Disconnected);
+    }
+
+    /// The minimum CLI version is declared twice: as a tuple here (used by the
+    /// runtime check) and as a string in `cli_download` (public API surface).
+    /// They describe the same thing, so they must not drift apart.
+    #[test]
+    fn test_min_cli_version_matches_cli_download() {
+        let declared = crate::cli_download::MIN_CLI_VERSION;
+        let parsed = SemVer::parse(declared)
+            .unwrap_or_else(|| panic!("cli_download::MIN_CLI_VERSION ({declared}) is not semver"));
+
+        assert_eq!(
+            (parsed.major, parsed.minor, parsed.patch),
+            MIN_CLI_VERSION,
+            "MIN_CLI_VERSION drifted: cli_download says {declared}, transport says {}.{}.{}",
+            MIN_CLI_VERSION.0,
+            MIN_CLI_VERSION.1,
+            MIN_CLI_VERSION.2
+        );
     }
 
     #[test]
