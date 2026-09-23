@@ -21,27 +21,25 @@ mod tests {
     #[test]
     fn test_claude_model_list() {
         let models = ClaudeModel::all();
-        assert_eq!(models.len(), 13); // 1 Opus 5 + 1 Sonnet 5 + 1 Fable 5 + 5 Claude 4 + 2 Claude 3.7 + 2 Claude 3.5 + 1 Claude 3
+        assert_eq!(models.len(), 12); // 5 Claude 5 + 4 Opus 4.x + 2 Sonnet 4.x + 1 Haiku 4.5
 
         let model_ids: Vec<String> = models.iter().map(|m| m.id.clone()).collect();
-        // Check Claude 5 models
+        // Claude 5 models
+        assert!(model_ids.contains(&"claude-fable-5-1".to_string()));
+        assert!(model_ids.contains(&"claude-opus-5-5".to_string()));
+        assert!(model_ids.contains(&"claude-fable-5".to_string()));
         assert!(model_ids.contains(&"claude-opus-5".to_string()));
         assert!(model_ids.contains(&"claude-sonnet-5".to_string()));
-        assert!(model_ids.contains(&"claude-fable-5".to_string()));
-        // Check Claude 4 models
+        // Claude 4.x models
+        assert!(model_ids.contains(&"claude-opus-4-8".to_string()));
         assert!(model_ids.contains(&"claude-opus-4-7".to_string()));
         assert!(model_ids.contains(&"claude-opus-4-6".to_string()));
-        assert!(model_ids.contains(&"claude-opus-4-1-20250805".to_string()));
-        assert!(model_ids.contains(&"claude-opus-4-20250514".to_string()));
-        assert!(model_ids.contains(&"claude-sonnet-4-20250514".to_string()));
-        // Check Claude 3.7 models
-        assert!(model_ids.contains(&"claude-3-7-sonnet-20250219".to_string()));
-        assert!(model_ids.contains(&"claude-3-7-sonnet-latest".to_string()));
-        // Check Claude 3.5 models
-        assert!(model_ids.contains(&"claude-3-5-haiku-20241022".to_string()));
-        assert!(model_ids.contains(&"claude-3-5-haiku-latest".to_string()));
-        // Check Claude 3 models
-        assert!(model_ids.contains(&"claude-3-haiku-20240307".to_string()));
+        assert!(model_ids.contains(&"claude-opus-4-5".to_string()));
+        assert!(model_ids.contains(&"claude-sonnet-4-6".to_string()));
+        assert!(model_ids.contains(&"claude-sonnet-4-5".to_string()));
+        assert!(model_ids.contains(&"claude-haiku-4-5".to_string()));
+        // Retired models must not be present
+        assert!(!model_ids.iter().any(|id| id.starts_with("claude-3")));
     }
 
     #[test]

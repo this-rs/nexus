@@ -59,7 +59,7 @@ impl Default for PoolConfig {
             max_idle: 5,
             max_active: 20,
             idle_timeout_secs: 300, // 5 minutes
-            default_model: "claude-opus-4-20250514".to_string(),
+            default_model: "claude-opus-5".to_string(),
         }
     }
 }

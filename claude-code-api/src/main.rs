@@ -76,7 +76,7 @@ async fn create_app(settings: Settings) -> Result<Router> {
         max_idle: settings.process_pool.max_idle,
         max_active: settings.process_pool.size,
         idle_timeout_secs: 300,
-        default_model: "claude-sonnet-4-20250514".to_string(),
+        default_model: "claude-sonnet-5".to_string(),
     };
 
     // 初始化进程池
@@ -152,10 +152,17 @@ async fn create_app(settings: Settings) -> Result<Router> {
         .route("/stats", get(api::stats::get_stats))
         .with_state(stats_state);
 
+    // 模型注册表（动态模型列表，带 TTL 缓存）
+    let model_registry = std::sync::Arc::new(crate::core::model_registry::ModelRegistry::new());
+    let model_routes = Router::new()
+        .route("/v1/models", get(api::models::list_models))
+        .route("/v1/models/refresh", post(api::models::refresh_models))
+        .with_state(model_registry);
+
     // 组合所有路由
     let app = Router::new()
         .route("/health", get(health_check))
-        .route("/v1/models", get(api::models::list_models))
+        .merge(model_routes)
         .merge(api_routes)
         .merge(conversation_routes)
         .merge(stats_routes)
