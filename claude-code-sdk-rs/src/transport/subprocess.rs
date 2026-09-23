@@ -60,9 +60,15 @@ impl SemVer {
         }
     }
 
-    /// Parse semantic version from string (e.g., "2.0.0" or "v2.0.0")
+    /// Parse semantic version from string (e.g., "2.0.0", "v2.0.0", or the
+    /// CLI's `--version` output "2.1.280 (Claude Code)").
     pub fn parse(version: &str) -> Option<Self> {
-        let version = version.trim().trim_start_matches('v');
+        // `claude --version` prints "2.1.280 (Claude Code)": keep only the
+        // first token. Without this the patch component was "280 (Claude
+        // Code)", failed to parse and silently became 0 — every up-to-date
+        // CLI was reported as 2.1.0, "below the recommended version".
+        let version = version.split_whitespace().next().unwrap_or("");
+        let version = version.trim_start_matches('v');
 
         // Handle versions like "@anthropic-ai/claude-code/2.0.0"
         let version = if let Some(v) = version.split('/').next_back() {
@@ -76,10 +82,20 @@ impl SemVer {
             return None;
         }
 
+        // Numeric prefix of the patch ("280-beta.1" → 280).
+        let patch = parts
+            .get(2)
+            .map(|p| {
+                p.chars()
+                    .take_while(char::is_ascii_digit)
+                    .collect::<String>()
+            })
+            .and_then(|p| p.parse().ok())
+            .unwrap_or(0);
         Some(Self {
             major: parts[0].parse().ok()?,
             minor: parts.get(1)?.parse().ok()?,
-            patch: parts.get(2).and_then(|p| p.parse().ok()).unwrap_or(0),
+            patch,
         })
     }
 }
@@ -1580,6 +1596,17 @@ mod tests {
             MIN_CLI_VERSION.1,
             MIN_CLI_VERSION.2
         );
+    }
+
+    #[test]
+    fn test_semver_parse_cli_version_output() {
+        // Regression: the real `claude --version` output. Parsed as 2.1.0,
+        // it triggered a false "below the recommended version" warning.
+        let v = SemVer::parse("2.1.280 (Claude Code)").unwrap();
+        assert_eq!((v.major, v.minor, v.patch), (2, 1, 280));
+        let v = SemVer::parse("2.1.280-beta.1").unwrap();
+        assert_eq!((v.major, v.minor, v.patch), (2, 1, 280));
+        assert!(SemVer::parse("").is_none());
     }
 
     #[test]
