@@ -415,6 +415,8 @@ mod tests {
 
         // Test PostToolUse handling
         let input = HookInput::PostToolUse(PostToolUseHookInput {
+            agent_id: None,
+            agent_type: None,
             session_id: "test-session".to_string(),
             transcript_path: "/tmp/transcript".to_string(),
             cwd: "/tmp".to_string(),

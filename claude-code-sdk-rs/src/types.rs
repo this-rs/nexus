@@ -503,6 +503,17 @@ pub struct PreToolUseHookInput {
     pub tool_name: String,
     /// Input parameters for the tool
     pub tool_input: serde_json::Value,
+    /// Id of the sub-agent the hook fired from; `None` on the main thread.
+    ///
+    /// Sent by the CLI "when the hook fires from within a subagent (alongside
+    /// agent_id)". Consumers that keep per-context state (e.g. what knowledge
+    /// was already injected) must key it by this: a sub-agent has its own
+    /// context window, separate from the main agent's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<String>,
+    /// Type of that sub-agent (e.g. "general-purpose", "Explore"), when present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_type: Option<String>,
 }
 
 /// Input data for PostToolUse hook events
@@ -523,6 +534,17 @@ pub struct PostToolUseHookInput {
     pub tool_input: serde_json::Value,
     /// Response from the tool execution
     pub tool_response: serde_json::Value,
+    /// Id of the sub-agent the hook fired from; `None` on the main thread.
+    ///
+    /// Sent by the CLI "when the hook fires from within a subagent (alongside
+    /// agent_id)". Consumers that keep per-context state (e.g. what knowledge
+    /// was already injected) must key it by this: a sub-agent has its own
+    /// context window, separate from the main agent's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<String>,
+    /// Type of that sub-agent (e.g. "general-purpose", "Explore"), when present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_type: Option<String>,
 }
 
 /// Input data for UserPromptSubmit hook events
@@ -3047,8 +3069,41 @@ mod tests {
 
     // --- HookInput: serde round-trip for all variants ---
     #[test]
+    fn test_pre_tool_use_hook_input_reads_subagent_identity() {
+        // The CLI adds agent_id/agent_type when the hook fires inside a
+        // sub-agent; the main thread omits them.
+        let from_subagent: HookInput = serde_json::from_value(serde_json::json!({
+            "hook_event_name": "PreToolUse",
+            "session_id": "s", "transcript_path": "t", "cwd": "/",
+            "tool_name": "Read", "tool_input": {"file_path": "a.rs"},
+            "agent_id": "agent-7", "agent_type": "general-purpose"
+        }))
+        .unwrap();
+        match from_subagent {
+            HookInput::PreToolUse(p) => {
+                assert_eq!(p.agent_id.as_deref(), Some("agent-7"));
+                assert_eq!(p.agent_type.as_deref(), Some("general-purpose"));
+            },
+            other => panic!("unexpected {other:?}"),
+        }
+
+        let main_thread: HookInput = serde_json::from_value(serde_json::json!({
+            "hook_event_name": "PreToolUse",
+            "session_id": "s", "transcript_path": "t", "cwd": "/",
+            "tool_name": "Read", "tool_input": {}
+        }))
+        .unwrap();
+        match main_thread {
+            HookInput::PreToolUse(p) => assert!(p.agent_id.is_none()),
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
     fn test_hook_input_pre_tool_use_serde() {
         let input = HookInput::PreToolUse(PreToolUseHookInput {
+            agent_id: None,
+            agent_type: None,
             session_id: "s1".into(),
             transcript_path: "/tmp/t.json".into(),
             cwd: "/home".into(),
@@ -3073,6 +3128,8 @@ mod tests {
     #[test]
     fn test_hook_input_post_tool_use_serde() {
         let input = HookInput::PostToolUse(PostToolUseHookInput {
+            agent_id: None,
+            agent_type: None,
             session_id: "s2".into(),
             transcript_path: "/tmp/t2.json".into(),
             cwd: "/work".into(),
