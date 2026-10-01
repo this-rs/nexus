@@ -396,4 +396,229 @@ mod tests {
         let batch = rx.recv().await.unwrap();
         assert_eq!(batch.len(), 2);
     }
+
+    /// Build a cheap distinguishable system message.
+    fn sys_msg(tag: &str) -> Message {
+        Message::System {
+            subtype: tag.to_string(),
+            data: serde_json::json!({}),
+        }
+    }
+
+    /// The timeout arm of `run()`: a batch smaller than `max_batch_size` can
+    /// only ever be flushed because `max_wait_time` elapsed.
+    ///
+    /// Verified with the Tokio clock paused (`start_paused`): no wall-clock
+    /// sleep, the runtime jumps straight to the batcher's own deadline.
+    #[tokio::test(start_paused = true)]
+    async fn test_message_batcher_flushes_partial_batch_when_wait_time_elapses() {
+        let (batcher, tx, mut rx) = MessageBatcher::new(10, Duration::from_millis(500));
+        let handle = tokio::spawn(batcher.run());
+
+        tx.send(sys_msg("only-one")).await.unwrap();
+
+        let batch = tokio::time::timeout(Duration::from_secs(30), rx.recv())
+            .await
+            .expect("the timeout arm never flushed the buffer")
+            .expect("batch channel closed");
+        assert_eq!(
+            batch.len(),
+            1,
+            "partial batch should carry the single message"
+        );
+        assert!(matches!(&batch[0], Message::System { subtype, .. } if subtype == "only-one"));
+
+        // Closing the input makes `run()` return instead of looping forever.
+        drop(tx);
+        handle.await.expect("batcher task panicked");
+    }
+
+    /// `emit_batch()` guards against an empty buffer: nothing is pushed to the
+    /// output channel (no empty `Vec` ever reaches the consumer).
+    #[tokio::test]
+    async fn test_emit_batch_on_empty_buffer_sends_nothing() {
+        let (mut batcher, _tx, mut rx) = MessageBatcher::new(4, Duration::from_secs(1));
+        assert!(batcher.buffer.is_empty());
+
+        batcher.emit_batch().await;
+
+        assert!(
+            matches!(
+                rx.try_recv(),
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+            ),
+            "an empty buffer must not produce a batch"
+        );
+    }
+
+    /// A dropped consumer is *not* an error for the batcher: it logs and keeps
+    /// going, and the messages in flight are dropped on the floor.
+    #[tokio::test]
+    async fn test_emit_batch_drains_buffer_even_when_receiver_is_gone() {
+        let (mut batcher, _tx, rx) = MessageBatcher::new(4, Duration::from_secs(1));
+        drop(rx);
+
+        batcher.buffer.push_back(sys_msg("lost"));
+        batcher.emit_batch().await;
+
+        assert!(
+            batcher.buffer.is_empty(),
+            "buffer is drained before the send, so the batch is lost silently"
+        );
+    }
+
+    /// With a non-zero jitter factor the computed jitter can be negative, and
+    /// `Duration::from_secs_f64` panics on a negative value — the `abs()` in
+    /// the implementation is what keeps the retry loop alive.
+    #[tokio::test(start_paused = true)]
+    async fn test_retry_with_jitter_never_panics_and_only_lengthens_the_delay() {
+        let config = RetryConfig {
+            max_retries: 5,
+            initial_delay: Duration::from_millis(100),
+            max_delay: Duration::from_secs(1),
+            backoff_multiplier: 2.0,
+            jitter_factor: 1.0,
+        };
+        let attempts = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let attempts_clone = attempts.clone();
+
+        let started = tokio::time::Instant::now();
+        let result = config
+            .retry(move || {
+                let attempts = attempts_clone.clone();
+                async move {
+                    if attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst) < 3 {
+                        Err(crate::errors::SdkError::ConnectionError("flaky".into()))
+                    } else {
+                        Ok(7)
+                    }
+                }
+            })
+            .await;
+
+        assert_eq!(result.unwrap(), 7);
+        assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 4);
+        // 100ms + 200ms + 400ms of backoff at minimum; jitter is added through
+        // `abs()`, so the delay can only ever grow, never shrink.
+        assert!(
+            started.elapsed() >= Duration::from_millis(700),
+            "jitter must never shorten the backoff, elapsed = {:?}",
+            started.elapsed()
+        );
+    }
+
+    /// The error returned to the caller after the last retry is the *last*
+    /// error, not the first one.
+    #[tokio::test(start_paused = true)]
+    async fn test_retry_returns_the_last_error_after_exhausting_retries() {
+        let config = RetryConfig {
+            max_retries: 2,
+            initial_delay: Duration::from_millis(10),
+            max_delay: Duration::from_millis(50),
+            backoff_multiplier: 2.0,
+            jitter_factor: 0.0,
+        };
+        let attempts = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let attempts_clone = attempts.clone();
+
+        let result: crate::errors::Result<()> = config
+            .retry(move || {
+                let attempts = attempts_clone.clone();
+                async move {
+                    let n = attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    Err(crate::errors::SdkError::ConnectionError(format!(
+                        "attempt {n}"
+                    )))
+                }
+            })
+            .await;
+
+        // max_retries = 2 means 3 calls in total: the initial one plus two retries.
+        assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 3);
+        match result {
+            Err(crate::errors::SdkError::ConnectionError(msg)) => assert_eq!(msg, "attempt 2"),
+            other => panic!("expected the last ConnectionError, got {other:?}"),
+        }
+    }
+
+    /// `min_latency_ms` uses `0` as its "never set" marker, so a genuine 0 ms
+    /// sample is forgotten: the next success overwrites the minimum instead of
+    /// keeping 0.
+    #[test]
+    fn test_zero_latency_sample_is_mistaken_for_an_unset_minimum() {
+        let mut metrics = PerformanceMetrics::default();
+
+        metrics.record_success(0);
+        assert_eq!(metrics.min_latency_ms, 0);
+
+        metrics.record_success(5);
+        assert_eq!(
+            metrics.min_latency_ms, 5,
+            "the real minimum (0 ms) is lost because 0 means `unset`"
+        );
+        assert_eq!(metrics.max_latency_ms, 5);
+        assert_eq!(metrics.average_latency_ms(), 2.5);
+    }
+
+    /// The exponential backoff is clamped by `max_delay`; only the clamped
+    /// `delay` is, the jitter is added on top of it afterwards.
+    #[tokio::test(start_paused = true)]
+    async fn test_backoff_is_clamped_by_max_delay() {
+        let config = RetryConfig {
+            max_retries: 3,
+            initial_delay: Duration::from_millis(100),
+            max_delay: Duration::from_millis(200),
+            backoff_multiplier: 1_000.0,
+            jitter_factor: 0.0,
+        };
+        let attempts = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let attempts_clone = attempts.clone();
+
+        let started = tokio::time::Instant::now();
+        let result = config
+            .retry(move || {
+                let attempts = attempts_clone.clone();
+                async move {
+                    if attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst) < 3 {
+                        Err(crate::errors::SdkError::ConnectionError("nope".into()))
+                    } else {
+                        Ok(())
+                    }
+                }
+            })
+            .await;
+
+        assert!(result.is_ok());
+        // 100ms, then 200ms (clamped from 100s), then 200ms again.
+        assert_eq!(started.elapsed(), Duration::from_millis(500));
+    }
+
+    /// The timeout arm fires even with nothing buffered: it must publish no
+    /// batch at all, and the batcher must keep waiting for the next message.
+    #[tokio::test(start_paused = true)]
+    async fn test_message_batcher_idle_timeouts_publish_nothing() {
+        let (batcher, tx, mut rx) = MessageBatcher::new(10, Duration::from_millis(50));
+        let handle = tokio::spawn(batcher.run());
+
+        // Several empty windows elapse (virtual time, no real sleeping).
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert!(
+            matches!(
+                rx.try_recv(),
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+            ),
+            "idle timeouts must not publish empty batches"
+        );
+
+        // And the batcher is still alive to serve the next message.
+        tx.send(sys_msg("after-idle")).await.unwrap();
+        let batch = tokio::time::timeout(Duration::from_secs(30), rx.recv())
+            .await
+            .expect("the batcher stopped reading after an idle timeout")
+            .expect("batch channel closed");
+        assert_eq!(batch.len(), 1);
+
+        drop(tx);
+        handle.await.expect("batcher task panicked");
+    }
 }
