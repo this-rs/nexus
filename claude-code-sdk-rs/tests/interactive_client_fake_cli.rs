@@ -422,8 +422,13 @@ async fn initialize_hooks_mints_callback_ids_even_when_it_cannot_tell_the_cli_ab
     let client = InteractiveClient::from_transport_with_hooks(Box::new(fake.transport()), hooks);
 
     let error = client.initialize_hooks().await.unwrap_err();
+    // The message used to be the transport's internal "Stdin channel not available",
+    // which told the caller nothing. `SubprocessTransport::send_sdk_control_request`
+    // now applies the same `TransportState` guard as `send_message`, so an
+    // un-connected client is refused by name. The defect this test pins is the one
+    // below: the ids are minted before the send is attempted.
     assert!(
-        matches!(&error, SdkError::InvalidState { message } if message == "Stdin channel not available"),
+        matches!(&error, SdkError::InvalidState { message } if message == "Not connected"),
         "got {error:?}"
     );
     assert_eq!(
