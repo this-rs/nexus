@@ -1,14 +1,46 @@
 %% name: release-readiness
-%% covers: Cargo.toml, claude-code-api/Cargo.toml, claude-code-sdk-rs/Cargo.toml, README.md, README_CN.md, README_JA.md, CHANGELOG.md, docs/allowed-hosts.txt, docs/RELEASE_READINESS.md, .github/workflows/release.yml, claude-code-api/tests/release_readiness.rs
+%% covers: nexus:Cargo.toml nexus:claude-code-api/Cargo.toml nexus:claude-code-sdk-rs/Cargo.toml nexus:README.md nexus:README_CN.md nexus:README_JA.md nexus:CHANGELOG.md nexus:docs/allowed-hosts.txt nexus:docs/RELEASE_READINESS.md nexus:.github/workflows/release.yml nexus:script/check-version-consistency.sh nexus:claude-code-api/tests/release_readiness.rs
 %% verified: dc510d5
 %% 
-%% Legend
-%%   ✅ verified — the node says how it was verified
-%%   🟠 decided but not written down
-%%   🔴 refused or broken — the reason is in the node
-%%   ⚪ upstream — owned by another task, not verified here
+%% Le sha ci-dessus est l'etat du depot contre lequel les CONSTATS ont ete
+%% releves. Le code de la porte qu'ils ont motive arrive dans la meme PR :
+%% aucun noeud n'affirme autre chose que ce qui a ete lu a ce sha ou ecrit ici.
 %% 
-%% Nodes name functions, never line numbers.
+%% PROUVE
+%%   - La porte recalcule les constats de preparation depuis les fichiers du
+%%     depot et refuse que docs/RELEASE_READINESS.md s'en ecarte, dans les deux
+%%     directions (constat masque ET reclamation perimee).
+%%   - Les quatre constats ouverts sur ce depot sont reproductibles par
+%%     collect_findings ; release-tag-version-unchecked ne l'est plus.
+%%   - Le controle des references interdites attrape un hote non declare :
+%%     ajouter une URL a script/run.sh fait echouer la porte.
+%% 
+%% SOURCES LUES
+%%   - workspace_version, member_package_version, documented_versions,
+%%     changelog_top_version, foreign_hosts, missing_release_guards,
+%%     collect_findings, RepoSnapshot::from_repo, tracked_text_files,
+%%     ids_claimed_by_report (claude-code-api/tests/release_readiness.rs)
+%%   - read_manifest_version (script/check-version-consistency.sh)
+%%   - job version-consistency et chaine needs (.github/workflows/release.yml)
+%%   - gh run list --repo <depot> --branch main, pour les trois depots
+%%   - git grep -lI <motif> origin/main et origin/chore/remove-local-tooling
+%%     (backend), pour le noeud backend-main-references-local-tooling
+%% 
+%% NON ETABLI
+%%   - « Tout bug high corrige » : sans registre dedoublonne (tache 1.3,
+%%     bloquee) le critere n'a pas de denominateur. Aucun noeud ne l'affirme.
+%%   - La matrice cible x variante x canal (tache 2.G) n'existe pas ; les
+%%     cases rouges connues de ce depot sont nommees, pas la matrice entiere.
+%%   - La couverture n'est pas un noeud de ce diagramme : gates Codecov en
+%%     informational, tache 3.4.
+%% 
+%% LEGENDE
+%%   ✅ verifie — le noeud dit comment
+%%   🟠 decide, non ecrit — le noeud dit quelle tache l'ecrira
+%%   🔴 refuse ou casse — la raison est dans le noeud
+%%   ⚪ amont — hors perimetre, le noeud dit ou cela vit
+%% 
+%% Les noeuds citent des noms de fonctions, jamais de numeros de ligne.
 
 flowchart TB
     subgraph sources["Repository facts (read offline)"]

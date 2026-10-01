@@ -1,0 +1,39 @@
+# Index des diagrammes de ce depot (voir la charte docs/DOCUMENTATION.md du
+# depot principal). Verifie hors reseau par
+# claude-code-api/tests/diagram_index.rs -- aucun appel reseau, aucun
+# sous-processus, aucune nouvelle chaine d'outils dans un depot Rust.
+#
+# Sous-ensemble YAML strict, identique a celui de l'index principal : entrees
+# "- name:", scalaires "cle: valeur", liste "covers:" de "- glob".
+# Globs prefixes par depot (ici toujours "nexus:") de sorte que ces entrees
+# puissent etre reprises telles quelles dans l'index principal.
+#
+# status: planned = diagramme prevu, pas de fichier .mmd (on n'exporte pas un
+#   contenu non verifie contre le code) ; le champ file: est alors absent.
+# status: verified = docs/diagrams/<name>.mmd existe, son en-tete est valide,
+#   et son contenu a ete relu contre le code au sha du champ verified.
+#
+# OUVERT (tache 0.2) : l'index principal du depot backend porte deja des globs
+# "nexus:" pour des cartes dont le .mmd vivrait la-bas (po-nexus-sdk). Il n'a
+# pas de moyen de pointer un .mmd situe dans CE depot. Les deux index coexistent
+# donc volontairement, et la question du rattachement revient au proprietaire de
+# la charte -- elle n'est pas tranchee ici en silence.
+diagrams:
+  - name: release-readiness
+    file: docs/diagrams/release-readiness.mmd
+    owner: theotime
+    status: verified
+    verified: dc510d5
+    covers:
+      - "nexus:Cargo.toml"
+      - "nexus:claude-code-api/Cargo.toml"
+      - "nexus:claude-code-sdk-rs/Cargo.toml"
+      - "nexus:README.md"
+      - "nexus:README_CN.md"
+      - "nexus:README_JA.md"
+      - "nexus:CHANGELOG.md"
+      - "nexus:docs/allowed-hosts.txt"
+      - "nexus:docs/RELEASE_READINESS.md"
+      - "nexus:.github/workflows/release.yml"
+      - "nexus:script/check-version-consistency.sh"
+      - "nexus:claude-code-api/tests/release_readiness.rs"

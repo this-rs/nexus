@@ -150,11 +150,53 @@ jobs:
       - name: Build with MSRV
         run: cargo build --all-features
 
+  # Diagram <-> code drift (task 1.1).
+  #
+  # The charter invariants run inside the ordinary `test` job. This job exists
+  # only to supply the pull request context the drift check needs: which files
+  # changed, and which commits carry a `Diagram-Unchanged:` trailer. It is kept
+  # separate so the computation stays out of the test matrix (it would run five
+  # times for nothing) and so its result reads clearly on the pull request.
+  #
+  # Offline: the change set comes from the checkout already on disk, and the
+  # check itself makes no network call.
+  diagram-drift:
+    name: Diagram drift
+    runs-on: ubuntu-latest
+    needs: fmt
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Need the merge base to diff against the target branch.
+          fetch-depth: 0
+
+      - uses: ./.github/actions/setup-rust
+        with:
+          toolchain: stable
+          components: ''
+
+      - name: Collect the pull request context
+        run: |
+          base="origin/${{ github.base_ref }}"
+          {
+            echo 'DIAGRAM_DRIFT_CHANGED_FILES<<__EOF__'
+            git diff --name-only "$base...HEAD"
+            echo '__EOF__'
+            echo 'DIAGRAM_DRIFT_TRAILERS<<__EOF__'
+            # Only the trailer lines; one per excused diagram.
+            git log --format='%(trailers:key=Diagram-Unchanged)' "$base..HEAD"
+            echo '__EOF__'
+          } >> "$GITHUB_ENV"
+
+      - name: Check diagram drift
+        run: cargo test -p claude-code-api --test diagram_index
+
   # Final CI status check
   ci-success:
     name: CI Success
     runs-on: ubuntu-latest
-    needs: [fmt, clippy, test, docs, msrv]
+    needs: [fmt, clippy, test, docs, msrv, diagram-drift]
     if: always()
     steps:
       - name: Check all jobs passed
@@ -165,6 +207,22 @@ jobs:
              [[ "${{ needs.docs.result }}" != "success" ]] || \
              [[ "${{ needs.msrv.result }}" != "success" ]]; then
             echo "One or more jobs failed"
+            exit 1
+          fi
+          # diagram-drift is skipped on a push to main, and only there: the
+          # check compares a pull request against its target branch, and a push
+          # to the target branch has nothing to compare. "skipped" is therefore
+          # accepted ONLY for a push event; on a pull request the job must have
+          # succeeded. This is the written justification the release readiness
+          # gate requires for a tolerated non-success result.
+          drift="${{ needs.diagram-drift.result }}"
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            if [[ "$drift" != "success" ]]; then
+              echo "diagram-drift did not pass on a pull request (result: $drift)"
+              exit 1
+            fi
+          elif [[ "$drift" != "skipped" && "$drift" != "success" ]]; then
+            echo "diagram-drift failed outside a pull request (result: $drift)"
             exit 1
           fi
           echo "All CI checks passed!"
