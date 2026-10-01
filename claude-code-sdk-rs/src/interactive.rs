@@ -42,6 +42,14 @@ pub struct InteractiveClient {
     hook_callbacks: Arc<RwLock<HashMap<String, Arc<dyn HookCallback>>>>,
     /// Counter for generating unique callback IDs
     callback_counter: Arc<Mutex<u64>>,
+    /// The CLI's stdin writer, cloned once at `connect()` and cleared at
+    /// `disconnect()`.
+    ///
+    /// `send_hook_response` writes through this clone, so it never has to take
+    /// the transport mutex just to ask for it. It MUST be cleared on
+    /// `disconnect`, or hook answers would go on being queued on a channel the
+    /// CLI no longer reads.
+    stdin_tx: Option<tokio::sync::mpsc::Sender<String>>,
 }
 
 impl InteractiveClient {
@@ -53,6 +61,7 @@ impl InteractiveClient {
             hooks: None,
             hook_callbacks: Arc::new(RwLock::new(HashMap::new())),
             callback_counter: Arc::new(Mutex::new(0)),
+            stdin_tx: None,
         }
     }
 
@@ -67,6 +76,7 @@ impl InteractiveClient {
             hooks: Some(hooks),
             hook_callbacks: Arc::new(RwLock::new(HashMap::new())),
             callback_counter: Arc::new(Mutex::new(0)),
+            stdin_tx: None,
         }
     }
 
@@ -83,6 +93,7 @@ impl InteractiveClient {
             hooks,
             hook_callbacks: Arc::new(RwLock::new(HashMap::new())),
             callback_counter: Arc::new(Mutex::new(0)),
+            stdin_tx: None,
         })
     }
 
@@ -147,10 +158,15 @@ impl InteractiveClient {
             return Ok(());
         }
 
-        let mut transport = self.transport.lock().await;
-        transport.connect().await?;
-        drop(transport); // Release lock immediately
+        let stdin_tx = {
+            let mut transport = self.transport.lock().await;
+            transport.connect().await?;
+            // Clone the stdin writer while we already hold the mutex, so
+            // `send_hook_response` never needs it again.
+            transport.clone_stdin_sender()
+        }; // Lock released immediately
 
+        self.stdin_tx = stdin_tx;
         self.connected = true;
         info!("Connected to Claude CLI");
         Ok(())
@@ -700,12 +716,15 @@ impl InteractiveClient {
     /// Writes a `control_response` JSON message to stdin with the serialized
     /// `HookJSONOutput`.
     ///
-    /// It writes through a cloned stdin sender, so it does not *hold* the
-    /// transport mutex while writing — but it does take it, briefly, to obtain
-    /// that clone (`clone_stdin_sender` needs `&self` on the transport). A task
-    /// that keeps the mutex, such as the relay spawned by
-    /// `receive_messages_stream`, therefore blocks this method; see
-    /// `send_hook_response_waits_for_the_transport_lock_before_writing_to_stdin`.
+    /// **Lock-free on a connected client**: it writes through the stdin sender
+    /// cloned once by `connect()`, so it neither holds nor takes the transport
+    /// mutex. A task that keeps that mutex — a caller streaming a turn, say —
+    /// cannot delay a hook answer.
+    ///
+    /// On a client that was never connected, or one already disconnected, there
+    /// is no cached sender and the method falls back to
+    /// `Transport::send_sdk_control_response`, which does take the mutex
+    /// briefly.
     ///
     /// # Arguments
     /// * `request_id` - The request_id from the original hook_callback control message
@@ -742,13 +761,8 @@ impl InteractiveClient {
             },
         };
 
-        // Use stdin_tx directly (lock-free path) if available
-        let stdin_tx = {
-            let transport = self.transport.lock().await;
-            transport.clone_stdin_sender()
-        };
-
-        if let Some(tx) = stdin_tx {
+        // Use the sender cached at connect() — no mutex on this path at all.
+        if let Some(tx) = &self.stdin_tx {
             let json = serde_json::to_string(&response_json)?;
             tx.send(json).await.map_err(|e| {
                 SdkError::ConnectionError(format!("Failed to send hook response: {}", e))
@@ -854,6 +868,9 @@ impl InteractiveClient {
         transport.disconnect().await?;
         drop(transport);
 
+        // The CLI's stdin is closed: a cached sender would now be a channel
+        // nobody reads.
+        self.stdin_tx = None;
         self.connected = false;
         info!("Disconnected from Claude CLI");
         Ok(())
@@ -2450,7 +2467,9 @@ mod tests {
     #[tokio::test]
     async fn send_hook_response_writes_one_json_line_to_stdin_when_the_transport_has_one() {
         let (transport, mut handle) = ScriptedBuilder::new().with_stdin().build();
-        let client = InteractiveClient::from_transport(transport);
+        let mut client = InteractiveClient::from_transport(transport);
+        // The stdin writer is cached by connect(); before it there is none.
+        client.connect().await.unwrap();
 
         let output = Ok(HookJSONOutput::Sync(SyncHookJSONOutput {
             continue_: Some(false),
@@ -2482,7 +2501,8 @@ mod tests {
     #[tokio::test]
     async fn send_hook_response_reports_a_closed_stdin_channel() {
         let (transport, handle) = ScriptedBuilder::new().with_stdin().build();
-        let client = InteractiveClient::from_transport(transport);
+        let mut client = InteractiveClient::from_transport(transport);
+        client.connect().await.unwrap();
         // Drop the receiving half: the CLI is gone.
         drop(handle.stdin_rx);
 
@@ -2684,43 +2704,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn send_hook_response_waits_for_the_transport_lock_before_writing_to_stdin() {
-        // `send_hook_response` needs the transport mutex to clone the stdin
-        // sender, so its "lock-free" write path is only lock-free once it has
-        // that clone in hand. Whoever holds the mutex blocks it — the relay of
-        // `receive_messages_stream` used to, and a caller that streams a turn
-        // through the transport still does.
-        let (transport, _handle) = ScriptedBuilder::new().with_stdin().build();
-        let mut client = InteractiveClient::from_transport(transport);
-        client.connect().await.unwrap();
-
-        let transport_mutex = client.transport.clone();
-        let held = transport_mutex.lock().await;
-
-        let output = Ok(HookJSONOutput::Sync(SyncHookJSONOutput::default()));
-        let blocked = tokio::time::timeout(
-            std::time::Duration::from_millis(150),
-            client.send_hook_response("req-blocked", &output),
-        )
-        .await;
-        assert!(
-            blocked.is_err(),
-            "send_hook_response should still be queued behind the guard; got {blocked:?}"
-        );
-
-        // Freeing the mutex frees the method.
-        drop(held);
-        tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            client.send_hook_response("req-unblocked", &output),
-        )
-        .await
-        .expect("the guard is gone")
-        .expect("the write succeeds");
-    }
-
-    #[tokio::test]
-    #[ignore = "known defect: send_hook_response cannot write while another task holds the transport mutex; the fix is to cache the stdin sender on InteractiveClient at connect() instead of asking the transport for it on every call"]
     async fn send_hook_response_should_not_need_the_transport_lock_at_all() {
         let (transport, mut handle) = ScriptedBuilder::new().with_stdin().build();
         let mut client = InteractiveClient::from_transport(transport);
@@ -2747,5 +2730,42 @@ mod tests {
             .expect("one line");
         let parsed: serde_json::Value = serde_json::from_str(&line).expect("valid JSON");
         assert_eq!(parsed["response"]["request_id"], "req-1");
+    }
+
+    #[tokio::test]
+    async fn disconnect_forgets_the_cached_stdin_sender_and_connect_re_arms_it() {
+        // Caching the sender at connect() without clearing it here would be a
+        // worse defect than the mutex it removes: hook answers would keep being
+        // queued on a channel the CLI no longer reads.
+        let (transport, mut handle) = ScriptedBuilder::new().with_stdin().build();
+        let mut client = InteractiveClient::from_transport(transport);
+        client.connect().await.unwrap();
+        client.disconnect().await.unwrap();
+
+        let output = Ok(HookJSONOutput::Sync(SyncHookJSONOutput::default()));
+        client
+            .send_hook_response("req-after-disconnect", &output)
+            .await
+            .expect("the fallback answers through the transport");
+        assert!(
+            handle.stdin_rx.as_mut().expect("stdin").try_recv().is_err(),
+            "nothing may be written to the stdin of a disconnected client"
+        );
+
+        // A reconnect re-arms the cached sender.
+        client.connect().await.unwrap();
+        client
+            .send_hook_response("req-reconnected", &output)
+            .await
+            .unwrap();
+        let line = handle
+            .stdin_rx
+            .as_mut()
+            .expect("stdin")
+            .recv()
+            .await
+            .expect("one line");
+        let parsed: serde_json::Value = serde_json::from_str(&line).expect("valid JSON");
+        assert_eq!(parsed["response"]["request_id"], "req-reconnected");
     }
 }
