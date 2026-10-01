@@ -1,7 +1,7 @@
-# Index des diagrammes de ce depot (voir la charte docs/DOCUMENTATION.md du
-# depot principal). Verifie hors reseau par
-# claude-code-api/tests/diagram_index.rs -- aucun appel reseau, aucun
-# sous-processus, aucune nouvelle chaine d'outils dans un depot Rust.
+# Index des diagrammes de ce depot (charte : docs/DOCUMENTATION.md, ICI -- le
+# depot principal garde la sienne pour la cartographie inter-depots). Verifie
+# hors reseau par claude-code-api/tests/diagram_index.rs -- aucun appel reseau,
+# aucun sous-processus, aucune nouvelle chaine d'outils dans un depot Rust.
 #
 # Sous-ensemble YAML strict, identique a celui de l'index principal : entrees
 # "- name:", scalaires "cle: valeur", liste "covers:" de "- glob".
@@ -13,11 +13,23 @@
 # status: verified = docs/diagrams/<name>.mmd existe, son en-tete est valide,
 #   et son contenu a ete relu contre le code au sha du champ verified.
 #
-# OUVERT (tache 0.2) : l'index principal du depot backend porte deja des globs
-# "nexus:" pour des cartes dont le .mmd vivrait la-bas (po-nexus-sdk). Il n'a
-# pas de moyen de pointer un .mmd situe dans CE depot. Les deux index coexistent
-# donc volontairement, et la question du rattachement revient au proprietaire de
-# la charte -- elle n'est pas tranchee ici en silence.
+# TRANCHE (tache 0.2) : les deux index coexistent, et ce n'est plus un
+#   arrangement tacite mais une regle verifiee. Cet index possede les diagrammes
+#   dont le .mmd vit ICI ; l'index principal possede la cartographie po-*, dont
+#   po-nexus-sdk qui porte des globs "nexus:" pour un .mmd qui vivrait la-bas.
+#   Deux garde-fous, verifies a chaque execution du verificateur principal
+#   (scripts/diagrams/check-index.mjs, fonction localIndexOwners) :
+#     1. un index local ne possede que des chemins de SON depot -- un glob
+#        "frontend:" ici serait une revendication sur un depot qui ne le voit
+#        pas, il est ignore ;
+#     2. si cet index et l'index principal revendiquent le MEME fichier, c'est
+#        une ERREUR nommant les deux revendications : deux gates se
+#        contrediraient, et chacun se croirait couvert par l'autre.
+#   Etat mesure : aucune collision. Les 24 fichiers possedes ici sortent du
+#   compte des orphelins du depot principal, parce qu'ils ont un proprietaire.
+#   Seule une entree `verified` possede, ici comme la-bas : la regle vient de
+#   owning_globs() dans diagram_index.rs, et elle a corrige un chiffre faux
+#   dans l'index principal (734 orphelins annonces, 1201 en realite).
 diagrams:
   - name: release-readiness
     file: docs/diagrams/release-readiness.mmd
