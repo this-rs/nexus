@@ -655,14 +655,12 @@ impl InteractiveClient {
         // the registry keeps growing entries nothing can ever address, one per
         // failed attempt.
         if let Err(e) = sent {
+            let rolled_back = minted.len();
             let mut callbacks_map = self.hook_callbacks.write().await;
-            for id in &minted {
-                callbacks_map.remove(id);
+            for id in minted {
+                callbacks_map.remove(&id);
             }
-            warn!(
-                "initialize_hooks: send failed, rolled back {} callback id(s)",
-                minted.len()
-            );
+            warn!("initialize_hooks rolled back {rolled_back} callback id(s)");
             return Err(e);
         }
 
@@ -2517,6 +2515,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn dispatch_hook_callback_keeps_a_well_typed_tool_use_id_on_the_manual_path() {
+        let callback = Arc::new(TestHookCallback::new());
+        let (client, id) = client_with_one_callback(callback.clone()).await;
+
+        // No `input`, so `SDKHookCallbackRequest` cannot deserialize and the
+        // manual path takes over — but `tool_use_id` IS a string here, so it is
+        // carried through rather than refused. The request still fails further
+        // on, because the substituted `{}` is not a HookInput.
+        let control_msg = serde_json::json!({
+            "request": {
+                "subtype": "hook_callback",
+                "callback_id": id,
+                "tool_use_id": "toolu_7"
+            }
+        });
+
+        let error = client
+            .dispatch_hook_callback(&control_msg)
+            .await
+            .expect("the callback was found")
+            .expect_err("an empty input cannot be a HookInput");
+        assert!(
+            matches!(&error, SdkError::MessageParseError { error, .. } if error.contains("Invalid hook input")),
+            "a usable tool_use_id must not be mistaken for a malformed one: {error:?}"
+        );
+        assert_eq!(callback.calls().await, 0);
+    }
+
+    #[tokio::test]
     async fn dispatch_hook_callback_reads_a_flat_control_message_too() {
         let callback = Arc::new(TestHookCallback::new());
         let (client, id) = client_with_one_callback(callback.clone()).await;
@@ -2694,6 +2721,27 @@ mod tests {
             "got {error:?}"
         );
         assert_eq!(callback.calls().await, 0, "a refused request runs nothing");
+
+        // The manual fallback with a tool_use_id that IS a string: no `input` at
+        // all is what makes the structured parse fail here, `{}` is substituted,
+        // the id comes through untouched — and the request then fails on the
+        // HookInput parse, not on the id.
+        let error = dispatch_hook_from_registry(
+            &serde_json::json!({
+                "subtype": "hook_callback",
+                "callbackId": "cb-1",
+                "tool_use_id": "toolu_7"
+            }),
+            &registry,
+        )
+        .await
+        .expect("found through the camelCase key")
+        .expect_err("an empty input cannot be a HookInput");
+        assert!(
+            matches!(&error, SdkError::MessageParseError { raw, .. } if raw == "{}"),
+            "a usable tool_use_id must not be mistaken for a malformed one: {error:?}"
+        );
+        assert_eq!(callback.calls().await, 0);
 
         // The structured path, with a usable tool_use_id.
         dispatch_hook_from_registry(
