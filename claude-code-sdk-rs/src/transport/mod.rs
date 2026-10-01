@@ -16,7 +16,11 @@ use tokio::sync::mpsc::Receiver;
 pub mod mock;
 pub mod subprocess;
 
+pub use subprocess::SECRET_BEARING_ARGS;
 pub use subprocess::SubprocessTransport;
+/// Redacted, loggable description of a spawn command — never prints argument
+/// values that follow a secret-bearing flag such as `--mcp-config`.
+pub use subprocess::describe_command_redacted;
 
 /// Input message structure for sending to Claude
 #[derive(Debug, Clone, serde::Serialize)]

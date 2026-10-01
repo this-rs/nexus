@@ -1380,7 +1380,7 @@ impl Transport for SubprocessTransport {
     /// `Connected`, so `is_connected()` still reports a two-way session.
     /// Expressing "open for reading, closed for writing" needs a
     /// `TransportState` variant; until then, every write path refuses with
-    /// [`INPUT_CLOSED`], which at least names the cause.
+    /// the internal `INPUT_CLOSED` message, which at least names the cause.
     async fn end_input(&mut self) -> Result<()> {
         // Close stdin channel to signal end of input
         self.stdin_tx.take();
@@ -1549,7 +1549,10 @@ pub fn find_claude_cli() -> Result<PathBuf> {
 /// `--mcp-config` is a JSON document holding each MCP server's `env` and
 /// headers — in practice the orchestrator's database password, search key and
 /// session token.
-const SECRET_BEARING_ARGS: [&str; 1] = ["--mcp-config"];
+/// Flags whose following argument carries a secret and must never be logged.
+/// Exported so the gateway crate redacts the same set, instead of keeping its
+/// own list that would drift.
+pub const SECRET_BEARING_ARGS: [&str; 1] = ["--mcp-config"];
 
 /// A loggable description of the command about to be spawned.
 ///
@@ -1557,7 +1560,7 @@ const SECRET_BEARING_ARGS: [&str; 1] = ["--mcp-config"];
 /// directory, every argument, and the NAMES of the environment variables set —
 /// and replaces what can hold credentials: the value after a secret-bearing
 /// argument, and every environment value.
-pub(crate) fn describe_command_redacted(cmd: &std::process::Command) -> String {
+pub fn describe_command_redacted(cmd: &std::process::Command) -> String {
     let mut args: Vec<String> = Vec::new();
     let mut redact_next = false;
     for arg in cmd.get_args() {

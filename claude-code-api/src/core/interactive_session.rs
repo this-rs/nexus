@@ -778,7 +778,7 @@ impl InteractiveSessionManager {
     ///
     /// **Not implemented.** Pre-warming an interactive session would mean
     /// spawning a CLI process with no conversation to attach it to: the process
-    /// is keyed by `conversation_id` in [`Self::create_session`], and the first
+    /// is keyed by `conversation_id` in `create_session`, and the first
     /// request brings its own id, so a pre-warmed process could never be
     /// claimed by it. Nothing is spawned, and `Ok(())` is returned
     /// unconditionally — no caller can observe a failure here.

@@ -64,6 +64,8 @@ pub use interactive::InteractiveClient;
 pub use interactive::{build_hook_response_json, dispatch_hook_from_registry, is_hook_callback};
 pub use internal_query::Query;
 pub use query::query;
+pub use transport::SECRET_BEARING_ARGS;
+pub use transport::describe_command_redacted;
 // Keep the old name as an alias for backward compatibility
 pub use interactive::InteractiveClient as SimpleInteractiveClient;
 pub use model_recommendation::ModelRecommendation;

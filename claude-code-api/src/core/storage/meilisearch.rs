@@ -179,7 +179,7 @@ impl MeilisearchClient {
     /// Search messages by content
     ///
     /// `conversation_id` is escaped before it enters the filter expression, so a
-    /// caller-supplied id cannot widen the filter (see [`escape_filter_value`]).
+    /// caller-supplied id cannot widen the filter (see `escape_filter_value`).
     pub async fn search_messages(
         &self,
         query: &str,
