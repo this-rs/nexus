@@ -416,13 +416,19 @@ impl InteractiveClient {
     pub async fn receive_messages_stream(&mut self) -> impl Stream<Item = Result<Message>> + '_ {
         // Create a channel for messages
         let (tx, rx) = tokio::sync::mpsc::channel(100);
-        let transport = self.transport.clone();
 
-        // Spawn a task to receive messages from transport
+        // Subscribe here, under a short-lived guard. The relay below must NOT
+        // hold the transport mutex: it only exits when `tx.send` fails, i.e. at
+        // the message *after* the caller dropped the stream, so a guard held
+        // inside the task starves every other method of the client until one
+        // more message happens to arrive.
+        let mut stream = {
+            let mut transport = self.transport.lock().await;
+            transport.receive_messages()
+        };
+
+        // Spawn a task to forward the already-subscribed stream
         tokio::spawn(async move {
-            let mut transport = transport.lock().await;
-            let mut stream = transport.receive_messages();
-
             while let Some(result) = stream.next().await {
                 // Send each message through the channel
                 if tx.send(result).await.is_err() {
@@ -2129,11 +2135,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn receive_messages_stream_holds_the_transport_lock_after_its_reader_is_gone() {
-        // The spawned forwarder takes `self.transport.lock()` and keeps the guard
-        // for its whole life. It only exits when a *further* message makes the
-        // channel send fail, so dropping the stream is not enough to free the
-        // client: every other method deadlocks in the meantime.
+    async fn receive_messages_stream_leaves_the_transport_lock_free() {
+        // The relay used to take `self.transport.lock()` and keep the guard for
+        // its whole life, which starved every other method of the client until
+        // one further message made its channel send fail. The subscription now
+        // happens before the spawn, under a guard that is dropped immediately.
         let (transport, handle) = MockTransport::pair();
         let mut client = InteractiveClient::from_transport(transport);
         client.connect().await.unwrap();
@@ -2141,26 +2147,20 @@ mod tests {
         drop(client.receive_messages_stream().await);
         await_subscribers(&handle.inbound_message_tx, 1).await;
 
-        let blocked = tokio::time::timeout(
+        tokio::time::timeout(
             std::time::Duration::from_millis(150),
             client.send_message("hi".to_string()),
         )
-        .await;
-        assert!(
-            blocked.is_err(),
-            "send_message should still be waiting for the transport mutex; got {blocked:?}"
-        );
-
-        // One message unblocks the forwarder: its send fails, it breaks, the
-        // guard drops, and the client becomes usable again.
-        handle.inbound_message_tx.send(system_message("late")).ok();
-        tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            client.send_message("hi".to_string()),
-        )
         .await
-        .expect("the lock is released once the forwarder exits")
+        .expect("the relay owns a broadcast subscription, not the transport mutex")
         .expect("send_message succeeds");
+
+        // What has NOT changed: the relay itself still only notices the dropped
+        // receiver on its next send, so its subscription outlives the stream by
+        // one message.
+        assert_eq!(handle.inbound_message_tx.receiver_count(), 1);
+        handle.inbound_message_tx.send(system_message("late")).ok();
+        await_subscribers(&handle.inbound_message_tx, 0).await;
     }
 
     #[tokio::test]
@@ -2685,15 +2685,17 @@ mod tests {
 
     #[tokio::test]
     async fn send_hook_response_waits_for_the_transport_lock_before_writing_to_stdin() {
-        // The relay spawned by `receive_messages_stream` keeps `transport.lock()`
-        // for its whole life. `send_hook_response` needs the same mutex to clone
-        // the stdin sender, so the "lock-free" write path is only lock-free once
-        // it has that clone in hand.
-        let (transport, handle) = MockTransport::pair();
+        // `send_hook_response` needs the transport mutex to clone the stdin
+        // sender, so its "lock-free" write path is only lock-free once it has
+        // that clone in hand. Whoever holds the mutex blocks it — the relay of
+        // `receive_messages_stream` used to, and a caller that streams a turn
+        // through the transport still does.
+        let (transport, _handle) = ScriptedBuilder::new().with_stdin().build();
         let mut client = InteractiveClient::from_transport(transport);
         client.connect().await.unwrap();
-        drop(client.receive_messages_stream().await);
-        await_subscribers(&handle.inbound_message_tx, 1).await;
+
+        let transport_mutex = client.transport.clone();
+        let held = transport_mutex.lock().await;
 
         let output = Ok(HookJSONOutput::Sync(SyncHookJSONOutput::default()));
         let blocked = tokio::time::timeout(
@@ -2703,28 +2705,29 @@ mod tests {
         .await;
         assert!(
             blocked.is_err(),
-            "send_hook_response should still be queued behind the relay's guard; got {blocked:?}"
+            "send_hook_response should still be queued behind the guard; got {blocked:?}"
         );
 
-        // Freeing the relay frees the method.
-        handle.inbound_message_tx.send(system_message("late")).ok();
+        // Freeing the mutex frees the method.
+        drop(held);
         tokio::time::timeout(
             std::time::Duration::from_secs(5),
             client.send_hook_response("req-unblocked", &output),
         )
         .await
         .expect("the guard is gone")
-        .expect("the fallback write succeeds");
+        .expect("the write succeeds");
     }
 
     #[tokio::test]
     #[ignore = "known defect: send_hook_response cannot write while another task holds the transport mutex; the fix is to cache the stdin sender on InteractiveClient at connect() instead of asking the transport for it on every call"]
     async fn send_hook_response_should_not_need_the_transport_lock_at_all() {
-        let (transport, handle) = MockTransport::pair();
+        let (transport, mut handle) = ScriptedBuilder::new().with_stdin().build();
         let mut client = InteractiveClient::from_transport(transport);
         client.connect().await.unwrap();
-        drop(client.receive_messages_stream().await);
-        await_subscribers(&handle.inbound_message_tx, 1).await;
+
+        let transport_mutex = client.transport.clone();
+        let _held = transport_mutex.lock().await;
 
         let output = Ok(HookJSONOutput::Sync(SyncHookJSONOutput::default()));
         tokio::time::timeout(
@@ -2732,7 +2735,17 @@ mod tests {
             client.send_hook_response("req-1", &output),
         )
         .await
-        .expect("a hook answer must not wait for a streaming relay")
+        .expect("a hook answer must not wait for the transport mutex")
         .expect("the write succeeds");
+
+        let line = handle
+            .stdin_rx
+            .as_mut()
+            .expect("stdin")
+            .recv()
+            .await
+            .expect("one line");
+        let parsed: serde_json::Value = serde_json::from_str(&line).expect("valid JSON");
+        assert_eq!(parsed["response"]["request_id"], "req-1");
     }
 }
