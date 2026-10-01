@@ -99,10 +99,12 @@ async fn test_sigterm_terminates_sigint_resistant_process() {
     use std::process::Stdio;
     use tokio::process::Command;
 
-    // Bash script that ignores SIGINT but exits on SIGTERM (default behavior)
+    // Bash script that ignores SIGINT but exits on SIGTERM (default behavior).
+    // It announces itself on stdout *after* installing the trap, so the test can
+    // wait for the handler to exist instead of guessing how long that takes.
     let mut child = Command::new("bash")
         .arg("-c")
-        .arg("trap '' INT; sleep 60")
+        .arg("trap '' INT; echo trap-installed; sleep 60")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -111,8 +113,22 @@ async fn test_sigterm_terminates_sigint_resistant_process() {
 
     let pid = child.id().expect("should have PID") as i32;
 
-    // Give the process a moment to start and set up the trap
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    // Wait for the trap to actually be installed. A fixed `sleep(100ms)` used to
+    // stand here and made this test fail under `cargo llvm-cov`: instrumentation
+    // and machine load pushed bash past 100 ms, SIGINT arrived before the trap,
+    // and the process died — so the test reported the opposite of the truth.
+    // Reading the announcement is deterministic at any speed.
+    {
+        use tokio::io::{AsyncBufReadExt, BufReader};
+        let stdout = child.stdout.take().expect("piped stdout");
+        let mut line = String::new();
+        let mut reader = BufReader::new(stdout);
+        tokio::time::timeout(Duration::from_secs(10), reader.read_line(&mut line))
+            .await
+            .expect("bash never announced its trap within 10s")
+            .expect("failed to read bash stdout");
+        assert_eq!(line.trim(), "trap-installed");
+    }
 
     // Stage 1: SIGINT — should be ignored
     unsafe {
