@@ -1,0 +1,218 @@
+%% name: nexus-api-misc
+%% covers: claude-code-api/src/lib.rs, claude-code-api/src/main.rs, claude-code-api/src/middleware/*.rs, claude-code-api/src/models/*.rs, claude-code-api/src/utils/*.rs
+%% verified: 2026-10-01
+flowchart TD
+    subgraph legend["Légende"]
+        direction LR
+        L1["✅ écrit et vérifié par un test"]
+        L2["🟠 décidé, non écrit"]
+        L3["🔴 bug confirmé, ou écrit non branché"]
+        L4["⚪ hors de ce dépôt"]
+    end
+
+    %% =====================================================================
+    %% Amorçage — src/main.rs
+    %% =====================================================================
+    subgraph boot["Amorçage — src/main.rs"]
+        direction TB
+        envsrc["⚪ RUN_MODE, config/*.toml, config/local.toml,<br/>variables CLAUDE_CODE__* et fichier .env"]
+        envsrc --> settingsnew
+        settingsnew["✅ Settings::new()<br/>valeurs par défaut, puis fichiers, puis environnement<br/><i>vérifié par EnvGuard + serial_test — domaine core-config</i>"]
+        settingsnew --> mainfn
+        mainfn["🔴 main()<br/>dotenv().ok, init du tracing, create_app,<br/>TcpListener::bind puis axum::serve<br/><i>amorçage : lie un port et sert sans fin — non testable, exclu</i>"]
+        mainfn --> listenaddr
+        listenaddr["✅ listen_addr(server)<br/>décide l'adresse d'écoute à partir de server.host<br/><i>vérifié : test rejoué sans le correctif, host jeté</i>"]
+        listenaddr -->|"host est une IP littérale"| addrok["✅ SocketAddr::new(ip, port)<br/>v4 comme v6, port 0 transmis tel quel"]
+        listenaddr -->|"nom DNS ou chaîne vide — refusé"| addrfb["✅ repli sur 0.0.0.0 avec un warn!<br/>aucune résolution DNS pendant l'amorçage"]
+        mainfn -->|"Settings::new ou le bind échoue — refusé"| bootfail["🟠 l'erreur remonte hors de main, le processus sort<br/>et rien n'est servi : aucun repli, aucun port de secours<br/><i>seule la branche Settings::new est atteignable par un test</i>"]
+    end
+
+    %% =====================================================================
+    %% Assemblage — src/lib.rs
+    %% =====================================================================
+
+    subgraph assembly["Assemblage — src/lib.rs"]
+        direction TB
+        createapp["✅ create_app(settings)<br/>build_router composé avec build_components, rien d'autre<br/><i>vérifié : TestServer monté sur le routeur renvoyé</i>"]
+        createapp --> buildcomp
+        buildcomp["✅ build_components(settings)<br/>construit tous les services depuis la configuration<br/><i>vérifié : TestSettings en mémoire, aucun port lié</i>"]
+
+        buildcomp --> cm["✅ ClaudeManager::new, avec claude.command,<br/>file_access et mcp<br/><i>vérifié : FakeClaudeCli passé par la chaîne claude.command</i>"]
+        buildcomp --> pool["✅ ProcessPool::new, PoolConfig issu de process_pool<br/>idle_timeout_secs 300 et default_model claude-sonnet-5 codés en dur<br/><i>vérifié : min_idle 0 en test, sinon deux processus seraient lancés</i>"]
+        buildcomp --> ism["✅ InteractiveSessionManager::new"]
+        buildcomp --> store["✅ InMemoryConversationStore, ConversationManager::new,<br/>ResponseCache::new avec les configs par défaut<br/><i>vérifié : POST puis GET sur /v1/conversations</i>"]
+        buildcomp --> registry["✅ ModelRegistry::new<br/><i>vérifié : wiremock devant l'API Models d'Anthropic</i>"]
+        buildcomp --> authflag["✅ auth_enabled copié de settings.auth.enabled<br/>seul chemin par lequel auth.enabled atteint le routeur<br/><i>vérifié : les deux valeurs relues depuis AppComponents</i>"]
+
+        ism -->|"claude.use_interactive_sessions vaut true"| prewarm
+        prewarm["🔴 InteractiveSessionManager::prewarm_default_session<br/>corps TODO : journalise puis renvoie Ok, ne lance rien<br/><i>vérifié : réussit avec une commande qui ne peut pas exister</i>"]
+        prewarm -->|"Ok, toujours"| contin["✅ build_components continue"]
+        prewarm -->|"Err, inatteignable"| prewarnerr["🔴 tracing::error Failed to pre-warm Claude process<br/>bras d'erreur d'une fonction qui ne peut pas échouer<br/><i>exclusion assumée : aucun test ne peut y entrer</i>"]
+
+        buildcomp --> buildrouter
+        buildrouter["✅ build_router(components)<br/>seule définition de ce que la passerelle sert<br/><i>vérifié : chaque route atteinte via axum_test</i>"]
+    end
+
+    %% =====================================================================
+    %% Table de routes
+    %% =====================================================================
+
+    subgraph served["Table de routes montée"]
+        direction TB
+        rhealth["✅ health_check renvoie la chaîne OK<br/>sans état ; protégé comme le reste quand auth.enabled vaut true"]
+        rmodels["✅ api::models::list_models et refresh_models<br/>état Arc de ModelRegistry"]
+        rchat["✅ api::chat::chat_completions<br/>état ChatState"]
+        rint["🔴 api::chat::interrupt_session<br/>sous /v1/sessions/:conversation_id/interrupt<br/>seule route qui n'utilise pas ApiError : elle fabrique son JSON<br/>à la main et met une chaîne nue sous error, là où toutes les<br/>autres mettent un objet message, type, param, code<br/><i>vérifié : les deux formes comparées dans le même test</i>"]
+        rconv["✅ api::conversations::create_conversation,<br/>list_conversations et get_conversation"]
+        rstats["✅ api::stats::get_stats"]
+    end
+
+    subgraph unmounted["Non monté — 404 délibéré"]
+        direction TB
+        usess["🔴 api::sessions::list_sessions et create_session<br/>un Vec vide construit sur place, puis un message<br/>Not implemented renvoyé avec un 200<br/><i>vérifié : handlers appelés en direct, /v1/sessions répond 404</i>"]
+        uproj["🔴 api::projects::list_projects et create_project<br/>même forme : collection vide, création qui ne crée rien<br/><i>vérifié : handlers appelés en direct, /v1/projects répond 404</i>"]
+        udecision["🟠 monter ou supprimer<br/>monter annoncerait deux collections à jamais vides et une<br/>création qui répond 200 sans rien faire ; la suppression<br/>est une décision humaine, voir le rapport"]
+        usess --> udecision
+        uproj --> udecision
+    end
+
+    %% =====================================================================
+    %% Pile de middleware
+    %% =====================================================================
+
+    subgraph stack["Pile de middleware, du plus externe au plus interne"]
+        direction TB
+        mcors["✅ CorsLayer::permissive<br/>la plus externe : court-circuite le préflight OPTIONS<br/><i>vérifié : préflight répondu même avec auth.enabled à true</i>"]
+        mcors --> merr
+        merr["✅ middleware::error_handler::handle_errors<br/>mesure la durée et journalise ; ne transforme jamais la réponse"]
+        merr -->|"statut 5xx"| merr5["✅ error! Server error, avec méthode, chemin et durée"]
+        merr -->|"4xx sauf 404"| merr4["✅ warn! Client error"]
+        merr -->|"404 — refusé au journal"| merr404["✅ silence délibéré : les sondes de routes<br/>inconnues ne polluent pas le log"]
+        merr --> mrid
+        mrid["✅ middleware::request_id::add_request_id<br/>reprend un x-request-id entrant, sinon Uuid::new_v4<br/>le pose sur la requête ET sur la réponse<br/><i>vérifié : id repris tel quel, et UUID validé quand absent</i>"]
+        mrid -->|"valeur d'en-tête non-UTF-8"| mridbad["🔴 parse puis unwrap sur la valeur d'en-tête<br/>panique théorique ; HeaderValue::to_str filtre en amont"]
+    end
+
+    %% =====================================================================
+    %% Authentification
+    %% =====================================================================
+    subgraph authz["Authentification — core::auth, branchée par build_router"]
+        direction TB
+        mauth{"auth_enabled"}
+        mauth -->|"false, défaut livré"| anon["✅ aucune couche posée, tout est servi en anonyme<br/><i>vérifié : credential absurde ignoré, 200 quand même</i>"]
+        mauth -->|"true"| authmw
+        authmw["✅ core::auth::auth_middleware monté par from_fn,<br/>à l'intérieur de request_id et de la couche CORS<br/><i>vérifié : 401 anonyme sur health, v1/models, stats,<br/>v1/conversations, v1/chat/completions et v1/models/refresh</i>"]
+        authmw -->|"aucun en-tête Authorization — refusé"| a401["✅ 401 UNAUTHORIZED<br/>la réponse porte quand même son x-request-id"]
+        authmw -->|"schéma Basic, bearer minuscule ou Token — refusé"| a401
+        authmw -->|"préfixe Bearer suivi de n'importe quoi"| apass
+        apass["🔴 next.run sans aucune vérification<br/>verify_token n'est jamais appelé : un jeton non signé,<br/>signé avec un autre secret, ou un Bearer vide passent<br/><i>vérifié : un test affirme le passage, un test rouge ignoré<br/>porte la spécification et nomme auth_middleware</i>"]
+        amgr["🔴 AuthManager::new, generate_token et verify_token<br/>écrits, testés, jamais appelés par le middleware<br/>auth.secret_key et auth.token_expiry_hours restent inertes<br/><i>vérifié : aller-retour generate puis verify, hors routeur</i>"]
+        apass -.->|"devrait appeler"| amgr
+        authmw --> ahealth["🟠 /health est protégé lui aussi<br/>aucune liste d'exemption n'existe : une sonde de santé<br/>sans jeton reçoit 401 — comportement épinglé, politique à trancher"]
+    end
+
+    %% =====================================================================
+    %% Traduction d'erreur
+    %% =====================================================================
+
+    subgraph errmap["Traduction d'erreur — src/models/error.rs"]
+        direction TB
+        apierr["✅ impl IntoResponse for ApiError<br/>enveloppe OpenAI : error, avec message, type, param et code"]
+        apierr -->|"BadRequest"| e400["✅ 400 invalid_request_error"]
+        apierr -->|"InvalidModel ou ContextLengthExceeded"| e400c["✅ 400 invalid_request_error avec un code dédié"]
+        apierr -->|"Unauthorized"| e401["🔴 401 authentication_error<br/>variante écrite qu'aucun gestionnaire ne construit :<br/>le 401 de la passerelle vient du middleware, pas d'ici"]
+        apierr -->|"NotFound"| e404["✅ 404 not_found_error"]
+        apierr -->|"ClaudeProcess"| e500c["✅ 500 claude_process_error<br/><i>vérifié : claude.command inlançable</i>"]
+        apierr -->|"Timeout"| e504["✅ 504 timeout_error, code timeout"]
+        apierr -->|"RateLimit"| e429["✅ 429 rate_limit_error"]
+        apierr -->|"ServiceUnavailable"| e503["✅ 503 service_unavailable"]
+        apierr -->|"bras fourre-tout"| e500["🔴 500 internal_error<br/>Internal, Database, Config, Io et Json tombent dans le<br/>même sac : le client ne peut pas distinguer une erreur de<br/>configuration d'un JSON illisible"]
+    end
+
+    %% =====================================================================
+    %% Modèles de charge utile
+    %% =====================================================================
+    subgraph payload["Modèles de charge utile — src/models/"]
+        direction TB
+        cco["✅ ClaudeCodeOutput : champ type, subtype optionnel,<br/>et data aplati par serde flatten"]
+        cco --> ptu["✅ parent_tool_use_id et is_sidechain<br/>lecture par data.get puis as_str<br/><i>vérifié : absent, null et valeurs non-chaîne ne sont pas un sidechain</i>"]
+        cco --> rt["🔴 aller-retour cassé si data porte une clé type<br/>sérialise la clé type deux fois puis échoue à se relire<br/>sur une erreur de champ dupliqué<br/><i>vérifié : latent, le transcript du CLI n'a qu'un type racine</i>"]
+        cb["🔴 ContentBlock n'a que la variante Text<br/>tool_use, tool_result, thinking et image sont refusés,<br/>donc ClaudeMessage ne sait pas lire un message à outil<br/><i>vérifié : from_value renvoie Err sur chaque sorte</i>"]
+        cse["🔴 ClaudeStreamEvent, tags snake_case du flux SSE Anthropic<br/>modèle juste, mais sans consommateur en production<br/><i>vérifié : message_stop et content_block_delta se lisent, ping est refusé</i>"]
+        cmodels["✅ ClaudeModel::all<br/>catalogue statique de repli quand ModelRegistry ne joint pas l'API<br/><i>vérifié : models/tests.rs épingle la liste</i>"]
+        oai["✅ ChatCompletionRequest, ChatCompletionResponse, Tool, ToolCall<br/>MessageContent et ContentPart en untagged : texte nu ou parties multimodales<br/>ChatCompletionRequest::default porte encore claude-3-opus-20240229"]
+        cse --> cb
+    end
+
+    %% =====================================================================
+    %% Utilitaires
+    %% =====================================================================
+    subgraph fcall["Appel d'outil déduit — src/utils/function_calling.rs"]
+        direction TB
+        fc["✅ detect_and_convert_tool_call(content, tools)<br/>appelé par api::chat quand la réponse pourrait être un appel d'outil"]
+        fc -->|"tools vaut None — refusé d'entrée"| fcnone["✅ None, aucune analyse tentée"]
+        fc --> ejc
+        ejc["✅ extract_json_from_content, trois stratégies dans cet ordre"]
+        ejc -->|"1. serde_json sur tout le contenu détrimé"| ejok["✅ valeur directe, tableaux et scalaires compris"]
+        ejc -->|"2. bloc de code balisé json"| ejfence["✅ si le corps du bloc n'est pas du JSON on n'abandonne pas,<br/>on passe à la stratégie 3<br/><i>vérifié : bloc invalide suivi d'un objet réel</i>"]
+        ejc -->|"3. première accolade ouvrante"| ejbrace["✅ find_matching_brace, compteur de profondeur qui<br/>respecte les chaînes et les échappements<br/><i>vérifié : accolades dans une chaîne, guillemet échappé,<br/>et non fermé qui renvoie None</i>"]
+        ejc -->|"aucune des trois"| ejnone["✅ None"]
+        ejok --> dtn
+        ejfence --> dtn
+        ejbrace --> dtn
+        dtn["✅ detect_tool_name : function, puis action,<br/>puis tool, puis name, dans cet ordre"]
+        dtn -->|"l'un de ces champs est une chaîne"| dtnhit["✅ ce nom gagne, même s'il ne figure pas parmi<br/>les outils demandés — aucune validation croisée"]
+        dtn -->|"sinon, et seulement si des outils sont fournis"| jmts
+        jmts["✅ json_matches_tool_schema(json, parameters)"]
+        jmts -->|"le schéma déclare required"| jmtsreq["✅ toutes les clés requises présentes vaut match,<br/>une seule manquante vaut refus"]
+        jmts -->|"pas de required"| jmts50["✅ règle des 50 pour cent, matches strictement positif<br/>et deux fois matches au moins égal au total<br/><i>vérifié : au-dessus, au-dessous, et zéro</i>"]
+        jmts -->|"json ou schéma non-objet"| jmtsno["✅ false"]
+        jmtsno --> fallback
+        jmtsreq --> fallback
+        fallback{"repli"}
+        fallback -->|"liste d'outils non vide ET json est un objet"| fb1["✅ FunctionCall vers tools index zéro<br/>un objet quelconque devient un appel au premier outil"]
+        fallback -->|"liste vide, ou json tableau ou scalaire — refusé"| fb0["✅ None, la réponse reste du texte<br/><i>vérifié : tableau, tableau d'appels, et scalaire 42</i>"]
+    end
+
+    subgraph parse["Conversion de flux — src/utils/parser.rs"]
+        direction TB
+        parser["🔴 claude_to_openai_stream et convert_claude_event_to_openai<br/>module entier mort : aucun appelant hors de ses propres tests,<br/>api::streaming_handler fabrique ses chunks lui-même"]
+        parser -->|"type assistant"| pa["✅ le premier bloc porteur de text gagne,<br/>les blocs suivants sont perdus"]
+        parser -->|"type result"| pr["✅ chunk vide avec finish_reason stop"]
+        parser -->|"tout autre type — refusé"| pn["✅ None : system, user et stream_event sont jetés en silence"]
+        parser -->|"MessageStart, ContentBlockDelta, MessageStop"| pe["✅ chunk correspondant"]
+        parser -->|"bras fourre-tout"| pe0["🔴 ContentBlockStart, ContentBlockStop, MessageDelta<br/>et surtout Error sont ignorés : une erreur du flux<br/>Anthropic deviendrait un silence côté client"]
+    end
+
+    subgraph stream["Diffusion — src/utils/streaming.rs et text_chunker.rs"]
+        direction TB
+        sse["✅ create_sse_stream, KeepAlive de 30 s, texte keep-alive<br/><i>vérifié : support::sse sur une vraie réponse text/event-stream</i>"]
+        sse -->|"serde_json::to_string échoue"| ssedef["🔴 unwrap_or_default : la trame SSE part avec un data vide<br/>valeur par défaut silencieuse là où un refus serait attendu"]
+        done["🔴 create_done_event renvoie le sentinel DONE<br/>écrite et jamais appelée ; api::chat émet le sien"]
+        tc["✅ chunk_text et TextChunker::poll_next<br/>appelés par api::streaming_handler pour simuler un flux<br/>ChunkConfig par défaut : 20 caractères, 50 ms, word_boundary"]
+        tc --> tcwb["✅ word_boundary recule jusqu'au dernier espace du chunk,<br/>sinon avance jusqu'au suivant : un mot plus long que<br/>chunk_size produit un chunk plus long que demandé"]
+        tc --> tcpanic["🔴 chunk_size est comparé à une longueur en octets,<br/>puis le chunk est découpé par indices d'octets : panique<br/>sur du texte UTF-8 multi-octets<br/><i>vérifié : test rouge ignoré, entrée japonaise avec la config par défaut</i>"]
+    end
+
+    %% =====================================================================
+    %% Chaînage entre domaines — déclaré après les sous-graphes pour que
+    %% chaque nœud reste dans le sien
+    %% =====================================================================
+    mainfn --> createapp
+    buildrouter --> mcors
+    mrid --> mauth
+    anon --> served
+    apass --> served
+    buildrouter --> served
+    buildrouter -->|"absents de la table, 404 sans corps"| unmounted
+    served --> apierr
+    rchat --> fc
+    rchat --> sse
+    rchat --> tc
+    cco --> parser
+
+    %% =====================================================================
+    %% Ce que le code faisait avant les correctifs de cette branche
+    %% =====================================================================
+    listenaddr -.->|"avant le correctif"| bugbind["🔴 server.host était décoratif<br/>l'adresse était codée en dur à 0.0.0.0 alors que<br/>le log d'amorçage affichait settings.server.host<br/><i>corrigé ici, test rouge sans le correctif</i>"]
+    mauth -.->|"avant le branchement"| authbug["🔴 auth.enabled ne faisait rien<br/>core::auth compilé et monté nulle part :<br/>la passerelle servait tout en anonyme quoi que dise la config<br/><i>corrigé ici, test rouge sans le correctif</i>"]

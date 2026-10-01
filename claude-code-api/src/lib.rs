@@ -41,18 +41,41 @@ pub struct AppComponents {
     pub conversation_state: api::conversations::ConversationState,
     pub stats_state: api::stats::StatsState,
     pub model_registry: Arc<ModelRegistry>,
+    /// Mirror of `settings.auth.enabled`: when true, [`build_router`] layers
+    /// [`core::auth::auth_middleware`] over **every** route, `/health` included.
+    ///
+    /// The flag exists because `auth.enabled` used to be inert — `core::auth`
+    /// was compiled and never mounted, so the gateway served every request
+    /// anonymously whatever the configuration said.
+    ///
+    /// Note what the mounted middleware does and does not do: it demands an
+    /// `Authorization: Bearer …` header and nothing more. It never calls
+    /// [`core::auth::AuthManager::verify_token`], so any bearer string is
+    /// accepted and `auth.secret_key` is still unused.
+    pub auth_enabled: bool,
 }
 
 /// The route table and middleware stack of the gateway.
 ///
 /// This is the single definition of what the gateway serves: `main` reaches it
 /// through [`create_app`], tests reach it directly.
+///
+/// Routes served: `/health`, `/v1/models`, `/v1/models/refresh`,
+/// `/v1/chat/completions`, `/v1/sessions/:conversation_id/interrupt`,
+/// `/v1/conversations` and `/v1/conversations/:id`, `/stats`.
+///
+/// Deliberately **not** served: `/v1/sessions` and `/v1/projects`. The handlers
+/// in [`api::sessions`] and [`api::projects`] exist but are placeholders — they
+/// answer with a hardcoded empty array and `{"message": "Not implemented"}`.
+/// Mounting them would advertise two working collections that can never hold
+/// anything, so they stay off the table and the paths stay `404`.
 pub fn build_router(components: AppComponents) -> Router {
     let AppComponents {
         chat_state,
         conversation_state,
         stats_state,
         model_registry,
+        auth_enabled,
     } = components;
 
     let cors = CorsLayer::permissive();
@@ -91,12 +114,24 @@ pub fn build_router(components: AppComponents) -> Router {
         .with_state(model_registry);
 
     // 组合所有路由
-    Router::new()
+    let routes = Router::new()
         .route("/health", get(health_check))
         .merge(model_routes)
         .merge(api_routes)
         .merge(conversation_routes)
-        .merge(stats_routes)
+        .merge(stats_routes);
+
+    // `auth.enabled` only means something if the middleware is actually in the
+    // stack. It sits *inside* `request_id` and `error_handler` so a rejected
+    // request still carries an `x-request-id` and still gets logged, and inside
+    // the CORS layer so a preflight `OPTIONS` is answered rather than refused.
+    let routes = if auth_enabled {
+        routes.layer(axum::middleware::from_fn(core::auth::auth_middleware))
+    } else {
+        routes
+    };
+
+    routes
         .layer(axum::middleware::from_fn(
             middleware::request_id::add_request_id,
         ))
@@ -153,6 +188,12 @@ pub async fn build_components(settings: Settings) -> Result<AppComponents> {
     ));
 
     // 如果启用了交互式会话，预热一个默认进程
+    //
+    // Nothing is actually pre-warmed: `prewarm_default_session` is a `TODO` stub
+    // that logs and returns `Ok(())` without spawning anything, so this `Err`
+    // arm is unreachable as the code stands and no test can enter it. The arm is
+    // kept so that the day the stub grows a body, a failure is still logged
+    // instead of being discarded by a `let _ =`.
     if settings.claude.use_interactive_sessions
         && let Err(e) = interactive_session_manager.prewarm_default_session().await
     {
@@ -189,6 +230,7 @@ pub async fn build_components(settings: Settings) -> Result<AppComponents> {
         conversation_state,
         stats_state,
         model_registry: Arc::new(ModelRegistry::new()),
+        auth_enabled: settings.auth.enabled,
     })
 }
 
