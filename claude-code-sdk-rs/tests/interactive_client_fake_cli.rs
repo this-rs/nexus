@@ -26,8 +26,10 @@ use tokio::sync::Mutex;
 /// stuck test fails instead of hanging.
 const WAIT: Duration = Duration::from_secs(10);
 
-/// The gap the fake leaves between two stdout lines so that a receive loop which
-/// re-subscribes between every message cannot miss one.
+/// The gap the fake leaves before its first line, so that a caller which
+/// subscribes only *after* writing its prompt cannot miss it. This is a
+/// property of the `send_message` + `receive_response` split, not of the
+/// receive loop: `send_and_receive` subscribes before it writes.
 const SPACING_MS: u64 = 300;
 
 /// A client over a real `SubprocessTransport` pointed at the fake.
@@ -164,19 +166,16 @@ async fn send_and_receive_stream_drives_a_whole_turn_without_losing_a_message() 
 }
 
 #[tokio::test]
-async fn send_and_receive_only_survives_a_real_cli_when_its_output_is_spaced_out() {
-    // `send_and_receive` sends first and subscribes afterwards, then drops and
-    // recreates its subscription for every single message. Against a real
-    // subprocess that only works if nothing is printed while it is unsubscribed,
-    // hence the sleeps: they are the test's way of staying deterministic, not
-    // something a real CLI would do.
+async fn send_and_receive_drives_a_real_cli_that_prints_its_turn_in_one_burst() {
+    // `send_and_receive` subscribes and writes under the same lock, then keeps
+    // that one subscription for the whole turn. The fake therefore prints its
+    // three lines back to back, with no sleep anywhere: the version that
+    // re-subscribed between every message lost the ones printed while it was
+    // unsubscribed and never returned.
     let fake = Transcript::new()
         .await_stdin()
-        .sleep_ms(SPACING_MS)
         .init("sess-blocking")
-        .sleep_ms(SPACING_MS)
         .assistant_text("bonjour")
-        .sleep_ms(SPACING_MS)
         .result_ok("bonjour")
         .wait_eof()
         .build();
@@ -185,7 +184,7 @@ async fn send_and_receive_only_survives_a_real_cli_when_its_output_is_spaced_out
 
     let messages = tokio::time::timeout(WAIT, client.send_and_receive("salut".to_string()))
         .await
-        .expect("the turn completes while the output stays spaced out")
+        .expect("a turn printed in one burst must still be collected whole")
         .expect("no transport error");
 
     assert_eq!(
@@ -201,11 +200,13 @@ async fn send_and_receive_only_survives_a_real_cli_when_its_output_is_spaced_out
 
 #[tokio::test]
 async fn send_message_then_receive_response_splits_the_same_turn_in_two() {
+    // Only the first gap is needed: `send_message` returns before
+    // `receive_response` subscribes, so the fake must not print until then.
+    // Once subscribed, the rest of the turn may arrive in one burst.
     let fake = Transcript::new()
         .await_stdin()
         .sleep_ms(SPACING_MS)
         .init("sess-two-steps")
-        .sleep_ms(SPACING_MS)
         .result_ok("done")
         .wait_eof()
         .build();

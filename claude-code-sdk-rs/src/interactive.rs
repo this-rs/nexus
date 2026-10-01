@@ -17,6 +17,18 @@ use tokio::sync::{Mutex, RwLock};
 use tokio_stream::wrappers::ReceiverStream;
 use tracing::{debug, error, info, warn};
 
+/// The turn cannot complete: the CLI's message stream ended before a
+/// [`Message::Result`].
+///
+/// `send_and_receive` and `receive_response` used to answer this case with an
+/// endless `sleep(10 ms)` loop, so a CLI that died mid-turn made the caller
+/// wait forever.
+fn stream_ended_before_result() -> SdkError {
+    SdkError::TransportError(
+        "the CLI message stream ended before a Result message: the turn cannot complete".into(),
+    )
+}
+
 /// Interactive client for stateful conversations with Claude
 ///
 /// This is the recommended client for interactive use. It provides a clean API
@@ -144,7 +156,20 @@ impl InteractiveClient {
         Ok(())
     }
 
-    /// Send a message and receive all messages until Result message
+    /// Send a message and collect every message of the turn, up to and
+    /// including the terminal [`Message::Result`].
+    ///
+    /// Like [`Self::send_and_receive_stream`], this subscribes to the message
+    /// stream **before** sending and keeps that one subscription for the whole
+    /// turn: a `broadcast` replays nothing, so a subscription dropped between
+    /// two messages loses whatever the CLI printed in between.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SdkError::InvalidState`] before `connect()`, whatever the
+    /// transport reports while writing or reading, and
+    /// [`SdkError::TransportError`] if the message stream ends before a
+    /// `Result` message — which is what a dead CLI looks like from here.
     pub async fn send_and_receive(&mut self, prompt: String) -> Result<Vec<Message>> {
         if !self.connected {
             return Err(SdkError::InvalidState {
@@ -152,45 +177,34 @@ impl InteractiveClient {
             });
         }
 
-        // Send message
-        {
+        // Subscribe and send under the SAME lock acquisition, so the response
+        // cannot land before the subscription exists.
+        let mut stream = {
             let mut transport = self.transport.lock().await;
+            let stream = transport.receive_messages();
             let message = InputMessage::user(prompt, "default".to_string());
             transport.send_message(message).await?;
-        } // Lock released here
+            stream
+        }; // Lock released here, after subscription and send
 
-        debug!("Message sent, waiting for response");
+        debug!("Message sent, subscription active");
 
-        // Receive messages
         let mut messages = Vec::new();
-        loop {
-            // Try to get a message
-            let msg_result = {
-                let mut transport = self.transport.lock().await;
-                let mut stream = transport.receive_messages();
-                stream.next().await
-            }; // Lock released here
-
-            // Process the message
-            if let Some(result) = msg_result {
-                match result {
-                    Ok(msg) => {
-                        debug!("Received: {:?}", msg);
-                        let is_result = matches!(msg, Message::Result { .. });
-                        messages.push(msg);
-                        if is_result {
-                            break;
-                        }
-                    },
-                    Err(e) => return Err(e),
-                }
-            } else {
-                // No more messages, wait a bit
-                tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+        while let Some(result) = stream.next().await {
+            match result {
+                Ok(msg) => {
+                    debug!("Received: {:?}", msg);
+                    let is_result = matches!(msg, Message::Result { .. });
+                    messages.push(msg);
+                    if is_result {
+                        return Ok(messages);
+                    }
+                },
+                Err(e) => return Err(e),
             }
         }
 
-        Ok(messages)
+        Err(stream_ended_before_result())
     }
 
     /// Send a message without waiting for response
@@ -326,7 +340,17 @@ impl InteractiveClient {
         })
     }
 
-    /// Receive messages until Result message (convenience method like Python SDK)
+    /// Collect the messages of the current turn without sending anything,
+    /// up to and including the terminal [`Message::Result`].
+    ///
+    /// Subscribes once and keeps that subscription until the turn ends, for
+    /// the same reason as [`Self::send_and_receive`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SdkError::InvalidState`] before `connect()`, whatever the
+    /// transport reports, and [`SdkError::TransportError`] if the stream ends
+    /// before a `Result` message.
     pub async fn receive_response(&mut self) -> Result<Vec<Message>> {
         if !self.connected {
             return Err(SdkError::InvalidState {
@@ -334,35 +358,28 @@ impl InteractiveClient {
             });
         }
 
-        let mut messages = Vec::new();
-        loop {
-            // Try to get a message
-            let msg_result = {
-                let mut transport = self.transport.lock().await;
-                let mut stream = transport.receive_messages();
-                stream.next().await
-            }; // Lock released here
+        // One subscription for the whole turn: see `send_and_receive`.
+        let mut stream = {
+            let mut transport = self.transport.lock().await;
+            transport.receive_messages()
+        };
 
-            // Process the message
-            if let Some(result) = msg_result {
-                match result {
-                    Ok(msg) => {
-                        debug!("Received: {:?}", msg);
-                        let is_result = matches!(msg, Message::Result { .. });
-                        messages.push(msg);
-                        if is_result {
-                            break;
-                        }
-                    },
-                    Err(e) => return Err(e),
-                }
-            } else {
-                // No more messages, wait a bit
-                tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+        let mut messages = Vec::new();
+        while let Some(result) = stream.next().await {
+            match result {
+                Ok(msg) => {
+                    debug!("Received: {:?}", msg);
+                    let is_result = matches!(msg, Message::Result { .. });
+                    messages.push(msg);
+                    if is_result {
+                        return Ok(messages);
+                    }
+                },
+                Err(e) => return Err(e),
             }
         }
 
-        Ok(messages)
+        Err(stream_ended_before_result())
     }
 
     /// Receive messages as a stream (streaming output support)
@@ -1850,33 +1867,38 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn send_and_receive_never_returns_when_the_stream_ends_without_a_result() {
+    async fn send_and_receive_reports_a_stream_that_ends_without_a_result() {
+        // This used to be the infinite `else { sleep 10 ms }` branch: the loop
+        // consumed the script, then polled an exhausted stream forever.
         let (transport, handle) = ScriptedBuilder::new().msg(system_message("init")).build();
         let mut client = InteractiveClient::from_transport(transport);
         client.connect().await.unwrap();
 
-        let outcome = tokio::time::timeout(
-            std::time::Duration::from_millis(150),
+        let error = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
             client.send_and_receive("hi".to_string()),
         )
-        .await;
+        .await
+        .expect("an exhausted stream must end the turn, not spin on a 10 ms sleep")
+        .expect_err("there was no Result message to return");
 
         assert!(
-            outcome.is_err(),
-            "send_and_receive returned {outcome:?}; a stream that ended without a \
-             Result message is supposed to leave it spinning on a 10 ms sleep"
+            matches!(&error, SdkError::TransportError(why) if why.contains("ended before a Result")),
+            "got {error:?}"
         );
         assert!(
             handle.queue.lock().expect("queue").is_empty(),
-            "the loop consumed the script, then kept polling an exhausted stream"
+            "the whole script was consumed before the stream ended"
         );
     }
 
     #[tokio::test]
-    async fn send_and_receive_loses_messages_emitted_before_it_subscribes() {
-        // `send_and_receive` re-subscribes to the broadcast on every iteration
-        // of its loop, and a tokio broadcast replays nothing: anything the CLI
-        // printed before the subscription is gone.
+    async fn send_and_receive_cannot_see_what_was_broadcast_before_the_call() {
+        // The subscription now opens inside the call, before the prompt is
+        // written, and stays open for the whole turn — but a tokio broadcast
+        // still replays nothing, so what the CLI printed *before* the call is
+        // gone for good. A caller who needs that history must hold a
+        // `subscribe_messages()` stream across turns instead.
         let (transport, handle) = MockTransport::pair();
         let mut client = InteractiveClient::from_transport(transport);
         client.connect().await.unwrap();
@@ -1901,24 +1923,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn send_and_receive_survives_a_broadcast_when_it_is_subscribed() {
+    async fn send_and_receive_keeps_one_subscription_for_the_whole_turn() {
+        // The two messages are broadcast back to back. The old loop dropped its
+        // subscription after the first one and a tokio broadcast replays
+        // nothing, so `done` was lost and the turn never ended; now a single
+        // subscription spans the turn and both messages arrive.
         let (transport, handle) = MockTransport::pair();
         let mut client = InteractiveClient::from_transport(transport);
         client.connect().await.unwrap();
 
         let tx = handle.inbound_message_tx.clone();
-        let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let feeder_done = done.clone();
         let feeder = tokio::spawn(async move {
             await_subscribers(&tx, 1).await;
             tx.send(system_message("init")).expect("subscribed");
-            // The loop drops its subscription after every message and a tokio
-            // broadcast replays nothing, so the terminal message has to be
-            // offered again and again until one lands inside a window.
-            while !feeder_done.load(std::sync::atomic::Ordering::SeqCst) {
-                let _ = tx.send(result_message("done"));
-                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-            }
+            tx.send(result_message("done")).expect("subscribed");
         });
 
         let messages = tokio::time::timeout(
@@ -1926,13 +1944,17 @@ mod tests {
             client.send_and_receive("hi".to_string()),
         )
         .await
-        .expect("the turn completes once both messages land in a subscription window")
+        .expect("a burst of messages must not fall outside the subscription window")
         .expect("no transport error");
-        done.store(true, std::sync::atomic::Ordering::SeqCst);
         feeder.await.expect("feeder");
 
         assert_eq!(system_subtypes(&messages), vec!["init".to_string()]);
         assert!(matches!(messages.last(), Some(Message::Result { .. })));
+        assert_eq!(
+            handle.inbound_message_tx.receiver_count(),
+            0,
+            "the turn's subscription is dropped when the turn ends"
+        );
     }
 
     // ========================================================================
@@ -2058,19 +2080,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn receive_response_never_returns_when_the_stream_ends_without_a_result() {
+    async fn receive_response_reports_a_stream_that_ends_without_a_result() {
         let (transport, _handle) = ScriptedBuilder::new().msg(system_message("init")).build();
         let mut client = InteractiveClient::from_transport(transport);
         client.connect().await.unwrap();
 
-        let outcome = tokio::time::timeout(
-            std::time::Duration::from_millis(150),
-            client.receive_response(),
-        )
-        .await;
+        let error =
+            tokio::time::timeout(std::time::Duration::from_secs(5), client.receive_response())
+                .await
+                .expect("an exhausted stream must not leave receive_response in a 10 ms busy loop")
+                .expect_err("there was no Result message to return");
         assert!(
-            outcome.is_err(),
-            "an exhausted stream leaves receive_response in its 10 ms busy loop; got {outcome:?}"
+            matches!(&error, SdkError::TransportError(why) if why.contains("ended before a Result")),
+            "got {error:?}"
         );
     }
 
