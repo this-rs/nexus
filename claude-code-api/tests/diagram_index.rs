@@ -408,14 +408,18 @@ pub fn detect_drift(entries: &[IndexEntry], changes: &ChangeSet) -> Vec<Drift> {
 
     let mut drifts = Vec::new();
     for entry in entries {
-        let diagram_file = entry
-            .file
-            .clone()
-            .unwrap_or_else(|| format!("docs/diagrams/{}.mmd", entry.name));
+        // Only a verified entry has a file to update. Demanding a change to a
+        // `planned` entry's `.mmd` would demand a change to a file that does
+        // not exist: unsatisfiable except by the escape hatch, which is how an
+        // escape hatch becomes routine. Its paths fall through to
+        // `unowned_paths`, which reports instead of failing.
+        let Some(diagram_file) = entry.file.clone() else {
+            continue;
+        };
         if changed.contains(diagram_file.as_str()) || excused.contains(&entry.name) {
             continue;
         }
-        let globs: Vec<&str> = entry.covers.iter().filter_map(|g| local_glob(g)).collect();
+        let globs: Vec<&str> = owning_globs(std::slice::from_ref(entry));
         if let Some(trigger) = changes
             .changed
             .iter()
@@ -438,16 +442,28 @@ pub fn detect_drift(entries: &[IndexEntry], changes: &ChangeSet) -> Vec<Drift> {
 /// (task 0.2), failing here would block every pull request and the gate would
 /// simply be switched off. A gate nobody can satisfy teaches nothing.
 pub fn unowned_paths(entries: &[IndexEntry], changes: &ChangeSet) -> Vec<String> {
-    let globs: Vec<&str> = entries
-        .iter()
-        .flat_map(|e| e.covers.iter())
-        .filter_map(|g| local_glob(g))
-        .collect();
+    let globs = owning_globs(entries);
     changes
         .changed
         .iter()
         .filter(|path| !globs.iter().any(|glob| glob_matches(glob, path)))
         .cloned()
+        .collect()
+}
+
+/// Local globs belonging to diagrams that actually exist.
+///
+/// A `planned` entry owns nothing: there is no file, nobody has checked its
+/// content against the code, and it names a diagram somebody intends to write.
+/// Treating its globs as ownership would let the orphan ceiling fall, and the
+/// drift check go quiet, without a single diagram being written — the index
+/// would be buying credit for intentions. Only `verified` counts.
+fn owning_globs(entries: &[IndexEntry]) -> Vec<&str> {
+    entries
+        .iter()
+        .filter(|e| e.status == "verified")
+        .flat_map(|e| e.covers.iter())
+        .filter_map(|g| local_glob(g))
         .collect()
 }
 
@@ -764,6 +780,29 @@ mod drift_rules {
         assert_eq!(drifts.len(), 1, "fires once, via nexus:src/**: {drifts:?}");
     }
 
+    /// A `planned` entry has no `.mmd`, so drift against it could only be
+    /// cleared by the escape hatch — which would make the hatch routine for
+    /// every domain still awaiting its diagram. Its paths are reported as
+    /// unowned instead, which is the honest state: no diagram owns them yet.
+    #[test]
+    fn a_planned_entry_never_demands_a_diagram_that_does_not_exist() {
+        let index = parse_index(
+            "diagrams:\n  - name: planned_one\n    status: planned\n    covers:\n      \
+             - \"nexus:src/**\"\n",
+        )
+        .expect("fixture index is valid");
+        let set = changes(&["src/thing.rs"], &[]);
+        assert!(
+            detect_drift(&index, &set).is_empty(),
+            "must not demand a missing file"
+        );
+        assert_eq!(
+            unowned_paths(&index, &set),
+            vec!["src/thing.rs"],
+            "reported as unowned instead"
+        );
+    }
+
     #[test]
     fn an_uncovered_change_does_not_drift_but_is_listed_as_unowned() {
         let set = changes(&["README.md"], &[]);
@@ -780,6 +819,89 @@ mod drift_rules {
     #[test]
     fn an_empty_change_set_drifts_nothing() {
         assert!(detect_drift(&index(), &changes(&[], &[])).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod ownership_rules {
+    use super::*;
+
+    fn index() -> Vec<IndexEntry> {
+        parse_index(
+            "diagrams:\n  - name: d1\n    file: docs/diagrams/d1.mmd\n    status: verified\n    \
+             covers:\n      - \"nexus:claude-code-api/src/api/**\"\n  - name: d2\n    \
+             status: planned\n    covers:\n      - \"nexus:src/other.rs\"\n",
+        )
+        .expect("fixture index is valid")
+    }
+
+    fn paths(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn a_covered_source_file_is_not_an_orphan() {
+        let found = orphans_among(&index(), paths(&["claude-code-api/src/api/routes.rs"]));
+        assert!(found.is_empty(), "{found:?}");
+    }
+
+    #[test]
+    fn an_uncovered_source_file_is_an_orphan() {
+        let found = orphans_among(&index(), paths(&["claude-code-api/src/core/manager.rs"]));
+        assert_eq!(found, vec!["claude-code-api/src/core/manager.rs"]);
+    }
+
+    #[test]
+    fn only_a_planned_entrys_globs_do_not_protect_a_file() {
+        // `d2` is planned, so it has no diagram yet. Its globs still appear in
+        // the index, and they must NOT excuse a file: counting a planned entry
+        // as an owner would let the ceiling fall without a single diagram
+        // being written.
+        let found = orphans_among(&index(), paths(&["src/other.rs"]));
+        assert_eq!(
+            found,
+            vec!["src/other.rs"],
+            "a planned entry owns nothing yet"
+        );
+    }
+
+    #[test]
+    fn examples_and_tests_are_not_counted() {
+        let found = orphans_among(
+            &index(),
+            paths(&[
+                "claude-code-sdk-rs/examples/basic.rs",
+                "claude-code-sdk-rs/tests/e2e_hooks.rs",
+                "claude-code-api/tests/diagram_index.rs",
+            ]),
+        );
+        assert!(found.is_empty(), "{found:?}");
+    }
+
+    #[test]
+    fn a_non_rust_file_is_not_counted() {
+        let found = orphans_among(&index(), paths(&["claude-code-api/src/config.toml"]));
+        assert!(found.is_empty(), "{found:?}");
+    }
+
+    #[test]
+    fn an_indexed_diagram_is_not_reported_as_unindexed() {
+        let found = unindexed_diagrams(&index(), &paths(&["d1"]));
+        assert!(found.is_empty(), "{found:?}");
+    }
+
+    #[test]
+    fn a_diagram_with_no_entry_is_reported() {
+        let found = unindexed_diagrams(&index(), &paths(&["d1", "stray"]));
+        assert_eq!(found, vec!["stray"]);
+    }
+
+    #[test]
+    fn a_diagram_whose_entry_is_only_planned_is_reported() {
+        // A file exists while the index still calls it planned: the two
+        // disagree, and the index is the one claiming nothing was verified.
+        let found = unindexed_diagrams(&index(), &paths(&["d2"]));
+        assert_eq!(found, vec!["d2"]);
     }
 }
 
@@ -908,19 +1030,70 @@ const ORPHANS_PATH: &str = "docs/diagrams/ORPHANS.md";
 /// Counting them would inflate the gap with files that will never have an
 /// owner, and a metric nobody can ever drive to zero gets ignored.
 fn orphan_source_files(entries: &[IndexEntry]) -> Vec<String> {
-    let globs: Vec<&str> = entries
-        .iter()
-        .flat_map(|e| e.covers.iter())
-        .filter_map(|g| local_glob(g))
-        .collect();
-    let mut orphans: Vec<String> = repo_relative_paths()
+    orphans_among(entries, repo_relative_paths())
+}
+
+/// The pure core of [`orphan_source_files`], taking the path list as an
+/// argument.
+///
+/// Split out so the selection rule can be tested against fixtures. Left inside
+/// the repository walk it was only ever proven by running the gate against the
+/// real tree and reading the number, which demonstrates nothing about the rule
+/// and would survive a refactor that broke it.
+pub fn orphans_among(entries: &[IndexEntry], paths: Vec<String>) -> Vec<String> {
+    let globs = owning_globs(entries);
+    let mut orphans: Vec<String> = paths
         .into_iter()
-        .filter(|p| p.ends_with(".rs"))
-        .filter(|p| p.starts_with("src/") || p.contains("/src/"))
+        .filter(|p| is_countable_source(p))
         .filter(|p| !globs.iter().any(|glob| glob_matches(glob, p)))
         .collect();
     orphans.sort();
     orphans
+}
+
+/// Whether a path counts towards the orphan ceiling.
+///
+/// Rust sources under a `src/`, and nothing else. An `examples/` or `tests/`
+/// file is excluded by not being under `src/` in the first place.
+fn is_countable_source(path: &str) -> bool {
+    path.ends_with(".rs") && (path.starts_with("src/") || path.contains("/src/"))
+}
+
+/// Diagram files present on disk with no `status: verified` index entry.
+///
+/// Pure, for the same reason as [`orphans_among`]: the on-disk variant was
+/// proven only by dropping a file in `docs/diagrams/` by hand.
+pub fn unindexed_diagrams(entries: &[IndexEntry], stems: &[String]) -> Vec<String> {
+    let verified: BTreeSet<&str> = entries
+        .iter()
+        .filter(|e| e.status == "verified")
+        .map(|e| e.name.as_str())
+        .collect();
+    let mut unindexed: Vec<String> = stems
+        .iter()
+        .filter(|stem| !verified.contains(stem.as_str()))
+        .cloned()
+        .collect();
+    unindexed.sort();
+    unindexed
+}
+
+/// Names (without extension) of the `.mmd` files in `docs/diagrams/`.
+fn diagram_stems_on_disk() -> Vec<String> {
+    let dir = repo_root().join("docs/diagrams");
+    fs::read_dir(&dir)
+        .expect("docs/diagrams must exist")
+        .flatten()
+        .filter_map(|entry| {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("mmd") {
+                return None;
+            }
+            path.file_stem()
+                .and_then(|s| s.to_str())
+                .map(str::to_string)
+        })
+        .collect()
 }
 
 /// Read `<!-- orphan-ceiling: N -->` from the published list.
@@ -984,32 +1157,7 @@ fn every_diagram_file_on_disk_is_indexed_as_verified() {
     // lifecycle says creating a diagram means adding its entry in the same
     // pull request; this is what makes that more than advice.
     let entries = parse_index(&read_repo_file(INDEX_PATH)).expect("index parses");
-    let verified: BTreeMap<&str, &IndexEntry> = entries
-        .iter()
-        .filter(|e| e.status == "verified")
-        .map(|e| (e.name.as_str(), e))
-        .collect();
-
-    let dir = repo_root().join("docs/diagrams");
-    let mut unindexed = Vec::new();
-    for entry in fs::read_dir(&dir)
-        .expect("docs/diagrams must exist")
-        .flatten()
-    {
-        let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("mmd") {
-            continue;
-        }
-        let stem = path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .expect("a .mmd file has a name")
-            .to_string();
-        if !verified.contains_key(stem.as_str()) {
-            unindexed.push(stem);
-        }
-    }
-    unindexed.sort();
+    let unindexed = unindexed_diagrams(&entries, &diagram_stems_on_disk());
     assert!(
         unindexed.is_empty(),
         "these diagrams exist in docs/diagrams/ but have no `status: verified` \

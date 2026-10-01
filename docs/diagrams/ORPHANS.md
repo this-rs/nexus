@@ -4,9 +4,10 @@ The charter asks that no source file be left without a diagram that owns it.
 This is the list of the ones that are, so the gap is a number somebody can act
 on rather than a vague sense that the documentation is thin.
 
-**77 of 77 `src/` files have no owner.** The two diagrams this repository has
-so far (`release-readiness`, `po-bugs`) cover configuration, documentation and
-their own gates — not the library and the server. That is the honest starting
+**74 of 77 `src/` files have no owner.** Of the three diagrams this repository
+has so far, two (`release-readiness`, `po-bugs`) cover configuration,
+documentation and their own gates; `nexus-model-catalogue` is the first to own
+library code, claiming three files of the model registry. That is the honest starting
 point, and publishing it is the point: a diagram per domain is task 0.2's work,
 and it cannot be planned against a gap nobody has measured.
 
@@ -17,10 +18,16 @@ the ceiling recorded below. The number can go down, never up — so a pull
 request that adds an unowned source file fails until either a diagram claims it
 or the ceiling is lowered in the same change.
 
-<!-- orphan-ceiling: 77 -->
+<!-- orphan-ceiling: 74 -->
 
 Lower the ceiling in the same pull request that adds the `covers` globs. Never
 raise it: the way out is a diagram, not a bigger number.
+
+Only a `status: verified` entry owns anything. A `planned` entry names a
+diagram somebody intends to write — counting its globs would let this ceiling
+fall without a single diagram existing, which is the index buying credit for
+intentions. The gate enforces that distinction
+(`owning_globs`), and it was a real bug here before a fixture test caught it.
 
 ## What is excluded, and why
 
@@ -46,21 +53,24 @@ would give `po-<domain>` for cartography of existing code.
 
 ## The list
 
-Regenerate with the command in the ratchet test's documentation; the counts
-below were taken against the index as committed.
+Regenerate with:
 
+```
+cargo test -p claude-code-api --test diagram_index -- --nocapture \
+  the_orphan_count_never_grows
+```
 
 ### claude-code-api/src/  (1)
   main.rs
 
-### claude-code-api/src/api/  (8)
-  chat.rs, conversations.rs, mod.rs, models.rs, projects.rs, sessions.rs, stats.rs, streaming_handler.rs
+### claude-code-api/src/api/  (7)
+  chat.rs, conversations.rs, mod.rs, projects.rs, sessions.rs, stats.rs, streaming_handler.rs
 
 ### claude-code-api/src/bin/  (1)
   ccapi.rs
 
-### claude-code-api/src/core/  (13)
-  auth.rs, cache.rs, claude_manager.rs, config.rs, conversation.rs, interactive_session.rs, mod.rs, model_registry.rs, objective_tracker.rs, process_pool.rs, retry.rs, session_manager.rs, session_process.rs
+### claude-code-api/src/core/  (12)
+  auth.rs, cache.rs, claude_manager.rs, config.rs, conversation.rs, interactive_session.rs, mod.rs, objective_tracker.rs, process_pool.rs, retry.rs, session_manager.rs, session_process.rs
 
 ### claude-code-api/src/core/hooks/  (3)
   mod.rs, neo4j_hook_callback.rs, neo4j_permission_provider.rs
@@ -74,8 +84,8 @@ below were taken against the index as committed.
 ### claude-code-api/src/middleware/  (3)
   error_handler.rs, mod.rs, request_id.rs
 
-### claude-code-api/src/models/  (5)
-  claude.rs, error.rs, mod.rs, openai.rs, tests.rs
+### claude-code-api/src/models/  (4)
+  error.rs, mod.rs, openai.rs, tests.rs
 
 ### claude-code-api/src/utils/  (5)
   function_calling.rs, mod.rs, parser.rs, streaming.rs, text_chunker.rs
