@@ -1,0 +1,149 @@
+%% name: nexus-api-core
+%% covers: claude-code-api/src/core/auth.rs, claude-code-api/src/core/cache.rs, claude-code-api/src/core/claude_manager.rs, claude-code-api/src/core/config.rs, claude-code-api/src/core/conversation.rs, claude-code-api/src/core/interactive_session.rs, claude-code-api/src/core/model_registry.rs, claude-code-api/src/core/objective_tracker.rs, claude-code-api/src/core/process_pool.rs, claude-code-api/src/core/retry.rs, claude-code-api/src/core/session_manager.rs
+%% verified: 2026-10-01
+flowchart TD
+    subgraph legend["Légende"]
+        direction LR
+        L1["✅ vérifié par un test"]
+        L2["🟠 décidé, non écrit — ici : code écrit, test non écrit"]
+        L3["🔴 bug / écrit mais non branché"]
+        L4["⚪ hors de ce fichier ou hors dépôt"]
+    end
+
+    %% ─────────────────────────── démarrage ───────────────────────────
+    subgraph boot["Démarrage — core/config.rs"]
+        cfg["🟠 Settings::new()<br/>RUN_MODE puis config/&lt;mode&gt;, config/local,<br/>env CLAUDE_CODE__…<br/>défauts : claude.command=claude,<br/>use_interactive_sessions=false, mcp.enabled=false"]
+        cfg -->|"fichier absent"| cfg_ok["🟠 required(false)<br/>aucune erreur : les défauts suffisent"]
+        cfg -->|"clé de type invalide"| cfg_ko["🟠 try_deserialize() renvoie ConfigError"]
+    end
+
+    app["⚪ create_app() / build_components() — src/lib.rs"]
+    cfg --> app
+    app --> cm
+    app --> pool
+    app --> ism
+    app --> conv
+    app --> cache
+    app --> registry
+    app --> prewarm
+
+    %% ─────────────────── lancement du CLI ───────────────────
+    subgraph spawn["Lancement du CLI claude — aucune abstraction de transport"]
+        cm["🔴 ClaudeManager::create_session_with_message()<br/>et create_interactive_session()<br/>Command::new(claude_command)<br/><i>bug : info! …with command: {:?} imprime<br/>la valeur de --mcp-config en clair,<br/>même défaut que S2, fichier d'un autre propriétaire</i>"]
+        ism["✅ InteractiveSessionManager::create_session()<br/>un process CLI par conversation_id<br/><i>vérifié : faux CLI scripté qui enregistre son argv</i>"]
+        ism -->|"continue_conversation"| ism_cont["✅ --continue<br/>reprise du contexte après mort du process<br/><i>vérifié : session morte insérée, argv relu</i>"]
+        ism -->|"file_access.skip_permissions"| ism_perm["✅ --dangerously-skip-permissions<br/>absent par défaut<br/><i>vérifié : les deux configurations</i>"]
+        ism -->|"mcp.enabled"| ism_mcp["✅ --mcp-config &lt;config_file&gt;<br/>sinon &lt;config_json&gt; en ligne<br/>config_file gagne<br/><i>vérifié : argv du faux CLI</i>"]
+        ism_mcp -->|"refusé"| ism_mcp_ko["🔴 mcp.strict et mcp.debug ignorés ici,<br/>honorés par claude_manager.rs<br/><i>divergence assumée, test en place</i>"]
+        ism --> redact["✅ describe_command_redacted()<br/>program, cwd, args, NOMS des variables<br/>la valeur après --mcp-config devient<br/>&lt;redacted N bytes&gt;<br/><i>vérifié : journal tracing capturé,<br/>test rejoué sans le correctif</i>"]
+        ism -->|"binaire absent"| ism_spawn_ko["✅ cmd.spawn() renvoie l'io::Error<br/>aucune session enregistrée<br/><i>vérifié : chemin inexistant</i>"]
+        pool["🔴 ProcessPool::get_or_create()<br/>délègue directement à ClaudeManager :<br/>aucun pooling, le TODO le dit"]
+        pool --> pool_acq["🔴 ProcessPool::acquire()<br/>process repris du pool : rend un rx<br/>dont le tx est jeté — le client n'aura<br/>jamais de sortie"]
+        pool -->|"max_active atteint"| pool_full["🟠 Err Process pool exhausted"]
+        prewarm["🔴 InteractiveSessionManager::prewarm_default_session()<br/>no-op documenté : rien n'est lancé, Ok(()) toujours<br/>la branche d'erreur journalisée par create_app est morte<br/><i>vérifié : aucun process, aucune session</i>"]
+    end
+
+    %% ─────────────────── un tour de conversation ───────────────────
+    subgraph turn["Un tour — core/interactive_session.rs"]
+        entry["✅ get_or_create_session_and_send()<br/>conversation_id absent → UUID v4<br/><i>vérifié : UUID parsé</i>"]
+        entry --> probe{"✅ child.try_wait()<br/>état du process"}
+        probe -->|"Ok(None) — vivant"| reuse["✅ send_to_existing_session()<br/>aucun nouveau process<br/><i>vérifié : argv inchangé</i>"]
+        probe -->|"Ok(Some(status)) — mort"| dead["✅ session retirée → SessionStatus::Dead<br/>recréation avec --continue"]
+        probe -->|"absent de la map"| fresh["✅ SessionStatus::NotFound<br/>création neuve, sans --continue"]
+        probe -->|"Err(e)"| probe_err["✅ statut illisible : traité comme une mort,<br/>session retirée puis --continue<br/><i>vérifié : enfant récolté par waitpid derrière<br/>tokio, Unix seulement</i>"]
+
+        reuse --> lock["✅ interaction_lock.lock().await<br/>un seul tour à la fois : le protocole CLI<br/>n'a pas de correlation_id<br/><i>vérifié : message relu sur stdin</i>"]
+        lock --> collect{"✅ boucle du collecteur<br/>timeout 30 s, filet de sécurité"}
+        collect -->|"type == result"| collect_done["✅ fin de réponse<br/><i>vérifié : messages injectés dans le broadcast</i>"]
+        collect -->|"type == error"| collect_err["✅ fin de réponse aussi"]
+        collect -->|"parent_tool_use_id présent"| collect_side["✅ message de sidechain ignoré<br/>ne clôt pas la réponse<br/><i>vérifié : sidechain + réponse + result</i>"]
+        collect -->|"RecvError::Lagged"| collect_lag["🔴 traité comme un canal fermé :<br/>la réponse entière est jetée en silence<br/><i>vérifié : broadcast de capacité 1 saturé</i>"]
+        collect -->|"30 s sans un seul message"| collect_to["✅ error! puis abandon<br/>le canal du client se ferme vide<br/><i>vérifié : horloge Tokio arrêtée</i>"]
+        lock -->|"stdin_tx fermé"| send_ko["✅ un ClaudeCodeOutput type=error<br/>Failed to send message: …<br/><i>vérifié : récepteur stdin lâché</i>"]
+    end
+
+    %% ─────────────────── lecture de la sortie CLI ───────────────────
+    subgraph io["Les quatre tâches par session"]
+        stdin_task["✅ tâche stdin<br/>write_all, saut de ligne, flush<br/>message initial vide → rien n'est écrit<br/><i>vérifié : CLI écho sur Unix</i>"]
+        stdin_task -->|"tube rompu"| stdin_ko["✅ error! et sortie de boucle<br/>le canal se ferme : seul signe visible<br/>un message vide échoue sur le saut de ligne :<br/>un write_all de zéro octet ne touche pas le tube<br/><i>vérifié : process mort puis envoi</i>"]
+        stdout_task["✅ tâche stdout — lignes JSON<br/>ligne vide ignorée, ligne inanalysable ignorée,<br/>type absent → unknown<br/><i>vérifié : transcripts dégradés</i>"]
+        stdout_task --> first{"✅ is_first_response"}
+        first -->|"vrai"| first_fwd["✅ transmis au client ET diffusé"]
+        first -->|"type==error ou text contenant Human:"| first_off["✅ bascule à faux :<br/>les lignes suivantes ne sont plus<br/>transmises au client, seulement diffusées<br/><i>vérifié : deux lignes, une seule reçue</i>"]
+        stdout_task -->|"EOF"| died["✅ build_process_died_event()<br/>result/process_died synthétique :<br/>débloque collecteurs et abonnés<br/><i>vérifié : CLI muet</i>"]
+        stderr_task["✅ tâche stderr → warn! uniquement<br/>jamais mêlée au flux de sortie<br/><i>vérifié : CLI bruyant sur stderr</i>"]
+        init_task["✅ collecteur de la première réponse<br/>mêmes règles : result, error, sidechain, 30 s<br/><i>vérifié : horloge Tokio arrêtée</i>"]
+        init_task -->|"client parti"| init_drop["✅ envoi en erreur → arrêt du collecteur<br/>la session survit<br/><i>vérifié : récepteur lâché avant l'appel</i>"]
+    end
+
+    ism --> stdin_task
+    ism --> stdout_task
+    ism --> stderr_task
+    ism --> init_task
+
+    %% ─────────────────── fin de vie ───────────────────
+    subgraph life["Fin de vie des sessions"]
+        loop5["✅ new() lance une boucle :<br/>sleep 300 s puis cleanup_expired_sessions(30)<br/><i>vérifié : horloge Tokio avancée de 301 s</i>"]
+        loop5 --> cleanup{"✅ cleanup_expired_sessions()"}
+        cleanup -->|"try_wait = Some"| cl_dead["✅ process_died diffusé puis retrait<br/><i>vérifié : abonné reçoit l'événement</i>"]
+        cleanup -->|"inactif > timeout"| cl_idle["🔴 tué sans aucun événement :<br/>un abonné reste suspendu<br/><i>vérifié : try_recv vide</i>"]
+        cleanup --> cl_kill["✅ kill du groupe de process via libc sur Unix<br/>puis child.kill()<br/>fait hors du verrou de la map"]
+        interrupt{"✅ interrupt_session()<br/>control_request/interrupt sur stdin,<br/>sans prendre interaction_lock"}
+        interrupt -->|"session absente"| int_none["✅ Ok(false), pas une erreur"]
+        interrupt -->|"canal plein"| int_full["✅ Ok(true) quand même :<br/>interruption simplement retardée"]
+        interrupt -->|"canal fermé"| int_closed["✅ Err stdin channel is closed"]
+        close["✅ close_session()<br/>retrait puis kill du groupe<br/>session inconnue → Err Session not found<br/><i>vérifié : fermeture deux fois</i>"]
+        drop_mgr["🔴 Drop for InteractiveSessionManager<br/>vide la map et tue tout —<br/>mais le type est Clone sur une map partagée :<br/>lâcher UN clone tue les sessions des autres<br/><i>vérifié : clone interrogé après le drop</i>"]
+    end
+
+    ism --> loop5
+    ism --> interrupt
+    ism --> close
+    ism --> drop_mgr
+    sm["🔴 SessionManager — create/get/update/remove/list_sessions<br/>écrit, référencé nulle part hors de son module"]
+
+    %% ─────────────────── autour de la requête ───────────────────
+    subgraph req["Autour de la requête HTTP"]
+        auth_mw["🔴 auth_middleware()<br/>accepte tout en-tête commençant par Bearer<br/>sans jamais appeler verify_token()<br/>et n'est monté sur aucune route"]
+        auth_mw -->|"en-tête absent ou mal formé"| auth_ko["🟠 401 UNAUTHORIZED"]
+        auth_mgr["🔴 AuthManager::generate_token() / verify_token()<br/>HS256 sur auth.secret_key<br/>écrit, appelé par personne"]
+        cache["🟠 ResponseCache::generate_key()<br/>SHA-256 de model + rôles + contenus<br/>appelé par api::chat"]
+        cache --> cache_get{"🟠 get()"}
+        cache_get -->|"enabled=false"| cache_off["🟠 None sans regarder la map"]
+        cache_get -->|"created_at dépassé de ttl_seconds"| cache_exp["🟠 entrée retirée puis None"]
+        cache_get -->|"sinon"| cache_hit["🟠 hit_count += 1 et clone de la réponse"]
+        cache --> cache_put{"🟠 put()"}
+        cache_put -->|"len >= max_entries"| cache_evict["🟠 evict_oldest() : balayage linéaire<br/>du created_at le plus ancien"]
+        conv["🟠 ConversationManager::get_context_messages()<br/>conversation inconnue → les nouveaux messages seuls"]
+        conv --> trim["🟠 trim_context()<br/>les system sont gardés d'office,<br/>le reste ajouté du plus récent au plus ancien<br/>estimation : 1 token pour 4 caractères,<br/>100 par part d'image, 50 si content absent"]
+        trim -->|"max_context_tokens dépassé"| trim_cut["🟠 break : les plus anciens sont jetés"]
+        registry["🟠 ModelRegistry::get_models()<br/>needs_refresh() : jamais rafraîchi ou ttl écoulé"]
+        registry --> refresh{"🟠 refresh()"}
+        refresh -->|"aucune api_key"| ref_static["🟠 Ok(false) : liste statique conservée,<br/>last_refresh marqué pour ne pas réessayer"]
+        refresh -->|"liste vide"| ref_empty["🟠 Err mais le catalogue courant est gardé"]
+        refresh -->|"HTTP en échec"| ref_err["🟠 Err, catalogue gardé, is_dynamic reste faux"]
+        refresh -->|"succès"| ref_ok["🟠 cache remplacé, from_remote = vrai"]
+        retry["🔴 RetryPolicy::execute()<br/>backoff exponentiel borné par max_delay_ms<br/>rend l'erreur telle quelle à max_retries<br/><i>vérifié : tests en ligne de retry.rs, mais aucun appelant</i>"]
+        retry --> should{"✅ should_retry()<br/>sur le texte de l'erreur, en minuscules"}
+        should -->|"timeout, connection, temporarily unavailable,<br/>too many requests, overloaded"| should_yes["✅ vrai"]
+        should -->|"invalid, unauthorized, forbidden, not found"| should_no["✅ faux"]
+        should -->|"inconnue"| should_def["✅ vrai par défaut — un refus<br/>non reconnu sera donc rejoué"]
+        breaker["🔴 CircuitBreaker::is_open()<br/>ouvre à failure_threshold, se referme<br/>après recovery_timeout<br/><i>vérifié : tests en ligne de retry.rs, mais aucun appelant</i>"]
+        objective["🔴 check_objective_reminder()<br/>quatre gardes : tracking, outils utilisés,<br/>cooldown, objectifs non vides<br/>testé en ligne mais appelé par personne"]
+    end
+
+    nobody["⚪ aucun appelant dans ce crate :<br/>grep sur le nom ne sort que le module lui-même"]
+    nobody -.->|"jamais appelé"| auth_mw
+    nobody -.->|"jamais appelé"| auth_mgr
+    nobody -.->|"jamais appelé"| sm
+    nobody -.->|"jamais appelé"| objective
+    nobody -.->|"jamais appelé"| retry
+    nobody -.->|"jamais appelé"| breaker
+    dead --> ism
+    fresh --> ism
+    client["⚪ api/chat.rs, api/streaming_handler.rs"] --> entry
+    client --> cache
+    client --> conv
+    client --> pool
+    models["⚪ API Anthropic /v1/models"] --> registry
+    cli_bin["⚪ binaire claude — hors dépôt"] --> stdout_task
