@@ -46,11 +46,11 @@ The first three lines of every `.mmd`:
   against. Not a date: a date cannot be checked out, so it cannot be used to
   reproduce what the author saw. Update it whenever the diagram changes.
 
-  The test currently only checks that `verified` is **non-empty**: the sha
-  *form* is a convention here, not yet enforced, so `verified: yesterday` would
-  pass the gate today. The main repository's checker does enforce
-  `[0-9a-f]{7,40}`. Closing that gap is a tracked follow-up; until then, treat
-  this one as a rule a reviewer has to look at.
+  Enforced: 7 to 40 lowercase hex digits. `verified: yesterday`, a date, `TODO`
+  and `HEAD` are all refused, as is an uppercase sha — `git rev-parse --short`
+  emits lowercase, and accepting both would let two spellings of one sha into
+  the index. The main repository's checker enforces the same shape, so a
+  diagram refused there is refused here.
 
 Further `%%` lines carry what the diagram proves, the sources read, and what is
 not established. A blank comment line is `%% ` — with the space, because bare

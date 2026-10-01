@@ -184,6 +184,17 @@ pub fn parse_header(mmd: &str) -> Result<DiagramHeader, String> {
     if verified.is_empty() {
         return Err("`%% verified:` is empty".to_string());
     }
+    // A short git sha, not a date. The whole point of the field is that a reader can run
+    // `git show <verified>:<file>` and see exactly the code the author read. A date cannot be
+    // checked out, so it makes the diagram's verification unreproducible — which is the defect
+    // diagrams exist to correct. The main repository's checker enforces the same shape; without
+    // this, a diagram refused there passed here.
+    if !is_short_sha(&verified) {
+        return Err(format!(
+            "`%% verified:` must be a short git sha (7-40 lowercase hex), not {verified:?} \
+             — a date or a word cannot be checked out"
+        ));
+    }
     let covers: Vec<String> = covers.split_whitespace().map(str::to_string).collect();
     if covers.is_empty() {
         return Err("`%% covers:` lists no glob".to_string());
@@ -193,6 +204,17 @@ pub fn parse_header(mmd: &str) -> Result<DiagramHeader, String> {
         covers,
         verified,
     })
+}
+
+/// Whether a string is a short git sha: 7 to 40 lowercase hex digits.
+///
+/// Lowercase only, because that is what `git rev-parse --short` emits and accepting both would
+/// let two spellings of the same sha into the index.
+fn is_short_sha(value: &str) -> bool {
+    (7..=40).contains(&value.len())
+        && value
+            .chars()
+            .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c))
 }
 
 fn expect_field(line: Option<&str>, field: &str) -> Result<String, String> {
@@ -612,6 +634,37 @@ mod header_parsing {
         assert_eq!(header.name, "x");
         assert_eq!(header.covers.len(), 2);
         assert_eq!(header.verified, "abc1234");
+    }
+
+    #[test]
+    fn accepts_a_short_sha_of_any_usual_length() {
+        for sha in ["abc1234", "9540068", "dc510d5", &"a".repeat(40)] {
+            let mmd = format!("%% name: x\n%% covers: nexus:a.rs\n%% verified: {sha}\n");
+            assert!(parse_header(&mmd).is_ok(), "{sha} should be accepted");
+        }
+    }
+
+    #[test]
+    fn rejects_a_verified_that_is_not_a_sha() {
+        // The field used to be checked only for emptiness, so every one of these passed the
+        // gate while being impossible to check out.
+        for bad in [
+            "yesterday",
+            "2026-10-01",
+            "TODO",
+            "HEAD",
+            "abc123",                      // too short
+            "ABC1234",                     // uppercase is not what git emits
+            "zzzzzzz",                     // not hex
+            &"a".repeat(41),               // too long
+        ] {
+            let mmd = format!("%% name: x\n%% covers: nexus:a.rs\n%% verified: {bad}\n");
+            let err = parse_header(&mmd).expect_err(&format!("{bad} should be refused"));
+            assert!(
+                err.contains("short git sha"),
+                "{bad}: unexpected error {err}"
+            );
+        }
     }
 
     #[test]
