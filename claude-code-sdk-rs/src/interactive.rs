@@ -672,11 +672,11 @@ impl InteractiveClient {
                 .get("input")
                 .cloned()
                 .unwrap_or(serde_json::json!({}));
-            let tool_use_id = request_data
-                .get("tool_use_id")
-                .or_else(|| request_data.get("toolUseId"))
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string());
+            let tool_use_id = match manual_tool_use_id(request_data) {
+                Ok(id) => id,
+                // Refuse rather than pretend there is no tool at all.
+                Err(e) => return Some(Err(e)),
+            };
             (cb_id.to_string(), input, tool_use_id)
         };
 
@@ -881,6 +881,31 @@ impl InteractiveClient {
 // Standalone hook helpers (for use without client lock)
 // ============================================================================
 
+/// Read `tool_use_id` (or `toolUseId`) off a `hook_callback` request, refusing a
+/// value that is present but is not a string.
+///
+/// This is the manual fallback both dispatchers take when
+/// `SDKHookCallbackRequest` fails to deserialize — and an ill-typed
+/// `tool_use_id` is one of the few things that makes it fail. The fallback used
+/// to call `.as_str()` and hand the callback `None`, i.e. tell a `PreToolUse`
+/// hook that there is no tool at all while the CLI was asking about one. The
+/// request is malformed, whichever callback it names, so it is answered with an
+/// `error` control response instead: the CLI gets a definite answer, and no hook
+/// ever decides about a tool it could not identify.
+fn manual_tool_use_id(request_data: &serde_json::Value) -> Result<Option<String>> {
+    match request_data
+        .get("tool_use_id")
+        .or_else(|| request_data.get("toolUseId"))
+    {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(serde_json::Value::String(id)) => Ok(Some(id.clone())),
+        Some(other) => Err(SdkError::MessageParseError {
+            error: format!("hook_callback tool_use_id must be a string, got {other}"),
+            raw: other.to_string(),
+        }),
+    }
+}
+
 /// Check if a raw SDK control JSON message is a `hook_callback`.
 ///
 /// Inspects the `subtype` field (supports both top-level and nested `request`).
@@ -925,11 +950,11 @@ pub async fn dispatch_hook_from_registry(
                 .get("input")
                 .cloned()
                 .unwrap_or(serde_json::json!({}));
-            let tool_use_id = request_data
-                .get("tool_use_id")
-                .or_else(|| request_data.get("toolUseId"))
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string());
+            let tool_use_id = match manual_tool_use_id(request_data) {
+                Ok(id) => id,
+                // Refuse rather than pretend there is no tool at all.
+                Err(e) => return Some(Err(e)),
+            };
             (cb_id.to_string(), input, tool_use_id)
         };
 
@@ -2359,8 +2384,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dispatch_hook_callback_falls_back_to_manual_fields_and_drops_a_malformed_tool_use_id()
-    {
+    async fn dispatch_hook_callback_refuses_a_malformed_tool_use_id() {
         let callback = Arc::new(TestHookCallback::new());
         let (client, id) = client_with_one_callback(callback.clone()).await;
 
@@ -2375,18 +2399,24 @@ mod tests {
             }
         });
 
-        let output = client
+        let error = client
             .dispatch_hook_callback(&control_msg)
             .await
-            .expect("the manual path finds the callback through its camelCase key")
-            .expect("the callback ran");
-        match output {
-            HookJSONOutput::Sync(sync) => assert_eq!(sync.continue_, Some(true)),
-            other => panic!("expected a Sync output, got {other:?}"),
+            .expect("a malformed request is answered, not ignored")
+            .expect_err("42 is not a tool use id");
+        match error {
+            SdkError::MessageParseError { error, raw } => {
+                assert!(
+                    error.contains("tool_use_id must be a string"),
+                    "got {error}"
+                );
+                assert_eq!(raw, "42");
+            },
+            other => panic!("expected MessageParseError, got {other:?}"),
         }
-        assert_eq!(callback.calls().await, 1);
-        // The ill-typed toolUseId is silently dropped rather than refused: the
-        // callback is told there is no tool_use_id at all.
+        // The callback is never told "there is no tool" about a request that
+        // named one.
+        assert_eq!(callback.calls().await, 0);
         assert_eq!(callback.last_tool_use_id().await, None);
     }
 
@@ -2593,8 +2623,8 @@ mod tests {
         );
         assert_eq!(callback.calls().await, 0);
 
-        // The manual fallback path, with a tool_use_id that does come through.
-        let output = dispatch_hook_from_registry(
+        // The manual fallback path, refusing an ill-typed tool_use_id.
+        let error = dispatch_hook_from_registry(
             &serde_json::json!({
                 "request": {
                     "subtype": "hook_callback",
@@ -2606,11 +2636,13 @@ mod tests {
             &registry,
         )
         .await
-        .expect("found through the camelCase key")
-        .expect("the callback ran");
-        assert!(matches!(output, HookJSONOutput::Sync(_)));
-        assert_eq!(callback.calls().await, 1);
-        assert_eq!(callback.last_tool_use_id().await, None);
+        .expect("a malformed request is answered, not ignored")
+        .expect_err("42 is not a tool use id");
+        assert!(
+            matches!(&error, SdkError::MessageParseError { error, .. } if error.contains("tool_use_id must be a string")),
+            "got {error:?}"
+        );
+        assert_eq!(callback.calls().await, 0, "a refused request runs nothing");
 
         // The structured path, with a usable tool_use_id.
         dispatch_hook_from_registry(
@@ -2625,7 +2657,7 @@ mod tests {
         .await
         .expect("found")
         .expect("ran");
-        assert_eq!(callback.calls().await, 2);
+        assert_eq!(callback.calls().await, 1);
         assert_eq!(
             callback.last_tool_use_id().await,
             Some("toolu_9".to_string())
@@ -2647,7 +2679,7 @@ mod tests {
             matches!(&error, SdkError::MessageParseError { error, .. } if error.contains("Invalid hook input")),
             "got {error:?}"
         );
-        assert_eq!(callback.calls().await, 2, "a parse failure runs nothing");
+        assert_eq!(callback.calls().await, 1, "a parse failure runs nothing");
     }
 
     #[test]
