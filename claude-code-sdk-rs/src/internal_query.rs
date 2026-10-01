@@ -305,12 +305,29 @@ impl Query {
             .cloned()
     }
 
+    /// Reply to an inbound control request with an error so the CLI never waits forever.
+    async fn send_control_error(
+        transport: &Arc<Mutex<Box<dyn Transport + Send>>>,
+        control_message: &JsonValue,
+        message: String,
+    ) {
+        let response = serde_json::json!({
+            "subtype": "error",
+            "request_id": Self::extract_request_id(control_message),
+            "error": message
+        });
+        let mut transport = transport.lock().await;
+        if let Err(e) = transport.send_sdk_control_response(response).await {
+            error!("Failed to send control error response: {}", e);
+        }
+    }
+
     /// Start control request handler task
     async fn start_control_handler(&mut self) {
         let transport = self.transport.clone();
         let can_use_tool = self.can_use_tool.clone();
         let hook_callbacks = self.hook_callbacks.clone();
-        let sdk_mcp_servers = self.sdk_mcp_servers.clone();
+        let sdk_mcp_servers = Arc::new(self.sdk_mcp_servers.clone());
         let pending_responses = self.pending_responses.clone();
 
         // Take ownership of the SDK control receiver to avoid holding locks
@@ -377,213 +394,256 @@ impl Query {
                             continue;
                         }
 
-                        // Parse and handle control requests (from CLI to SDK)
-                        // Check if this is a control_request with a nested request field
-                        let request_data = if control_message.get("type").and_then(|v| v.as_str())
-                            == Some("control_request")
-                        {
-                            control_message
-                                .get("request")
-                                .cloned()
-                                .unwrap_or(control_message.clone())
-                        } else {
-                            control_message.clone()
-                        };
+                        // Handle each request in its own task so a slow callback
+                        // cannot block the control loop.
+                        let transport_for_control = transport_for_control.clone();
+                        let can_use_tool_clone = can_use_tool_clone.clone();
+                        let hook_callbacks_clone = hook_callbacks_clone.clone();
+                        let sdk_mcp_servers_clone = sdk_mcp_servers_clone.clone();
+                        tokio::spawn(async move {
+                            // Parse and handle control requests (from CLI to SDK)
+                            // Check if this is a control_request with a nested request field
+                            let request_data =
+                                if control_message.get("type").and_then(|v| v.as_str())
+                                    == Some("control_request")
+                                {
+                                    control_message
+                                        .get("request")
+                                        .cloned()
+                                        .unwrap_or(control_message.clone())
+                                } else {
+                                    control_message.clone()
+                                };
 
-                        if let Some(subtype) = request_data.get("subtype").and_then(|v| v.as_str())
-                        {
-                            match subtype {
-                                "can_use_tool" => {
-                                    // Handle permission request
-                                    if let Ok(request) =
-                                        serde_json::from_value::<SDKControlPermissionRequest>(
-                                            request_data.clone(),
-                                        )
-                                    {
-                                        // Handle with can_use_tool callback
-                                        if let Some(ref can_use_tool) = can_use_tool_clone {
-                                            let context = ToolPermissionContext {
-                                                signal: None,
-                                                suggestions: request
-                                                    .permission_suggestions
-                                                    .unwrap_or_default(),
-                                            };
+                            if let Some(subtype) =
+                                request_data.get("subtype").and_then(|v| v.as_str())
+                            {
+                                match subtype {
+                                    "can_use_tool" => {
+                                        // Handle permission request
+                                        if let Ok(request) =
+                                            serde_json::from_value::<SDKControlPermissionRequest>(
+                                                request_data.clone(),
+                                            )
+                                        {
+                                            // Handle with can_use_tool callback
+                                            if let Some(ref can_use_tool) = can_use_tool_clone {
+                                                let context = ToolPermissionContext {
+                                                    signal: None,
+                                                    suggestions: request
+                                                        .permission_suggestions
+                                                        .unwrap_or_default(),
+                                                };
 
-                                            let result = can_use_tool
-                                                .can_use_tool(
-                                                    &request.tool_name,
-                                                    &request.input,
-                                                    &context,
+                                                let result = can_use_tool
+                                                    .can_use_tool(
+                                                        &request.tool_name,
+                                                        &request.input,
+                                                        &context,
+                                                    )
+                                                    .await;
+
+                                                // CLI expects: {"allow": true, "input": ...} or {"allow": false, "reason": ...}
+                                                let permission_response = match result {
+                                                    PermissionResult::Allow(allow) => {
+                                                        let mut resp = serde_json::json!({
+                                                            "allow": true,
+                                                        });
+                                                        if let Some(input) = allow.updated_input {
+                                                            resp["input"] = input;
+                                                        }
+                                                        if let Some(perms) =
+                                                            allow.updated_permissions
+                                                        {
+                                                            resp["updatedPermissions"] =
+                                                                serde_json::to_value(perms)
+                                                                    .unwrap_or_default();
+                                                        }
+                                                        resp
+                                                    },
+                                                    PermissionResult::Deny(deny) => {
+                                                        let mut resp = serde_json::json!({
+                                                            "allow": false,
+                                                        });
+                                                        if !deny.message.is_empty() {
+                                                            resp["reason"] =
+                                                                serde_json::json!(deny.message);
+                                                        }
+                                                        if deny.interrupt {
+                                                            resp["interrupt"] =
+                                                                serde_json::json!(true);
+                                                        }
+                                                        resp
+                                                    },
+                                                };
+
+                                                // Wrap response with proper structure
+                                                // CLI expects "subtype": "success" for all successful responses
+                                                let response = serde_json::json!({
+                                                    "subtype": "success",
+                                                    "request_id": Self::extract_request_id(&control_message),
+                                                    "response": permission_response
+                                                });
+
+                                                // Send response
+                                                let mut transport =
+                                                    transport_for_control.lock().await;
+                                                if let Err(e) = transport
+                                                    .send_sdk_control_response(response)
+                                                    .await
+                                                {
+                                                    error!(
+                                                        "Failed to send permission response: {}",
+                                                        e
+                                                    );
+                                                }
+                                            } else {
+                                                Self::send_control_error(
+                                                    &transport_for_control,
+                                                    &control_message,
+                                                    "No can_use_tool callback registered"
+                                                        .to_string(),
                                                 )
                                                 .await;
-
-                                            // CLI expects: {"allow": true, "input": ...} or {"allow": false, "reason": ...}
-                                            let permission_response = match result {
-                                                PermissionResult::Allow(allow) => {
-                                                    let mut resp = serde_json::json!({
-                                                        "allow": true,
-                                                    });
-                                                    if let Some(input) = allow.updated_input {
-                                                        resp["input"] = input;
-                                                    }
-                                                    if let Some(perms) = allow.updated_permissions {
-                                                        resp["updatedPermissions"] =
-                                                            serde_json::to_value(perms)
-                                                                .unwrap_or_default();
-                                                    }
-                                                    resp
-                                                },
-                                                PermissionResult::Deny(deny) => {
-                                                    let mut resp = serde_json::json!({
-                                                        "allow": false,
-                                                    });
-                                                    if !deny.message.is_empty() {
-                                                        resp["reason"] =
-                                                            serde_json::json!(deny.message);
-                                                    }
-                                                    if deny.interrupt {
-                                                        resp["interrupt"] = serde_json::json!(true);
-                                                    }
-                                                    resp
-                                                },
-                                            };
-
-                                            // Wrap response with proper structure
-                                            // CLI expects "subtype": "success" for all successful responses
-                                            let response = serde_json::json!({
-                                                "subtype": "success",
-                                                "request_id": Self::extract_request_id(&control_message),
-                                                "response": permission_response
-                                            });
-
-                                            // Send response
-                                            let mut transport = transport_for_control.lock().await;
-                                            if let Err(e) =
-                                                transport.send_sdk_control_response(response).await
-                                            {
-                                                error!("Failed to send permission response: {}", e);
                                             }
-                                        }
-                                    } else {
-                                        // Fallback for snake_case fields (tool_name, permission_suggestions)
-                                        if let Some(tool_name) =
-                                            request_data.get("tool_name").and_then(|v| v.as_str())
-                                            && let Some(input_val) =
-                                                request_data.get("input").cloned()
-                                            && let Some(ref can_use_tool) = can_use_tool_clone
-                                        {
-                                            // Try to parse permission suggestions (snake_case)
-                                            let suggestions: Vec<PermissionUpdate> = request_data
-                                                .get("permission_suggestions")
-                                                .cloned()
-                                                .and_then(|v| {
-                                                    serde_json::from_value::<Vec<PermissionUpdate>>(
-                                                        v,
-                                                    )
-                                                    .ok()
-                                                })
-                                                .unwrap_or_default();
-
-                                            let context = ToolPermissionContext {
-                                                signal: None,
-                                                suggestions,
-                                            };
-                                            let result = can_use_tool
-                                                .can_use_tool(tool_name, &input_val, &context)
-                                                .await;
-
-                                            let permission_response = match result {
-                                                PermissionResult::Allow(allow) => {
-                                                    let mut resp =
-                                                        serde_json::json!({ "allow": true });
-                                                    if let Some(input) = allow.updated_input {
-                                                        resp["input"] = input;
-                                                    }
-                                                    if let Some(perms) = allow.updated_permissions {
-                                                        resp["updatedPermissions"] =
-                                                            serde_json::to_value(perms)
-                                                                .unwrap_or_default();
-                                                    }
-                                                    resp
-                                                },
-                                                PermissionResult::Deny(deny) => {
-                                                    let mut resp =
-                                                        serde_json::json!({ "allow": false });
-                                                    if !deny.message.is_empty() {
-                                                        resp["reason"] =
-                                                            serde_json::json!(deny.message);
-                                                    }
-                                                    if deny.interrupt {
-                                                        resp["interrupt"] = serde_json::json!(true);
-                                                    }
-                                                    resp
-                                                },
-                                            };
-
-                                            let response = serde_json::json!({
-                                                "subtype": "success",
-                                                "request_id": Self::extract_request_id(&control_message),
-                                                "response": permission_response
-                                            });
-                                            let mut transport = transport_for_control.lock().await;
-                                            if let Err(e) =
-                                                transport.send_sdk_control_response(response).await
+                                        } else {
+                                            // Fallback for snake_case fields (tool_name, permission_suggestions)
+                                            if let Some(tool_name) = request_data
+                                                .get("tool_name")
+                                                .and_then(|v| v.as_str())
+                                                && let Some(input_val) =
+                                                    request_data.get("input").cloned()
+                                                && let Some(ref can_use_tool) = can_use_tool_clone
                                             {
-                                                error!(
-                                                    "Failed to send permission response (fallback): {}",
-                                                    e
-                                                );
-                                            }
-                                        }
-                                    }
-                                },
-                                "hook_callback" => {
-                                    // Handle hook callback with strongly-typed inputs/outputs
-                                    if let Ok(request) =
-                                        serde_json::from_value::<SDKHookCallbackRequest>(
-                                            request_data.clone(),
-                                        )
-                                    {
-                                        let callbacks = hook_callbacks_clone.read().await;
+                                                // Try to parse permission suggestions (snake_case)
+                                                let suggestions: Vec<PermissionUpdate> =
+                                                    request_data
+                                                        .get("permission_suggestions")
+                                                        .cloned()
+                                                        .and_then(|v| {
+                                                            serde_json::from_value::<
+                                                                Vec<PermissionUpdate>,
+                                                            >(
+                                                                v
+                                                            )
+                                                            .ok()
+                                                        })
+                                                        .unwrap_or_default();
 
-                                        if let Some(callback) = callbacks.get(&request.callback_id)
-                                        {
-                                            let context = HookContext { signal: None };
+                                                let context = ToolPermissionContext {
+                                                    signal: None,
+                                                    suggestions,
+                                                };
+                                                let result = can_use_tool
+                                                    .can_use_tool(tool_name, &input_val, &context)
+                                                    .await;
 
-                                            // Try to deserialize input as HookInput
-                                            let hook_result = match serde_json::from_value::<
-                                                crate::types::HookInput,
-                                            >(
-                                                request.input.clone()
-                                            ) {
-                                                Ok(hook_input) => {
-                                                    // Call the hook with strongly-typed input
-                                                    callback
-                                                        .execute(
-                                                            &hook_input,
-                                                            request.tool_use_id.as_deref(),
-                                                            &context,
-                                                        )
-                                                        .await
-                                                },
-                                                Err(parse_err) => {
+                                                let permission_response = match result {
+                                                    PermissionResult::Allow(allow) => {
+                                                        let mut resp =
+                                                            serde_json::json!({ "allow": true });
+                                                        if let Some(input) = allow.updated_input {
+                                                            resp["input"] = input;
+                                                        }
+                                                        if let Some(perms) =
+                                                            allow.updated_permissions
+                                                        {
+                                                            resp["updatedPermissions"] =
+                                                                serde_json::to_value(perms)
+                                                                    .unwrap_or_default();
+                                                        }
+                                                        resp
+                                                    },
+                                                    PermissionResult::Deny(deny) => {
+                                                        let mut resp =
+                                                            serde_json::json!({ "allow": false });
+                                                        if !deny.message.is_empty() {
+                                                            resp["reason"] =
+                                                                serde_json::json!(deny.message);
+                                                        }
+                                                        if deny.interrupt {
+                                                            resp["interrupt"] =
+                                                                serde_json::json!(true);
+                                                        }
+                                                        resp
+                                                    },
+                                                };
+
+                                                let response = serde_json::json!({
+                                                    "subtype": "success",
+                                                    "request_id": Self::extract_request_id(&control_message),
+                                                    "response": permission_response
+                                                });
+                                                let mut transport =
+                                                    transport_for_control.lock().await;
+                                                if let Err(e) = transport
+                                                    .send_sdk_control_response(response)
+                                                    .await
+                                                {
                                                     error!(
-                                                        "Failed to parse hook input: {}",
-                                                        parse_err
+                                                        "Failed to send permission response (fallback): {}",
+                                                        e
                                                     );
-                                                    // Return error using MessageParseError
-                                                    Err(crate::errors::SdkError::MessageParseError {
+                                                }
+                                            } else {
+                                                Self::send_control_error(
+                                                &transport_for_control,
+                                                &control_message,
+                                                "Invalid can_use_tool request or no callback registered"
+                                                    .to_string(),
+                                            )
+                                            .await;
+                                            }
+                                        }
+                                    },
+                                    "hook_callback" => {
+                                        // Handle hook callback with strongly-typed inputs/outputs
+                                        if let Ok(request) =
+                                            serde_json::from_value::<SDKHookCallbackRequest>(
+                                                request_data.clone(),
+                                            )
+                                        {
+                                            let callbacks = hook_callbacks_clone.read().await;
+
+                                            if let Some(callback) =
+                                                callbacks.get(&request.callback_id)
+                                            {
+                                                let context = HookContext { signal: None };
+
+                                                // Try to deserialize input as HookInput
+                                                let hook_result = match serde_json::from_value::<
+                                                    crate::types::HookInput,
+                                                >(
+                                                    request.input.clone()
+                                                ) {
+                                                    Ok(hook_input) => {
+                                                        // Call the hook with strongly-typed input
+                                                        callback
+                                                            .execute(
+                                                                &hook_input,
+                                                                request.tool_use_id.as_deref(),
+                                                                &context,
+                                                            )
+                                                            .await
+                                                    },
+                                                    Err(parse_err) => {
+                                                        error!(
+                                                            "Failed to parse hook input: {}",
+                                                            parse_err
+                                                        );
+                                                        // Return error using MessageParseError
+                                                        Err(crate::errors::SdkError::MessageParseError {
                                                         error: format!("Invalid hook input: {parse_err}"),
                                                         raw: request.input.to_string(),
                                                     })
-                                                },
-                                            };
+                                                    },
+                                                };
 
-                                            // Handle hook result
-                                            let response_json = match hook_result {
-                                                Ok(hook_output) => {
-                                                    // Serialize HookJSONOutput to JSON
-                                                    let output_value = serde_json::to_value(
+                                                // Handle hook result
+                                                let response_json = match hook_result {
+                                                    Ok(hook_output) => {
+                                                        // Serialize HookJSONOutput to JSON
+                                                        let output_value = serde_json::to_value(
                                                         &hook_output,
                                                     )
                                                     .unwrap_or_else(|e| {
@@ -594,105 +654,6 @@ impl Query {
                                                         serde_json::json!({})
                                                     });
 
-                                                    serde_json::json!({
-                                                        "subtype": "success",
-                                                        "request_id": Self::extract_request_id(&control_message),
-                                                        "response": output_value
-                                                    })
-                                                },
-                                                Err(e) => {
-                                                    error!("Hook callback failed: {}", e);
-                                                    serde_json::json!({
-                                                        "subtype": "error",
-                                                        "request_id": Self::extract_request_id(&control_message),
-                                                        "error": e.to_string()
-                                                    })
-                                                },
-                                            };
-
-                                            let mut transport = transport_for_control.lock().await;
-                                            if let Err(e) = transport
-                                                .send_sdk_control_response(response_json)
-                                                .await
-                                            {
-                                                error!(
-                                                    "Failed to send hook callback response: {}",
-                                                    e
-                                                );
-                                            }
-                                        } else {
-                                            warn!(
-                                                "No hook callback found for ID: {}",
-                                                request.callback_id
-                                            );
-                                            // Send error response
-                                            let error_response = serde_json::json!({
-                                                "subtype": "error",
-                                                "request_id": Self::extract_request_id(&control_message),
-                                                "error": format!("No hook callback found for ID: {}", request.callback_id)
-                                            });
-                                            let mut transport = transport_for_control.lock().await;
-                                            if let Err(e) = transport
-                                                .send_sdk_control_response(error_response)
-                                                .await
-                                            {
-                                                error!("Failed to send error response: {}", e);
-                                            }
-                                        }
-                                    } else {
-                                        // Fallback for snake_case fields (callback_id, tool_use_id)
-                                        let callback_id = request_data
-                                            .get("callback_id")
-                                            .and_then(|v| v.as_str());
-                                        let tool_use_id = request_data
-                                            .get("tool_use_id")
-                                            .and_then(|v| v.as_str())
-                                            .map(|s| s.to_string());
-                                        let input = request_data
-                                            .get("input")
-                                            .cloned()
-                                            .unwrap_or(serde_json::json!({}));
-
-                                        if let Some(callback_id) = callback_id {
-                                            let callbacks = hook_callbacks_clone.read().await;
-                                            if let Some(callback) = callbacks.get(callback_id) {
-                                                let context = HookContext { signal: None };
-
-                                                // Try to parse as HookInput
-                                                let hook_result = match serde_json::from_value::<
-                                                    crate::types::HookInput,
-                                                >(
-                                                    input.clone()
-                                                ) {
-                                                    Ok(hook_input) => {
-                                                        callback
-                                                            .execute(
-                                                                &hook_input,
-                                                                tool_use_id.as_deref(),
-                                                                &context,
-                                                            )
-                                                            .await
-                                                    },
-                                                    Err(parse_err) => {
-                                                        error!(
-                                                            "Failed to parse hook input (fallback): {}",
-                                                            parse_err
-                                                        );
-                                                        Err(crate::errors::SdkError::MessageParseError {
-                                                            error: format!("Invalid hook input: {parse_err}"),
-                                                            raw: input.to_string(),
-                                                        })
-                                                    },
-                                                };
-
-                                                let response_json = match hook_result {
-                                                    Ok(hook_output) => {
-                                                        let output_value = serde_json::to_value(&hook_output)
-                                                            .unwrap_or_else(|e| {
-                                                                error!("Failed to serialize hook output (fallback): {}", e);
-                                                                serde_json::json!({})
-                                                            });
-
                                                         serde_json::json!({
                                                             "subtype": "success",
                                                             "request_id": Self::extract_request_id(&control_message),
@@ -700,10 +661,7 @@ impl Query {
                                                         })
                                                     },
                                                     Err(e) => {
-                                                        error!(
-                                                            "Hook callback failed (fallback): {}",
-                                                            e
-                                                        );
+                                                        error!("Hook callback failed: {}", e);
                                                         serde_json::json!({
                                                             "subtype": "error",
                                                             "request_id": Self::extract_request_id(&control_message),
@@ -719,40 +677,159 @@ impl Query {
                                                     .await
                                                 {
                                                     error!(
-                                                        "Failed to send hook callback response (fallback): {}",
+                                                        "Failed to send hook callback response: {}",
                                                         e
                                                     );
                                                 }
                                             } else {
                                                 warn!(
                                                     "No hook callback found for ID: {}",
-                                                    callback_id
+                                                    request.callback_id
                                                 );
+                                                // Send error response
+                                                let error_response = serde_json::json!({
+                                                    "subtype": "error",
+                                                    "request_id": Self::extract_request_id(&control_message),
+                                                    "error": format!("No hook callback found for ID: {}", request.callback_id)
+                                                });
+                                                let mut transport =
+                                                    transport_for_control.lock().await;
+                                                if let Err(e) = transport
+                                                    .send_sdk_control_response(error_response)
+                                                    .await
+                                                {
+                                                    error!("Failed to send error response: {}", e);
+                                                }
                                             }
                                         } else {
-                                            warn!(
-                                                "Invalid hook_callback control message: missing callback_id"
-                                            );
-                                        }
-                                    }
-                                },
-                                "mcp_message" => {
-                                    // Handle MCP message
-                                    if let Some(server_name) =
-                                        request_data.get("server_name").and_then(|v| v.as_str())
-                                        && let Some(message) = request_data.get("message")
-                                    {
-                                        debug!(
-                                            "Processing MCP message for SDK server: {}",
-                                            server_name
-                                        );
+                                            // Fallback for snake_case fields (callback_id, tool_use_id)
+                                            let callback_id = request_data
+                                                .get("callback_id")
+                                                .and_then(|v| v.as_str());
+                                            let tool_use_id = request_data
+                                                .get("tool_use_id")
+                                                .and_then(|v| v.as_str())
+                                                .map(|s| s.to_string());
+                                            let input = request_data
+                                                .get("input")
+                                                .cloned()
+                                                .unwrap_or(serde_json::json!({}));
 
-                                        // Check if we have an SDK server with this name
-                                        if let Some(server_arc) =
-                                            sdk_mcp_servers_clone.get(server_name)
+                                            if let Some(callback_id) = callback_id {
+                                                let callbacks = hook_callbacks_clone.read().await;
+                                                if let Some(callback) = callbacks.get(callback_id) {
+                                                    let context = HookContext { signal: None };
+
+                                                    // Try to parse as HookInput
+                                                    let hook_result = match serde_json::from_value::<
+                                                        crate::types::HookInput,
+                                                    >(
+                                                        input.clone()
+                                                    ) {
+                                                        Ok(hook_input) => {
+                                                            callback
+                                                                .execute(
+                                                                    &hook_input,
+                                                                    tool_use_id.as_deref(),
+                                                                    &context,
+                                                                )
+                                                                .await
+                                                        },
+                                                        Err(parse_err) => {
+                                                            error!(
+                                                                "Failed to parse hook input (fallback): {}",
+                                                                parse_err
+                                                            );
+                                                            Err(crate::errors::SdkError::MessageParseError {
+                                                            error: format!("Invalid hook input: {parse_err}"),
+                                                            raw: input.to_string(),
+                                                        })
+                                                        },
+                                                    };
+
+                                                    let response_json = match hook_result {
+                                                        Ok(hook_output) => {
+                                                            let output_value = serde_json::to_value(&hook_output)
+                                                            .unwrap_or_else(|e| {
+                                                                error!("Failed to serialize hook output (fallback): {}", e);
+                                                                serde_json::json!({})
+                                                            });
+
+                                                            serde_json::json!({
+                                                                "subtype": "success",
+                                                                "request_id": Self::extract_request_id(&control_message),
+                                                                "response": output_value
+                                                            })
+                                                        },
+                                                        Err(e) => {
+                                                            error!(
+                                                                "Hook callback failed (fallback): {}",
+                                                                e
+                                                            );
+                                                            serde_json::json!({
+                                                                "subtype": "error",
+                                                                "request_id": Self::extract_request_id(&control_message),
+                                                                "error": e.to_string()
+                                                            })
+                                                        },
+                                                    };
+
+                                                    let mut transport =
+                                                        transport_for_control.lock().await;
+                                                    if let Err(e) = transport
+                                                        .send_sdk_control_response(response_json)
+                                                        .await
+                                                    {
+                                                        error!(
+                                                            "Failed to send hook callback response (fallback): {}",
+                                                            e
+                                                        );
+                                                    }
+                                                } else {
+                                                    warn!(
+                                                        "No hook callback found for ID: {}",
+                                                        callback_id
+                                                    );
+                                                    Self::send_control_error(
+                                                    &transport_for_control,
+                                                    &control_message,
+                                                    format!(
+                                                        "No hook callback found for ID: {callback_id}"
+                                                    ),
+                                                )
+                                                .await;
+                                                }
+                                            } else {
+                                                warn!(
+                                                    "Invalid hook_callback control message: missing callback_id"
+                                                );
+                                                Self::send_control_error(
+                                                    &transport_for_control,
+                                                    &control_message,
+                                                    "Invalid hook_callback: missing callback_id"
+                                                        .to_string(),
+                                                )
+                                                .await;
+                                            }
+                                        }
+                                    },
+                                    "mcp_message" => {
+                                        // Handle MCP message
+                                        if let Some(server_name) =
+                                            request_data.get("server_name").and_then(|v| v.as_str())
+                                            && let Some(message) = request_data.get("message")
                                         {
-                                            // Try to downcast to SdkMcpServer
-                                            if let Some(sdk_server) = server_arc
+                                            debug!(
+                                                "Processing MCP message for SDK server: {}",
+                                                server_name
+                                            );
+
+                                            // Check if we have an SDK server with this name
+                                            if let Some(server_arc) =
+                                                sdk_mcp_servers_clone.get(server_name)
+                                            {
+                                                // Try to downcast to SdkMcpServer
+                                                if let Some(sdk_server) = server_arc
                                                 .downcast_ref::<crate::sdk_mcp::SdkMcpServer>(
                                             ) {
                                                 // Call the SDK MCP server
@@ -810,33 +887,60 @@ impl Query {
                                                     "SDK server '{}' is not of type SdkMcpServer",
                                                     server_name
                                                 );
+                                                Self::send_control_error(
+                                                    &transport_for_control,
+                                                    &control_message,
+                                                    format!(
+                                                        "Server '{server_name}' is not an SDK MCP server"
+                                                    ),
+                                                )
+                                                .await;
+                                            }
+                                            } else {
+                                                warn!(
+                                                    "No SDK MCP server found with name: {}",
+                                                    server_name
+                                                );
+                                                let error_response = serde_json::json!({
+                                                    "subtype": "error",
+                                                    "request_id": Self::extract_request_id(&control_message),
+                                                    "error": format!("Server '{}' not found", server_name)
+                                                });
+
+                                                let mut transport =
+                                                    transport_for_control.lock().await;
+                                                if let Err(e) = transport
+                                                    .send_sdk_control_response(error_response)
+                                                    .await
+                                                {
+                                                    error!(
+                                                        "Failed to send MCP error response: {}",
+                                                        e
+                                                    );
+                                                }
                                             }
                                         } else {
-                                            warn!(
-                                                "No SDK MCP server found with name: {}",
-                                                server_name
-                                            );
-                                            let error_response = serde_json::json!({
-                                                "subtype": "error",
-                                                "request_id": Self::extract_request_id(&control_message),
-                                                "error": format!("Server '{}' not found", server_name)
-                                            });
-
-                                            let mut transport = transport_for_control.lock().await;
-                                            if let Err(e) = transport
-                                                .send_sdk_control_response(error_response)
-                                                .await
-                                            {
-                                                error!("Failed to send MCP error response: {}", e);
-                                            }
+                                            Self::send_control_error(
+                                            &transport_for_control,
+                                            &control_message,
+                                            "Invalid mcp_message: missing server_name or message"
+                                                .to_string(),
+                                        )
+                                        .await;
                                         }
-                                    }
-                                },
-                                _ => {
-                                    debug!("Unknown SDK control subtype: {}", subtype);
-                                },
+                                    },
+                                    _ => {
+                                        debug!("Unknown SDK control subtype: {}", subtype);
+                                        Self::send_control_error(
+                                            &transport_for_control,
+                                            &control_message,
+                                            format!("Unsupported control subtype: {subtype}"),
+                                        )
+                                        .await;
+                                    },
+                                }
                             }
-                        }
+                        });
                     }
                 }
             });
@@ -1084,5 +1188,165 @@ mod tests {
         assert_eq!(im.session_id, "abc");
         assert_eq!(im.message["role"].as_str().unwrap(), "user");
         assert_eq!(im.message["content"].as_str().unwrap(), "Hi");
+    }
+
+    // --- control loop: every inbound request must get a reply ---
+
+    use crate::types::{
+        ControlRequest, ControlResponse, PermissionResultAllow, ToolPermissionContext as PermCtx,
+    };
+    use async_trait::async_trait;
+    use futures::stream;
+    use std::pin::Pin;
+
+    struct ChannelTransport {
+        control_rx: Option<mpsc::Receiver<JsonValue>>,
+        responses: mpsc::UnboundedSender<JsonValue>,
+    }
+
+    #[async_trait]
+    impl Transport for ChannelTransport {
+        fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+            self
+        }
+        async fn connect(&mut self) -> Result<()> {
+            Ok(())
+        }
+        async fn send_message(&mut self, _m: InputMessage) -> Result<()> {
+            Ok(())
+        }
+        fn receive_messages(
+            &mut self,
+        ) -> Pin<Box<dyn futures::Stream<Item = Result<Message>> + Send + 'static>> {
+            Box::pin(stream::empty())
+        }
+        async fn send_control_request(&mut self, _r: ControlRequest) -> Result<()> {
+            Ok(())
+        }
+        async fn receive_control_response(&mut self) -> Result<Option<ControlResponse>> {
+            Ok(None)
+        }
+        async fn send_sdk_control_request(&mut self, _r: JsonValue) -> Result<()> {
+            Ok(())
+        }
+        async fn send_sdk_control_response(&mut self, r: JsonValue) -> Result<()> {
+            let _ = self.responses.send(r);
+            Ok(())
+        }
+        fn take_sdk_control_receiver(&mut self) -> Option<mpsc::Receiver<JsonValue>> {
+            self.control_rx.take()
+        }
+        fn is_connected(&self) -> bool {
+            true
+        }
+        async fn disconnect(&mut self) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    struct BlockingPerm(Arc<tokio::sync::Notify>);
+
+    #[async_trait]
+    impl CanUseTool for BlockingPerm {
+        async fn can_use_tool(
+            &self,
+            _tool_name: &str,
+            _input: &JsonValue,
+            _context: &PermCtx,
+        ) -> PermissionResult {
+            self.0.notified().await;
+            PermissionResult::Allow(PermissionResultAllow {
+                updated_input: None,
+                updated_permissions: None,
+            })
+        }
+    }
+
+    async fn start_query(
+        can_use_tool: Option<Arc<dyn CanUseTool>>,
+    ) -> (mpsc::Sender<JsonValue>, mpsc::UnboundedReceiver<JsonValue>) {
+        let (ctl_tx, ctl_rx) = mpsc::channel(16);
+        let (resp_tx, resp_rx) = mpsc::unbounded_channel();
+        let transport: Box<dyn Transport + Send> = Box::new(ChannelTransport {
+            control_rx: Some(ctl_rx),
+            responses: resp_tx,
+        });
+        let mut q = Query::new(
+            Arc::new(Mutex::new(transport)),
+            true,
+            can_use_tool,
+            None,
+            HashMap::new(),
+        );
+        q.start().await.unwrap();
+        (ctl_tx, resp_rx)
+    }
+
+    async fn next_reply(rx: &mut mpsc::UnboundedReceiver<JsonValue>) -> JsonValue {
+        timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("control request got no reply")
+            .expect("channel closed")
+    }
+
+    #[tokio::test]
+    async fn can_use_tool_without_callback_gets_error_reply() {
+        let (tx, mut rx) = start_query(None).await;
+        tx.send(serde_json::json!({
+            "type": "control_request", "request_id": "r1",
+            "request": {"subtype": "can_use_tool", "tool_name": "Bash", "input": {}}
+        }))
+        .await
+        .unwrap();
+        let reply = next_reply(&mut rx).await;
+        assert_eq!(reply["subtype"], "error");
+        assert_eq!(reply["request_id"], "r1");
+    }
+
+    #[tokio::test]
+    async fn unknown_subtype_and_unknown_hook_get_error_reply() {
+        let (tx, mut rx) = start_query(None).await;
+        tx.send(serde_json::json!({
+            "type": "control_request", "request_id": "r2",
+            "request": {"subtype": "something_new"}
+        }))
+        .await
+        .unwrap();
+        let reply = next_reply(&mut rx).await;
+        assert_eq!(reply["subtype"], "error");
+        assert_eq!(reply["request_id"], "r2");
+
+        tx.send(serde_json::json!({
+            "type": "control_request", "request_id": "r3",
+            "request": {"subtype": "hook_callback", "input": {}}
+        }))
+        .await
+        .unwrap();
+        let reply = next_reply(&mut rx).await;
+        assert_eq!(reply["subtype"], "error");
+        assert_eq!(reply["request_id"], "r3");
+    }
+
+    #[tokio::test]
+    async fn slow_callback_does_not_block_other_requests() {
+        let gate = Arc::new(tokio::sync::Notify::new());
+        let (tx, mut rx) = start_query(Some(Arc::new(BlockingPerm(gate.clone())))).await;
+        tx.send(serde_json::json!({
+            "type": "control_request", "request_id": "slow",
+            "request": {"subtype": "can_use_tool", "tool_name": "Bash", "input": {}}
+        }))
+        .await
+        .unwrap();
+        tx.send(serde_json::json!({
+            "type": "control_request", "request_id": "fast",
+            "request": {"subtype": "something_new"}
+        }))
+        .await
+        .unwrap();
+        let reply = next_reply(&mut rx).await;
+        assert_eq!(reply["request_id"], "fast");
+        gate.notify_one();
+        let reply = next_reply(&mut rx).await;
+        assert_eq!(reply["request_id"], "slow");
     }
 }
