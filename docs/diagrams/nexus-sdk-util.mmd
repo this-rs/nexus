@@ -1,0 +1,222 @@
+%% name: nexus-sdk-util
+%% covers: claude-code-sdk-rs/src/cli_download.rs, claude-code-sdk-rs/src/model_recommendation.rs, claude-code-sdk-rs/src/perf_utils.rs, claude-code-sdk-rs/src/sdk_mcp.rs, claude-code-sdk-rs/src/token_tracker.rs
+%% verified: 2026-10-01
+flowchart TD
+    subgraph legend["Légende"]
+        direction LR
+        L1["✅ vérifié par un test"]
+        L2["🟠 décidé, non écrit"]
+        L3["🔴 bug / non branché"]
+        L4["⚪ hors dépôt"]
+    end
+
+    %% =================================================================
+    %% 1. Trouver ou installer le CLI — cli_download.rs
+    %% =================================================================
+    subgraph acq["Acquisition du CLI — cli_download.rs"]
+        direction TB
+        ENSURE["✅ ensure_cli(auto_download)<br/>seul point d’entrée public<br/><i>vérifié : HOME et PATH neutralisés, serveur wiremock</i>"]
+        FIND["⚪ find_claude_cli()<br/>transport::subprocess : PATH, cache SDK, emplacements connus"]
+        CACHED["🔴 ensure_cli — branche cache<br/>exige maintenant exists() ET is_file()<br/>branche morte : find_claude_cli teste déjà la même chose<br/><i>vérifié : test rejoué sans le correctif</i>"]
+        NOAUTO["✅ Err CliNotFound<br/>le message explique auto_download_cli(true) et npm install -g<br/><i>vérifié : assertion sur le texte</i>"]
+        DL["✅ download_cli(version, on_progress)<br/>crée le répertoire de cache puis délègue<br/><i>vérifié : cache dans un tempdir</i>"]
+        DLSTUB["🟠 download_cli — stub sans la feature auto-download<br/>renvoie ConfigError : installez manuellement<br/>compilé mais jamais exécuté par un test : aucune cible de test ne tourne sans la feature"]
+        NOCACHE["🟠 ConfigError : cache introuvable<br/>get_cache_dir() ne renvoie None que si dirs::home_dir() échoue — inatteignable depuis un test"]
+        MKDIRKO["✅ ConfigError : Failed to create cache directory<br/><i>vérifié : chemin de cache placé dans un fichier régulier</i>"]
+        PLAT["✅ install_cli_for_platform()<br/>aiguillage cfg(unix) / cfg(windows)"]
+        WIN["🟠 install_cli_windows()<br/>npm puis script PowerShell install.ps1<br/>écrit mais jamais exécuté : cfg(windows), non compilé sur l’hôte de mesure"]
+
+        ENSURE --> FIND
+        FIND -->|"Ok — un CLI existe déjà"| RET["✅ Ok(chemin)"]
+        FIND -->|"Err"| CACHED
+        CACHED -->|"absent ou pas un fichier"| AUTO{"auto_download ?"}
+        AUTO -->|"false — refus"| NOAUTO
+        AUTO -->|"true"| DL
+        DL -->|"cache indéterminable"| NOCACHE
+        DL -->|"mkdir impossible"| MKDIRKO
+        DL -->|"répertoire prêt"| PLAT
+        PLAT --> WIN
+        AUTO -->|"true, mais feature auto-download absente"| DLSTUB
+    end
+
+    subgraph unixinst["Installation Unix — install_cli_unix()"]
+        direction TB
+        UNIX["✅ install_cli_unix(version, target, on_progress)<br/>progress(0, None) puis progress(100, Some(100)) en cas de succès<br/><i>vérifié : rappels de progression collectés</i>"]
+        GET["✅ GET claude.ai/install.sh<br/>URL injectée par test_override, compilé uniquement en build de test<br/><i>vérifié : wiremock ; un test d’intégration prouve que l’override est inerte hors cfg(test)</i>"]
+        HTTPKO["✅ statut non 2xx → warn puis repli npm<br/><i>vérifié : réponses 404 et 503</i>"]
+        NOPARENT["✅ target.parent() == None → abandon du script<br/><i>vérifié : cible = /</i>"]
+        BASH["✅ bash -c script, CLAUDE_INSTALL_DIR = parent de la cible<br/><i>vérifié : script servi localement qui dépose un fichier</i>"]
+        BASHKO["✅ sortie non nulle → warn(stderr), repli npm<br/>find_claude_cli n’est PAS consulté ici<br/><i>vérifié : script exit 3</i>"]
+        OKTARGET["✅ la cible existe → Ok(cible)"]
+        LOOKUP["✅ le script a menti : repli sur find_claude_cli() puis find_cli_in_known_locations()<br/>renvoie un CLI qu’il n’a pas installé<br/><i>vérifié : script exit 0 sans rien écrire</i>"]
+        KNOWN["🔴 find_cli_in_known_locations()<br/>HOME/.local/bin/claude, HOME/.claude/local/claude, /usr/local/bin/claude — ignore les répertoires (is_file)<br/>repli INATTEIGNABLE : find_claude_cli teste déjà ces trois chemins avec le même exists() ET is_file()<br/><i>vérifié : la fonction elle-même testée avec un HOME temporaire</i>"]
+        NPMGATE{"which(npm) ?"}
+        NPMKO["✅ Err CliNotFound<br/>install script and npm both failed<br/><i>vérifié : chemin npm inexistant</i>"]
+        NPMPKG["✅ spec npm : latest → paquet non épinglé, sinon @anthropic-ai/claude-code@version<br/><i>vérifié : argv enregistré par un faux npm</i>"]
+        NPMTMP["🔴 répertoire de travail fixe : temp_dir()/cc-sdk-npm-install<br/>supprimé puis recréé à chaque appel — deux installations concurrentes s’écrasent<br/>un FICHIER résiduel à ce chemin bloque le repli npm pour toujours : remove_dir_all ne supprime que des répertoires<br/>to_str().unwrap() panique si le TMPDIR n’est pas de l’UTF-8<br/><i>vérifié : ConfigError Failed to create temp directory</i>"]
+        NPMCOPY["✅ copie vers la cible puis chmod 0755<br/>répertoire de cache absent → ConfigError Failed to copy CLI to cache<br/>les deux erreurs de permissions qui suivent sont inatteignables : le fichier vient d’être créé par nous<br/><i>vérifié : mode du fichier relu, cible sans parent</i>"]
+        NPMNOBIN["✅ npm a réussi sans node_modules/.bin/claude → Err CliNotFound<br/><i>vérifié : faux npm qui ne dépose rien</i>"]
+
+        UNIX --> GET
+        GET --> HTTPKO
+        GET --> NOPARENT
+        GET --> BASH
+        BASH --> BASHKO
+        BASH --> OKTARGET
+        BASH --> LOOKUP
+        LOOKUP -->|"jamais atteint"| KNOWN
+        HTTPKO --> NPMGATE
+        BASHKO --> NPMGATE
+        LOOKUP -->|"rien trouvé"| NPMGATE
+        NPMGATE -->|"absent — refus"| NPMKO
+        NPMGATE -->|"présent"| NPMPKG
+        NPMPKG --> NPMTMP
+        NPMTMP --> NPMCOPY
+        NPMTMP --> NPMNOBIN
+    end
+
+    subgraph version["Version publiée — check_latest_npm_version()"]
+        direction TB
+        VER["✅ check_latest_npm_version()<br/>client reqwest, timeout 10 s, Accept: application/json<br/><i>vérifié : wiremock, en-tête affirmé</i>"]
+        VERNONE["✅ None sur : statut non 2xx, corps non JSON, champ version absent, version non textuelle, version illisible<br/>aucune erreur n’est propagée<br/><i>vérifié : un test par cas</i>"]
+        VEROK["✅ Some(SemVer) — 2.1 devient 2.1.0"]
+        VERSTUB["✅ stub None sans la feature auto-download<br/>corrigé : la crate ne compilait pas avec default-features = false<br/><i>vérifié : cargo check --no-default-features</i>"]
+        VER --> VERNONE
+        VER --> VEROK
+        VER --> VERSTUB
+    end
+
+    subgraph cache["Cache local — get_cache_dir() / is_cli_cached()"]
+        direction TB
+        CDIR["✅ get_cache_dir()<br/>macOS : HOME/Library/Caches/cc-sdk/cli — autres : dirs::cache_dir()/cc-sdk/cli<br/><i>vérifié : assertions par plateforme</i>"]
+        CPATH["✅ get_cached_cli_path() → cache/claude ou claude.exe"]
+        CACHEDOK["✅ is_cli_cached() exige un fichier ET un bit d’exécution<br/>0644 refusé, 0755 accepté, répertoire refusé<br/><i>vérifié : permissions posées dans un tempdir</i>"]
+        CDIR --> CPATH --> CACHEDOK
+    end
+
+    %% =================================================================
+    %% 2. Budget de jetons — token_tracker.rs
+    %% =================================================================
+    subgraph budget["Budget — token_tracker.rs"]
+        direction TB
+        UPD["✅ BudgetManager::update_usage(in, out, cost)<br/>additionne puis évalue, jamais l’inverse<br/><i>vérifié : journal tracing capturé</i>"]
+        NOLIMIT["✅ aucune limite posée → aucun rappel, aucun journal<br/>is_exceeded() reste false même à 2 M de jetons<br/><i>vérifié : rappel compté à zéro</i>"]
+        CHECK["✅ BudgetLimit::check_limits(usage)<br/>coût d’abord, jetons ensuite"]
+        COSTEX["✅ ratio coût ≥ 1.0 → Exceeded<br/>la borne exacte est Exceeded, pas Warning"]
+        COSTWARN["✅ ratio coût ≥ seuil → Warning avec le message Cost usage at X%"]
+        TOKEX["✅ ratio jetons ≥ 1.0 → Exceeded (écrase un Warning de coût)"]
+        TOKWARN["✅ ratio jetons ≥ seuil → Warning<br/>le garde matches!(Exceeded) empêche la rétrogradation, mais le message jetons écrase celui du coût<br/><i>vérifié : les deux ordres testés</i>"]
+        NANHOLE["🔴 cap à 0 ou négatif : 0/0 donne NaN, un cap négatif un ratio négatif<br/>toute comparaison est fausse → budget silencieusement illimité<br/>with_cost() et with_tokens() ne valident rien<br/><i>vérifié : tests qui épinglent le comportement actuel, non corrigé</i>"]
+        CLAMP["🔴 with_warning_threshold() clampe au lieu de refuser<br/>seuil 0.0 → Warning dès 0 jeton consommé ; f64::NAN se propage et désarme l’alerte<br/><i>vérifié : seuils -1.0, 5.0 et NAN</i>"]
+        WARNONCE["✅ Warning : rappel une seule fois (warning_fired)<br/>réarmé par set_limit(), clear_limit() et reset_usage()<br/><i>vérifié : compteur d’appels</i>"]
+        EXEVERY["✅ Exceeded : rappel à CHAQUE mise à jour, sans dédoublonnage<br/>asymétrie assumée avec Warning<br/><i>vérifié : trois mises à jour, trois appels</i>"]
+        OVERFLOW["🔴 total_tokens() additionne deux u64 sans saturation<br/>panique en build debug sur des compteurs absurdes — non testé, entrée irréaliste"]
+
+        UPD --> NOLIMIT
+        UPD --> CHECK
+        CHECK --> COSTEX
+        CHECK --> COSTWARN
+        CHECK --> TOKEX
+        CHECK --> TOKWARN
+        CHECK --> NANHOLE
+        CHECK --> CLAMP
+        COSTWARN --> WARNONCE
+        TOKWARN --> WARNONCE
+        COSTEX --> EXEVERY
+        TOKEX --> EXEVERY
+        CHECK --> OVERFLOW
+    end
+
+    %% =================================================================
+    %% 3. Utilitaires de performance — perf_utils.rs
+    %% =================================================================
+    subgraph perf["Performance — perf_utils.rs"]
+        direction TB
+        RETRY["✅ RetryConfig::retry(f)<br/>rejoue tant que retries reste inférieur à max_retries<br/><i>vérifié : horloge Tokio en pause</i>"]
+        RETRYOK["✅ Ok au premier succès, même après des échecs"]
+        RETRYJIT["✅ gigue = rand × delay × jitter_factor, puis abs()<br/>le délai ne peut donc que s’allonger, jamais se raccourcir<br/><i>vérifié : jitter_factor 1.0, durée écoulée minorée</i>"]
+        RETRYBACK["✅ backoff : delay × multiplier, borné par max_delay<br/>la gigue n’est PAS bornée par max_delay"]
+        RETRYERR["✅ retries épuisés → la DERNIÈRE erreur est renvoyée<br/><i>vérifié : messages numérotés</i>"]
+        BATCH["✅ MessageBatcher::run()<br/>timeout(max_wait_time, recv())"]
+        BFULL["✅ buffer ≥ max_batch_size → emit_batch()"]
+        BCLOSE["✅ entrée fermée → vide le buffer puis sort de la boucle"]
+        BTIME["✅ délai écoulé → émet un lot partiel<br/>délai écoulé à vide → ne publie rien et continue d’attendre<br/><i>vérifié : start_paused, aucun sleep réel</i>"]
+        BEMPTY["✅ emit_batch() sur buffer vide → retour immédiat, aucun lot vide publié<br/>garde défensive : les trois appelants testent déjà is_empty()<br/><i>vérifié : appel direct de la méthode privée</i>"]
+        BLOST["✅ récepteur disparu → warn et lot perdu<br/>le buffer est drainé AVANT l’envoi, donc les messages sont détruits<br/><i>vérifié : récepteur droppé</i>"]
+        METRICS["🔴 PerformanceMetrics::record_success<br/>min_latency_ms traite 0 comme non initialisé : un échantillon réel à 0 ms est écrasé par le suivant<br/><i>vérifié : record_success(0) puis record_success(5) donne min = 5</i>"]
+
+        RETRY --> RETRYOK
+        RETRY --> RETRYJIT --> RETRYBACK
+        RETRY --> RETRYERR
+        BATCH --> BFULL
+        BATCH --> BCLOSE
+        BATCH --> BTIME
+        BFULL --> BEMPTY
+        BTIME --> BEMPTY
+        BEMPTY --> BLOST
+    end
+
+    %% =================================================================
+    %% 4. Serveur MCP en processus — sdk_mcp.rs
+    %% =================================================================
+    subgraph mcp["MCP en processus — sdk_mcp.rs"]
+        direction TB
+        CALLER["⚪ internal_query : control_request subtype mcp_message<br/>downcast_ref vers SdkMcpServer puis send_sdk_control_response"]
+        HM["✅ SdkMcpServer::handle_message(value)<br/>aiguillage sur method<br/><i>vérifié : un test par branche</i>"]
+        NOMETHOD["✅ method absente ou non textuelle → Err InvalidState<br/>erreur HORS bande : c’est internal_query qui fabrique subtype error<br/><i>vérifié : method entière</i>"]
+        INIT["✅ initialize → protocolVersion 2024-11-05, capabilities.tools vide, serverInfo"]
+        LIST["✅ tools/list → tableau vide si aucun outil, jamais null<br/>republie inputSchema et required"]
+        CALL["✅ tools/call"]
+        CALLKO["✅ Err InvalidState si params absent, name absent, ou outil inconnu"]
+        CALLARGS["✅ arguments absent → objet vide ; type non objet transmis tel quel<br/>le schéma annoncé n’est JAMAIS validé, required est ignoré<br/><i>vérifié : outil exigeant name appelé sans argument</i>"]
+        DUP["✅ noms d’outils dupliqués acceptés par add_tool, le premier inscrit gagne<br/><i>vérifié : deux handlers distincts</i>"]
+        CALLOK["✅ réponse : result.content sérialisé, isError repris du ToolResult<br/>isError null quand l outil ne le renseigne pas"]
+        CALLERR["✅ handler Err → remonté à l’appelant, pas d erreur JSON-RPC en bande"]
+        NOTIF["✅ notifications/initialized → répond quand même<br/>JSON-RPC interdit de répondre à une notification, mais la requête de contrôle qui l’enveloppe exige une réponse — sans id<br/><i>vérifié : forme exacte affirmée</i>"]
+        UNKNOWN["✅ méthode inconnue → erreur EN bande, code -32601, id repris"]
+        WIRE["✅ ToolResult sérialise is_error, le fil MCP attend isError<br/>la correspondance est faite à la main dans handle_message<br/><i>vérifié : les deux formes épinglées</i>"]
+
+        CALLER --> HM
+        HM --> NOMETHOD
+        HM --> INIT
+        HM --> LIST
+        HM --> CALL
+        CALL --> CALLKO
+        CALL --> CALLARGS
+        CALL --> DUP
+        CALL --> CALLOK
+        CALL --> CALLERR
+        CALLOK --> WIRE
+        HM --> NOTIF
+        HM --> UNKNOWN
+    end
+
+    %% =================================================================
+    %% 5. Choix de modèle — model_recommendation.rs
+    %% =================================================================
+    subgraph reco["Choix de modèle — model_recommendation.rs"]
+        direction TB
+        SUG["✅ ModelRecommendation::suggest(task_type)<br/>recherche exacte dans la table<br/><i>vérifié : casse et espaces</i>"]
+        SUGNONE["✅ absent → None, aucun repli, aucune normalisation<br/>Simple et  simple ne trouvent rien"]
+        DEF["✅ with_defaults() : 14 entrées, 3 niveaux<br/>haiku-3-5, sonnet-4-5, opus-4-7"]
+        CUSTOM["✅ custom() ne valide rien : table vide, clé vide et modèle vide acceptés"]
+        COST["✅ estimate_cost_multiplier(model)<br/>table d’alias exacte, haiku 1.0, sonnet 5.0, opus 15.0"]
+        COSTUNK["🔴 modèle inconnu → 5.0 silencieusement<br/>claude-haiku-4-5 et claude-opus-4-5 sont absents de la table : un Haiku est facturé comme un Sonnet<br/>divergence avec claude-code-api/src/models/claude.rs<br/><i>vérifié : test qui épingle l’écart, non corrigé</i>"]
+        CONS["✅ cohérence interne : chaque modèle recommandé par défaut a un prix explicite, et le prix croît de cheapest à balanced puis à best<br/><i>vérifié : parcours de toute la table</i>"]
+
+        SUG --> SUGNONE
+        SUG --> DEF
+        SUG --> CUSTOM
+        DEF --> COST
+        COST --> COSTUNK
+        COST --> CONS
+    end
+
+    %% =================================================================
+    %% Liens entre domaines
+    %% =================================================================
+    PLAT -->|"cfg(unix)"| UNIX
+    CACHED -.->|"get_cached_cli_path()"| CPATH
+    DL -.->|"get_cache_dir()"| CDIR
+    OKTARGET -.->|"le binaire est désormais dans le cache"| CACHEDOK
+    VER -.->|"comparé à MIN_CLI_VERSION 2.1.280"| ENSURE
