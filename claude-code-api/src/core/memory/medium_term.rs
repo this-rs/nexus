@@ -394,6 +394,9 @@ impl ContextualMemoryProvider for MediumTermMemory {
                 let plans = self.search_plans(query, limit).await?;
                 Ok(plans
                     .into_iter()
+                    // `limit` is documented as a maximum: enforce it here too, in
+                    // case the server returned more than the query string asked for.
+                    .take(limit)
                     .map(|p| {
                         let content = format!("{}\n\n{}", p.title, p.description);
                         let score = self.calculate_score(query, &content, "plan");
@@ -419,6 +422,7 @@ impl ContextualMemoryProvider for MediumTermMemory {
                 let tasks = self.search_tasks(query, limit).await?;
                 Ok(tasks
                     .into_iter()
+                    .take(limit)
                     .map(|t| {
                         let content = format!("{}\n\n{}", t.title, t.description);
                         let score = self.calculate_score(query, &content, "task");
@@ -447,6 +451,7 @@ impl ContextualMemoryProvider for MediumTermMemory {
 
         Ok(decisions
             .into_iter()
+            .take(limit)
             .map(|d| {
                 let content = format!(
                     "{}\n\nRationale: {}\nChosen: {}",
@@ -501,5 +506,43 @@ mod tests {
 
         assert!(score.semantic > 0.0);
         assert_eq!(score.scope, 0.9); // decision has highest scope
+    }
+
+    /// Les quatre appelants de `calculate_score` ne passent que « plan »,
+    /// « task », « decision » et « note » : le bras par défaut du `match` n'est
+    /// atteignable que d'ici, et il accorde une portée neutre plutôt que de
+    /// refuser un type inconnu.
+    #[test]
+    fn calculate_score_gives_an_unknown_entity_type_a_neutral_scope() {
+        let memory = MediumTermMemory::new(McpConfig {
+            url: "http://orchestrateur.invalide".to_string(),
+            api_key: None,
+        });
+
+        let score = memory.calculate_score("alpha", "contenu alpha", "milestone");
+
+        assert_eq!(score.scope, 0.5, "type inconnu : portée neutre");
+        assert_eq!(score.semantic, 1.0);
+        assert_eq!(
+            score.recency, 0.5,
+            "la récence est figée pour l'étage médian, jamais calculée"
+        );
+        // 1.0 * 0.5 + 0.5 * 0.3 + 0.5 * 0.2
+        assert!((score.combined - 0.75).abs() < 1e-9);
+    }
+
+    /// Une requête sans mot donne `semantic = 0.0` au lieu de diviser par zéro.
+    #[test]
+    fn calculate_score_scores_zero_semantic_when_the_query_has_no_words() {
+        let memory = MediumTermMemory::new(McpConfig {
+            url: "http://orchestrateur.invalide".to_string(),
+            api_key: None,
+        });
+
+        assert_eq!(memory.calculate_score("", "contenu", "plan").semantic, 0.0);
+        assert_eq!(
+            memory.calculate_score(" \t\n", "contenu", "plan").semantic,
+            0.0
+        );
     }
 }
