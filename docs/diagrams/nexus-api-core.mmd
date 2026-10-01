@@ -1,6 +1,6 @@
 %% name: nexus-api-core
 %% covers: claude-code-api/src/core/auth.rs, claude-code-api/src/core/cache.rs, claude-code-api/src/core/claude_manager.rs, claude-code-api/src/core/config.rs, claude-code-api/src/core/conversation.rs, claude-code-api/src/core/interactive_session.rs, claude-code-api/src/core/model_registry.rs, claude-code-api/src/core/objective_tracker.rs, claude-code-api/src/core/process_pool.rs, claude-code-api/src/core/retry.rs, claude-code-api/src/core/session_manager.rs
-%% verified: 2026-10-01
+%% verified: 2026-10-02
 flowchart TD
     subgraph legend["Légende"]
         direction LR
@@ -104,9 +104,9 @@ flowchart TD
 
     %% ─────────────────── autour de la requête ───────────────────
     subgraph req["Autour de la requête HTTP"]
-        auth_mw["🔴 auth_middleware()<br/>accepte tout en-tête commençant par Bearer<br/>sans jamais appeler verify_token()<br/>et n'est monté sur aucune route"]
+        auth_mw["✅ auth_middleware()<br/>vérifie le jeton par verify_token() et insère les Claims<br/>monté par from_fn_with_state quand auth.enabled vaut true<br/>/health exempté par UNAUTHENTICATED_PATHS"]
         auth_mw -->|"en-tête absent ou mal formé"| auth_ko["🟠 401 UNAUTHORIZED"]
-        auth_mgr["🔴 AuthManager::generate_token() / verify_token()<br/>HS256 sur auth.secret_key<br/>écrit, appelé par personne"]
+        auth_mgr["✅ AuthManager::verify_token() appelé par le middleware<br/>HS256 sur auth.secret_key, exp vérifié<br/>🟠 generate_token() sans appelant de production :<br/>aucune route ne frappe de jeton"]
         cache["🟠 ResponseCache::generate_key()<br/>SHA-256 de model + rôles + contenus<br/>appelé par api::chat"]
         cache --> cache_get{"🟠 get()"}
         cache_get -->|"enabled=false"| cache_off["🟠 None sans regarder la map"]
