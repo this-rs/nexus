@@ -1,12 +1,12 @@
 %% name: po-bugs
 %% covers: nexus:docs/BUGS.md nexus:claude-code-api/tests/bug_registry.rs
 %% verified: 8ac7830
-%%
+%% 
 %% Le sha ci-dessus est l'etat du depot contre lequel les CONSTATS ont ete
 %% releves. Les verdicts par bug ont ete releves le 01/10/2026 contre
 %% origin/main des depots backend et frontend, et non contre le rapport du
 %% 30/09 qui les proposait.
-%%
+%% 
 %% PROUVE
 %%   - Les treize entrees ont ete relues dans le code : huit sont fermees,
 %%     cinq sont vivantes. Chaque verdict cite une fonction et un commit.
@@ -17,7 +17,7 @@
 %%   - La porte attrape quatre mutations rejouees sans elle : un glyphe
 %%     change dans la table, une ligne sans noeud, un .mmd non indexe, et
 %%     une ligne ✅ qui ne cite aucun commit.
-%%
+%% 
 %% SOURCES LUES
 %%   - WhereBuilder::add_search_filter, add_assigned_to_filter, add_tags_filter
 %%     (backend src/neo4j/client.rs)
@@ -36,20 +36,20 @@
 %%     protocolApi.triggerEvent (frontend src/services/)
 %%   - parse_registry_rows, parse_diagram_nodes, parse_index
 %%     (claude-code-api/tests/bug_registry.rs)
-%%
+%% 
 %% NON ETABLI
 %%   - Les noeuds 🔴 par domaine (artefact 3 de la convention) : les
 %%     diagrammes backend et frontend n'existent pas encore, tache 0.2.
 %%   - La severite est posee a la main ; aucune regle ne la derive du code.
 %%   - Les memes format!("{:?}") existent sur PlanStatus, NoteStatus,
 %%     StepStatus, ReleaseStatus, MilestoneStatus : non audites ici.
-%%
+%% 
 %% LEGENDE
 %%   ✅ verifie — le noeud dit comment
 %%   🟠 decide, non ecrit — le noeud dit quelle tache l'ecrira
 %%   🔴 refuse ou casse — la raison est dans le noeud
 %%   ⚪ amont — hors perimetre, le noeud dit ou cela vit
-%%
+%% 
 %% Les noeuds citent des noms de fonctions, jamais de numeros de ligne.
 
 flowchart LR
@@ -113,13 +113,14 @@ flowchart LR
     subgraph nexussec["Domain: nexus gateway — claude-code-api (task 1b4d27f2)"]
         b14["image-url-ssrf<br/>sev-high<br/>✅ refuse_unless_public rejects any host that<br/>resolves to a non-public address, before the fetch;<br/>proved by download_image_consults_the_guard<br/>_before_fetching, replayed without the call site"]
         b15["image-url-local-file-read<br/>sev-high<br/>✅ process_image_url's else branch now returns<br/>BadRequest instead of a path; proved by<br/>an_unrecognised_image_url_is_refused_rather<br/>_than_read_as_a_path, replayed without it"]
-        b16["mcp-secrets-in-logs<br/>sev-high<br/>🔴 Debug for Command prints --mcp-config verbatim:<br/>ClaudeManager::create_session_with_message,<br/>InteractiveSessionManager::create_session, query.rs"]
+        b16["mcp-secrets-in-logs<br/>sev-high<br/>✅ all four sites log describe_command_redacted<br/>instead of the Command: create_interactive_session,<br/>create_session_with_message, interactive_session,<br/>query.rs; proved by an_inline_mcp_config_never<br/>_reaches_the_log, kept honest by debug_formatting<br/>_is_what_leaked_and_still_would"]
         b17["api-auth-never-wired<br/>sev-high<br/>🔴 AuthManager and auth_middleware referenced<br/>nowhere outside core/auth.rs; create_app layers<br/>only add_request_id, handle_errors, cors"]
     end
 
     subgraph nexuscorr["What the re-check changed about that report"]
         c1["cited build_router and<br/>test_app_serves_the_production_route_table<br/>🔴 neither exists here; evidence re-derived<br/>against create_app in main.rs"]
-        c2["listed three logging sites<br/>🔴 a fourth is in claude-code-sdk-rs query.rs,<br/>the crate that already defines<br/>describe_command_redacted"]
+        c2["listed three logging sites<br/>✅ a fourth was in claude-code-sdk-rs query.rs,<br/>the crate that already defines<br/>describe_command_redacted; all four now share it,<br/>made pub so copies cannot diverge"]
+        c5["the report named arguments only<br/>🔴 Debug for Command prints environment VALUES<br/>too, so a token passed by env leaked from the<br/>same lines; environment_values_are_replaced<br/>_by_their_names pins that"]
         c3["treated download_image as one bug<br/>🔴 it is two, and they closed separately:<br/>each fix has its own test, and reverting<br/>either one alone turns that test red"]
         c4["DNS rebinding survives the SSRF fix<br/>🟠 the host is resolved twice, here and by<br/>reqwest; pinning the checked address needs a<br/>custom connector — recorded, not implied"]
     end

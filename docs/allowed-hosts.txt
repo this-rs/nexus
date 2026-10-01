@@ -65,3 +65,19 @@ www.npmjs.com
 # Third-party platforms named in the compatibility documentation.
 platform.openai.com
 www.google.com
+
+# Address literals that appear only as the SUBJECTS of refusal tests for the
+# SSRF guard in `api::chat::refuse_unless_public`. The reason to list these is
+# the opposite of the reason above: they are not public hosts the repository
+# talks to, they are addresses it must prove it REFUSES to talk to. Nothing
+# contacts them — the guard rejects them before any request is made, and a
+# literal address resolves without a DNS query, which is what keeps those
+# tests offline.
+#
+# 169.254.169.254 is the cloud instance-metadata address, the whole reason the
+# guard exists; a test that cannot name it cannot prove the refusal.
+169.254.169.254
+127.0.0.1
+# A public literal, so the guard is shown to still allow ordinary fetches —
+# without it, a guard that refused everything would pass its own tests.
+93.184.216.34

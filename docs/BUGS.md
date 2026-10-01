@@ -169,7 +169,7 @@ below the table rather than quietly fixed.
 | `task-status-debug-in-ws-and-compaction` | backend | sev-medium | 🔴 | Two user-visible sites still Debug-format a `TaskStatus`, which has `rename_all = "snake_case"` and no `Display`. `update_task` emits a `CrudEvent` carrying `"Failed"` to the socket; `fetch_active_plans_and_tasks` yields `"inprogress"`, printed into the compaction prompt as `🔄 INPROGRESS`. | **New**, no branch fixes it. PO task `73300ba4` created by this slice. Load-bearing: `on_task_completed_cascade_steps` compares the Debug casing, so both sides must change together. |
 | `image-url-ssrf` | nexus | sev-high | ✅ | `download_image` passed a client-supplied `http(s)` URL straight to `reqwest::get` with no scheme or host allowlist, so `http://169.254.169.254/latest/meta-data/` was reachable from the server. | `refuse_unless_public` resolves the host and refuses unless **every** address is publicly routable, before any request leaves the process. Proved by `download_image_consults_the_guard_before_fetching`, which fails when the call site alone is reverted. Residual: DNS rebinding, see below. |
 | `image-url-local-file-read` | nexus | sev-high | ✅ | `process_image_url`'s final branch was `else { Ok(url.to_string()) }`: anything neither `data:image/` nor `http(s)://` was returned **as a local path** and injected into the prompt as `Image: {path}`. | The branch now returns `BadRequest`. Proved by `an_unrecognised_image_url_is_refused_rather_than_read_as_a_path` over `/etc/passwd`, `file://`, `~/.ssh/id_rsa` and a Windows path; it fails when that branch alone is reverted. |
-| `mcp-secrets-in-logs` | nexus | sev-high | 🔴 | `Debug for Command` prints every argument, so `info!("… with command: {:?}", cmd)` writes the `--mcp-config` payload — which routinely carries tokens — verbatim. Four sites: `ClaudeManager::create_session_with_message` (twice), `InteractiveSessionManager::create_session`, and `claude-code-sdk-rs` `query.rs`. | **New to this registry.** PO task `1b4d27f2`. The SDK already has `describe_command_redacted`; `dc510d5` applied it on one side only. The fourth site, in the SDK's own `query.rs`, was **not** in the task's list — found by this re-check. |
+| `mcp-secrets-in-logs` | nexus | sev-high | ✅ | `Debug for Command` prints every argument, so `info!("… with command: {:?}", cmd)` wrote the `--mcp-config` payload — which routinely carries tokens — verbatim. Four sites, one of them in the SDK's own `query.rs`. | All four now call `describe_command_redacted`, exported from the SDK with `SECRET_BEARING_ARGS` so the gateway reuses it instead of rewriting it. Pinned by `claude-code-api/tests/command_redaction.rs`, whose `debug_formatting_is_what_leaked_and_still_would` keeps the defect itself under test. Landed in `85ab6fc`. |
 | `api-auth-never-wired` | nexus | sev-high | 🔴 | `AuthManager` and `auth_middleware` are referenced nowhere outside `core/auth.rs`; `create_app` layers only `add_request_id`, `handle_errors` and CORS. Setting `auth.enabled = true` therefore does nothing and the gateway serves everything anonymously. | **New to this registry.** PO task `1b4d27f2`. Same class as the backend's `auth-anonymous-without-config`, but here there is not even a documented intent — the switch simply lies. |
 <!-- BUG-TABLE-END -->
 
@@ -193,10 +193,11 @@ one finding is wider than reported.
   branch** — the router is built by `create_app` in `claude-code-api/src/main.rs`,
   and no such test is present. The conclusion stands (auth is unwired) but the
   evidence had to be re-derived, which is why the row cites `create_app`.
-* The secrets-in-logs finding lists three sites in `claude-code-api`. There is
-  a **fourth**, in `claude-code-sdk-rs/src/query.rs` — the same crate that
-  already defines `describe_command_redacted`. A fix applied only to the three
-  named sites would leave the SDK's own path leaking.
+* The secrets-in-logs finding lists three sites in `claude-code-api`. There
+  was a **fourth**, in `claude-code-sdk-rs/src/query.rs` — the same crate that
+  already defined `describe_command_redacted`. A fix applied only to the three
+  named sites would have left the SDK's own path leaking. All four were fixed
+  together, which is why the row is ✅ rather than partially closed.
 * `download_image` is **two** bugs, not one. An allowlist on the fetch closes
   the SSRF and leaves the local-file-read branch untouched, so they are
   tracked separately and must be closed separately.
