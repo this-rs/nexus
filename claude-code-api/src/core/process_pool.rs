@@ -21,7 +21,7 @@
 //!   request answer with nothing.
 //! * [`ProcessPool::release`] — the only way a process ever gets *into* `idle`
 //!   from the serving path — has no caller either.
-//! * [`ProcessPool::maintain_min_idle`], spawned by [`ProcessPool::new`],
+//! * `ProcessPool::maintain_min_idle` (private), spawned by [`ProcessPool::new`],
 //!   nevertheless spawns `min_idle` **real** `claude` children and parks them in
 //!   `idle`. `ProcessPoolConfig::default` sets `min_idle = 2` and
 //!   `config/optimized.toml` sets 3, so a default deployment keeps two CLI

@@ -342,7 +342,17 @@ impl Transcript {
                 let copy = dir
                     .path()
                     .join(format!("fake_claude{}", std::env::consts::EXE_SUFFIX));
-                std::fs::copy(fake_cli_path(), &copy).expect("copy fake_claude");
+                // Hard-link instead of copying when possible. `fs::copy` leaves a
+                // write fd open on the new executable while it is written; if another
+                // test thread forks in that window the child inherits the fd, and
+                // spawning the file then fails with ETXTBSY ("Text file busy") on
+                // Linux. A hard link never opens the binary for writing, and
+                // `current_exe()` still reports the link's own path, so the
+                // `.version` sidecar next to it is found. Fall back to a copy
+                // across filesystems.
+                if std::fs::hard_link(fake_cli_path(), &copy).is_err() {
+                    std::fs::copy(fake_cli_path(), &copy).expect("copy fake_claude");
+                }
                 std::fs::write(copy.with_extension("version"), version)
                     .expect("write version sidecar");
                 copy
