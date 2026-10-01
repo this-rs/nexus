@@ -529,7 +529,10 @@ async fn fake_memory_providers_drive_the_unified_provider() {
     let contents: Vec<&str> = results.iter().map(|r| r.content.as_str()).collect();
     assert_eq!(contents, vec!["court terme", "moyen terme", "long terme"]);
 
-    // One dead tier takes the whole query down: `query` uses `?` on each level.
+    // A dead tier is skipped, not fatal: `query` logs the failure and answers
+    // with what the reachable tiers know. (It used to `?` on each level, so an
+    // unreachable project-orchestrator also cost the caller its short-term
+    // memory — see `core::memory::unified`.)
     let broken = UnifiedMemoryProvider::new(
         Box::new(FakeMemoryProvider::with_texts(&[(
             "s1",
@@ -539,9 +542,25 @@ async fn fake_memory_providers_drive_the_unified_provider() {
         Box::new(FakeMemoryProvider::failing("orchestrator unreachable")),
         Box::new(FakeMemoryProvider::with_texts(&[("l1", "long terme", 0.4)])),
     );
-    assert_eq!(
-        broken.query("auth", 10).await.unwrap_err().to_string(),
-        "orchestrator unreachable"
+    let degraded = broken
+        .query("auth", 10)
+        .await
+        .expect("a dead tier is skipped, not fatal");
+    let degraded_contents: Vec<&str> = degraded.iter().map(|r| r.content.as_str()).collect();
+    assert_eq!(degraded_contents, vec!["court terme", "long terme"]);
+
+    // Only a total outage is an error.
+    let dead = UnifiedMemoryProvider::new(
+        Box::new(FakeMemoryProvider::failing("store unreachable")),
+        Box::new(FakeMemoryProvider::failing("orchestrator unreachable")),
+        Box::new(FakeMemoryProvider::failing("meilisearch unreachable")),
+    );
+    assert!(
+        dead.query("auth", 10)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("every memory level failed")
     );
 }
 
