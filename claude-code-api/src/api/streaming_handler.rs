@@ -88,7 +88,7 @@ impl Drop for SseDisconnectGuard {
 /// Handle streaming response with text chunking for better UX.
 ///
 /// When `session_manager` and `conversation_id` are provided, an
-/// [`SseDisconnectGuard`] is installed that auto-interrupts the CLI if the
+/// `SseDisconnectGuard` is installed that auto-interrupts the CLI if the
 /// HTTP client drops the SSE connection before the stream finishes.
 pub async fn handle_enhanced_streaming_response(
     model: String,
