@@ -59,6 +59,31 @@ after what it changes, so the diagram and the code travel together:
 - `fix/<domain>-<subject>` - a bug fix with its regression test
 - `test/<domain>-<subject>` - tests only, raising coverage of a module
 
+### Diagrams
+
+Architecture and design diagrams live in the repository as standard Mermaid,
+one `docs/diagrams/<name>.mmd` per diagram, rendered natively by GitHub. They
+are reviewed and changed like code, in the same pull request as the code they
+describe. No external service is needed to read, check or update them.
+
+- Index: `docs/diagrams/INDEX.yml` — one entry per diagram, with the globs it
+  owns. Adding a `.mmd` means adding its entry in the same pull request.
+- The charter (naming, the mandatory `%% name` / `%% covers` / `%% verified`
+  header, the ✅ 🟠 🔴 ⚪ status marks, the lifecycle) has a single home, in
+  the main repository: `docs/DOCUMENTATION.md` in
+  [this-rs/project-orchestrator](https://github.com/this-rs/project-orchestrator).
+  It is not copied here, so that there is one version of it rather than two
+  that drift.
+- Checked offline by `claude-code-api/tests/diagram_index.rs`, which runs as
+  part of `cargo test`. It also detects drift: if you change a file a diagram
+  owns, update the diagram, or state in a commit trailer why it still holds:
+
+  ```
+  Diagram-Unchanged: <name> — <reason>
+  ```
+
+  The reason is not optional — a bare name is rejected.
+
 ### Pushing
 
 Always push with an explicit refspec:

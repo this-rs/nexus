@@ -899,6 +899,49 @@ fn every_verified_diagram_obeys_the_header_rules() {
 }
 
 #[test]
+fn every_diagram_file_on_disk_is_indexed_as_verified() {
+    // The other direction of the index check. Without this a `.mmd` can sit in
+    // docs/diagrams/ owning nothing: no `covers`, so the drift check never
+    // fires for it, and no owner, so nobody maintains it. The charter's
+    // lifecycle says creating a diagram means adding its entry in the same
+    // pull request; this is what makes that more than advice.
+    let entries = parse_index(&read_repo_file(INDEX_PATH)).expect("index parses");
+    let verified: BTreeMap<&str, &IndexEntry> = entries
+        .iter()
+        .filter(|e| e.status == "verified")
+        .map(|e| (e.name.as_str(), e))
+        .collect();
+
+    let dir = repo_root().join("docs/diagrams");
+    let mut unindexed = Vec::new();
+    for entry in fs::read_dir(&dir)
+        .expect("docs/diagrams must exist")
+        .flatten()
+    {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("mmd") {
+            continue;
+        }
+        let stem = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .expect("a .mmd file has a name")
+            .to_string();
+        if !verified.contains_key(stem.as_str()) {
+            unindexed.push(stem);
+        }
+    }
+    unindexed.sort();
+    assert!(
+        unindexed.is_empty(),
+        "these diagrams exist in docs/diagrams/ but have no `status: verified` \
+         entry in {INDEX_PATH}: {unindexed:?}. Add an entry with its `covers` \
+         globs in this same pull request — an unindexed diagram owns nothing, \
+         so the drift check can never fire for it and nobody is its owner."
+    );
+}
+
+#[test]
 fn every_local_glob_matches_something_that_exists() {
     // A glob written from prose rather than from the tree silently owns
     // nothing — the diagram then looks authoritative over code it never
