@@ -222,10 +222,138 @@ mod tests {
         );
     }
 
+    /// `CrossConversation` and `KnowledgeNote` share the level-3 arm.
+    #[test]
+    fn cross_conversation_is_also_level_three() {
+        assert_eq!(
+            MemorySource::CrossConversation {
+                conversation_id: "c1".to_string(),
+                message_id: "m1".to_string(),
+            }
+            .level(),
+            3
+        );
+    }
+
+    /// `MemorySource` is externally tagged, so the variant name is part of the
+    /// wire format — renaming one would silently break stored results.
+    #[test]
+    fn memory_source_round_trips_through_json() {
+        let source = MemorySource::KnowledgeNote {
+            note_id: "n1".to_string(),
+            project_id: Some("p1".to_string()),
+        };
+        let json = serde_json::to_value(&source).expect("serializable");
+        assert_eq!(
+            json,
+            serde_json::json!({"KnowledgeNote": {"note_id": "n1", "project_id": "p1"}})
+        );
+        let back: MemorySource = serde_json::from_value(json).expect("deserializable");
+        assert_eq!(back, source);
+    }
+
+    /// The default weights are 50 / 30 / 20 and they sum to 1, so `combined`
+    /// stays inside the range of its components.
     #[test]
     fn test_relevance_score() {
         let score = RelevanceScore::new(0.8, 0.6, 0.4);
         // 0.8 * 0.5 + 0.6 * 0.3 + 0.4 * 0.2 = 0.4 + 0.18 + 0.08 = 0.66
         assert!((score.combined - 0.66).abs() < 0.001);
+        assert!((score.semantic - 0.8).abs() < f64::EPSILON);
+        assert!((score.recency - 0.6).abs() < f64::EPSILON);
+        assert!((score.scope - 0.4).abs() < f64::EPSILON);
+
+        let perfect = RelevanceScore::new(1.0, 1.0, 1.0);
+        assert!((perfect.combined - 1.0).abs() < 1e-9);
+    }
+
+    /// `with_weights` applies the triple verbatim — it neither normalises it nor
+    /// clamps the product, so weights that do not sum to 1 push `combined`
+    /// outside `0.0..=1.0`. Pinned because `UnifiedMemoryProvider` relies on
+    /// exactly that to boost a level above 1.0.
+    #[test]
+    fn with_weights_applies_the_triple_verbatim() {
+        let score = RelevanceScore::with_weights(0.8, 0.6, 0.4, (1.0, 1.0, 1.0));
+        assert!((score.combined - 1.8).abs() < 1e-9);
+        assert!((score.semantic - 0.8).abs() < f64::EPSILON);
+
+        // All the weight on recency.
+        let recency_only = RelevanceScore::with_weights(1.0, 0.25, 1.0, (0.0, 1.0, 0.0));
+        assert!((recency_only.combined - 0.25).abs() < 1e-9);
+
+        // Zero weights give a zero score without touching the components.
+        let muted = RelevanceScore::with_weights(0.9, 0.9, 0.9, (0.0, 0.0, 0.0));
+        assert!(muted.combined.abs() < f64::EPSILON);
+        assert!((muted.scope - 0.9).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn default_relevance_score_is_all_zeros() {
+        let score = RelevanceScore::default();
+        assert!(score.semantic.abs() < f64::EPSILON);
+        assert!(score.recency.abs() < f64::EPSILON);
+        assert!(score.scope.abs() < f64::EPSILON);
+        assert!(score.combined.abs() < f64::EPSILON);
+    }
+
+    /// `Deserialize` is derived, so `combined` is read from the wire rather than
+    /// recomputed: a stored score can disagree with its own components. Worth
+    /// knowing before trusting a `combined` that did not come from `new`.
+    #[test]
+    fn a_deserialized_score_keeps_an_inconsistent_combined() {
+        let score: RelevanceScore = serde_json::from_value(serde_json::json!({
+            "semantic": 0.0,
+            "recency": 0.0,
+            "scope": 0.0,
+            "combined": 99.0,
+        }))
+        .expect("deserializable");
+        assert!((score.combined - 99.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn memory_result_starts_untitled_with_null_metadata() {
+        let result = MemoryResult::new(
+            "r1".to_string(),
+            MemorySource::Conversation {
+                conversation_id: "c1".to_string(),
+                message_index: 2,
+            },
+            "content".to_string(),
+            RelevanceScore::default(),
+            Utc::now(),
+        );
+
+        assert_eq!(result.title, None);
+        assert_eq!(result.metadata, serde_json::Value::Null);
+
+        let decorated = result
+            .with_title("A title".to_string())
+            .with_metadata(serde_json::json!({"role": "user"}));
+        assert_eq!(decorated.title, Some("A title".to_string()));
+        assert_eq!(decorated.metadata["role"], serde_json::json!("user"));
+        // The builders keep everything else intact.
+        assert_eq!(decorated.id, "r1");
+        assert_eq!(decorated.content, "content");
+        assert_eq!(decorated.source.level(), 1);
+    }
+
+    /// The last call wins — `with_metadata` replaces, it does not merge.
+    #[test]
+    fn with_metadata_replaces_rather_than_merges() {
+        let result = MemoryResult::new(
+            "r1".to_string(),
+            MemorySource::ProjectOrchestrator {
+                entity_type: "task".to_string(),
+                entity_id: "t1".to_string(),
+            },
+            "content".to_string(),
+            RelevanceScore::default(),
+            Utc::now(),
+        )
+        .with_metadata(serde_json::json!({"a": 1}))
+        .with_metadata(serde_json::json!({"b": 2}));
+
+        assert_eq!(result.metadata, serde_json::json!({"b": 2}));
     }
 }
