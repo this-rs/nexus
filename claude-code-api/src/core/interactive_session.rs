@@ -7,6 +7,8 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::{broadcast, mpsc};
 use tracing::{debug, error, info, warn};
+
+use nexus_claude::describe_command_redacted;
 use uuid::Uuid;
 
 use crate::core::claude_manager::ClaudeManager;
@@ -373,9 +375,11 @@ impl InteractiveSessionManager {
             });
         }
 
+        // Same class as the two sites in claude_manager: never `{:?}` a
+        // Command, whose Debug prints every argument and environment value.
         info!(
-            "Starting interactive Claude session with command: {:?}",
-            cmd
+            "Starting interactive Claude session with command: {}",
+            describe_command_redacted(cmd.as_std())
         );
 
         let mut child = cmd.spawn()?;

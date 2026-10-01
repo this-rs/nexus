@@ -345,13 +345,120 @@ async fn process_image_url(url: &str) -> ApiResult<String> {
     } else if url.starts_with("http://") || url.starts_with("https://") {
         download_image(url).await
     } else {
-        Ok(url.to_string())
+        // Anything else used to be returned verbatim and handed to the CLI as
+        // `Image: <path>`, which let a caller name any file the CLI could read.
+        // A client string is never a path.
+        Err(ApiError::BadRequest(
+            "image_url must be a data:image/ URL or an http(s) URL".to_string(),
+        ))
     }
+}
+
+/// Whether an address may be fetched on behalf of a caller.
+///
+/// The gateway fetches `image_url` itself, so every address the server can
+/// reach but the caller cannot is a confused-deputy hazard: loopback, the
+/// private ranges, and above all the link-local block that carries cloud
+/// instance metadata at `169.254.169.254`. Only globally routable addresses
+/// are allowed through.
+///
+/// `IpAddr::is_global` is still unstable, so the ranges are spelled out here
+/// rather than waiting for it.
+fn is_publicly_routable(ip: std::net::IpAddr) -> bool {
+    use std::net::IpAddr;
+    match ip {
+        IpAddr::V4(v4) => {
+            let [a, b, ..] = v4.octets();
+            !(v4.is_unspecified()
+                || v4.is_loopback()
+                || v4.is_private()
+                || v4.is_link_local()
+                || v4.is_multicast()
+                || v4.is_broadcast()
+                || v4.is_documentation()
+                // 100.64.0.0/10, carrier-grade NAT.
+                || (a == 100 && (64..128).contains(&b))
+                // 198.18.0.0/15, benchmarking.
+                || (a == 198 && (18..20).contains(&b))
+                // 240.0.0.0/4, reserved.
+                || a >= 240)
+        },
+        IpAddr::V6(v6) => {
+            // An IPv4-mapped address is an IPv4 address wearing a hat; judge
+            // the address it actually reaches.
+            if let Some(mapped) = v6.to_ipv4_mapped() {
+                return is_publicly_routable(IpAddr::V4(mapped));
+            }
+            let first = v6.segments()[0];
+            !(v6.is_unspecified()
+                || v6.is_loopback()
+                || v6.is_multicast()
+                // fc00::/7, unique local.
+                || (first & 0xfe00) == 0xfc00
+                // fe80::/10, link local.
+                || (first & 0xffc0) == 0xfe80)
+        },
+    }
+}
+
+/// Resolve `url` and refuse it unless every address it reaches is public.
+///
+/// Every resolved address is checked, not just the first: a name that returns
+/// one public and one loopback address must not be fetchable.
+///
+/// This narrows the hole rather than sealing it. The name is resolved here and
+/// resolved again by the HTTP client, so a DNS entry that changes between the
+/// two still slips through (DNS rebinding). Closing that needs the connection
+/// pinned to the address checked here, which is a `reqwest` connector change
+/// and a larger piece of work than this fix; it is recorded as such in
+/// `docs/BUGS.md` rather than left implied.
+async fn refuse_unless_public(url: &str) -> ApiResult<()> {
+    let parsed = reqwest::Url::parse(url)
+        .map_err(|e| ApiError::BadRequest(format!("Invalid image URL: {e}")))?;
+
+    match parsed.scheme() {
+        "http" | "https" => {},
+        other => {
+            return Err(ApiError::BadRequest(format!(
+                "image_url scheme {other:?} is not allowed"
+            )));
+        },
+    }
+
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| ApiError::BadRequest("image_url has no host".to_string()))?;
+    let port = parsed.port_or_known_default().unwrap_or(80);
+
+    // A literal address resolves without touching DNS, which is what keeps the
+    // tests for this guard offline.
+    let addrs = tokio::net::lookup_host((host, port))
+        .await
+        .map_err(|e| ApiError::BadRequest(format!("Cannot resolve image host: {e}")))?;
+
+    let mut saw_one = false;
+    for addr in addrs {
+        saw_one = true;
+        if !is_publicly_routable(addr.ip()) {
+            return Err(ApiError::BadRequest(
+                "image_url resolves to a non-public address".to_string(),
+            ));
+        }
+    }
+    if !saw_one {
+        return Err(ApiError::BadRequest(
+            "image_url host resolves to no address".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 async fn download_image(url: &str) -> ApiResult<String> {
     use reqwest;
     use std::io::Write;
+
+    // Before any request leaves the process.
+    refuse_unless_public(url).await?;
 
     let response = reqwest::get(url)
         .await
@@ -646,4 +753,179 @@ async fn handle_non_streaming_response(
     );
 
     Ok(Json(response))
+}
+
+#[cfg(test)]
+mod image_url_guard_tests {
+    use super::*;
+    use std::net::IpAddr;
+
+    fn ip(s: &str) -> IpAddr {
+        s.parse().expect("test address parses")
+    }
+
+    // -- the address classifier -------------------------------------------
+
+    #[test]
+    fn cloud_metadata_and_the_private_ranges_are_not_publicly_routable() {
+        // 169.254.169.254 is the address this guard exists for: it serves
+        // instance credentials on every major cloud.
+        for blocked in [
+            "169.254.169.254",
+            "127.0.0.1",
+            "0.0.0.0",
+            "10.1.2.3",
+            "172.16.0.1",
+            "172.31.255.255",
+            "192.168.1.1",
+            "100.64.0.1", // carrier-grade NAT
+            "198.18.0.1", // benchmarking
+            "240.0.0.1",  // reserved
+            "255.255.255.255",
+            "224.0.0.1", // multicast
+        ] {
+            assert!(
+                !is_publicly_routable(ip(blocked)),
+                "{blocked} must not be publicly routable"
+            );
+        }
+    }
+
+    #[test]
+    fn ipv6_loopback_unique_local_and_link_local_are_not_publicly_routable() {
+        for blocked in ["::", "::1", "fc00::1", "fd12:3456::1", "fe80::1", "ff02::1"] {
+            assert!(
+                !is_publicly_routable(ip(blocked)),
+                "{blocked} must not be publicly routable"
+            );
+        }
+    }
+
+    #[test]
+    fn an_ipv4_mapped_ipv6_address_is_judged_by_the_address_it_reaches() {
+        // ::ffff:169.254.169.254 reaches the metadata service just as well as
+        // the bare v4 address; checking only the v6 shape would wave it past.
+        assert!(!is_publicly_routable(ip("::ffff:169.254.169.254")));
+        assert!(!is_publicly_routable(ip("::ffff:127.0.0.1")));
+        assert!(is_publicly_routable(ip("::ffff:93.184.216.34")));
+    }
+
+    #[test]
+    fn ordinary_public_addresses_still_pass() {
+        for allowed in [
+            "93.184.216.34",
+            "8.8.8.8",
+            "172.32.0.1",
+            "2606:2800:220:1::1",
+        ] {
+            assert!(
+                is_publicly_routable(ip(allowed)),
+                "{allowed} must remain fetchable"
+            );
+        }
+    }
+
+    // -- the guard, end to end, without a network -------------------------
+    //
+    // Every URL below uses a literal address, so `lookup_host` answers from
+    // the string and no DNS query or HTTP request is made.
+
+    #[tokio::test]
+    async fn the_metadata_address_is_refused_before_any_request() {
+        let err = refuse_unless_public("http://169.254.169.254/latest/meta-data/")
+            .await
+            .expect_err("the metadata service must be refused");
+        assert!(
+            matches!(err, ApiError::BadRequest(ref m) if m.contains("non-public")),
+            "unexpected error: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn loopback_is_refused_whatever_the_port() {
+        for url in [
+            "http://127.0.0.1/admin",
+            "http://127.0.0.1:9200/_cluster/health",
+            "https://[::1]:8080/",
+        ] {
+            assert!(
+                refuse_unless_public(url).await.is_err(),
+                "{url} must be refused"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_non_http_scheme_is_refused() {
+        let err = refuse_unless_public("file:///etc/passwd")
+            .await
+            .expect_err("file:// must be refused");
+        assert!(
+            matches!(err, ApiError::BadRequest(ref m) if m.contains("not allowed")),
+            "unexpected error: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_public_literal_address_passes_the_guard() {
+        // Proves the guard is not simply refusing everything, which is the way
+        // a check like this silently stops being a check.
+        refuse_unless_public("http://93.184.216.34/image.png")
+            .await
+            .expect("a public address must pass the guard");
+    }
+
+    #[tokio::test]
+    async fn download_image_consults_the_guard_before_fetching() {
+        // The tests above prove the guard is correct; this one proves it is
+        // WIRED. Without the call in `download_image`, reqwest attempts the
+        // connection and the error becomes `Internal("Failed to download
+        // image: ...")` instead of a refusal, so the distinction is asserted
+        // rather than just `is_err()`.
+        //
+        // Port 1 on loopback is refused instantly by the OS, so the unfixed
+        // path fails fast rather than hanging this test.
+        let err = process_image_url("http://127.0.0.1:1/image.png")
+            .await
+            .expect_err("a loopback target must never be fetched");
+        match err {
+            ApiError::BadRequest(ref m) if m.contains("non-public") => {},
+            other => panic!(
+                "expected a refusal from the guard, got {other:?} — \
+                 the guard is not wired into download_image"
+            ),
+        }
+    }
+
+    // -- the branch that treated a client string as a path ----------------
+
+    #[tokio::test]
+    async fn an_unrecognised_image_url_is_refused_rather_than_read_as_a_path() {
+        // This is the local-file-read bug: these used to be returned verbatim
+        // and injected into the prompt as `Image: <path>`.
+        for hostile in [
+            "/etc/passwd",
+            "../../../../etc/shadow",
+            "file:///etc/passwd",
+            "~/.ssh/id_rsa",
+            "C:\\Windows\\win.ini",
+        ] {
+            let result = process_image_url(hostile).await;
+            assert!(result.is_err(), "{hostile} must be refused, got {result:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_data_url_still_works() {
+        // 1x1 transparent PNG; the fix must not break the supported path.
+        let url = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
+        let path = process_image_url(url)
+            .await
+            .expect("data URLs stay supported");
+        assert!(
+            std::path::Path::new(&path).exists(),
+            "the decoded image should be on disk at {path}"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
 }

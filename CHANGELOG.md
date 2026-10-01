@@ -147,7 +147,7 @@ All notable changes to this project will be documented in this file.
 - Fixed EPIPE errors by properly closing sessions on timeout
 - Resolved all compilation warnings
 
-## [0.1.5] - 2025-01-22 (SDK Release)
+## [claude-code-sdk-rs 0.1.5] - 2025-01-22
 
 ### Fixed
 - Fixed interactive mode hang issue in Rust SDK with new SimpleInteractiveClient implementation

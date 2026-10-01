@@ -296,7 +296,12 @@ async fn query_print_mode(
     }
 
     info!("Starting Claude CLI with --print mode");
-    debug!("Command: {:?}", cmd);
+    // Never `{:?}` a Command: its Debug prints every argument and every
+    // environment value, including whatever follows --mcp-config.
+    debug!(
+        "Command: {}",
+        crate::transport::subprocess::describe_command_redacted(cmd.as_std())
+    );
 
     if let Some(user) = options.user.as_deref() {
         crate::transport::subprocess::apply_process_user(&mut cmd, user)?;

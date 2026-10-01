@@ -162,7 +162,9 @@ pub use types::ClaudeCodeOptionsBuilder;
 
 // Re-export transport types for convenience
 pub use transport::SubprocessTransport;
-pub use transport::subprocess::{SemVer, find_claude_cli, get_cli_version};
+pub use transport::subprocess::{
+    SECRET_BEARING_ARGS, SemVer, describe_command_redacted, find_claude_cli, get_cli_version,
+};
 
 // Re-export CLI download utilities
 pub use cli_download::{

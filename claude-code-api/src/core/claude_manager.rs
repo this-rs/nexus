@@ -7,6 +7,8 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::mpsc;
 use tracing::{error, info, warn};
+
+use nexus_claude::describe_command_redacted;
 use uuid::Uuid;
 
 use crate::core::config::{FileAccessConfig, MCPConfig};
@@ -69,9 +71,13 @@ impl ClaudeManager {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 
+        // Never `{:?}` a Command: its Debug prints every argument and every
+        // environment value. Redacted description instead — see
+        // nexus_claude::describe_command_redacted.
         info!(
-            "Starting interactive Claude session {} with command: {:?}",
-            session_id, cmd
+            "Starting interactive Claude session {} with command: {}",
+            session_id,
+            describe_command_redacted(cmd.as_std())
         );
 
         let mut child = cmd.spawn()?;
@@ -196,9 +202,13 @@ impl ClaudeManager {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 
+        // This command carries `--mcp-config <json>`, which holds each MCP
+        // server's env and headers: database password, search key, session
+        // token. Logging the Command directly published them at info level.
         info!(
-            "Starting Claude process for session {} with command: {:?}",
-            session_id, cmd
+            "Starting Claude process for session {} with command: {}",
+            session_id,
+            describe_command_redacted(cmd.as_std())
         );
 
         let mut child = cmd.spawn()?;

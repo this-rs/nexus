@@ -17,6 +17,7 @@ pub mod mock;
 pub mod subprocess;
 
 pub use subprocess::SubprocessTransport;
+pub use subprocess::{SECRET_BEARING_ARGS, describe_command_redacted};
 
 /// Input message structure for sending to Claude
 #[derive(Debug, Clone, serde::Serialize)]

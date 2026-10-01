@@ -1,6 +1,7 @@
 //! Diagram charter and drift gate for this repository (task 1.1).
 //!
-//! The charter (`docs/DOCUMENTATION.md` in the main repository) makes the
+//! The charter (`docs/DOCUMENTATION.md`, in this repository; the main
+//! repository keeps its own for the cross-repo cartography) makes the
 //! in-repo diagrams authoritative: a `docs/diagrams/<name>.mmd` per diagram,
 //! reviewed like code, changed in the same pull request as the code it
 //! describes. Two things have to be enforced for that to mean anything, and

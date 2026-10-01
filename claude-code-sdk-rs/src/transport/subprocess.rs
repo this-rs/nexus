@@ -1453,7 +1453,7 @@ pub fn find_claude_cli() -> Result<PathBuf> {
 /// `--mcp-config` is a JSON document holding each MCP server's `env` and
 /// headers — in practice the orchestrator's database password, search key and
 /// session token.
-const SECRET_BEARING_ARGS: [&str; 1] = ["--mcp-config"];
+pub const SECRET_BEARING_ARGS: [&str; 1] = ["--mcp-config"];
 
 /// A loggable description of the command about to be spawned.
 ///
@@ -1461,7 +1461,19 @@ const SECRET_BEARING_ARGS: [&str; 1] = ["--mcp-config"];
 /// directory, every argument, and the NAMES of the environment variables set —
 /// and replaces what can hold credentials: the value after a secret-bearing
 /// argument, and every environment value.
-pub(crate) fn describe_command_redacted(cmd: &std::process::Command) -> String {
+///
+/// # Never log a `Command` directly
+///
+/// `Debug for std::process::Command` prints every argument AND every
+/// environment value, so `debug!("{:?}", cmd)` publishes whatever the caller
+/// passed after `--mcp-config` — in practice database passwords and session
+/// tokens. Always log this instead.
+///
+/// Public because the gateway crate spawns the same CLI and needs the same
+/// redaction. One implementation, one place to add the next secret-bearing
+/// argument: four copies is how three of the four call sites stayed unfixed
+/// after the first repair.
+pub fn describe_command_redacted(cmd: &std::process::Command) -> String {
     let mut args: Vec<String> = Vec::new();
     let mut redact_next = false;
     for arg in cmd.get_args() {
