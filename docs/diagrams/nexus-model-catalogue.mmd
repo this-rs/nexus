@@ -1,10 +1,10 @@
 %% name: nexus-model-catalogue
 %% covers: nexus:claude-code-api/src/core/model_registry.rs nexus:claude-code-api/src/models/claude.rs nexus:claude-code-api/src/api/models.rs nexus:claude-code-api/tests/docs_model_drift.rs nexus:README.md nexus:README_CN.md nexus:README_JA.md nexus:docs/valid-models.md nexus:docs/tool-calling.md nexus:docs/url-preview-integration.md nexus:docs/url-preview-troubleshooting.md nexus:claude-code-sdk-rs/docs/models-guide.md nexus:claude-code-sdk-rs/examples/README_MODELS.md
 %% verified: 9540068
-%%
+%% 
 %% Le sha ci-dessus est l'etat du depot contre lequel les CONSTATS ont ete
 %% releves. Les correctifs qu'ils ont motives arrivent dans la meme PR.
-%%
+%% 
 %% CONSTAT MESURE (01/10/2026, avant correctif)
 %%   Aucun des 7 identifiants de modele ecrits dans la documentation n'existait
 %%   dans le catalogue de repli. Zero recouvrement, pas "quelques-uns perimes" :
@@ -18,7 +18,7 @@
 %%     claude-opus-4-1-20250805   x3    claude-sonnet-4-6 / 4-5, claude-haiku-4-5
 %%   Reparti sur 16 fichiers. Un lecteur qui recopiait n'importe lequel de ces
 %%   identifiants obtenait un 404 not_found_error.
-%%
+%% 
 %% PROUVE (comment)
 %%   - documentation_names_no_model_the_code_does_not_know : rejoue avec un
 %%     identifiant perime reintroduit dans docs/tool-calling.md -> ECHEC, puis
@@ -29,7 +29,7 @@
 %%     qu'un catalogue deplace echoue au lieu de rendre le test ci-dessus vide.
 %%   - every_translation_carries_a_dated_staleness_notice : rejoue en effacant
 %%     la date du bandeau de README_JA.md -> ECHEC.
-%%
+%% 
 %% REFUSE
 %%   - Rafraichir la liste d'identifiants dans la prose : refuse. C'est ce qui
 %%     avait ete fait les fois precedentes, et la liste etait de nouveau fausse

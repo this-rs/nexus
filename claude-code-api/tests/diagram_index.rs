@@ -246,6 +246,41 @@ fn node_labels(mmd: &str) -> Vec<String> {
     labels
 }
 
+/// Mermaid constructs that render wrong or not at all, with the line number.
+///
+/// This is not a parser. A real Mermaid parser is JavaScript, and adding a
+/// Node toolchain to a Rust workspace for it was rejected — so this checks the
+/// specific traps that have actually bitten this repository, which is the
+/// honest scope. It caught nothing when written; it was written because both
+/// diagrams here were committed carrying the first one.
+///
+/// - A bare `%%` line. Mermaid treats `%%` followed by nothing as the start of
+///   a directive rather than a comment, and the block can swallow the lines
+///   after it. The charter already requires `%% ` with a trailing space; this
+///   makes the requirement enforceable instead of remembered.
+/// - An unbalanced `["` / `"]` on one line, which silently truncates a label.
+pub fn mermaid_traps(mmd: &str) -> Vec<String> {
+    let mut traps = Vec::new();
+    for (index, line) in mmd.lines().enumerate() {
+        let lineno = index + 1;
+        if line.trim_end() == "%%" && !line.ends_with(' ') {
+            traps.push(format!(
+                "line {lineno}: bare \"%%\" — write \"%% \" with a trailing space, \
+                 or Mermaid reads it as a directive"
+            ));
+        }
+        let opens = line.matches("[\"").count();
+        let closes = line.matches("\"]").count();
+        if opens != closes {
+            traps.push(format!(
+                "line {lineno}: {opens} `[\"` against {closes} `\"]` — a label \
+                 left open truncates silently"
+            ));
+        }
+    }
+    traps
+}
+
 /// Node labels that cite a source location as `file:line` instead of a name.
 ///
 /// The charter's reason is empirical: a line number is wrong as soon as a
@@ -642,6 +677,31 @@ mod node_rules {
     }
 
     #[test]
+    fn a_bare_comment_line_is_reported() {
+        // Both diagrams in this repository were committed with these. The
+        // offline Mermaid linter caught them; nothing in the repository did.
+        let traps = mermaid_traps("flowchart TB\n%%\n  a[\"✅ x\"]\n");
+        assert_eq!(traps.len(), 1, "{traps:?}");
+        assert!(traps[0].contains("line 2"), "{traps:?}");
+    }
+
+    #[test]
+    fn a_comment_line_with_the_trailing_space_is_accepted() {
+        assert!(mermaid_traps("flowchart TB\n%% \n  a[\"✅ x\"]\n").is_empty());
+    }
+
+    #[test]
+    fn an_unbalanced_label_is_reported() {
+        let traps = mermaid_traps("flowchart TB\n  a[\"unterminated\n");
+        assert_eq!(traps.len(), 1, "{traps:?}");
+    }
+
+    #[test]
+    fn a_balanced_line_with_two_labels_is_accepted() {
+        assert!(mermaid_traps("  a[\"✅ one\"] --> b[\"✅ two\"]\n").is_empty());
+    }
+
+    #[test]
     fn a_line_number_citation_is_reported() {
         let mmd = "flowchart TB\n  a[\"✅ see routes.rs:58\"]\n";
         assert_eq!(nodes_citing_line_numbers(mmd).len(), 1);
@@ -1017,6 +1077,12 @@ fn every_verified_diagram_obeys_the_header_rules() {
             "{file}: these nodes cite a line number instead of a name, and a \
              line number is wrong as soon as a neighbouring commit lands: \
              {line_citations:?}"
+        );
+
+        let traps = mermaid_traps(&mmd);
+        assert!(
+            traps.is_empty(),
+            "{file}: constructs that render wrong or not at all: {traps:?}"
         );
     }
 }
