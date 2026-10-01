@@ -104,9 +104,13 @@ fn collect(dir: &Path, base: &Path, out: &mut Vec<PathBuf>) {
             && !name.contains("README_CN")
             && !name.contains("README_JA")
         {
-            if let Ok(relative) = path.strip_prefix(base) {
-                out.push(relative.to_path_buf());
-            }
+            // `let ... else` rather than a nested `if let`: clippy's
+            // collapsible_if fires on the nested form, and a let-chain would
+            // risk the 1.88 MSRV job.
+            let Ok(relative) = path.strip_prefix(base) else {
+                continue;
+            };
+            out.push(relative.to_path_buf());
         }
     }
 }
