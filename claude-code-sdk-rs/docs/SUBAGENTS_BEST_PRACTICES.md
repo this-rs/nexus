@@ -528,7 +528,7 @@ Work through each step systematically.
     "#.to_string()).await?;
 
     // 接收并打印响应
-    let mut stream = client.receive_response_stream().await;
+    let mut stream = client.receive_response_stream().await?;
     while let Some(result) = stream.next().await {
         match result? {
             Message::Assistant { message } => {

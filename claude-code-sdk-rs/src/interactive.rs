@@ -403,6 +403,12 @@ impl InteractiveClient {
     /// Returns a stream of messages that can be iterated over asynchronously.
     /// This is similar to Python SDK's `receive_messages()` method.
     ///
+    /// # Errors
+    ///
+    /// Returns [`SdkError::InvalidState`] if called before `connect()`. It used
+    /// to hand out a stream that was simply over, so a caller who forgot to
+    /// connect read "the CLI said nothing" instead of an error.
+    ///
     /// # Example
     ///
     /// ```rust,no_run
@@ -418,7 +424,7 @@ impl InteractiveClient {
     ///     client.send_message("Hello!".to_string()).await?;
     ///     
     ///     // Receive messages as a stream
-    ///     let mut stream = client.receive_messages_stream().await;
+    ///     let mut stream = client.receive_messages_stream().await?;
     ///     while let Some(msg) = stream.next().await {
     ///         match msg {
     ///             Ok(message) => println!("Received: {:?}", message),
@@ -429,7 +435,15 @@ impl InteractiveClient {
     ///     Ok(())
     /// }
     /// ```
-    pub async fn receive_messages_stream(&mut self) -> impl Stream<Item = Result<Message>> + '_ {
+    pub async fn receive_messages_stream(
+        &mut self,
+    ) -> Result<impl Stream<Item = Result<Message>> + '_> {
+        if !self.connected {
+            return Err(SdkError::InvalidState {
+                message: "Not connected".into(),
+            });
+        }
+
         // Create a channel for messages
         let (tx, rx) = tokio::sync::mpsc::channel(100);
 
@@ -455,18 +469,25 @@ impl InteractiveClient {
         });
 
         // Return the receiver as a stream
-        ReceiverStream::new(rx)
+        Ok(ReceiverStream::new(rx))
     }
 
     /// Receive messages as an async iterator until a Result message
     ///
     /// This is a convenience method that collects messages until a Result message
     /// is received, similar to Python SDK's `receive_response()`.
-    pub async fn receive_response_stream(&mut self) -> impl Stream<Item = Result<Message>> + '_ {
-        // Create a stream that stops after Result message
-        async_stream::stream! {
-            let mut stream = self.receive_messages_stream().await;
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SdkError::InvalidState`] if called before `connect()`, through
+    /// [`Self::receive_messages_stream`].
+    pub async fn receive_response_stream(
+        &mut self,
+    ) -> Result<impl Stream<Item = Result<Message>> + '_> {
+        let mut stream = self.receive_messages_stream().await?;
 
+        // Create a stream that stops after Result message
+        Ok(async_stream::stream! {
             while let Some(result) = stream.next().await {
                 match &result {
                     Ok(msg) => {
@@ -482,7 +503,7 @@ impl InteractiveClient {
                     }
                 }
             }
-        }
+        })
     }
 
     /// Change the permission mode of the active CLI subprocess session.
@@ -1757,6 +1778,8 @@ mod tests {
 
     #[tokio::test]
     async fn every_turn_operation_is_refused_before_connect() {
+        // All nine of them: the two stream getters used to hand out an empty
+        // stream instead.
         let (transport, _handle) = MockTransport::pair();
         let mut client = InteractiveClient::from_transport(transport);
 
@@ -1772,8 +1795,16 @@ mod tests {
         assert_not_connected(client.set_permission_mode("plan").await.err());
         assert_not_connected(client.interrupt().await.err());
         {
-            // The stream borrows the client, so scope it.
+            // The streams borrow the client, so scope them.
             let stream = client.send_and_receive_stream("hi".to_string()).await;
+            assert_not_connected(stream.err());
+        }
+        {
+            let stream = client.receive_messages_stream().await;
+            assert_not_connected(stream.err());
+        }
+        {
+            let stream = client.receive_response_stream().await;
             assert_not_connected(stream.err());
         }
 
@@ -2178,7 +2209,7 @@ mod tests {
         let mut client = InteractiveClient::from_transport(transport);
         client.connect().await.unwrap();
 
-        let stream = client.receive_messages_stream().await;
+        let stream = client.receive_messages_stream().await.unwrap();
         let mut stream = std::pin::pin!(stream);
         let mut collected = Vec::new();
         while let Some(item) = stream.next().await {
@@ -2206,7 +2237,7 @@ mod tests {
         let mut client = InteractiveClient::from_transport(transport);
         client.connect().await.unwrap();
 
-        drop(client.receive_messages_stream().await);
+        drop(client.receive_messages_stream().await.unwrap());
         await_subscribers(&handle.inbound_message_tx, 1).await;
 
         tokio::time::timeout(
@@ -2235,7 +2266,7 @@ mod tests {
         let mut client = InteractiveClient::from_transport(transport);
         client.connect().await.unwrap();
 
-        let stream = client.receive_response_stream().await;
+        let stream = client.receive_response_stream().await.unwrap();
         let mut stream = std::pin::pin!(stream);
         let mut collected = Vec::new();
         while let Some(item) = stream.next().await {
@@ -2256,7 +2287,7 @@ mod tests {
         let mut client = InteractiveClient::from_transport(transport);
         client.connect().await.unwrap();
 
-        let stream = client.receive_response_stream().await;
+        let stream = client.receive_response_stream().await.unwrap();
         let mut stream = std::pin::pin!(stream);
         let error = stream.next().await.expect("one item").unwrap_err();
         assert!(

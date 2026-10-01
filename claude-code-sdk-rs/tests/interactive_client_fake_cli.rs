@@ -377,30 +377,41 @@ async fn the_hook_round_trip_works_over_the_real_stdin_and_control_channel() {
 }
 
 #[tokio::test]
-async fn the_two_stream_getters_answer_an_empty_stream_instead_of_refusing_before_connect() {
-    // Seven methods start with `if !self.connected { return Err(InvalidState) }`.
-    // `receive_messages_stream` and `receive_response_stream` do not: before
-    // connect they hand out a stream that is simply over, so a caller who forgot
-    // to connect sees "the CLI said nothing" instead of an error.
+async fn the_two_stream_getters_refuse_before_connect_like_the_other_seven() {
+    // All nine turn operations now start with
+    // `if !self.connected { return Err(InvalidState) }`. These two used to hand
+    // out a stream that was simply over, so a caller who forgot to connect read
+    // "the CLI said nothing" instead of an error.
     let fake = Transcript::new().await_stdin().result_ok("done").build();
     let mut client = client_for(&fake);
 
-    let messages = tokio::time::timeout(WAIT, collect_turn(client.receive_messages_stream().await))
+    let error = client
+        .receive_messages_stream()
         .await
-        .expect("an unconnected transport ends the stream at once");
+        .err()
+        .expect("an unconnected client has no messages to stream");
     assert!(
-        messages.is_empty(),
-        "no error, no message: {messages:?} — the missing guard is silent"
+        matches!(&error, SdkError::InvalidState { message } if message == "Not connected"),
+        "got {error:?}"
     );
 
-    let messages = tokio::time::timeout(WAIT, collect_turn(client.receive_response_stream().await))
+    let error = client
+        .receive_response_stream()
         .await
+        .err()
         .expect("same thing one layer up");
-    assert!(messages.is_empty());
+    assert!(
+        matches!(&error, SdkError::InvalidState { message } if message == "Not connected"),
+        "got {error:?}"
+    );
 
-    // The client is still usable: the relay task released the lock on its way out.
+    // Nothing was spawned and nothing was locked: the client is still usable.
     assert!(client.child_pid().await.is_none());
     client.connect().await.unwrap();
+    assert!(
+        client.receive_messages_stream().await.is_ok(),
+        "and once connected the very same call is accepted"
+    );
     client.disconnect().await.unwrap();
 }
 
