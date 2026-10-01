@@ -43,8 +43,14 @@ The first three lines of every `.mmd`:
   (`nexus:` here). Must match the entry's `covers` in `INDEX.yml` exactly; the
   test compares them.
 - `verified` — the **short sha** of the commit whose code the diagram was read
-  against. Not a date: a date cannot be checked out. Update it whenever the
-  diagram changes.
+  against. Not a date: a date cannot be checked out, so it cannot be used to
+  reproduce what the author saw. Update it whenever the diagram changes.
+
+  The test currently only checks that `verified` is **non-empty**: the sha
+  *form* is a convention here, not yet enforced, so `verified: yesterday` would
+  pass the gate today. The main repository's checker does enforce
+  `[0-9a-f]{7,40}`. Closing that gap is a tracked follow-up; until then, treat
+  this one as a rule a reviewer has to look at.
 
 Further `%%` lines carry what the diagram proves, the sources read, and what is
 not established. A blank comment line is `%% ` — with the space, because bare
@@ -113,9 +119,20 @@ environment, so it needs no network and no git subprocess. Outside a pull
 request it reports instead of failing; a gate nobody can satisfy gets switched
 off, and a gate that is switched off teaches nothing.
 
-Files that no `verified` diagram owns are **reported, never failed**, and
-listed in [`ORPHANS.md`](diagrams/ORPHANS.md). That ceiling is meant to fall by
-writing diagrams, never by shrinking what counts as source.
+Unowned files are handled at two levels, and the difference matters:
+
+- **In a pull request**, a changed file that no `verified` diagram owns is
+  **reported, not failed**. Most files have no owner yet; failing here would
+  block every pull request, and a gate nobody can satisfy gets switched off.
+- **Across the repository**, the total is **ratcheted**.
+  [`ORPHANS.md`](diagrams/ORPHANS.md) carries an `<!-- orphan-ceiling: N -->`
+  marker and the test asserts the real count never exceeds it. Adding an
+  unowned `src/` file fails the build. The way out is a `covers` glob, not a
+  higher ceiling — the test says so in its own failure message.
+
+The ceiling falls by writing diagrams, never by shrinking what counts as
+source. An unreadable marker fails too, so the ratchet cannot be switched off
+by corrupting it.
 
 ## 8. A bug is a task, a note and a red node
 
