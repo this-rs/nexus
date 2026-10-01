@@ -1,0 +1,170 @@
+%% name: nexus-api-storage
+%% covers: claude-code-api/src/core/storage/*.rs
+%% verified: 2026-10-01
+flowchart TD
+    subgraph legend["Légende"]
+        direction LR
+        LG1["✅ vérifié par un test"]
+        LG2["🟠 décidé, non écrit"]
+        LG3["🔴 bug / non branché"]
+        LG4["⚪ hors dépôt"]
+    end
+
+    %% =====================================================================
+    %% Ce qui est VRAIMENT branché — relevé par grep sur tout le crate
+    %% =====================================================================
+    entry["⚪ build_components() — src/lib.rs<br/>le seul assembleur de l'application"]
+
+    entry -->|"seul import de core::storage"| wired
+    entry -->|"cache de réponses"| refused_cache
+    entry -.->|"ne construit RIEN d'autre<br/>du module storage"| unwired
+
+    wired["✅ InMemoryConversationStore::new(InMemoryConversationConfig::default())<br/>puis ConversationManager::new(store, …)<br/>= DefaultConversationManager, type concret non générique<br/><i>vérifié : tests en ligne de memory.rs + harnais HTTP</i>"]
+
+    refused_cache["🟠 option refusée : core::cache::ResponseCache<br/>c'est ELLE que build_components branche, et elle<br/>n'implémente pas le trait CacheStore de ce module"]
+
+    unwired["🔴 non branché : tout le reste de core::storage<br/>aucune référence hors de src/core/storage/ pour<br/>Neo4jClient, CombinedConversationStore, TieredCache,<br/>InMemoryCacheStore, InMemorySessionStore.<br/>D'où le allow(dead_code) en tête de chaque fichier :<br/>« Public API - may not be used internally »"]
+
+    unwired --> traits
+    wired --> traits
+    traits["🔴 storage::traits — 3 traits, 7 + 5 + 4 méthodes async<br/>ConversationStore : consommé (ConversationManager, ShortTermMemory)<br/>SessionStore : ZÉRO consommateur hors du module<br/>CacheStore : ZÉRO consommateur hors du module"]
+
+    traits --> mem_group
+    traits --> comb_group
+    traits --> tiered_group
+
+    ms_callers["🔴 appelants de MeilisearchClient, eux-mêmes non branchés<br/>core::memory::long_term::LongTermMemory::query()<br/>core::hooks::neo4j_hook_callback::init_meilisearch_index()<br/><i>ni l'un ni l'autre n'est construit par build_components</i>"]
+    entry -.->|"jamais construit"| ms_callers
+    ms_callers --> ms_group
+
+    %% =====================================================================
+    %% memory.rs — tout en processus, donc entièrement atteignable
+    %% =====================================================================
+    subgraph mem_group["storage/memory.rs — en processus, aucune couture nécessaire"]
+        direction TB
+        mem_conv["✅ InMemoryConversationStore::create / get / add_message / delete / list_active<br/>RwLock&lt;HashMap&gt; de parking_lot<br/><i>vérifié : tests en ligne, store en mémoire</i>"]
+        mem_conv -->|"id inconnu"| mem_absent["✅ add_message et update_metadata renvoient<br/>Err(anyhow!(« Conversation not found: id »)),<br/>mais get renvoie Ok(None) et delete Ok(false)<br/><i>vérifié : test_message_not_found</i>"]
+        mem_conv -->|"max_history_messages dépassé"| mem_trim["🟠 add_message purge le début de l'historique<br/>par drain(0..n) et ne le signale qu'en info! :<br/>l'appelant reçoit Ok(()) sans savoir<br/>que des messages ont disparu"]
+        mem_conv --> mem_meta["🟠 update_metadata / cleanup_expired<br/><i>aucun test en ligne aujourd'hui</i>"]
+
+        mem_sess["🔴 InMemorySessionStore — implémente SessionStore,<br/>qui n'a aucun consommateur<br/><i>create / get / remove / list ont des tests en ligne</i>"]
+        mem_sess -->|"id absent"| mem_sess_update["🟠 contrat incohérent : update renvoie<br/>Err(« Session not found »), tandis que<br/>get et remove renvoient Ok(None)"]
+
+        mem_cache["🔴 InMemoryCacheStore — implémente CacheStore,<br/>qui n'a aucun consommateur<br/>DashMap + TTL vérifié à la lecture<br/><i>tests en ligne : put/get, stats, enabled=false</i>"]
+        mem_cache -->|"enabled = false"| mem_cache_off["✅ get renvoie None sans lire et put n'insère rien :<br/>le refus est silencieux, pas une erreur<br/><i>vérifié : test_cache_disabled</i>"]
+        mem_cache -->|"max_entries atteint"| mem_evict["🟠 evict_oldest() ne retire qu'UNE entrée par put :<br/>une carte déjà au-delà de la capacité y reste"]
+        mem_cache --> mem_cleanup["🟠 CacheStore::cleanup()<br/><i>aucun test en ligne aujourd'hui</i>"]
+    end
+
+    %% =====================================================================
+    %% meilisearch.rs — couvert par wiremock, la couture est l'URL
+    %% =====================================================================
+    subgraph ms_group["storage/meilisearch.rs — couvert SANS service : wiremock parle HTTP/JSON"]
+        direction TB
+        ms_cfg["✅ MeilisearchConfig::default()<br/>MEILISEARCH_URL / MEILISEARCH_KEY<br/><i>vérifié : variables posées, serial_test</i>"]
+        ms_cfg -->|"variables absentes"| ms_cfg_fallback["✅ http://localhost:7700, api_key None :<br/>défaut silencieux, rien ne refuse de démarrer<br/><i>vérifié : variables retirées</i>"]
+
+        ms_cfg --> ms_new
+        ms_new["✅ MeilisearchClient::new(config)<br/>Client::new(config.url, …) puis init_indexes()<br/>la couture est config.url<br/><i>vérifié : wiremock, les 4 requêtes affirmées</i>"]
+
+        ms_new --> ms_init
+        ms_init["✅ init_indexes()<br/>create_index + set_settings, pour chacun des deux<br/>index nexus_messages / nexus_conversations<br/><i>vérifié : corps des PATCH settings affirmés</i>"]
+        ms_init -->|"create_index échoue"| ms_init_ok["✅ .ok() avale l'erreur. Le commentaire dit<br/>« Ignore if exists », mais le rejet est avalé<br/>inconditionnellement : un 500 donne un client valide<br/><i>vérifié : POST /indexes en 500, new() réussit</i>"]
+        ms_init -->|"set_settings échoue"| ms_init_err["✅ ? remonte, aucun client construit, et le second<br/>index n'est jamais touché si le premier échoue<br/><i>vérifié : 500 sur messages, 400 sur conversations</i>"]
+
+        ms_new --> ms_idx_get["✅ messages_index() / conversations_index()<br/>simple résolution de nom, zéro I/O<br/><i>vérifié : compte de requêtes inchangé</i>"]
+
+        ms_idx_get --> ms_write
+        ms_write["✅ index_message / index_messages / index_conversation<br/>POST documents?primaryKey=id<br/><i>vérifié : corps JSON et index cible affirmés</i>"]
+        ms_write -->|"docs vide"| ms_write_empty["✅ index_messages court-circuite avant toute<br/>résolution d'index : Ok(()) sans réseau<br/><i>vérifié : compte de requêtes inchangé</i>"]
+        ms_write -->|"413 / 500"| ms_write_err["✅ ? remonte, rien n'est avalé<br/><i>vérifié : message amont retrouvé dans l'erreur</i>"]
+
+        ms_idx_get --> ms_search
+        ms_search["✅ search_messages(query, conversation_id, limit)<br/><i>vérifié : q, limit et filter affirmés sur le corps</i>"]
+        ms_search -->|"conversation_id = None"| ms_search_nofilter["✅ aucune clé filter envoyée : la recherche porte<br/>sur TOUT l'index, toutes conversations confondues<br/><i>vérifié : absence de la clé affirmée</i>"]
+        ms_search -->|"conversation_id = Some"| ms_escape
+        ms_escape["✅ escape_filter_value(id), puis<br/>conversation_id = « id entre guillemets doubles »<br/><i>vérifié : wiremock + test rejoué sans le correctif</i>"]
+        ms_escape -->|"id contenant un guillemet double"| ms_inject["🔴→✅ injection de filtre, corrigée ici<br/>un id interpolé brut fermait le littéral, et la suite<br/>de l'id devenait de la syntaxe de filtre : un OR<br/>élargissait la recherche, et delete_conversation_messages<br/>la transformait en suppressions d'autres conversations<br/><i>vérifié : au plus 2 guillemets non échappés</i>"]
+        ms_search -->|"hit sans un champ"| ms_search_de["✅ MessageDocument n'a aucun serde(default) :<br/>un seul hit mal formé casse toute la recherche<br/>au lieu d'être ignoré<br/><i>vérifié : hit sans role, erreur nommant le champ</i>"]
+
+        ms_idx_get --> ms_search_conv["✅ search_conversations(query, limit)<br/>aucun paramètre de filtre : impossible de restreindre<br/>la recherche à un modèle ou une date, bien que<br/>l'index les déclare filtrables<br/><i>vérifié : corps affirmé, absence de filter</i>"]
+
+        ms_idx_get --> ms_del
+        ms_del["✅ delete_message(id)<br/>DELETE documents/&lt;id&gt; sur nexus_messages<br/><i>vérifié : chemin exact affirmé</i>"]
+
+        ms_idx_get --> ms_del_conv
+        ms_del_conv["✅ delete_conversation(id)<br/>document de conversation D'ABORD,<br/>puis delete_conversation_messages<br/><i>vérifié : ordre des 3 requêtes affirmé</i>"]
+        ms_del_conv -->|"le DELETE du document échoue"| ms_orphan["🟠 ? abandonne avant la recherche : tous les<br/>messages restent indexés, aucun chemin de<br/>compensation et aucune reprise<br/><i>vérifié : aucune recherche émise</i>"]
+        ms_del_conv --> ms_del_msgs
+        ms_del_msgs["✅ delete_conversation_messages(id)<br/>search_messages(chaîne vide, Some(id), 1000)<br/>puis une suppression par id<br/><i>vérifié : limit=1000 et filtre affirmés</i>"]
+        ms_del_msgs -->|"plus de 1000 messages"| ms_cap["🟠 limite codée en dur, aucune pagination :<br/>les messages au-delà du 1000e restent indexés<br/>et restent donc trouvables<br/><i>vérifié : une seule requête de recherche</i>"]
+        ms_del_msgs -->|"un DELETE échoue"| ms_swallow["🟠 let _ = … : l'échec est avalé et la boucle<br/>continue ; la fonction renvoie Ok(()) même si<br/>AUCUNE suppression n'a abouti<br/><i>vérifié : 2 DELETE en 500, résultat Ok</i>"]
+        ms_del_msgs -->|"la recherche échoue"| ms_search_err["✅ ? remonte : une conversation dont les messages<br/>sont illisibles n'est pas annoncée nettoyée<br/><i>vérifié : 500 sur /search</i>"]
+
+        ms_idx_get --> ms_stats
+        ms_stats["✅ get_stats()<br/>messages puis conversations ;<br/>is_indexing = OU logique des deux<br/><i>vérifié : 7 et 3 documents, comptes non permutés</i>"]
+        ms_stats -->|"un index répond 500"| ms_stats_err["✅ ? remonte dès le premier index : jamais de<br/>statistiques à zéro inventées<br/><i>vérifié : une seule requête /stats émise</i>"]
+    end
+
+    ms_write --> ms_server
+    ms_search --> ms_server
+    ms_del_conv --> ms_server
+    ms_stats --> ms_server
+    ms_server["⚪ serveur Meilisearch<br/>REST HTTP/JSON sur config.url — entièrement<br/>remplaçable par wiremock. C'est pour cela que<br/>tout le bloc ci-dessus est ✅ sans aucun service."]
+
+    %% =====================================================================
+    %% neo4j.rs — la vraie frontière : aucune couture possible
+    %% =====================================================================
+    subgraph neo_group["storage/neo4j.rs — EXIGE un service réel"]
+        direction TB
+        neo_cfg["🟠 Neo4jConfig::default()<br/>NEO4J_URI / NEO4J_USER / NEO4J_PASSWORD,<br/>avec password = « password » en dur comme défaut"]
+        neo_cfg --> neo_new
+        neo_new["🟠 Neo4jClient::new(config)<br/>neo4rs::Graph::new(uri, user, password)<br/><i>inatteignable : poignée de main Bolt BINAIRE sur TCP.<br/>wiremock ne sert que de l'HTTP, et neo4rs n'expose<br/>aucun trait de connexion injectable — il n'y a donc<br/>aucune couture, contrairement à Meilisearch.</i>"]
+        neo_new --> neo_schema["🟠 init_schema()<br/>3 CREATE CONSTRAINT ; chaque échec est journalisé<br/>en debug! puis ignoré : un schéma absent ne bloque<br/>pas le démarrage et ne remonte rien"]
+        neo_new --> neo_stores
+        neo_stores["🟠 Neo4jConversationStore / Neo4jSessionStore<br/>create, get, add_message, update_metadata, list_active,<br/>cleanup_expired, delete, update, remove, list<br/><i>chaque méthode part du Neo4jClient : rien n'est<br/>joignable sans la poignée de main ci-dessus</i>"]
+        neo_stores -->|"datetime illisible"| neo_parse["🟠 parse_neo4j_datetime()<br/>? sur node.get puis sur parse_from_rfc3339 :<br/>une seule ligne mal formée fait échouer<br/>la lecture de toute la conversation"]
+    end
+
+    neo_new --> neo_server["⚪ serveur Neo4j — protocole Bolt<br/>binaire sur TCP. AUCUN mock HTTP ne le remplace.<br/>C'est la frontière honnête de ce domaine : ces nœuds<br/>ne seront jamais ✅ sans service réel, ou sans<br/>introduire un trait de connexion injectable."]
+
+    %% =====================================================================
+    %% combined.rs — Neo4j + Meilisearch, donc bloqué par Neo4j
+    %% =====================================================================
+    subgraph comb_group["storage/combined.rs — EXIGE un service réel (par Neo4j)"]
+        direction TB
+        comb_new["🟠 CombinedConversationStore::new(neo4j_client, Option&lt;Arc&lt;MeilisearchClient&gt;&gt;)<br/><i>le premier paramètre est un Neo4jClient CONCRET,<br/>pas un trait : construire le store exige déjà Bolt.<br/>Le second est optionnel et injectable, lui.</i>"]
+        comb_new -->|"meilisearch = None"| comb_none["🟠 search_messages / search_conversation_messages /<br/>search_conversations renvoient Ok(vec![]) :<br/>un backend absent est indistinguable<br/>d'une recherche sans résultat"]
+        comb_new -->|"meilisearch = Some"| comb_index
+        comb_index["🟠 index_message / update_conversation_index<br/>aplatit MessageContent (Text, Array, None vers chaîne vide),<br/>aperçu = 5 derniers messages, tronqué à 500 caractères"]
+        comb_index -->|"l'indexation échoue"| comb_warn["🟠 warn!(« Failed to index … ») puis on continue :<br/>add_message renvoie Ok et l'index reste désynchronisé<br/>de Neo4j sans que l'appelant l'apprenne"]
+        comb_new --> comb_delete["🟠 delete / cleanup_expired<br/>let _ = ms.delete_conversation(id) : échec Meilisearch<br/>avalé, puis suppression Neo4j quand même"]
+        comb_new --> comb_sess["🟠 CombinedSessionStore<br/>délègue les 5 méthodes à Neo4jSessionStore sans rien<br/>ajouter ; le doc-comment annonce un cache<br/>qui n'existe pas"]
+    end
+
+    comb_new --> neo_new
+    comb_index --> ms_write
+    comb_delete --> ms_del_conv
+
+    %% =====================================================================
+    %% tiered_cache.rs — L1 atteignable, L2 non
+    %% =====================================================================
+    subgraph tiered_group["storage/tiered_cache.rs — L1 atteignable, L2 exige un service réel"]
+        direction TB
+        tc_new["✅ TieredCache::memory_only(config) = new(config, None)<br/>la couture est le paramètre Option&lt;Arc&lt;Graph&gt;&gt;<br/><i>vérifié : tests en ligne, L1 seul</i>"]
+        tc_new --> tc_put
+        tc_put["✅ CacheStore::put — insère en L1 puis write_l2<br/><i>vérifié : test_l1_cache_only</i>"]
+        tc_put -->|"l1_max_entries atteint"| tc_evict["🟠 evict_oldest_l1() ne retire qu'une entrée,<br/>même si la carte dépasse la capacité de beaucoup"]
+        tc_new --> tc_get
+        tc_get["✅ CacheStore::get — L1, puis L2, puis miss compté<br/><i>vérifié : test_l1_cache_only, test_cache_miss</i>"]
+        tc_get -->|"TTL L1 dépassé"| tc_lazy["🟠 get_l1 retire l'entrée à la lecture :<br/>c'est la seule purge de TTL qui fonctionne"]
+        tc_new --> tc_loop
+        tc_loop["🔴 l1_cleanup_loop(cache.l1.clone(), ttl)<br/>DashMap::clone RECOPIE les shards au lieu de partager :<br/>la tâche purge une copie détachée, vide au moment du<br/>clone, et le L1 réel n'est JAMAIS purgé en arrière-plan.<br/>La tâche n'est de plus jamais annulée : elle fuit<br/>avec le cache.<br/><i>prémisse vérifiée : dashmap_clone_detaches_the_map_…<br/>reproduction en #[ignore] : le tick est un sleep(300)<br/>sans horloge injectable</i>"]
+        tc_new --> tc_cleanup["🟠 CacheStore::cleanup()<br/>purge L1 à la demande, puis L2 si présent ;<br/>le compte renvoyé additionne les deux étages"]
+        tc_new --> tc_stats["🟠 stats() annonce enabled: true EN DUR,<br/>même quand L2 est absent ou l2_enabled = false"]
+    end
+
+    tc_get -->|"l2 = Some et l2_enabled"| tc_l2
+    tc_put -->|"l2 = Some et l2_enabled"| tc_l2
+    tc_l2["🟠 get_l2 / write_l2 / init_l2_schema<br/>Cypher MERGE / MATCH / DELETE sur NexusCacheEntry ;<br/>toute erreur est réduite à un warn! et le cache<br/>se comporte comme un miss<br/><i>inatteignable : exige un Arc&lt;neo4rs::Graph&gt;,<br/>donc la poignée de main Bolt</i>"]
+    tc_l2 --> neo_server
