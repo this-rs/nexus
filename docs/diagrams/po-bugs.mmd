@@ -97,9 +97,30 @@ flowchart LR
     d6 --> b12
     d3 --> b11
     d3 --> b13
+    d2 --> b14
+    d2 --> b15
+    d2 --> b16
+    d2 --> b17
+    b17 --> c1
+    b16 --> c2
+    b14 --> c3
+    b15 --> c3
     d5 --> b6
     d5 --> b8
     d3 --> b7
+
+    subgraph nexussec["Domain: nexus gateway — claude-code-api (task 1b4d27f2)"]
+        b14["image-url-ssrf<br/>sev-high<br/>🔴 download_image hands a client URL to<br/>reqwest::get with no scheme or host allowlist;<br/>the metadata address is reachable"]
+        b15["image-url-local-file-read<br/>sev-high<br/>🔴 the same function's else branch returns the<br/>client string AS A PATH, injected as Image: {path};<br/>an allowlist on the fetch does not close it"]
+        b16["mcp-secrets-in-logs<br/>sev-high<br/>🔴 Debug for Command prints --mcp-config verbatim:<br/>ClaudeManager::create_session_with_message,<br/>InteractiveSessionManager::create_session, query.rs"]
+        b17["api-auth-never-wired<br/>sev-high<br/>🔴 AuthManager and auth_middleware referenced<br/>nowhere outside core/auth.rs; create_app layers<br/>only add_request_id, handle_errors, cors"]
+    end
+
+    subgraph nexuscorr["What the re-check changed about that report"]
+        c1["cited build_router and<br/>test_app_serves_the_production_route_table<br/>🔴 neither exists here; evidence re-derived<br/>against create_app in main.rs"]
+        c2["listed three logging sites<br/>🔴 a fourth is in claude-code-sdk-rs query.rs,<br/>the crate that already defines<br/>describe_command_redacted"]
+        c3["treated download_image as one bug<br/>🔴 it is two, and they close separately"]
+    end
 
     subgraph stale["Why 🟠 is not ✅ — the failure mode this registry exists to catch"]
         s1["fix/inject-escape<br/>🔴 not an ancestor of origin/main;<br/>PO task efbb040e reads completed"]
@@ -126,6 +147,8 @@ flowchart LR
     s3 --> p1
     b11 --> p3
     b13 --> p3
+    c1 --> p3
+    c2 --> p3
     d3 --> p1
     d3 --> p2
 

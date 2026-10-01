@@ -132,8 +132,9 @@ charter gate's 39.
 ## 4. Inventory — verified 2026-10-01 against `origin/main`
 
 The eleven findings of the 2026-09-30 report were re-checked against the code
-rather than believed, and they resolved into the **thirteen** entries below:
-two reports split in half, because one half had landed and the other had not.
+rather than believed, and they resolved into **thirteen** of the entries
+below: two reports split in half, because one half had landed and the other
+had not. Four more cover this repository, bringing the table to **seventeen**.
 
 * **Eight are closed** ✅ — one of them by deleting the caller rather than by
   adding the route it called.
@@ -141,6 +142,11 @@ two reports split in half, because one half had landed and the other had not.
   branch. These are the dangerous ones; see the note after the table.
 * **Two are new** 🔴 — found only because the re-check read the code. They had
   no owner before this slice and have one now.
+
+Four further entries cover `nexus` itself (PO task `1b4d27f2`), verified in
+this repository on the same day. They are listed because a registry that
+skipped the repository it lives in would be the least credible document in the
+workspace.
 
 One report was also inaccurate in its wording; the corrections are listed
 below the table rather than quietly fixed.
@@ -161,7 +167,29 @@ below the table rather than quietly fixed.
 | `chat-input-request-frontend-dead-listeners` | frontend | sev-low | 🔴 | The same commit left the consumers: `InputRequestBlock`, `useChat`, `chatAssembly`, `chatExport` and `types/chat.ts` still handle an event no producer emits — dead code that reads as a live feature. | **New**, no prior owner. PO task `96c8c56c` created by this slice. Decision in the PR: delete, or rewire onto `AskUserQuestion`. |
 | `task-status-debug-in-api-payloads` | backend | sev-high | ✅ | `WaveTask.status` and `DependencyGraphNode.status` were `String`s built with `format!("{:?}")`, shipping `InProgress` where every other payload says `in_progress`; no frontend comparison matched. | Both fields typed `TaskStatus` so serde owns the wire form. Fixed by backend `03f78569` (#466), locked by `test_dependency_graph_node_enriched_serialization`. |
 | `task-status-debug-in-ws-and-compaction` | backend | sev-medium | 🔴 | Two user-visible sites still Debug-format a `TaskStatus`, which has `rename_all = "snake_case"` and no `Display`. `update_task` emits a `CrudEvent` carrying `"Failed"` to the socket; `fetch_active_plans_and_tasks` yields `"inprogress"`, printed into the compaction prompt as `🔄 INPROGRESS`. | **New**, no branch fixes it. PO task `73300ba4` created by this slice. Load-bearing: `on_task_completed_cascade_steps` compares the Debug casing, so both sides must change together. |
+| `image-url-ssrf` | nexus | sev-high | 🔴 | `download_image` passes a client-supplied `http(s)` URL straight to `reqwest::get` with no scheme or host allowlist, writes the body to the temp dir, and hands the path to the CLI. `http://169.254.169.254/latest/meta-data/` is reachable from the server. | **New to this registry.** PO task `1b4d27f2` (sev-high, nexus). Fix owner: the agent holding `api/chat.rs`. Needs a refusal test, replayed without the fix. |
+| `image-url-local-file-read` | nexus | sev-high | 🔴 | Same function's final branch is `else { Ok(url.to_string()) }`: a URL that is neither `data:image/` nor `http(s)://` is returned **as a local path** and injected into the prompt as `Image: {path}`, so a caller makes the CLI read any file it can reach. | **New to this registry.** Same PO task `1b4d27f2`. Distinct from the SSRF: an allowlist on the fetch would not close it, the fallback branch itself must refuse. |
+| `mcp-secrets-in-logs` | nexus | sev-high | 🔴 | `Debug for Command` prints every argument, so `info!("… with command: {:?}", cmd)` writes the `--mcp-config` payload — which routinely carries tokens — verbatim. Four sites: `ClaudeManager::create_session_with_message` (twice), `InteractiveSessionManager::create_session`, and `claude-code-sdk-rs` `query.rs`. | **New to this registry.** PO task `1b4d27f2`. The SDK already has `describe_command_redacted`; `dc510d5` applied it on one side only. The fourth site, in the SDK's own `query.rs`, was **not** in the task's list — found by this re-check. |
+| `api-auth-never-wired` | nexus | sev-high | 🔴 | `AuthManager` and `auth_middleware` are referenced nowhere outside `core/auth.rs`; `create_app` layers only `add_request_id`, `handle_errors` and CORS. Setting `auth.enabled = true` therefore does nothing and the gateway serves everything anonymously. | **New to this registry.** PO task `1b4d27f2`. Same class as the backend's `auth-anonymous-without-config`, but here there is not even a documented intent — the switch simply lies. |
 <!-- BUG-TABLE-END -->
+
+### Corrections to the nexus security report (task `1b4d27f2`)
+
+Verified in this repository; two details did not survive the re-check, and
+one finding is wider than reported.
+
+* The report names `build_router` and a test
+  `test_app_serves_the_production_route_table`. **Neither exists on this
+  branch** — the router is built by `create_app` in `claude-code-api/src/main.rs`,
+  and no such test is present. The conclusion stands (auth is unwired) but the
+  evidence had to be re-derived, which is why the row cites `create_app`.
+* The secrets-in-logs finding lists three sites in `claude-code-api`. There is
+  a **fourth**, in `claude-code-sdk-rs/src/query.rs` — the same crate that
+  already defines `describe_command_redacted`. A fix applied only to the three
+  named sites would leave the SDK's own path leaking.
+* `download_image` is **two** bugs, not one. An allowlist on the fetch closes
+  the SSRF and leaves the local-file-read branch untouched, so they are
+  tracked separately and must be closed separately.
 
 ### Corrections to the 2026-09-30 report
 
