@@ -28,7 +28,7 @@
 
 ## Testing Guidelines
 - Frameworks: `tokio::test` for async, `axum-test` for HTTP routes.
-- Locations: unit tests in-module (`mod tests`), integration tests in `tests/` (e.g., `tests/api_tests.rs`).
+- Locations: unit tests in-module (`mod tests`); integration tests in the **crate's own** `tests/` directory — `claude-code-sdk-rs/tests/` or `claude-code-api/tests/`. The repository root is a virtual workspace with no `[package]`, so a `tests/` directory there is never compiled and never runs.
 - Conventions: name tests by behavior (e.g., `test_chat_completion_validation`). Ensure fast, deterministic tests.
 - Run: `cargo test` or `cargo test -p claude-code-api`.
 
