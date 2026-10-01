@@ -2,6 +2,26 @@
 
 All notable changes to this project will be documented in this file.
 
+> [!WARNING]
+> **This file stops at 0.1.10 (2025-01-15); the workspace is at 0.5.0.** Checked
+> 2026-10-01.
+>
+> Four minor versions shipped without an entry here. Do not read the absence of a
+> `0.5.0` section as "nothing changed" — read it as "this file was not updated".
+> `git log` is the record for that span.
+>
+> **Why it was not regenerated.** `cliff.toml` is configured but has never been run: the
+> header above is not the one it emits, and its footer is absent. It also cannot be run
+> usefully as things stand — git-cliff groups commits by tag, and the newest version tag in
+> this repository is `v0.0.5`, so the 126 commits since would collapse into a single
+> `[Unreleased]` block. Creating the missing tags is a release action, deliberately not
+> taken here.
+>
+> **To close the gap:** tag the releases that shipped, then
+> `git-cliff --output CHANGELOG.md`, then delete this notice —
+> `cargo test -p claude-code-api --test docs_changelog` fails if the notice outlives the
+> gap, and fails while the gap outlives the notice.
+
 ## [0.1.10] - 2025-01-15
 
 ### SDK Updates
