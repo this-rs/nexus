@@ -1,0 +1,130 @@
+%% name: nexus-api-hooks
+%% covers: claude-code-api/src/core/hooks/*.rs
+%% verified: 2026-10-01
+flowchart TD
+    subgraph legend["Légende"]
+        direction LR
+        L1["✅ vérifié par un test"]
+        L2["🟠 décidé, non écrit"]
+        L3["🔴 bug / non branché"]
+        L4["⚪ hors dépôt"]
+    end
+
+    %% =====================================================================
+    %% neo4j_permission_provider.rs — le garde de permissions
+    %% =====================================================================
+    subgraph perm["neo4j_permission_provider.rs — décide allow ou deny"]
+        direction TB
+
+        perm_new["✅ Neo4jPermissionProvider::new()<br/>audit_enabled = true, cache vide<br/><i>vérifié : serveur Bolt factice</i>"]
+        perm_builders["✅ with_project / with_workspace<br/>with_session / with_audit<br/><i>vérifié : paramètres Cypher relus<br/>sur le serveur Bolt factice</i>"]
+        perm_new --> perm_builders
+
+        %% ---- schéma -----------------------------------------------------
+        perm_init["Neo4jPermissionProvider::init_schema()<br/>2 CONSTRAINT + 1 INDEX, tous IF NOT EXISTS"]
+        perm_builders --> perm_init
+        perm_init -->|"graph.run rend Ok"| perm_init_ok["✅ Ok(())<br/>info! schema initialized<br/><i>vérifié : les 3 RUN relus</i>"]
+        perm_init -->|"graph.run rend Err"| perm_init_swallow["🔴 erreur avalée par debug!<br/>retourne quand même Ok(())<br/>et log « schema initialized »<br/><i>vérifié : serveur Bolt répondant<br/>FAILURE aux 3 requêtes</i>"]
+
+        %% ---- chargement des règles --------------------------------------
+        perm_reload["Neo4jPermissionProvider::reload_rules()<br/>scope global OU workspace OU project<br/>le cache n'est remplacé qu'après succès"]
+        perm_builders --> perm_reload
+        perm_reload -->|"workspace_id ou project_id absent"| perm_reload_empty["✅ paramètre = chaîne vide, pas null<br/>une règle de scope_id vide vaut<br/>pour tout provider non scopé<br/><i>vérifié : paramètres relus</i>"]
+        perm_reload -->|"graph.execute rend Err, ou règle malformée"| perm_reload_err["✅ Err remonté, règles précédentes gardées<br/>corrigé : le rules_cache.clear() initial<br/>ouvrait le garde dès que Neo4j tombait<br/><i>vérifié : test rejoué sans le correctif,<br/>il rend allow au lieu de deny</i>"]
+        perm_reload -->|"ligne convertie en neo4rs::Node"| perm_decode["✅ décodage des propriétés<br/>id, tool_pattern et decision obligatoires<br/><i>vérifié : nœuds Bolt forgés à la main</i>"]
+        perm_decode -->|"id, tool_pattern ou decision absent"| perm_decode_err["✅ Err : le chargement entier échoue<br/>aucune règle partielle acceptée<br/><i>vérifié : nœud sans id, puis sans<br/>decision, puis sans tool_pattern</i>"]
+        perm_decode -->|"reason absent ou null"| perm_decode_reason["✅ node.get reason puis .ok() rend None<br/>le deny garde un message généré<br/><i>vérifié : propriété null</i>"]
+        perm_decode -->|"scope inconnu, priority absent"| perm_decode_default["✅ scope devient Global, priority devient 0<br/>aucune erreur, dégradation muette<br/><i>vérifié : scope organisation</i>"]
+        perm_decode --> perm_cache["✅ rules_cache all remplacé en bloc<br/>ordre = celui du ORDER BY Cypher<br/>une règle supprimée cesse de s'appliquer<br/><i>vérifié : deux règles, deux ordres</i>"]
+
+        %% ---- sélection de la règle --------------------------------------
+        perm_find["Neo4jPermissionProvider::find_matching_rule()<br/>la première règle qui matche gagne"]
+        perm_cache --> perm_find
+        perm_find --> perm_prio["🔴 PermissionScope::priority()<br/>jamais consultée (0, 50, 100)<br/>une règle global rendue en premier<br/>masque une règle project<br/><i>vérifié : mêmes règles, ordre inversé</i>"]
+
+        perm_matches["PermissionRule::matches()<br/>glob maison, aucune crate glob"]
+        perm_find --> perm_matches
+        perm_matches -->|"pattern vaut une étoile seule"| perm_m_all["✅ true, y compris pour un nom vide<br/><i>vérifié : test unitaire</i>"]
+        perm_matches -->|"pattern finit par une étoile"| perm_m_prefix["✅ starts_with du préfixe<br/>sûr en UTF-8 : l'étoile fait 1 octet<br/><i>vérifié : motif accentué</i>"]
+        perm_matches -->|"pattern commence par une étoile"| perm_m_suffix["✅ ends_with du suffixe<br/><i>vérifié : motifs étoile-Fetch et étoile-é</i>"]
+        perm_matches -->|"pattern contient une parenthèse ouvrante ET une fermante"| perm_m_paren["🔴 compare le nom de base SEUL<br/>Bash(git:étoile) matche Bash(rm:-rf)<br/>un allow étroit ouvre tout l'outil<br/><i>vérifié : test rouge #[ignore]<br/>parenthesised_patterns_should_match…</i>"]
+        perm_matches -->|"étoile au milieu, ou parenthèse non fermée"| perm_m_exact["✅ comparaison littérale<br/>mcp__étoile__read n'est pas un glob<br/><i>vérifié : test unitaire</i>"]
+
+        %% ---- la décision ------------------------------------------------
+        perm_can["can_use_tool()<br/>impl CanUseTool for Neo4jPermissionProvider"]
+        perm_matches --> perm_can
+        perm_can -->|"decision vaut allow"| perm_allow["✅ Allow, updated_input = None<br/>l'entrée n'est jamais réécrite<br/><i>vérifié : serveur Bolt factice</i>"]
+        perm_can -->|"decision vaut deny"| perm_deny["✅ Deny, interrupt = false<br/>message = reason, sinon le texte<br/>Tool X is denied by permission rule<br/><i>vérifié : reason posé puis null</i>"]
+        perm_can -->|"decision vaut ask"| perm_ask["🔴 Allow silencieux<br/>le commentaire dit let SDK handle asking<br/>mais PermissionResult n'a que Allow et Deny<br/><i>vérifié : serveur Bolt factice</i>"]
+        perm_can -->|"decision inconnue : Deny, DENY, vide, blocked"| perm_unknown["🔴 Allow silencieux, désormais tracé par warn!<br/>une règle mal orthographiée AUTORISE<br/><i>vérifié : 5 valeurs, plus le test rouge<br/>#[ignore] should_refuse_a_rule_decision…</i>"]
+        perm_can -->|"aucune règle ne matche, ou cache jamais chargé"| perm_default["🔴 Allow par défaut, audit allow_default<br/>un provider jamais reload_rules<br/>est un garde inerte<br/><i>vérifié : test rouge #[ignore]<br/>an_empty_rule_set_should_refuse…</i>"]
+
+        %% ---- audit ------------------------------------------------------
+        perm_audit["log_audit()<br/>CREATE a:NexusPermissionAudit"]
+        perm_allow --> perm_audit
+        perm_deny --> perm_audit
+        perm_default --> perm_audit
+        perm_audit -->|"audit_enabled vaut false"| perm_audit_off["✅ return immédiat, zéro écriture<br/><i>vérifié : aucun RUN NexusPermissionAudit</i>"]
+        perm_audit -->|"graph.run rend Ok"| perm_audit_ok["✅ uuid, tool_name, decision,<br/>rule_id, session_id, now<br/><i>vérifié : paramètres Cypher relus</i>"]
+        perm_audit -->|"graph.run rend Err"| perm_audit_err["🔴 seulement warn!, décision rendue<br/>la trace d'audit est perdue en silence<br/><i>vérifié : FAILURE ciblé sur<br/>la seule requête d'audit</i>"]
+
+        %% ---- écriture des règles ----------------------------------------
+        perm_add["Neo4jPermissionProvider::add_rule()<br/>CREATE r:NexusPermissionRule"]
+        perm_builders --> perm_add
+        perm_add -->|"reason = None et scope = Global"| perm_add_defaults["✅ reason et scope_id écrits vides<br/>pas null : le filtre IS NULL<br/>de list_rules ne les verra jamais<br/><i>vérifié : paramètres Cypher relus</i>"]
+        perm_add -->|"Ok"| perm_add_clear["🔴 rules_cache.clear() sans recharger<br/>ajouter une règle DÉSARME toutes<br/>les règles deny jusqu'au prochain reload<br/><i>vérifié : deny, puis add, puis allow</i>"]
+        perm_add -->|"Err"| perm_add_err["✅ Err remonté, cache intact<br/>le clear est placé après le ?<br/><i>vérifié : FAILURE ciblé sur le CREATE</i>"]
+
+        perm_remove["Neo4jPermissionProvider::remove_rule()<br/>MATCH puis DELETE r RETURN count"]
+        perm_builders --> perm_remove
+        perm_remove -->|"deleted plus grand que 0"| perm_rm_true["✅ Ok(true), TOUT le cache vidé<br/>pas seulement la règle supprimée<br/><i>vérifié : RECORD deleted=1</i>"]
+        perm_remove -->|"deleted vaut 0, ou aucune ligne"| perm_rm_false["✅ Ok(false), cache conservé<br/>aucun audit n'est écrit<br/><i>vérifié : deleted=0 puis zéro ligne</i>"]
+        perm_remove -->|"count non entier, ou graph Err"| perm_rm_err["✅ Err remonté<br/><i>vérifié : RECORD textuel puis FAILURE</i>"]
+
+        perm_list["Neo4jPermissionProvider::list_rules()<br/>même bloc de décodage que reload_rules"]
+        perm_builders --> perm_list
+        perm_list -->|"Some(scope)"| perm_list_scoped["✅ WHERE r.scope et scope_id<br/>ou r.scope_id IS NULL<br/>Global envoie un scope_id vide<br/><i>vérifié : 3 scopes, paramètres relus</i>"]
+        perm_list -->|"None"| perm_list_all["✅ aucun WHERE, tout est rendu<br/><i>vérifié : Cypher relu, sans WHERE</i>"]
+        perm_list -->|"nœud incomplet, ou graph Err"| perm_list_err["✅ Err remonté<br/><i>vérifié : nœud sans tool_pattern</i>"]
+    end
+
+    %% =====================================================================
+    %% neo4j_hook_callback.rs — la capture d'événements
+    %% =====================================================================
+    subgraph hook["neo4j_hook_callback.rs — persiste les événements, hors périmètre de test de cet agent"]
+        direction TB
+
+        hook_new["🔴 Neo4jHookCallback::new()<br/>graph, Meilisearch optionnel, config<br/>jamais construit : non branché"]
+        hook_exec["HookCallback::execute()<br/>match sur HookInput"]
+        hook_new --> hook_exec
+
+        hook_exec -->|"PreToolUse"| hook_pre["handle_pre_tool_use()<br/>tool_start_times.insert id et Instant::now"]
+        hook_pre -->|"tool_use_id vaut None"| hook_pre_nodur["🔴 rien n'est enregistré<br/>la durée sera perdue"]
+        hook_exec -->|"PostToolUse"| hook_post["handle_post_tool_use()<br/>CREATE t:NexusToolUsage"]
+        hook_exec -->|"UserPromptSubmit"| hook_prompt["handle_user_prompt_submit()<br/>CREATE p:NexusUserPrompt"]
+        hook_exec -->|"Stop"| hook_stop["handle_stop()<br/>CREATE e:NexusSessionEvent"]
+        hook_exec -->|"toute autre variante : SessionStart, PreCompact, Notification"| hook_ignored["🔴 Ok SyncHookJSONOutput::default<br/>variante ignorée sans trace"]
+
+        hook_post -->|"output_json plus long que max_output_size"| hook_trunc["🔴 tranche output_json par octets<br/>panique si la coupe tombe au milieu<br/>d'un caractère UTF-8 — même défaut<br/>dans truncate_for_search()"]
+        hook_post -->|"start_time absent"| hook_sentinel["🔴 duration_ms vaut -1 en base<br/>sentinelle indistinguable d'une mesure"]
+        hook_post -->|"graph.run rend Err"| hook_post_err["🔴 seulement warn!, Ok rendu au SDK<br/>l'événement est perdu en silence"]
+        hook_post -->|"index_in_meilisearch et client présent"| hook_ms["🔴 construit ToolUsageDocument<br/>puis seulement debug!<br/>INDEX_TOOL_USAGE n'est jamais écrit"]
+        hook_prompt -->|"graph.run rend Err"| hook_prompt_err["🔴 warn! puis Ok : prompt perdu"]
+        hook_stop -->|"graph.run rend Err"| hook_stop_err["🔴 warn! puis Ok : fin de session perdue"]
+
+        hook_msidx["🔴 init_meilisearch_index()<br/>ne fait qu'un debug!, retourne Ok(())<br/>aucun index n'est créé"]
+        hook_new --> hook_msidx
+        hook_schema["Neo4jHookCallback::init_schema()<br/>3 CONSTRAINT + 1 INDEX"]
+        hook_new --> hook_schema
+        hook_schema -->|"graph.run rend Err"| hook_schema_swallow["🔴 erreur avalée, Ok(()) rendu<br/>même défaut que le provider"]
+    end
+
+    %% =====================================================================
+    %% Montage — déclaré après les sous-graphes pour que les nœuds
+    %% appartiennent bien à leur domaine
+    %% =====================================================================
+    sdk["⚪ nexus_claude<br/>CanUseTool et HookCallback<br/>appelés par le client SDK"]
+    unwired["🔴 aucun point de montage<br/>ni Neo4jPermissionProvider::new<br/>ni Neo4jHookCallback::new<br/>n'est appelé dans ce crate<br/><i>grep : seul core/hooks/mod.rs les ré-exporte</i>"]
+    sdk --> unwired
+    unwired --> perm_new
+    unwired --> hook_new

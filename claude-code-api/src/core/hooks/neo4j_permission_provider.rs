@@ -65,6 +65,10 @@ impl PermissionScope {
         }
     }
 
+    /// Advisory weight of the scope. Nothing in [`Neo4jPermissionProvider`]
+    /// reads it: the order rules are evaluated in comes from the
+    /// `ORDER BY r.priority DESC` of the Cypher queries, i.e. from each rule's
+    /// own `priority` property, not from its scope.
     pub fn priority(&self) -> i32 {
         match self {
             PermissionScope::Global => 0,
@@ -86,7 +90,13 @@ pub struct PermissionRule {
 }
 
 impl PermissionRule {
-    /// Check if the rule matches a tool name (glob matching)
+    /// Check whether this rule applies to `tool_name`.
+    ///
+    /// This is *not* glob matching, despite the `*` syntax: only a leading or a
+    /// trailing `*` is honoured, a `*` anywhere else is compared literally, and
+    /// a parenthesised pattern such as `Bash(git:*)` is matched on its base name
+    /// alone — so it also applies to `Bash(rm:-rf)`. A rule written to narrow a
+    /// tool down to one argument therefore covers the whole tool.
     pub fn matches(&self, tool_name: &str) -> bool {
         if self.tool_pattern == "*" {
             return true;
@@ -167,7 +177,12 @@ impl Neo4jPermissionProvider {
         self
     }
 
-    /// Initialize Neo4j schema
+    /// Initialize Neo4j schema.
+    ///
+    /// Every statement is `IF NOT EXISTS`, and a statement that fails is only
+    /// logged at `debug` level: this returns `Ok(())` even when none of the
+    /// constraints nor the index could be created, so it is not a connectivity
+    /// check.
     pub async fn init_schema(&self) -> Result<()> {
         let constraints = vec![
             "CREATE CONSTRAINT nexus_permission_rule_id IF NOT EXISTS FOR (r:NexusPermissionRule) REQUIRE r.id IS UNIQUE",
@@ -190,10 +205,16 @@ impl Neo4jPermissionProvider {
         Ok(())
     }
 
-    /// Reload rules from Neo4j
+    /// Reload rules from Neo4j.
+    ///
+    /// The cache is replaced only once the new rule set has been fetched and
+    /// decoded: on `Err` the previously loaded rules stay in effect. Emptying it
+    /// up front would turn an unreachable Neo4j — or a concurrent `can_use_tool`
+    /// call racing the reload — into a blanket allowance, because
+    /// `find_matching_rule` treats an empty cache as "no rule applies". The
+    /// `insert` below replaces the `"all"` entry wholesale, so no explicit
+    /// `clear()` is needed on the success path.
     pub async fn reload_rules(&self) -> Result<()> {
-        self.rules_cache.clear();
-
         let q = query(
             "MATCH (r:NexusPermissionRule)
             WHERE r.scope = 'global'
@@ -409,6 +430,14 @@ impl Neo4jPermissionProvider {
 
 #[async_trait]
 impl CanUseTool for Neo4jPermissionProvider {
+    /// Decide whether `tool_name` may run.
+    ///
+    /// **This guard fails open.** A tool no loaded rule matches is allowed, and
+    /// so is every tool when [`Neo4jPermissionProvider::reload_rules`] has never
+    /// been called or when [`Neo4jPermissionProvider::add_rule`] /
+    /// [`Neo4jPermissionProvider::remove_rule`] has just invalidated the cache.
+    /// A rule whose `decision` is neither `"allow"` nor `"deny"` is allowed too.
+    /// Only an explicit `"deny"` rule refuses anything.
     async fn can_use_tool(
         &self,
         tool_name: &str,
@@ -440,7 +469,15 @@ impl CanUseTool for Neo4jPermissionProvider {
                     })
                 },
                 _ => {
-                    // "ask" or unknown - default to allow (let SDK handle asking)
+                    // "ask", a typo such as "Deny", or a decision from a newer
+                    // schema. `PermissionResult` has only `Allow` and `Deny`, so
+                    // nothing downstream can prompt the user: this arm is an
+                    // unconditional allowance, and a misspelt deny rule grants
+                    // the tool.
+                    warn!(
+                        "Allowing tool {} - rule {} has an uninterpretable decision {:?}",
+                        tool_name, rule.id, decision
+                    );
                     PermissionResult::Allow(PermissionResultAllow {
                         updated_input: None,
                         updated_permissions: None,
@@ -511,6 +548,150 @@ mod tests {
         assert!(!rule.matches("Write"));
     }
 
+    /// `matches` only understands a `*` at one end of the pattern.
+    #[test]
+    fn test_permission_rule_matches_suffix_wildcard() {
+        let rule = PermissionRule {
+            id: "test".to_string(),
+            tool_pattern: "*Fetch".to_string(),
+            decision: "allow".to_string(),
+            reason: None,
+            scope: PermissionScope::Global,
+            priority: 0,
+        };
+
+        assert!(rule.matches("WebFetch"));
+        assert!(rule.matches("Fetch"));
+        assert!(!rule.matches("FetchWeb"));
+    }
+
+    /// A `*` in the middle is not a wildcard: the pattern is compared literally.
+    #[test]
+    fn test_permission_rule_ignores_an_inner_wildcard() {
+        let rule = PermissionRule {
+            id: "test".to_string(),
+            tool_pattern: "mcp__*__read".to_string(),
+            decision: "deny".to_string(),
+            reason: None,
+            scope: PermissionScope::Global,
+            priority: 0,
+        };
+
+        assert!(!rule.matches("mcp__nexus__read"));
+        assert!(rule.matches("mcp__*__read"));
+    }
+
+    /// An empty pattern matches only the empty tool name — it is not a wildcard.
+    #[test]
+    fn test_permission_rule_with_an_empty_pattern_matches_nothing_useful() {
+        let rule = PermissionRule {
+            id: "test".to_string(),
+            tool_pattern: String::new(),
+            decision: "deny".to_string(),
+            reason: None,
+            scope: PermissionScope::Global,
+            priority: 0,
+        };
+
+        assert!(!rule.matches("Bash"));
+        assert!(rule.matches(""));
+    }
+
+    /// `"*"` matches the empty tool name too, so a catch-all rule still decides
+    /// when the CLI sends no tool name at all.
+    #[test]
+    fn test_permission_rule_wildcard_matches_an_empty_tool_name() {
+        let rule = PermissionRule {
+            id: "test".to_string(),
+            tool_pattern: "*".to_string(),
+            decision: "deny".to_string(),
+            reason: None,
+            scope: PermissionScope::Global,
+            priority: 0,
+        };
+
+        assert!(rule.matches(""));
+    }
+
+    /// The parenthesised form is matched on its base name only (the code calls
+    /// this "Simplified"), so a rule scoped to `git` covers every `Bash` call.
+    /// See `parenthesised_patterns_should_match_their_argument_too` in
+    /// `tests/neo4j_permission_bolt.rs` for the behaviour this should have.
+    #[test]
+    fn test_permission_rule_parenthesised_pattern_matches_the_base_name_only() {
+        let rule = PermissionRule {
+            id: "test".to_string(),
+            tool_pattern: "Bash(git:*)".to_string(),
+            decision: "allow".to_string(),
+            reason: None,
+            scope: PermissionScope::Global,
+            priority: 0,
+        };
+
+        assert!(rule.matches("Bash(git:status)"));
+        assert!(
+            rule.matches("Bash(rm:-rf)"),
+            "the argument is never compared"
+        );
+        assert!(!rule.matches("Read"));
+    }
+
+    /// A pattern that opens a parenthesis without closing it falls through to the
+    /// exact comparison.
+    #[test]
+    fn test_permission_rule_unbalanced_parenthesis_is_compared_literally() {
+        let rule = PermissionRule {
+            id: "test".to_string(),
+            tool_pattern: "Bash(git".to_string(),
+            decision: "allow".to_string(),
+            reason: None,
+            scope: PermissionScope::Global,
+            priority: 0,
+        };
+
+        assert!(!rule.matches("Bash(git:status)"));
+        assert!(rule.matches("Bash(git"));
+    }
+
+    /// Multi-byte patterns must not panic when the `*` is stripped.
+    #[test]
+    fn test_permission_rule_handles_a_multibyte_pattern() {
+        let prefix = PermissionRule {
+            id: "test".to_string(),
+            tool_pattern: "Éditer*".to_string(),
+            decision: "deny".to_string(),
+            reason: None,
+            scope: PermissionScope::Global,
+            priority: 0,
+        };
+        assert!(prefix.matches("Éditer un fichier"));
+        assert!(!prefix.matches("Editer"));
+
+        let suffix = PermissionRule {
+            tool_pattern: "*é".to_string(),
+            ..prefix
+        };
+        assert!(suffix.matches("Privé"));
+        assert!(!suffix.matches("Prive"));
+    }
+
+    #[test]
+    fn test_permission_scope_as_str() {
+        assert_eq!(PermissionScope::Global.as_str(), "global");
+        assert_eq!(
+            PermissionScope::Workspace("ws-1".to_string()).as_str(),
+            "workspace"
+        );
+        assert_eq!(
+            PermissionScope::Project("proj-1".to_string()).as_str(),
+            "project"
+        );
+    }
+
+    /// `priority()` documents Project as the highest scope, but nothing in the
+    /// provider reads it: see
+    /// `can_use_tool_takes_the_first_returned_rule_and_ignores_the_scope_priority`
+    /// in `tests/neo4j_permission_bolt.rs`.
     #[test]
     fn test_permission_scope_priority() {
         assert!(
