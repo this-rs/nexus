@@ -898,6 +898,84 @@ fn every_verified_diagram_obeys_the_header_rules() {
     }
 }
 
+/// Where the orphan ceiling is recorded.
+const ORPHANS_PATH: &str = "docs/diagrams/ORPHANS.md";
+
+/// Source files (`.rs` under a `src/`) that no diagram's `covers` claims.
+///
+/// Examples and tests are excluded on purpose: an example exists to be read
+/// and a test to be executed, so neither is logic a diagram would describe.
+/// Counting them would inflate the gap with files that will never have an
+/// owner, and a metric nobody can ever drive to zero gets ignored.
+fn orphan_source_files(entries: &[IndexEntry]) -> Vec<String> {
+    let globs: Vec<&str> = entries
+        .iter()
+        .flat_map(|e| e.covers.iter())
+        .filter_map(|g| local_glob(g))
+        .collect();
+    let mut orphans: Vec<String> = repo_relative_paths()
+        .into_iter()
+        .filter(|p| p.ends_with(".rs"))
+        .filter(|p| p.starts_with("src/") || p.contains("/src/"))
+        .filter(|p| !globs.iter().any(|glob| glob_matches(glob, p)))
+        .collect();
+    orphans.sort();
+    orphans
+}
+
+/// Read `<!-- orphan-ceiling: N -->` from the published list.
+fn orphan_ceiling(doc: &str) -> Option<usize> {
+    let at = doc.find("<!-- orphan-ceiling:")?;
+    let rest = &doc[at + "<!-- orphan-ceiling:".len()..];
+    let end = rest.find("-->")?;
+    rest[..end].trim().parse().ok()
+}
+
+#[test]
+fn the_orphan_count_never_grows() {
+    // The charter wants every source file owned by a diagram. Most are not yet
+    // (task 0.2), so a hard "zero orphans" assertion would fail on day one and
+    // get deleted. A ceiling that can only descend turns the same goal into
+    // something a pull request can be held to today: claim a file, or at least
+    // do not add another unowned one.
+    //
+    // Regenerate the list behind the ceiling with:
+    //   cargo test -p claude-code-api --test diagram_index -- --nocapture \
+    //     the_orphan_count_never_grows
+    let entries = parse_index(&read_repo_file(INDEX_PATH)).expect("index parses");
+    let orphans = orphan_source_files(&entries);
+    let doc = read_repo_file(ORPHANS_PATH);
+    let ceiling = orphan_ceiling(&doc)
+        .unwrap_or_else(|| panic!("{ORPHANS_PATH} carries no `orphan-ceiling` marker"));
+
+    println!("orphan source files ({}):", orphans.len());
+    for path in &orphans {
+        println!("  {path}");
+    }
+
+    assert!(
+        orphans.len() <= ceiling,
+        "{} source files have no owning diagram, above the ceiling of {ceiling} \
+         recorded in {ORPHANS_PATH}. Give the new file a diagram by adding it \
+         to a `covers` glob — raising the ceiling is not the way out.",
+        orphans.len()
+    );
+}
+
+#[test]
+fn the_orphan_ceiling_marker_is_readable() {
+    // Negative controls for the parser, so a typo in the marker cannot turn
+    // the ratchet off by making the ceiling unreadable.
+    assert_eq!(orphan_ceiling("<!-- orphan-ceiling: 42 -->"), Some(42));
+    assert_eq!(
+        orphan_ceiling("text <!-- orphan-ceiling:7--> more"),
+        Some(7)
+    );
+    assert_eq!(orphan_ceiling("<!-- orphan-ceiling: -->"), None);
+    assert_eq!(orphan_ceiling("<!-- orphan-ceiling: many -->"), None);
+    assert_eq!(orphan_ceiling("no marker at all"), None);
+}
+
 #[test]
 fn every_diagram_file_on_disk_is_indexed_as_verified() {
     // The other direction of the index check. Without this a `.mmd` can sit in
