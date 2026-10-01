@@ -1,0 +1,109 @@
+%% name: nexus-api-http
+%% covers: claude-code-api/src/api/*.rs
+%% verified: 2026-10-01
+flowchart TD
+    subgraph legend["Légende"]
+        direction LR
+        L1["✅ vérifié par un test"]
+        L2["🟠 décidé, non écrit"]
+        L3["🔴 bug / non branché"]
+        L4["⚪ hors dépôt"]
+    end
+
+    client["⚪ client OpenAI<br/>openai-python, curl, LangChain"] --> router
+
+    router["✅ build_router()<br/>seule table de routes du binaire<br/><i>vérifié : test_app() monte ce routeur, pas une copie</i>"]
+
+    router -->|"POST /v1/chat/completions"| chat["✅ chat_completions()"]
+    router -->|"POST /v1/sessions/:id/interrupt"| interrupt["✅ interrupt_session()"]
+    router -->|"POST, GET /v1/conversations"| convs["✅ create_conversation(), list_conversations(), get_conversation()"]
+    router -->|"GET /v1/models, POST /v1/models/refresh"| models["✅ list_models(), refresh_models()"]
+    router -->|"GET /stats"| stats["✅ get_stats()<br/>CacheStats + CARGO_PKG_VERSION"]
+    router -->|"GET /health"| health["✅ health_check() renvoie OK"]
+    router -.->|"jamais monté"| orphans["🔴 list_sessions(), create_session(),<br/>list_projects(), create_project()<br/>écrits, renvoient une liste vide ou Not implemented,<br/>aucune route ne les atteint"]
+
+    %% ───────────────────────── chat_completions ─────────────────────────
+    chat --> empty{"messages vide ?"}
+    empty -->|"oui"| e400["✅ ApiError::BadRequest<br/>400 invalid_request_error<br/><i>vérifié : POST sans messages</i>"]
+    empty -->|"non"| convid{"conversation_id fourni ?"}
+
+    convid -->|"oui, inconnu du store"| e404["✅ ApiError::NotFound avant tout lancement<br/>404 not_found_error<br/><i>vérifié : 404 avec un claude.command insaisissable,<br/>donc le CLI n'a pas tourné</i>"]
+    convid -->|"oui, connu"| ctx
+    convid -->|"non"| create["✅ conversation_manager.create_conversation()<br/>l'échec du store serait un 500 internal_error<br/><i>non atteignable : ChatState est typé sur<br/>DefaultConversationManager, pas de faux store</i>"]
+    create --> ctx
+
+    ctx["✅ get_context_messages()<br/>historique + nouveaux tours, tronqué par trim_context()"] --> cache{"stream == false<br/>et clé en cache ?"}
+    cache -->|"oui"| hit["✅ réponse rejouée, conversation_id réestampillé sur celle de l'appelant<br/><i>vérifié : deux appels identiques, même id de complétion,<br/>mais deux conversations distinctes</i>"]
+    hit -.-> keyblind["🔴 clé = model + messages seulement :<br/>tools, tool_choice, temperature, max_tokens ignorés<br/>un appelant qui déclare un outil reçoit la réponse calculée sans outil<br/><i>test rouge ignoré ; generate_key est dans core::cache</i>"]
+    cache -->|"non"| fmt
+
+    fmt["✅ format_messages_for_claude()<br/>User:/Assistant:/System: sur l'historique,<br/>dernier tour sans préfixe"]
+    fmt -.->|"role inconnu (tool, function)"| droprole["🔴 contenu jeté par le bras par défaut du match sur le rôle<br/>le résultat d'outil d'un client OpenAI<br/>n'atteint jamais le CLI<br/><i>test rouge ignoré, plus un assert sur le texte disparu</i>"]
+    fmt --> images["✅ extract_content_and_images()<br/>texte joint par des espaces, images résolues"]
+
+    images --> policy{"✅ classify_image_url()"}
+    policy -->|"data:image/…,base64"| inline["✅ persist_temp_image()<br/>fichier temporaire suivi dans TEMP_FILES"]
+    policy -->|"http(s) + hôte routable"| dl["✅ download_image(Url)<br/><i>vérifié : wiremock 200 et 404,<br/>port fermé pour l'échec réseau</i>"]
+    policy -->|"169.254.169.254, 127.0.0.1, 10/8, ::1,<br/>metadata.google.internal, *.internal"| ssrf["✅ refus 400 — SSRF<br/><i>vérifié : table de 32 URL refusées</i>"]
+    policy -->|"file:, ftp:, /etc/passwd, chemin Windows, data:text/html"| path["✅ refus 400 — plus de chemin local<br/>l'entrée client ne devient plus une ligne Image:<br/><i>vérifié : test rejoué sans le correctif</i>"]
+    inline --> prompt
+    dl --> prompt
+
+    prompt["✅ ligne Image: chemin ajoutée après le texte"] --> transport{"claude.use_interactive_sessions ?"}
+
+    transport -->|"true"| isession["✅ get_or_create_session_and_send(Some(conversation_id))<br/>la clé de session EST l'id rendu au client<br/><i>vérifié : interrupt_session(id) ne répond plus Ok(false)</i>"]
+    transport -->|"false"| pool["✅ process_pool.get_or_create()<br/>ne met rien en pool : crée un process par tour"]
+    isession --> mode
+    pool --> mode
+    isession -.->|"spawn impossible"| e500p["✅ ApiError::ClaudeProcess<br/>500 claude_process_error<br/><i>vérifié : command inexistante</i>"]
+    pool -.-> e500p
+
+    mode{"stream == true ?"}
+
+    %% ───────────────────────── non-streaming ─────────────────────────
+    mode -->|"non"| nonstream["✅ handle_non_streaming_response()<br/>boucle timeout(min(reste, 5s), rx.recv())"]
+    nonstream -->|"sidechain (parent_tool_use_id)"| skip["✅ ignoré<br/><i>vérifié : le texte du sous-agent n'est pas rendu</i>"]
+    nonstream -->|"bloc text"| text["✅ concaténé, token_count = mots"]
+    nonstream -->|"bloc tool_use"| tooluse["✅ ToolCall OpenAI<br/>id vide → call_ + uuid, input absent → objet vide"]
+    nonstream -->|"bloc tool_result / inconnu"| ignored["✅ journalisé puis ignoré"]
+    nonstream -->|"result avec is_error, ou type error"| silenterr["🔴 traité comme un succès : 200 au contenu vide<br/>build_process_died_event() émet exactement ce message<br/>quand le CLI meurt<br/><i>test rouge ignoré</i>"]
+    nonstream -->|"budget écoulé"| touto["✅ ApiError::ClaudeProcess 'Timeout … after N seconds'<br/>budget respecté à la seconde<br/><i>vérifié : horloge Tokio arrêtée, 1 s mesuré, pas 5</i>"]
+    touto --> closenoop["🔴 claude_manager.close_session(session_id)<br/>no-op sur le chemin interactif :<br/>ces sessions vivent dans InteractiveSessionManager.sessions"]
+
+    text --> build{"tool_calls extraits ?"}
+    tooluse --> build
+    build -->|"oui + texte"| fstop["✅ finish_reason = stop, contenu conservé"]
+    build -->|"oui, sans texte"| ftool["✅ finish_reason = tool_calls, content = null JSON"]
+    build -->|"non, mais JSON + tools déclarés"| heur["✅ detect_and_convert_tool_call()<br/>heuristique héritée : le texte JSON est jeté"]
+    build -->|"non"| ftext["✅ réponse texte, finish_reason = stop"]
+
+    fstop --> persist
+    ftool --> persist
+    heur --> persist
+    ftext --> persist
+
+    persist["✅ add_message() pour chaque tour client puis pour la réponse<br/>échec du store → 500 internal_error"] --> put["✅ cache.put(clé, réponse) + conversation_id estampillé"]
+
+    %% ───────────────────────── streaming ─────────────────────────
+    mode -->|"oui"| sawait["✅ add_message() des tours client<br/>avant de céder le canal au flux"]
+    sawait --> sse["✅ handle_streaming_response()<br/>→ handle_enhanced_streaming_response()<br/>texte découpé en tranches de 15 caractères"]
+    sse --> rec["✅ record_streamed_turn()<br/>recopie chaque chunk, accumule le texte,<br/>add_message(assistant) à la fin<br/><i>vérifié : conversation = user puis assistant après un POST stream</i>"]
+    rec --> frames["✅ create_sse_stream() : une ligne data: par chunk"]
+    frames --> nodone["🔴 aucune trame finale data: DONE<br/>utils::streaming::create_sse_stream<br/><i>test rouge ignoré du socle</i>"]
+    sse -.-> silentstream["🔴 même silence côté flux : un result en erreur émet<br/>finish_reason stop, un type error n'émet rien du tout<br/>api::streaming_handler, autre propriétaire"]
+    rec -.->|"client déconnecté avant la fin"| lost["🟠 rien n'est persisté : le générateur est<br/>abandonné avant add_message"]
+    sse -.->|"drop du flux"| guard["✅ SseDisconnectGuard::drop()<br/>interrompt la session CLI si le flux<br/>n'a pas vu de message result"]
+
+    %% ───────────────────────── interrupt ─────────────────────────
+    interrupt --> isw{"interactive_session_manager.interrupt_session(id)"}
+    isw -->|"Ok(true)"| i200["✅ 200 avec status: interrupted<br/><i>vérifié : faux CLI qui garde son stdin ouvert</i>"]
+    isw -->|"Ok(false)"| i404["✅ 404 avec error: session not found<br/><i>vérifié : id inconnu</i>"]
+    isw -->|"Err — canal stdin fermé"| i500["✅ 500 avec error: … stdin channel is closed<br/><i>vérifié : CLI sorti, interruption rejouée</i>"]
+
+    %% ───────────────────────── conversations, models ─────────────────────────
+    convs --> cstore["✅ DefaultConversationManager (store en mémoire)<br/>GET inconnu → 404 not_found_error"]
+    cstore -.-> cint["🟠 branches ApiError::Internal de create_conversation<br/><i>inatteignables par HTTP : ConversationState.manager<br/>n'est pas générique, aucun faux store injectable</i>"]
+    models --> registry["✅ ModelRegistry<br/>sans clé : catalogue statique ClaudeModel::all()<br/>avec clé : Anthropic Models API, échec = catalogue conservé<br/><i>vérifié : wiremock 200, 503, corps malformé</i>"]
+
+    %% ───────────────────────── nettoyage ─────────────────────────
+    inline --> sweep["✅ cleanup_temp_files() toutes les 300 s<br/>prune_temp_files() supprime au-delà de 900 s<br/><i>vérifié : horloge Tokio arrêtée + instants explicites</i>"]
