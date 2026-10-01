@@ -405,10 +405,11 @@ async fn the_two_stream_getters_answer_an_empty_stream_instead_of_refusing_befor
 }
 
 #[tokio::test]
-async fn initialize_hooks_mints_callback_ids_even_when_it_cannot_tell_the_cli_about_them() {
-    // No `connect()`, so the transport has no stdin channel. The callback ids are
-    // generated and stored *before* the send is attempted, so a failed
-    // initialize leaves the registry holding ids the CLI will never send back.
+async fn initialize_hooks_rolls_back_its_callback_ids_when_it_cannot_reach_the_cli() {
+    // No `connect()`, so the transport refuses to write. The callback ids are
+    // minted and registered *before* the send — a hook_callback fired the instant
+    // the CLI reads the init message must find its entry — so a failed send has
+    // to take them back out.
     let seen = Arc::new(Mutex::new(Vec::new()));
     let hook = Arc::new(RecordingHook { seen }) as Arc<dyn HookCallback>;
     let mut hooks = std::collections::HashMap::new();
@@ -426,17 +427,18 @@ async fn initialize_hooks_mints_callback_ids_even_when_it_cannot_tell_the_cli_ab
     // The message used to be the transport's internal "Stdin channel not available",
     // which told the caller nothing. `SubprocessTransport::send_sdk_control_request`
     // now applies the same `TransportState` guard as `send_message`, so an
-    // un-connected client is refused by name. The defect this test pins is the one
-    // below: the ids are minted before the send is attempted.
+    // un-connected client is refused by name.
     assert!(
         matches!(&error, SdkError::InvalidState { message } if message == "Not connected"),
         "got {error:?}"
     );
-    assert_eq!(
-        client.hook_callbacks().read().await.len(),
-        1,
-        "the id was minted before the failed send and is never rolled back"
+    assert!(
+        client.hook_callbacks().read().await.is_empty(),
+        "an id the CLI will never learn must not stay in the registry"
     );
+    // And retrying does not pile up one more leaked id per attempt.
+    client.initialize_hooks().await.unwrap_err();
+    assert!(client.hook_callbacks().read().await.is_empty());
     assert!(
         fake.stdin_lines().is_empty(),
         "nothing reached the CLI, which was never even spawned"

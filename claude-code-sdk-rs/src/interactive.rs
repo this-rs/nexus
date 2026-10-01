@@ -573,6 +573,8 @@ impl InteractiveClient {
         // Generate callback IDs and register callbacks (mirrors Query::initialize)
         let mut counter = self.callback_counter.lock().await;
         let mut callbacks_map = self.hook_callbacks.write().await;
+        // Every id minted below, so a failed send can take them back out.
+        let mut minted: Vec<String> = Vec::new();
 
         let hooks_json: HashMap<String, serde_json::Value> = hooks
             .iter()
@@ -588,6 +590,7 @@ impl InteractiveClient {
                                 let callback_id =
                                     format!("hook_{}_{}", *counter, uuid::Uuid::new_v4().simple());
                                 callbacks_map.insert(callback_id.clone(), hook_cb.clone());
+                                minted.push(callback_id.clone());
                                 callback_id
                             })
                             .collect();
@@ -620,9 +623,26 @@ impl InteractiveClient {
         });
 
         // Send via transport stdin
-        {
+        let sent = {
             let mut transport = self.transport.lock().await;
-            transport.send_sdk_control_request(control_msg).await?;
+            transport.send_sdk_control_request(control_msg).await
+        };
+
+        // The ids are registered BEFORE the send, so that a hook_callback the
+        // CLI fires the instant it reads the init message always finds its
+        // entry. A failed send therefore has to take them back out: otherwise
+        // the registry keeps growing entries nothing can ever address, one per
+        // failed attempt.
+        if let Err(e) = sent {
+            let mut callbacks_map = self.hook_callbacks.write().await;
+            for id in &minted {
+                callbacks_map.remove(id);
+            }
+            warn!(
+                "initialize_hooks: send failed, rolled back {} callback id(s)",
+                minted.len()
+            );
+            return Err(e);
         }
 
         info!("initialize_hooks: sent init with hook callback IDs to CLI");
