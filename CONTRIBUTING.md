@@ -50,7 +50,7 @@ cargo doc --all-features --no-deps
 
 - `main` - Stable release branch
 - `v0.x` - Version branches for ongoing development
-- `feature/*` - Feature branches
+- `docs/*`, `fix/*`, `test/*`, `chore/*` - Topic branches (see *Branch naming*)
 
 ### Commit Messages
 
@@ -80,13 +80,69 @@ fix(sdk): handle CLI timeout gracefully
 docs: update installation instructions
 ```
 
+### Branch naming
+
+| Prefix | Use |
+|---|---|
+| `docs/<domain>` | documentation and diagrams only for a domain |
+| `fix/<domain>-<subject>` | bug fix |
+| `test/<domain>-<subject>` | tests only |
+| `chore/<subject>` | tooling, CI, maintenance |
+
+### One PR = one vertical slice
+
+A pull request carries a complete slice: the fix, a regression test that
+**fails without the fix** (paste the failing command and output in the PR),
+the updated diagram under `docs/diagrams/<name>.mmd` (or an explicit
+`Diagram-Unchanged: <name> — <reason>`), and the documentation. Diagram-only
+PRs describing unverified code are not accepted. The PR template checklist
+must be fully ticked; an unticked box means the PR is not mergeable.
+
+Always report coverage as two figures when both exist: **raw** and **gated**
+(see `docs/COVERAGE.md`). Never exclude code from coverage to make a number pass.
+
+### Pushing
+
+Never push directly to `main`. Push your branch with an explicit refspec:
+
+```bash
+git push origin HEAD:refs/heads/<branch>
+```
+
+Do not create releases, tags or version bumps in a feature PR.
+
+### Build directory per worktree
+
+When you use several `git worktree`s, give each one its own build directory so
+they never contend for the same Cargo lock or invalidate each other's cache:
+
+```bash
+export CARGO_TARGET_DIR=/path/to/target-<worktree-name>
+```
+
+### Pre-push hooks
+
+Make sure the Rust toolchain is on the `PATH` before pushing, otherwise the
+pre-push hooks cannot find `cargo`:
+
+```bash
+PATH=$HOME/.cargo/bin:$PATH git push origin HEAD:refs/heads/<branch>
+```
+Never bypass the hooks with `--no-verify`.
+
+### Patch coverage gate
+
+`codecov.yml` has a blocking patch status: lines added or modified by a PR
+must be at least 80% covered. The project-wide status stays informational until
+the baseline is raised (currently about 69% for `nexus-claude`, 39% for `claude-code-api`).
+
 ### Pull Request Process
 
 1. Fork the repository
-2. Create a feature branch from `main` or the appropriate version branch
+2. Create a branch from `main` or the appropriate version branch (see *Branch naming*)
 3. Make your changes with appropriate tests
 4. Ensure all CI checks pass
-5. Submit a PR with a clear description
+5. Push with `git push origin HEAD:refs/heads/<branch>` and open a PR, filling in the PR template
 
 ## CI/CD Pipeline
 
