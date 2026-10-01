@@ -228,6 +228,28 @@ pub enum McpServerConfig {
     },
 }
 
+/// Debug view of a name→value map that shows the names and hides the values.
+///
+/// Environment variables and HTTP headers are where credentials live — an
+/// `Authorization` header, a `*_PASSWORD`, a `*_TOKEN`. `Debug` output ends up in
+/// logs, and logs are not a place secrets survive in: the orchestrator's log file
+/// was world-readable and carried database passwords and session tokens on every
+/// spawn. The names stay visible because they are what you debug with ("was
+/// `NEO4J_URI` set?"); the values never are, whatever they look like — guessing
+/// which ones are secret is how one slips through.
+pub(crate) struct RedactedValues<'a>(pub(crate) &'a HashMap<String, String>);
+
+impl std::fmt::Debug for RedactedValues<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut keys: Vec<&String> = self.0.keys().collect();
+        // Sorted so the output is stable across runs and diffable in logs.
+        keys.sort();
+        f.debug_map()
+            .entries(keys.into_iter().map(|k| (k, "<redacted>")))
+            .finish()
+    }
+}
+
 impl std::fmt::Debug for McpServerConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -235,17 +257,17 @@ impl std::fmt::Debug for McpServerConfig {
                 .debug_struct("Stdio")
                 .field("command", command)
                 .field("args", args)
-                .field("env", env)
+                .field("env", &env.as_ref().map(RedactedValues))
                 .finish(),
             Self::Sse { url, headers } => f
                 .debug_struct("Sse")
                 .field("url", url)
-                .field("headers", headers)
+                .field("headers", &headers.as_ref().map(RedactedValues))
                 .finish(),
             Self::Http { url, headers } => f
                 .debug_struct("Http")
                 .field("url", url)
-                .field("headers", headers)
+                .field("headers", &headers.as_ref().map(RedactedValues))
                 .finish(),
             Self::Sdk { name, .. } => f
                 .debug_struct("Sdk")
@@ -1094,7 +1116,7 @@ impl std::fmt::Debug for ClaudeCodeOptions {
             .field("settings", &self.settings)
             .field("add_dirs", &self.add_dirs)
             .field("extra_args", &self.extra_args)
-            .field("env", &self.env)
+            .field("env", &RedactedValues(&self.env))
             .field("debug_stderr", &self.debug_stderr.is_some())
             .field("include_partial_messages", &self.include_partial_messages)
             .field("can_use_tool", &self.can_use_tool.is_some())
@@ -3933,5 +3955,44 @@ mod tests {
         let req = SDKControlRewindFilesRequest::new("msg_abc");
         assert_eq!(req.subtype, "rewind_files");
         assert_eq!(req.user_message_id, "msg_abc");
+    }
+
+    // Debug output reaches logs; credentials in env and headers must not.
+    #[test]
+    fn options_debug_hides_env_values_but_keeps_names() {
+        let mut options = ClaudeCodeOptions::default();
+        options
+            .env
+            .insert("NEO4J_PASSWORD".to_string(), "hunter2-db".to_string());
+        let debug = format!("{options:?}");
+        assert!(!debug.contains("hunter2-db"), "env value leaked: {debug}");
+        assert!(debug.contains("NEO4J_PASSWORD"));
+    }
+
+    #[test]
+    fn mcp_server_debug_hides_env_and_header_values() {
+        let stdio = McpServerConfig::Stdio {
+            command: "po-mcp".into(),
+            args: None,
+            env: Some(HashMap::from([(
+                "PO_AUTH_TOKEN".to_string(),
+                "eyJ.secret.jwt".to_string(),
+            )])),
+        };
+        let http = McpServerConfig::Http {
+            url: "https://example.test/mcp".into(),
+            headers: Some(HashMap::from([(
+                "Authorization".to_string(),
+                "Bearer sk-live-xyz".to_string(),
+            )])),
+        };
+        for (config, secret, name) in [
+            (&stdio, "eyJ.secret.jwt", "PO_AUTH_TOKEN"),
+            (&http, "Bearer sk-live-xyz", "Authorization"),
+        ] {
+            let debug = format!("{config:?}");
+            assert!(!debug.contains(secret), "value leaked: {debug}");
+            assert!(debug.contains(name), "name must stay visible: {debug}");
+        }
     }
 }

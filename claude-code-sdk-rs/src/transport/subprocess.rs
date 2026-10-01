@@ -716,7 +716,14 @@ impl SubprocessTransport {
         self.state = TransportState::Connecting;
 
         let mut cmd = self.build_command();
-        info!("Starting Claude CLI with command: {:?}", cmd);
+        // Never `{:?}` the Command itself: its Debug prints every env value and
+        // the full --mcp-config JSON, which carries the MCP server's credentials.
+        // Logged that way on every spawn, the orchestrator's (world-readable) log
+        // held database passwords and session tokens in clear.
+        info!(
+            "Starting Claude CLI with command: {}",
+            describe_command_redacted(cmd.as_std())
+        );
 
         if let Some(user) = self.options.user.as_deref() {
             apply_process_user(&mut cmd, user)?;
@@ -1441,6 +1448,50 @@ pub fn find_claude_cli() -> Result<PathBuf> {
     })
 }
 
+/// Arguments whose VALUE (the next argument) must never reach a log.
+///
+/// `--mcp-config` is a JSON document holding each MCP server's `env` and
+/// headers — in practice the orchestrator's database password, search key and
+/// session token.
+const SECRET_BEARING_ARGS: [&str; 1] = ["--mcp-config"];
+
+/// A loggable description of the command about to be spawned.
+///
+/// Keeps what a person debugging a launch needs — the program, the working
+/// directory, every argument, and the NAMES of the environment variables set —
+/// and replaces what can hold credentials: the value after a secret-bearing
+/// argument, and every environment value.
+pub(crate) fn describe_command_redacted(cmd: &std::process::Command) -> String {
+    let mut args: Vec<String> = Vec::new();
+    let mut redact_next = false;
+    for arg in cmd.get_args() {
+        let arg = arg.to_string_lossy();
+        if redact_next {
+            args.push(format!("<redacted {} bytes>", arg.len()));
+            redact_next = false;
+            continue;
+        }
+        redact_next = SECRET_BEARING_ARGS.contains(&arg.as_ref());
+        args.push(arg.into_owned());
+    }
+
+    let mut env_keys: Vec<String> = cmd
+        .get_envs()
+        .map(|(k, _)| k.to_string_lossy().into_owned())
+        .collect();
+    env_keys.sort();
+
+    format!(
+        "program={} cwd={} args={:?} env_keys={:?}",
+        cmd.get_program().to_string_lossy(),
+        cmd.get_current_dir()
+            .map(|d| d.display().to_string())
+            .unwrap_or_else(|| "<inherited>".to_string()),
+        args,
+        env_keys,
+    )
+}
+
 pub(crate) fn apply_process_user(cmd: &mut Command, user: &str) -> Result<()> {
     let user = user.trim();
     if user.is_empty() {
@@ -1689,5 +1740,69 @@ mod tests {
     async fn test_get_cli_version_nonexistent_binary() {
         let result = get_cli_version(std::path::Path::new("/nonexistent/binary/claude")).await;
         assert!(result.is_none(), "Nonexistent binary should return None");
+    }
+
+    // ---------------------------------------------------------------
+    // Spawn log must never carry credentials (regression: the Debug of
+    // Command printed every env value and the full --mcp-config JSON).
+    // ---------------------------------------------------------------
+
+    fn command_with_secrets() -> std::process::Command {
+        let mut cmd = std::process::Command::new("/usr/local/bin/claude");
+        cmd.arg("--output-format")
+            .arg("stream-json")
+            .arg("--mcp-config")
+            .arg(r#"{"mcpServers":{"po":{"env":{"NEO4J_PASSWORD":"hunter2-db","PO_AUTH_TOKEN":"eyJ.secret.jwt"}}}}"#)
+            .arg("--model")
+            .arg("claude-opus-5-5")
+            .env("ANTHROPIC_API_KEY", "sk-ant-leak-me")
+            .env("PATH", "/usr/bin")
+            .current_dir("/tmp");
+        cmd
+    }
+
+    #[test]
+    fn spawn_description_contains_no_secret_value() {
+        let described = describe_command_redacted(&command_with_secrets());
+        for secret in ["hunter2-db", "eyJ.secret.jwt", "sk-ant-leak-me"] {
+            assert!(
+                !described.contains(secret),
+                "secret {secret:?} leaked into the spawn log: {described}"
+            );
+        }
+    }
+
+    #[test]
+    fn spawn_description_keeps_what_debugging_needs() {
+        // Redaction must not make a failed launch undiagnosable.
+        let described = describe_command_redacted(&command_with_secrets());
+        assert!(described.contains("/usr/local/bin/claude"));
+        assert!(described.contains("cwd=/tmp"));
+        assert!(described.contains("--mcp-config"));
+        assert!(
+            described.contains("<redacted"),
+            "the mcp-config value is replaced, not dropped"
+        );
+        assert!(
+            described.contains("claude-opus-5-5"),
+            "non-secret args stay visible"
+        );
+        assert!(
+            described.contains("ANTHROPIC_API_KEY"),
+            "env NAMES stay visible"
+        );
+        assert!(described.contains("PATH"));
+    }
+
+    #[test]
+    fn only_the_value_after_a_secret_bearing_arg_is_redacted() {
+        let mut cmd = std::process::Command::new("claude");
+        cmd.arg("--mcp-config").arg("{}").arg("--verbose");
+        let described = describe_command_redacted(&cmd);
+        assert!(
+            described.contains("--verbose"),
+            "the argument after the value is kept"
+        );
+        assert!(described.contains("<redacted 2 bytes>"));
     }
 }
