@@ -1,0 +1,250 @@
+%% name: nexus-sdk-client
+%% covers: claude-code-sdk-rs/src/client.rs, claude-code-sdk-rs/src/client_working.rs, claude-code-sdk-rs/src/internal_query.rs, claude-code-sdk-rs/src/optimized_client.rs, claude-code-sdk-rs/src/query.rs
+%% verified: 2026-10-01
+flowchart TD
+    subgraph legend["Légende"]
+        direction LR
+        L1["✅ vérifié par un test"]
+        L2["🟠 aucun test ne le couvre"]
+        L3["🔴 bug confirmé / code non branché"]
+        L4["⚪ hors de ce dépôt"]
+    end
+
+    caller["⚪ appelant : nexus-claude-api, chat, exemples"]
+    caller --> pick{"quel point d'entrée ?"}
+    pick -->|"un seul tour, sans état"| q_query
+    pick -->|"session interactive"| c_new
+    pick -->|"variante historique"| w_new
+    pick -->|"pool, lots, reprises"| o_new
+
+    %% ===================================================================
+    %% query.rs — one-shot --print
+    %% ===================================================================
+    subgraph query_rs["query.rs — un seul tour, mode --print"]
+        q_query["🟠 query()<br/>pose CLAUDE_CODE_ENTRYPOINT=sdk-rust<br/>puis trie sur QueryInput"]
+        q_query -->|"QueryInput::Text"| q_print
+        q_query -->|"QueryInput::Stream — refusé"| q_unsupported
+        q_unsupported["🔴 SdkError::NotSupported<br/>le mode flux d'entrée n'est pas implémenté<br/>bien que QueryInput::Stream soit public"]
+        q_print["🟠 query_print_mode()<br/>construit l'argv --print --output-format stream-json"]
+        q_print --> q_find
+        q_find["🔴 find_claude_cli()<br/>options.cli_path est ignoré ici,<br/>contrairement à SubprocessTransport::new()"]
+        q_find -->|"introuvable"| q_notfound["🟠 SdkError::CliNotFound"]
+        q_find -->|"trouvé"| q_spawn["🟠 cmd.spawn()<br/>échec → SdkError::ProcessError"]
+        q_spawn --> q_stdout
+        q_stdout["🟠 tâche stdout<br/>parse_message() par ligne"]
+        q_stdout -->|"JSON illisible"| q_drop["🔴 ligne jetée en debug!<br/>l'appelant ne voit jamais l'erreur"]
+        q_stdout -->|"Ok(None)"| q_ignore["🟠 JSON hors message : ignoré"]
+        q_stdout -->|"Ok(Some)"| q_send["🟠 envoyé sur le ReceiverStream"]
+        q_stdout -->|"Err"| q_err["🟠 SdkError transmis au flux"]
+        q_stdout --> q_wait["🟠 child.wait()<br/>code de sortie non nul → ProcessExited"]
+        q_spawn --> q_cleanup["🟠 tâche de nettoyage<br/>tx.closed() puis child.kill()<br/>tue le CLI quand le flux est lâché"]
+    end
+
+    %% ===================================================================
+    %% client.rs — ClaudeSDKClient
+    %% ===================================================================
+    subgraph client_rs["client.rs — ClaudeSDKClient, session bidirectionnelle"]
+        c_new["✅ ClaudeSDKClient::new()<br/>pose CLAUDE_CODE_ENTRYPOINT=sdk-rust<br/><i>vérifié : faux CLI, env du processus fils lu</i>"]
+        c_new -->|"SubprocessTransport::new() Ok"| c_internal
+        c_new -->|"Err CliNotFound — avalée"| c_emptypath
+        c_emptypath["🔴 with_cli_path(options, )<br/>chemin vide : l'absence de CLI ne remonte pas,<br/>connect() échoue plus tard en ProcessError<br/><i>vérifié : PATH et HOME vidés</i>"]
+        c_with["✅ ClaudeSDKClient::with_transport()<br/>seule couture d'injection du domaine<br/><i>vérifié : transport scripté</i>"]
+        c_with --> c_internal
+        c_emptypath --> c_internal
+
+        c_internal{"✅ with_transport_internal()<br/>can_use_tool, hooks, mcp_servers<br/>ou enable_file_checkpointing ?<br/><i>vérifié : transport scripté</i>"}
+        c_internal -->|"aucun"| c_noproto["✅ query_handler = None<br/>protocole de contrôle éteint<br/><i>vérifié : transport scripté</i>"]
+        c_internal -->|"au moins un"| c_mkquery["✅ Query::new()<br/>n'extrait que McpServerConfig::Sdk,<br/>les variantes Stdio / Sse / Http sont filtrées<br/><i>vérifié : carte mixte Sdk + Stdio</i>"]
+
+        c_connect{"✅ connect(initial_prompt)<br/>déjà Connected ?<br/><i>vérifié : transport scripté + faux CLI</i>"}
+        c_noproto --> c_connect
+        c_mkquery --> c_connect
+        c_connect -->|"oui"| c_reconnect["🔴 retour Ok immédiat<br/>le prompt reçu est jeté sans trace<br/><i>vérifié : aucun octet écrit sur stdin</i>"]
+        c_connect -->|"non"| c_tconnect["✅ transport.connect()<br/>échec → l'erreur remonte telle quelle,<br/>état inchangé<br/><i>vérifié : transport scripté</i>"]
+        c_tconnect --> c_handshake{"✅ query_handler présent ?<br/><i>vérifié : transport scripté + faux CLI</i>"}
+        c_handshake -->|"oui"| c_init
+        c_handshake -->|"non"| c_state
+        c_init["✅ Query::start() puis Query::initialize()<br/><i>vérifié : faux CLI, reply_control initialize</i>"]
+        c_init -->|"handshake refusé"| c_leak
+        c_leak["🔴 l'erreur remonte, l'état reste Disconnected<br/>mais le transport est connecté :<br/>disconnect() prend sa sortie anticipée<br/>et le processus fils est fuité<br/><i>vérifié : transport scripté, compteur de disconnect à 0</i>"]
+        c_init --> c_state
+        c_state["✅ état = Connected<br/>observé par is_connected()<br/><i>vérifié : transport scripté + faux CLI</i>"]
+        c_state --> c_recv_task
+        c_recv_task["✅ start_message_receiver()<br/>s'abonne une fois, hors du verrou<br/><i>vérifié : transport scripté + faux CLI</i>"]
+        c_recv_task --> c_prompt{"✅ initial_prompt fourni ?<br/><i>vérifié : transport scripté + faux CLI</i>"}
+        c_prompt -->|"oui"| c_send
+        c_prompt -->|"non"| c_ready["✅ prêt, aucune session enregistrée<br/><i>vérifié : faux CLI</i>"]
+
+        c_send{"✅ send_user_message(prompt)<br/>état == Connected ?<br/><i>vérifié : transport scripté</i>"}
+        c_send -->|"non"| c_send_ko["✅ InvalidState Not connected<br/><i>vérifié : transport scripté</i>"]
+        c_send -->|"oui"| c_session["🔴 session default créée et comptée<br/>AVANT l'envoi : un envoi en échec<br/>laisse quand même la session<br/><i>vérifié : transport scripté en échec d'envoi</i>"]
+        c_session --> c_tsend["✅ transport.send_message()<br/>InputMessage::user(prompt, default)<br/><i>vérifié : faux CLI, ligne stdin relue</i>"]
+        c_sendreq["🔴 send_request(prompt, session_id)<br/>le session_id documenté est lié à _session_id<br/>et jamais lu : tout part sur default<br/><i>vérifié : transport scripté</i>"]
+        c_sendreq --> c_send
+        c_query2["🔴 query(prompt, session_id)<br/>honore le session_id mais ne vérifie NI l'état<br/>NI n'enregistre la session : écrit sur un client<br/>jamais connecté<br/><i>vérifié : transport scripté</i>"]
+        c_query2 --> c_tsend
+
+        c_recv_task --> c_loop{"✅ boucle du receveur<br/>Ok ou Err ?<br/><i>vérifié : transport scripté</i>"}
+        c_loop -->|"Ok et Message::Result"| c_usage["✅ BudgetManager::update_usage()<br/>usage absent ou non numérique → 0,<br/>total_cost_usd absent → 0.0<br/><i>vérifié : résultat scripté sans usage</i>"]
+        c_loop -->|"Ok et System subtype=init"| c_initbuf["✅ copie dans message_buffer<br/>pour get_server_info()<br/><i>vérifié : transport scripté + faux CLI</i>"]
+        c_loop -->|"Ok, abonné présent"| c_deliver["✅ tx.send(Ok(message))<br/><i>vérifié : transport scripté + faux CLI</i>"]
+        c_loop -->|"Ok, aucun abonné"| c_buffer["✅ mis en tampon, sauf l'init<br/>déjà copié juste au-dessus<br/><i>vérifié : test rejoué sans le correctif,<br/>l'init était rejoué deux fois</i>"]
+        c_loop -->|"Err, abonné présent"| c_errout["✅ Err transmis à l'abonné<br/>puis état = Error, boucle rompue<br/><i>vérifié : transport scripté</i>"]
+        c_loop -->|"Err, aucun abonné"| c_errlost["🔴 erreur perdue : elle n'est jamais<br/>mise en tampon, l'état passe à Error<br/>sans que personne l'apprenne<br/><i>vérifié : transport scripté</i>"]
+
+        c_rmsg["✅ receive_messages()<br/>vide message_buffer dans un nouveau canal<br/>et enregistre le tx courant<br/><i>vérifié : transport scripté + faux CLI</i>"]
+        c_buffer --> c_rmsg
+        c_initbuf --> c_rmsg
+        c_rmsg --> c_reorder["🔴 le rejeu passe par une tâche spawn<br/>tandis que le receveur écrit en direct :<br/>l'ordre tampon / direct n'est pas garanti<br/><i>non couvert : course non déterministe</i>"]
+        c_rmsg --> c_drain["🔴 le tampon est consommé :<br/>get_server_info() oublie le handshake<br/>dès qu'on a lu le flux<br/><i>vérifié : transport scripté + faux CLI</i>"]
+        c_rresp["✅ receive_response()<br/>async_stream qui s'arrête au premier Result<br/><i>vérifié : un message suit le Result et est coupé</i>"]
+        c_rmsg --> c_rresp
+
+        c_srv{"✅ get_server_info()<br/>query_handler avec résultat d'init ?<br/><i>vérifié : transport scripté + faux CLI</i>"}
+        c_srv -->|"oui"| c_srv_proto["✅ renvoie la charge sous response<br/><i>vérifié : faux CLI, reply_control_with initialize</i>"]
+        c_srv -->|"non"| c_srv_buf["✅ cherche System subtype=init<br/>dans le tampon, sinon None<br/><i>vérifié : system non-init ignoré</i>"]
+
+        c_int{"✅ interrupt()<br/>état == Connected ?<br/><i>vérifié : transport scripté</i>"}
+        c_int -->|"non"| c_int_ko["✅ InvalidState Not connected<br/><i>vérifié : transport scripté</i>"]
+        c_int -->|"oui, query_handler présent"| c_int_proto["✅ Query::interrupt()<br/>subtype interrupt du protocole<br/><i>vérifié : faux CLI</i>"]
+        c_int -->|"oui, sans handler"| c_int_legacy
+        c_int_legacy["✅ ControlRequest::Interrupt interrupt_N<br/>compteur incrémenté à chaque appel<br/><i>vérifié : faux CLI, interrupt_1 puis interrupt_2</i>"]
+        c_int_legacy --> c_ack{"✅ tâche d'ack : receive_control_response()<br/>sous timeout de 5 s<br/><i>vérifié : transport scripté</i>"}
+        c_ack -->|"ack du bon id et success"| c_ack_ok["✅ Ok(())<br/><i>vérifié : transport scripté + faux CLI</i>"]
+        c_ack -->|"success faux ou autre id"| c_ack_bad["✅ ControlRequestError<br/>Interrupt not acknowledged successfully<br/><i>vérifié : ack scripté success=false, puis id décalé</i>"]
+        c_ack -->|"Ok(None)"| c_ack_none["✅ ControlRequestError<br/>No interrupt acknowledgment received<br/><i>vérifié : transport scripté renvoyant Ok(None)</i>"]
+        c_ack -->|"Err du transport"| c_ack_err["✅ erreur du transport transmise telle quelle<br/><i>vérifié : transport scripté</i>"]
+        c_ack -->|"5 s écoulées"| c_ack_to["✅ SdkError::Timeout seconds=5<br/><i>vérifié : horloge Tokio arrêtée</i>"]
+        c_ack -->|"tâche en panique"| c_ack_panic["✅ ControlRequestError<br/>Interrupt task panicked<br/><i>vérifié : transport scripté qui panique</i>"]
+        c_ack --> c_ack_lock["🔴 la tâche d'ack garde le verrou du transport<br/>jusqu'à 5 s : tout envoi concurrent attend<br/><i>non couvert : pas d'assertion sur la contention</i>"]
+
+        c_spm{"✅ set_permission_mode(mode)<br/>query_handler présent ?<br/><i>vérifié : transport scripté + faux CLI</i>"}
+        c_spm -->|"non"| c_noh["✅ InvalidState<br/>Query handler not initialized...<br/><i>vérifié : transport scripté</i>"]
+        c_spm -->|"oui"| c_proto_ok["✅ control_request au CLI<br/>subtype error → ControlRequestError<br/>portant le message du CLI<br/><i>vérifié : faux CLI, reply_control_error</i>"]
+        c_sm{"✅ set_model(Option&lt;String&gt;)<br/>query_handler présent ?<br/><i>vérifié : transport scripté + faux CLI</i>"}
+        c_sm -->|"non"| c_noh
+        c_sm -->|"oui"| c_proto_ok
+        c_rw{"✅ rewind_files(user_message_id)<br/>état == Connected ?<br/><i>vérifié : transport scripté</i>"}
+        c_rw -->|"non"| c_rw_ko["✅ InvalidState<br/>Not connected. Call connect() first.<br/><i>vérifié : transport scripté</i>"]
+        c_rw -->|"oui, checkpointing éteint"| c_rw_flag["✅ InvalidState<br/>File checkpointing is not enabled...<br/><i>vérifié : protocole allumé par hooks</i>"]
+        c_rw -->|"oui, checkpointing allumé"| c_rw_ok["✅ Query::rewind_files()<br/><i>vérifié : faux CLI, user_message_id relu sur stdin</i>"]
+        c_rw_ok --> c_rw_dead["🔴 branche else inatteignable :<br/>enable_file_checkpointing implique<br/>toujours query_handler = Some"]
+
+        c_acct{"✅ get_account_info()<br/>état == Connected ?<br/><i>vérifié : transport scripté</i>"}
+        c_acct -->|"non"| c_acct_ko["✅ InvalidState<br/>Not connected. Call connect() first.<br/><i>vérifié : transport scripté</i>"]
+        c_acct -->|"ANTHROPIC_USER_EMAIL posée"| c_acct_env["✅ Email: valeur<br/><i>vérifié : variable posée, aucun /status émis</i>"]
+        c_acct -->|"sinon"| c_cfg
+        c_cfg["✅ read_claude_config()<br/>.config/claude/config.json puis .claude/config.json,<br/>email avant user ; JSON cassé ou champ absent : ignoré<br/><i>vérifié : HOME temporaire, quatre dispositions</i>"]
+        c_cfg -->|"trouvé"| c_cfg_ok["✅ Email: ... ou User: ...<br/><i>vérifié : HOME temporaire</i>"]
+        c_cfg -->|"rien"| c_status
+        c_status["✅ envoie le prompt /status puis lit le flux<br/><i>vérifié : transport scripté</i>"]
+        c_status -->|"texte citant account, email,<br/>subscription ou authenticated"| c_status_ok["✅ texte élagué renvoyé<br/><i>vérifié : transport scripté</i>"]
+        c_status -->|"texte hors sujet ou vide"| c_status_ko["✅ InvalidState<br/>Account information not available...<br/><i>vérifié : réponse hors sujet, puis tour vide</i>"]
+        c_status -->|"Err dans le flux"| c_status_err["✅ erreur du flux propagée<br/><i>vérifié : transport scripté</i>"]
+        c_status --> c_hang["🔴 le tx stocké n'est jamais lâché :<br/>si le CLI meurt sans Result, la boucle<br/>attend indéfiniment<br/><i>non couvert : un test de blocage<br/>ne prouverait rien de plus qu'un délai</i>"]
+
+        c_disc{"✅ disconnect()<br/>état == Disconnected ?<br/><i>vérifié : transport scripté</i>"}
+        c_disc -->|"oui"| c_disc_noop["✅ Ok(()) sans toucher au transport<br/><i>vérifié : compteur de disconnect inchangé</i>"]
+        c_disc -->|"non"| c_disc_t["✅ transport.disconnect()<br/><i>vérifié : transport scripté</i>"]
+        c_disc_t -->|"Ok"| c_disc_ok["✅ état = Disconnected<br/>et sessions vidées<br/><i>vérifié : transport scripté + faux CLI</i>"]
+        c_disc_t -->|"Err"| c_disc_ko["🔴 l'erreur remonte mais l'état reste<br/>Connected et les sessions sont gardées<br/><i>vérifié : transport scripté en échec</i>"]
+
+        c_drop{"✅ Drop for ClaudeSDKClient<br/>Handle::try_current() ?<br/><i>vérifié : transport scripté</i>"}
+        c_drop -->|"runtime présent, état Connected"| c_drop_ok["✅ disconnect() lancé en tâche<br/><i>vérifié : compteur de disconnect à 1</i>"]
+        c_drop -->|"runtime présent, non connecté"| c_drop_skip["✅ rien à faire<br/><i>vérifié : compteur à 0</i>"]
+        c_drop -->|"aucun runtime"| c_drop_leak["🔴 silencieux : un client connecté lâché<br/>hors runtime fuite son processus fils<br/><i>vérifié : Drop dans un test synchrone</i>"]
+
+        c_budget["✅ set_budget_limit / clear_budget_limit<br/>reset_usage_stats / get_usage_stats / is_budget_exceeded<br/><i>vérifié : plafond de jetons franchi, rappel appelé une fois</i>"]
+        c_usage --> c_budget
+        c_budget --> c_zero["🔴 BudgetLimit::with_cost(0.0) : le ratio<br/>coût / plafond vaut NaN, donc jamais dépassé<br/>— le défaut est dans token_tracker.rs"]
+    end
+
+    %% ===================================================================
+    %% internal_query.rs — protocole de contrôle
+    %% ===================================================================
+    subgraph internal_query_rs["internal_query.rs — Query, protocole de contrôle SDK"]
+        iq_start["✅ Query::start()<br/>start_control_handler() puis une tâche<br/>qui relaie les messages non-contrôle<br/><i>vérifié indirectement : faux CLI via connect()</i>"]
+        iq_start --> iq_take{"🟠 take_sdk_control_receiver()<br/>le transport en expose-t-il un ?"}
+        iq_take -->|"non"| iq_nohandler["🔴 aucune boucle de contrôle lancée :<br/>toute requête partira et expirera à 60 s"]
+        iq_take -->|"oui"| iq_loop["✅ boucle de contrôle<br/><i>vérifié : faux CLI</i>"]
+        iq_loop -->|"type control_response"| iq_corr{"✅ request_id ou requestId connu ?<br/><i>vérifié : faux CLI</i>"}
+        iq_corr -->|"oui"| iq_deliver["✅ oneshot résolu<br/><i>vérifié : faux CLI</i>"]
+        iq_corr -->|"non"| iq_warn["🟠 warn! et rien d'autre"]
+        iq_loop -->|"type control_request can_use_tool"| iq_perm["🟠 handle_permission_request()<br/>Allow → allow:true, Deny → allow:false + reason"]
+        iq_loop -->|"type control_request hook_callback"| iq_hook["🟠 rappel de hook par callback_id"]
+        iq_send["✅ send_control_request()<br/>req_N_uuid, oneshot, attente bornée à 60 s<br/><i>vérifié : faux CLI</i>"]
+        iq_send -->|"subtype error"| iq_err["✅ ControlRequestError portant error<br/><i>vérifié : faux CLI, reply_control_error</i>"]
+        iq_send -->|"succès"| iq_ok["✅ renvoie response, à défaut data,<br/>à défaut un objet vide<br/><i>vérifié : faux CLI, charge sous response relue</i>"]
+        iq_send -->|"canal fermé"| iq_closed["🟠 ControlRequestError Response channel closed"]
+        iq_send -->|"60 s écoulées"| iq_to["🟠 Timeout seconds=60<br/>et l'entrée pendante est retirée"]
+        iq_init["✅ Query::initialize()<br/>numérote les hooks en hook_N_uuid<br/>et retient le résultat<br/><i>vérifié : faux CLI</i>"]
+        iq_init --> iq_send
+        iq_ctl["✅ interrupt / set_permission_mode<br/>set_model / rewind_files<br/><i>vérifié : faux CLI, un control_request par appel</i>"]
+        iq_ctl --> iq_send
+        iq_rx["🔴 Query::receive_messages()<br/>expect(Receiver already taken) :<br/>le second appel panique"]
+    end
+
+    %% ===================================================================
+    %% client_working.rs
+    %% ===================================================================
+    subgraph client_working_rs["client_working.rs — ClaudeSDKClientWorking, variante historique"]
+        w_new["🟠 ClaudeSDKClientWorking::new()<br/>pose CLAUDE_CODE_ENTRYPOINT=sdk-rust"]
+        w_new --> w_connect{"🟠 connect(initial_prompt)<br/>déjà Connected ?"}
+        w_connect -->|"oui"| w_noop["🟠 Ok(()) et le prompt est jeté"]
+        w_connect -->|"non"| w_tr["🟠 SubprocessTransport::new()?<br/>honore options.cli_path, puis connect()"]
+        w_tr --> w_pump["🟠 tâche de pompe : receive_messages()<br/>vers un mpsc<br/>aucun tampon, aucun rejeu"]
+        w_send{"🟠 send_user_message()<br/>état == Connected ?"}
+        w_send -->|"non"| w_send_ko["🟠 InvalidState Not connected"]
+        w_send -->|"oui, transport absent"| w_send_lost["🔴 InvalidState Transport not available<br/>état Connected sans transport : incohérent"]
+        w_send -->|"oui"| w_send_ok["🟠 toujours la session default"]
+        w_recv{"🟠 receive_message()<br/>récepteur présent ?"}
+        w_recv -->|"non"| w_recv_ko["🟠 InvalidState Not connected"]
+        w_recv -->|"oui"| w_recv_ok["🟠 rx.recv()<br/>None quand la pompe s'arrête"]
+        w_recv_ok --> w_resp["🟠 receive_response()<br/>accumule jusqu'au Result inclus"]
+        w_disc["🟠 disconnect()<br/>état posé à Disconnected AVANT<br/>le disconnect du transport : un échec<br/>ne laisse pas d'état menteur,<br/>contrairement à client.rs"]
+        w_nodrop["🔴 aucun Drop : un client lâché sans<br/>disconnect() laisse le CLI vivant"]
+    end
+
+    %% ===================================================================
+    %% optimized_client.rs
+    %% ===================================================================
+    subgraph optimized_client_rs["optimized_client.rs — OptimizedClient, pool et lots"]
+        o_new["🟠 OptimizedClient::new(options, mode)<br/>max_connections = max_concurrent en mode Batch,<br/>1 sinon"]
+        o_new --> o_mode{"🟠 ClientMode"}
+        o_mode -->|"OneShot"| o_q
+        o_mode -->|"Interactive"| o_sess
+        o_mode -->|"Batch"| o_batch
+
+        o_q["🟠 query() → query_with_retry(prompt, 3, 100 ms)"]
+        o_q --> o_retry{"🟠 execute_query() a échoué ?"}
+        o_retry -->|"moins de 3 essais"| o_backoff["🔴 attente doublée et nouvel essai<br/>quelle que soit l'erreur : un CliNotFound<br/>est réessayé trois fois"]
+        o_retry -->|"essais épuisés"| o_fail["🟠 l'erreur remonte"]
+        o_backoff --> o_exec
+        o_exec["🟠 execute_query()<br/>acquire → send_message → collect_messages<br/>sous timeout de 120 s"]
+        o_exec --> o_race["🔴 send_message() précède l'abonnement<br/>de collect_messages() : la diffusion ne rejoue<br/>rien, les premiers messages peuvent manquer"]
+        o_exec --> o_norelease["🔴 pool.release() n'est atteint qu'en succès :<br/>un échec perd la connexion au lieu<br/>de la rendre au pool"]
+        o_acq{"🟠 ConnectionPool::acquire()<br/>une connexion oisive est-elle valide ?"}
+        o_acq -->|"oui"| o_reuse["🟠 réutilisée"]
+        o_acq -->|"non"| o_fresh["🔴 nouveau SubprocessTransport ;<br/>le permis du sémaphore est lâché à la sortie<br/>de la fonction, donc rien n'est borné"]
+        o_exec --> o_acq
+        o_collect["🟠 collect_messages()<br/>met à jour le budget sur Result<br/>puis s'arrête au Result"]
+        o_exec --> o_collect
+
+        o_sess{"🟠 start_interactive_session()<br/>mode == Interactive ?"}
+        o_sess -->|"non"| o_sess_ko["🟠 InvalidState Client not in interactive mode"]
+        o_sess -->|"oui"| o_proc
+        o_proc["🔴 start_message_processor()<br/>re-appelle receive_messages() à chaque tour<br/>de boucle — un abonnement neuf par message —<br/>et tient le write lock à travers le await"]
+        o_si{"🟠 send_interactive() / receive_interactive()<br/>session active ?"}
+        o_si -->|"non"| o_si_ko["🟠 InvalidState<br/>No active interactive session"]
+        o_si -->|"oui"| o_si_ok["🟠 InputMessage::user(..., default)"]
+        o_proc --> o_si
+        o_int{"🟠 interrupt()<br/>transport courant présent ?"}
+        o_int -->|"non"| o_int_ko["🟠 InvalidState No active session"]
+        o_int -->|"oui"| o_int_ok["🟠 ControlRequest::Interrupt(uuid v4)<br/>aucun ack n'est attendu,<br/>contrairement à client.rs"]
+        o_end["🟠 end_interactive_session()<br/>rend le transport au pool et oublie le récepteur"]
+
+        o_batch{"🟠 process_batch(prompts)<br/>mode == Batch ?"}
+        o_batch -->|"non"| o_batch_ko["🟠 InvalidState Client not in batch mode"]
+        o_batch -->|"oui"| o_batch_ok["🔴 un spawn par prompt ;<br/>acquire_owned().await.unwrap() panique<br/>si le sémaphore est fermé"]
+        o_batch_ok --> o_q
+    end
