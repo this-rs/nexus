@@ -11,11 +11,25 @@ coverage:
       default:
         target: auto
         threshold: 2%
-        informational: true  # Don't fail CI on coverage decrease
+        # Still informational, deliberately. Project coverage compares the whole
+        # repository against itself, and this repository has no measured
+        # baseline yet: the honest baseline (both crates, raw and gated) is task
+        # 3.4. Making this blocking first would pick a number nobody measured.
+        # Task 3.4 removes this line once the baseline exists.
+        informational: true
     patch:
       default:
+        # BLOCKING. Patch coverage judges only the lines this pull request
+        # changes, so it needs no repository-wide baseline to be fair: it asks
+        # whether the code you just wrote is tested. That is why the patch gate
+        # can harden now while the project gate waits for 3.4.
+        #
+        # THE RATCHET LIVES ON THE NEXT LINE AND NOWHERE ELSE: 80 -> 90 -> 100
+        # as the modules come up. Never copy this number into a workflow or a
+        # script. (A YAML anchor was tried and reverted: an unknown top-level
+        # key risks Codecov rejecting the file, which disables reporting
+        # silently -- a worse failure than a number in one obvious place.)
         target: 80%
-        informational: true
 
 parsers:
   gcov:

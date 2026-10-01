@@ -89,9 +89,15 @@ introduces the reference.
 These are real but belong to other tasks; the gate does not compute them, so
 they are recorded here in prose rather than as rows:
 
-- Both Codecov gates in `codecov.yml` carry `informational: true`, so coverage
-  cannot fail a build. Nothing currently stops a release from shipping less
-  tested than its predecessor. Task 3.4 owns making them blocking.
+- The Codecov **patch** gate is now blocking at 80% (task 1.2): a pull request
+  whose own changed lines are under-tested fails. The **project** gate is still
+  `informational: true`, deliberately — this repository has no measured
+  coverage baseline, and a blocking gate on an unmeasured number is a number
+  nobody chose. Task 3.4 measures both crates, raw and gated, and removes that
+  line. Until then, nothing stops the repository as a whole from drifting down,
+  only individual pull requests. Current exclusions are listed with reasons and
+  owners in [`docs/COVERAGE_EXCLUSIONS.md`](COVERAGE_EXCLUSIONS.md); one of the
+  four (`**/mod.rs`) is flagged there as questionable rather than accepted.
 - `Cargo.lock` is listed in `.gitignore`, so CI resolves dependencies fresh on
   every run. A new release of any transitive dependency can break `main`
   overnight with no code change — this has already happened once (`time

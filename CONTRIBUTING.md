@@ -52,6 +52,41 @@ cargo doc --all-features --no-deps
 - `v0.x` - Version branches for ongoing development
 - `feature/*` - Feature branches
 
+For work that follows the living-documentation convention, name the branch
+after what it changes, so the diagram and the code travel together:
+
+- `docs/<domain>` - charter, index or diagram changes
+- `fix/<domain>-<subject>` - a bug fix with its regression test
+- `test/<domain>-<subject>` - tests only, raising coverage of a module
+
+### Pushing
+
+Always push with an explicit refspec:
+
+```bash
+git push origin HEAD:refs/heads/<branch>
+```
+
+Pushing `HEAD` without a refspec can create or update a branch you did not
+mean to, depending on the local `push.default`. Never push directly to `main`.
+
+### One build directory per worktree
+
+If you use `git worktree` to work on several branches at once, give each one
+its own `CARGO_TARGET_DIR`. Two worktrees sharing a target directory will
+serialise on the build lock and rebuild each other's artifacts continuously:
+
+```bash
+git worktree add ../nexus-fix-transport fix/transport-version
+cd ../nexus-fix-transport
+export CARGO_TARGET_DIR="$PWD/target"   # not the default shared one
+cargo test --all-features
+```
+
+Note that `Cargo.lock` is not tracked in this repository, so a fresh worktree
+resolves dependencies from scratch. A new release of any transitive dependency
+can therefore change a build that your code did not touch.
+
 ### Commit Messages
 
 We follow [Conventional Commits](https://www.conventionalcommits.org/):
