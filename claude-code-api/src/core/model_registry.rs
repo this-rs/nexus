@@ -48,6 +48,7 @@ pub struct ModelRegistry {
     http: reqwest::Client,
     api_key: Option<String>,
     ttl: Duration,
+    models_url: String,
 }
 
 impl ModelRegistry {
@@ -64,6 +65,19 @@ impl ModelRegistry {
             info!("ANTHROPIC_API_KEY not set — /v1/models will serve the static model catalog");
         }
 
+        Self::with_endpoint(
+            ANTHROPIC_MODELS_URL.to_string(),
+            api_key,
+            Duration::from_secs(ttl_secs),
+        )
+    }
+
+    /// Build a registry against an explicit models endpoint.
+    ///
+    /// [`new`](Self::new) reads the endpoint, key and TTL from the environment;
+    /// this constructor takes them as arguments so a test can point the registry
+    /// at a local mock server instead of `api.anthropic.com`.
+    pub fn with_endpoint(models_url: String, api_key: Option<String>, ttl: Duration) -> Self {
         Self {
             cache: RwLock::new(CacheState {
                 models: ClaudeModel::all(),
@@ -72,7 +86,8 @@ impl ModelRegistry {
             }),
             http: reqwest::Client::new(),
             api_key,
-            ttl: Duration::from_secs(ttl_secs),
+            ttl,
+            models_url,
         }
     }
 
@@ -142,7 +157,7 @@ impl ModelRegistry {
         loop {
             let mut req = self
                 .http
-                .get(ANTHROPIC_MODELS_URL)
+                .get(&self.models_url)
                 .header("x-api-key", api_key)
                 .header("anthropic-version", ANTHROPIC_VERSION)
                 .query(&[("limit", "100")]);
