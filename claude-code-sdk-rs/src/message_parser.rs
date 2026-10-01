@@ -250,12 +250,20 @@ fn parse_system_message(json: Value) -> Result<Option<Message>> {
     // Preserve the payload in BOTH shapes: prefer an explicit "data" object when
     // present, otherwise gather every top-level field except the envelope keys
     // ("type"/"subtype"). An envelope-only message still yields an empty object.
-    let data = if let Some(d) = json.get("data") {
+    //
+    // A `"data": null` is treated as *absent*, not as an explicit payload: null
+    // carries nothing, so taking that branch would throw away exactly the flat
+    // sibling fields this code exists to keep. See
+    // `test_parse_system_message_null_data_falls_back_to_flat_payload`.
+    let data = if let Some(d) = json.get("data").filter(|d| !d.is_null()) {
         d.clone()
     } else if let Value::Object(map) = &json {
         let mut payload = map.clone();
         payload.remove("type");
         payload.remove("subtype");
+        // Only reachable holding a null (a non-null "data" took the branch
+        // above), so this strips the empty key rather than re-injecting it.
+        payload.remove("data");
         Value::Object(payload)
     } else {
         Value::Object(serde_json::Map::new())
@@ -1477,5 +1485,672 @@ mod tests {
         } else {
             panic!("Expected StreamEvent");
         }
+    }
+
+    // ====================================================================
+    // Blocks the parser drops, and the diagnostics that say so
+    // ====================================================================
+
+    /// A user message whose array content holds *only* block types the parser
+    /// does not know collapses to "no content at all": empty `content` AND
+    /// `content_blocks == None`. The message itself is still delivered, so a
+    /// consumer that only looks at `content` sees an empty user turn rather
+    /// than an error.
+    #[test]
+    fn test_parse_user_message_array_of_only_unknown_blocks_yields_nothing() {
+        let json = json!({
+            "type": "user",
+            "message": {
+                "content": [
+                    {"type": "image", "source": {"data": "iVBOR"}},
+                    {"type": "server_tool_use", "id": "srvtoolu_1"}
+                ]
+            }
+        });
+        let result = parse_message(json).unwrap().unwrap();
+        match &result {
+            Message::User { message, .. } => {
+                assert_eq!(message.content, "");
+                assert_eq!(
+                    message.content_blocks, None,
+                    "unknown blocks are dropped, and an all-dropped array becomes None"
+                );
+            },
+            other => panic!("Expected Message::User, got {other:?}"),
+        }
+    }
+
+    /// Same drop on the assistant side, but mixed with a known block: the
+    /// unknown block is skipped and the surviving blocks keep their relative
+    /// order (the dropped one does not leave a hole or shift anything).
+    #[test]
+    fn test_parse_assistant_message_skips_unknown_blocks_and_keeps_order() {
+        let json = json!({
+            "type": "assistant",
+            "message": {
+                "content": [
+                    {"type": "text", "text": "first"},
+                    {"type": "redacted_thinking", "data": "opaque"},
+                    {"type": "text", "text": "second"}
+                ]
+            }
+        });
+        let result = parse_message(json).unwrap().unwrap();
+        match &result {
+            Message::Assistant { message, .. } => {
+                assert_eq!(
+                    message.content,
+                    vec![
+                        ContentBlock::Text(TextContent {
+                            text: "first".to_string()
+                        }),
+                        ContentBlock::Text(TextContent {
+                            text: "second".to_string()
+                        }),
+                    ],
+                    "redacted_thinking is dropped silently, order of survivors preserved"
+                );
+            },
+            other => panic!("Expected Message::Assistant, got {other:?}"),
+        }
+    }
+
+    /// A *malformed* known block inside a user array is NOT dropped: the `?`
+    /// in the loop aborts the whole message. One bad tool_result loses the
+    /// entire user turn, including the sibling blocks that were fine.
+    #[test]
+    fn test_parse_user_message_array_with_malformed_known_block_fails_whole_message() {
+        let json = json!({
+            "type": "user",
+            "message": {
+                "content": [
+                    {"type": "tool_result", "tool_use_id": "toolu_ok", "content": "fine"},
+                    {"type": "text"}
+                ]
+            }
+        });
+        let err = parse_message(json).unwrap_err();
+        match &err {
+            SdkError::MessageParseError { error, .. } => {
+                assert_eq!(error, "Missing 'text' field in text block");
+            },
+            other => panic!("Expected MessageParseError, got {other:?}"),
+        }
+    }
+
+    /// Minimal in-memory `MakeWriter` so a test can read back what `tracing`
+    /// actually emitted.
+    #[derive(Clone, Default)]
+    struct CapturedLog(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl CapturedLog {
+        fn contents(&self) -> String {
+            String::from_utf8(self.0.lock().expect("log mutex").clone()).expect("utf8 log")
+        }
+    }
+
+    impl std::io::Write for CapturedLog {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().expect("log mutex").extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl tracing_subscriber::fmt::MakeWriter<'_> for CapturedLog {
+        type Writer = CapturedLog;
+        fn make_writer(&self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    /// The block count in the DEBUG line is the only trace a dropped block
+    /// leaves. This asserts the number is the count of blocks *kept* (2), not
+    /// the number of items received (3) — otherwise the log would hide the drop.
+    ///
+    /// Coverage note: `llvm-cov` still reports the `blocks.len()` argument of
+    /// that `debug!` as uncovered even though this test reads the rendered line
+    /// back. `tracing` passes the argument through `format_args!`, so the value
+    /// is captured by reference here and only formatted later, inside the
+    /// subscriber — the region llvm-cov maps onto that line is never entered.
+    /// The behaviour is verified; the counter cannot be.
+    #[test]
+    fn test_user_message_debug_log_reports_kept_block_count() {
+        let log = CapturedLog::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::DEBUG)
+            .with_ansi(false)
+            .with_writer(log.clone())
+            .finish();
+
+        let json = json!({
+            "type": "user",
+            "message": {
+                "content": [
+                    {"type": "tool_result", "tool_use_id": "toolu_1", "content": "a"},
+                    {"type": "image", "source": {"data": "iVBOR"}},
+                    {"type": "tool_result", "tool_use_id": "toolu_2", "content": "b"}
+                ]
+            }
+        });
+
+        let parsed =
+            tracing::subscriber::with_default(subscriber, || parse_message(json).unwrap().unwrap());
+
+        match &parsed {
+            Message::User { message, .. } => {
+                assert_eq!(message.content_blocks.as_ref().map(Vec::len), Some(2));
+            },
+            other => panic!("Expected Message::User, got {other:?}"),
+        }
+
+        let emitted = log.contents();
+        assert!(
+            emitted.contains("Parsed user message with 2 content blocks"),
+            "DEBUG line must report the count of blocks kept; got: {emitted}"
+        );
+    }
+
+    /// `tool_result.content` is only read as a string or an array. Any other
+    /// JSON — a number, an object, an explicit null — is neither converted nor
+    /// refused: it becomes `content: None`, indistinguishable from a tool that
+    /// returned nothing at all.
+    #[test]
+    fn test_parse_content_block_tool_result_non_string_non_array_content_is_dropped() {
+        for payload in [json!(42), json!({"stdout": "ok"}), json!(null), json!(true)] {
+            let block = parse_content_block(&json!({
+                "type": "tool_result",
+                "tool_use_id": "toolu_1",
+                "content": payload
+            }))
+            .unwrap()
+            .unwrap();
+            assert_eq!(
+                block,
+                ContentBlock::ToolResult(ToolResultContent {
+                    tool_use_id: "toolu_1".to_string(),
+                    content: None,
+                    is_error: None,
+                }),
+                "content {payload} is dropped rather than refused"
+            );
+        }
+    }
+
+    // ====================================================================
+    // parse_system_message — the three shapes of `data`
+    // ====================================================================
+
+    /// Defensive `else` of the `Value::Object` match. Unreachable through
+    /// `parse_message` (a non-object JSON has no "type" string, so the
+    /// envelope check rejects it first), so it is exercised by calling the
+    /// private function directly: a non-object payload yields `{}`, never a
+    /// panic.
+    #[test]
+    fn test_parse_system_message_non_object_json_yields_empty_object() {
+        let result = parse_system_message(Value::String("not an envelope".into()))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            result,
+            Message::System {
+                subtype: "unknown".to_string(),
+                data: json!({}),
+            }
+        );
+    }
+
+    /// Proof that the branch above really is out of reach from the public
+    /// entry point: `parse_message` refuses a non-object before any subtype
+    /// dispatch happens.
+    #[test]
+    fn test_parse_message_rejects_non_object_json() {
+        let err = parse_message(json!(["system"])).unwrap_err();
+        match &err {
+            SdkError::MessageParseError { error, .. } => {
+                assert_eq!(error, "Missing 'type' field");
+            },
+            other => panic!("Expected MessageParseError, got {other:?}"),
+        }
+    }
+
+    /// `"type"` present but not a string is rejected the same way — the
+    /// parser never coerces.
+    #[test]
+    fn test_parse_message_rejects_non_string_type() {
+        let err = parse_message(json!({"type": 7})).unwrap_err();
+        assert!(matches!(err, SdkError::MessageParseError { .. }));
+    }
+
+    /// An explicit `"data": null` must NOT win over the flat siblings: null
+    /// carries no payload, so taking that branch would throw away exactly the
+    /// workflow state the flat-shape handling exists to preserve.
+    #[test]
+    fn test_parse_system_message_null_data_falls_back_to_flat_payload() {
+        let json = json!({
+            "type": "system",
+            "subtype": "task_progress",
+            "data": null,
+            "task_id": "task-42",
+            "workflow_progress": [{"agent": "a1", "state": "running"}]
+        });
+        let result = parse_message(json).unwrap().unwrap();
+        match &result {
+            Message::System { subtype, data } => {
+                assert_eq!(subtype, "task_progress");
+                assert_eq!(data.get("task_id"), Some(&json!("task-42")));
+                assert_eq!(
+                    data.get("workflow_progress"),
+                    Some(&json!([{"agent": "a1", "state": "running"}])),
+                    "flat payload must survive an explicit null `data`"
+                );
+                assert!(
+                    data.get("data").is_none(),
+                    "the null `data` key itself is not re-injected into the payload"
+                );
+            },
+            other => panic!("Expected Message::System, got {other:?}"),
+        }
+    }
+
+    /// A non-null, non-object `data` is still taken verbatim: the parser does
+    /// not require `data` to be a JSON object despite the field's name and
+    /// doc. Pinned so a future tightening is a deliberate change.
+    #[test]
+    fn test_parse_system_message_scalar_data_is_taken_verbatim() {
+        let json = json!({
+            "type": "system",
+            "subtype": "status",
+            "data": "ready",
+            "ignored_sibling": 1
+        });
+        let result = parse_message(json).unwrap().unwrap();
+        assert_eq!(
+            result,
+            Message::System {
+                subtype: "status".to_string(),
+                data: json!("ready"),
+            }
+        );
+    }
+
+    // ====================================================================
+    // parse_result_message — the fallback is a silent default machine
+    // ====================================================================
+
+    /// A result message with a well-formed envelope but a wrongly typed
+    /// `duration_ms` does not fail: serde rejects it, the fallback kicks in,
+    /// and the bad number becomes 0 with no error and no log. The surrounding
+    /// fields are still recovered.
+    #[test]
+    fn test_parse_result_message_wrong_typed_duration_silently_becomes_zero() {
+        let json = json!({
+            "type": "result",
+            "subtype": "success",
+            "duration_ms": "1500",
+            "duration_api_ms": 1200,
+            "is_error": false,
+            "num_turns": 2,
+            "session_id": "sess_x",
+            "result": "done"
+        });
+        let result = parse_message(json).unwrap().unwrap();
+        match &result {
+            Message::Result {
+                duration_ms,
+                duration_api_ms,
+                session_id,
+                result: text,
+                ..
+            } => {
+                assert_eq!(*duration_ms, 0, "a string duration is silently zeroed");
+                assert_eq!(*duration_api_ms, 1200);
+                assert_eq!(session_id, "sess_x");
+                assert_eq!(text.as_deref(), Some("done"));
+            },
+            other => panic!("Expected Message::Result, got {other:?}"),
+        }
+    }
+
+    /// `num_turns` is read as i64 then cast with `as i32`: a value past
+    /// i32::MAX wraps instead of being refused. Pinned because the wrap is
+    /// silent — the caller sees a negative turn count.
+    #[test]
+    fn test_parse_result_message_num_turns_wraps_past_i32() {
+        let json = json!({
+            "type": "result",
+            "subtype": "success",
+            "duration_ms": 1,
+            "duration_api_ms": 1,
+            "is_error": false,
+            "num_turns": 2_147_483_648_i64,
+            "session_id": "sess_x"
+        });
+        let result = parse_message(json).unwrap().unwrap();
+        match &result {
+            Message::Result { num_turns, .. } => {
+                assert_eq!(
+                    *num_turns,
+                    i32::MIN,
+                    "i64 -> i32 cast wraps rather than refusing the message"
+                );
+            },
+            other => panic!("Expected Message::Result, got {other:?}"),
+        }
+    }
+
+    /// A result message missing every required field still parses: the
+    /// fallback invents "unknown"/0/false defaults. This is the shape a
+    /// consumer must be ready for — `is_error == false` here means "the CLI
+    /// told us nothing", not "the turn succeeded".
+    #[test]
+    fn test_parse_result_message_envelope_only_is_all_defaults() {
+        let result = parse_message(json!({"type": "result"})).unwrap().unwrap();
+        assert_eq!(
+            result,
+            Message::Result {
+                subtype: "unknown".to_string(),
+                duration_ms: 0,
+                duration_api_ms: 0,
+                is_error: false,
+                num_turns: 0,
+                session_id: "unknown".to_string(),
+                total_cost_usd: None,
+                usage: None,
+                result: None,
+                structured_output: None,
+            }
+        );
+    }
+
+    /// `structured_output: null` is normalised to `None` on the fallback path
+    /// too, so consumers never have to distinguish `None` from `Some(null)`.
+    #[test]
+    fn test_parse_result_message_fallback_drops_null_structured_output() {
+        let json = json!({
+            "type": "result",
+            "subtype": "success",
+            "duration_ms": "bad",
+            "structured_output": null
+        });
+        let result = parse_message(json).unwrap().unwrap();
+        match &result {
+            Message::Result {
+                structured_output, ..
+            } => assert_eq!(*structured_output, None),
+            other => panic!("Expected Message::Result, got {other:?}"),
+        }
+    }
+
+    // ====================================================================
+    // Parser strings vs. serde tags — the two must not drift
+    // ====================================================================
+
+    /// `parse_stream_event` matches event types as hand-written string
+    /// literals, while `StreamEventData` derives its tag from
+    /// `rename_all = "snake_case"`. If the two ever disagree, the SDK would
+    /// emit a `type` it cannot itself parse back. This drives every variant
+    /// the parser builds through parse -> serialize and asserts the tag it
+    /// serialises to is the very string the parser accepted.
+    #[test]
+    fn test_stream_event_type_literals_match_serde_tags() {
+        let cases: Vec<(&str, Value)> = vec![
+            (
+                "message_start",
+                json!({"type": "message_start", "message": {"id": "m1"}}),
+            ),
+            (
+                "content_block_start",
+                json!({"type": "content_block_start", "index": 0, "content_block": {"type": "text"}}),
+            ),
+            (
+                "content_block_delta",
+                json!({"type": "content_block_delta", "index": 1, "delta": {"type": "text_delta", "text": "hi"}}),
+            ),
+            (
+                "content_block_stop",
+                json!({"type": "content_block_stop", "index": 2}),
+            ),
+            (
+                "message_delta",
+                json!({"type": "message_delta", "delta": {"stop_reason": "end_turn"}}),
+            ),
+            ("message_stop", json!({"type": "message_stop"})),
+        ];
+
+        for (expected_tag, event) in cases {
+            let parsed = parse_message(json!({"type": "stream_event", "event": event}))
+                .unwrap()
+                .unwrap_or_else(|| panic!("{expected_tag} must not be dropped"));
+            let Message::StreamEvent { event: data, .. } = parsed else {
+                panic!("{expected_tag}: expected StreamEvent");
+            };
+            let reserialised = serde_json::to_value(&data).unwrap();
+            assert_eq!(
+                reserialised.get("type").and_then(Value::as_str),
+                Some(expected_tag),
+                "serde tag must equal the literal parse_stream_event matches on"
+            );
+            // And the round-trip is lossless, so the SDK can re-read its own output.
+            assert_eq!(
+                serde_json::from_value::<StreamEventData>(reserialised).unwrap(),
+                data
+            );
+        }
+    }
+
+    /// Same contract one level down, for the three delta kinds.
+    #[test]
+    fn test_stream_delta_type_literals_match_serde_tags() {
+        let cases: Vec<(&str, Value)> = vec![
+            ("text_delta", json!({"type": "text_delta", "text": "tok"})),
+            (
+                "thinking_delta",
+                json!({"type": "thinking_delta", "thinking": "hmm"}),
+            ),
+            (
+                "input_json_delta",
+                json!({"type": "input_json_delta", "partial_json": "{\"a\":"}),
+            ),
+        ];
+
+        for (expected_tag, delta) in cases {
+            let parsed = parse_message(json!({
+                "type": "stream_event",
+                "event": {"type": "content_block_delta", "index": 0, "delta": delta}
+            }))
+            .unwrap()
+            .unwrap();
+            let Message::StreamEvent {
+                event:
+                    StreamEventData::ContentBlockDelta {
+                        delta: parsed_delta,
+                        ..
+                    },
+                ..
+            } = parsed
+            else {
+                panic!("{expected_tag}: expected ContentBlockDelta");
+            };
+            let reserialised = serde_json::to_value(&parsed_delta).unwrap();
+            assert_eq!(
+                reserialised.get("type").and_then(Value::as_str),
+                Some(expected_tag)
+            );
+            assert_eq!(
+                serde_json::from_value::<StreamDelta>(reserialised).unwrap(),
+                parsed_delta
+            );
+        }
+    }
+
+    /// A negative or non-integral `index` is not refused — `as_u64()` returns
+    /// None and the block index silently becomes 0, which is a *valid* index.
+    /// A consumer reassembling blocks by index would merge the wrong block.
+    #[test]
+    fn test_parse_stream_event_negative_index_silently_becomes_zero() {
+        for bad_index in [json!(-1), json!(1.5), json!("3")] {
+            let parsed = parse_message(json!({
+                "type": "stream_event",
+                "event": {"type": "content_block_stop", "index": bad_index}
+            }))
+            .unwrap()
+            .unwrap();
+            assert_eq!(
+                parsed,
+                Message::StreamEvent {
+                    event: StreamEventData::ContentBlockStop { index: 0 },
+                    session_id: None,
+                    parent_tool_use_id: None,
+                },
+                "index {bad_index} should have been refused, it collapses to 0 instead"
+            );
+        }
+    }
+
+    /// Parsing the CLI's JSON and reading the result back through **serde**
+    /// is lossless for every message kind. This is the property a consumer
+    /// relies on when it persists `Message` values and reloads them.
+    #[test]
+    fn test_parsed_messages_survive_a_serde_round_trip() {
+        let inputs = vec![
+            json!({"type": "user", "message": {"content": "hello"}, "parent_tool_use_id": "toolu_p"}),
+            json!({
+                "type": "assistant",
+                "message": {"content": [
+                    {"type": "text", "text": "hi"},
+                    {"type": "thinking", "thinking": "t", "signature": "s"},
+                    {"type": "tool_use", "id": "toolu_1", "name": "Read", "input": {"path": "/a"}}
+                ]}
+            }),
+            json!({"type": "system", "subtype": "init", "data": {"k": "v"}}),
+            json!({
+                "type": "result", "subtype": "success", "duration_ms": 5, "duration_api_ms": 4,
+                "is_error": false, "num_turns": 1, "session_id": "s1", "total_cost_usd": 0.01
+            }),
+            json!({
+                "type": "stream_event", "session_id": "s1",
+                "event": {"type": "content_block_delta", "index": 0,
+                          "delta": {"type": "text_delta", "text": "x"}}
+            }),
+        ];
+
+        for input in inputs {
+            let first = parse_message(input.clone()).unwrap().unwrap();
+            let round = serde_json::to_value(&first).unwrap();
+            let second: Message = serde_json::from_value(round.clone())
+                .unwrap_or_else(|e| panic!("serde could not re-read {input}: {e}"));
+            assert_eq!(first, second, "round trip changed the message: {round}");
+        }
+    }
+
+    /// But the *parser* cannot re-read what the SDK serialises. Because
+    /// `ContentBlock` is `#[serde(untagged)]`, serialisation emits no `"type"`,
+    /// and `parse_content_block()` only has a no-`type` fallback for text
+    /// blocks. So feeding the SDK's own output back through `parse_message()`
+    /// **silently drops every thinking and tool_use block** — no error, no
+    /// warning, a shorter content array.
+    ///
+    /// Pinning the broken behaviour here rather than fixing it: the fix is
+    /// either a tag on `ContentBlock` (changes the wire format for every other
+    /// consumer of the type) or shape-guessing in `parse_content_block()`
+    /// (guesses where the CLI is explicit). Both are larger than this file.
+    /// See `test_reparsing_own_output_should_preserve_all_blocks` below for the
+    /// behaviour that is wanted.
+    #[test]
+    fn test_reparsing_the_sdks_own_output_drops_thinking_and_tool_use_blocks() {
+        let original = parse_message(json!({
+            "type": "assistant",
+            "message": {"content": [
+                {"type": "text", "text": "hi"},
+                {"type": "thinking", "thinking": "t", "signature": "s"},
+                {"type": "tool_use", "id": "toolu_1", "name": "Read", "input": {"path": "/a"}}
+            ]}
+        }))
+        .unwrap()
+        .unwrap();
+
+        let serialised = serde_json::to_value(&original).unwrap();
+        let reparsed = parse_message(serialised).unwrap().unwrap();
+
+        let Message::Assistant { message, .. } = &reparsed else {
+            panic!("expected Message::Assistant");
+        };
+        assert_eq!(
+            message.content,
+            vec![ContentBlock::Text(TextContent {
+                text: "hi".to_string()
+            })],
+            "only the text block survives a re-parse of the SDK's own output"
+        );
+        assert_ne!(original, reparsed, "the loss is silent, not an error");
+    }
+
+    /// The behaviour that ought to hold: `parse_message()` is idempotent over
+    /// the SDK's own serialisation. Fails today because the untagged
+    /// `Serialize` for `types::ContentBlock` writes no `"type"` key and
+    /// `parse_content_block()` drops any untyped non-text block.
+    /// Triggering input: an assistant message containing a `thinking` or
+    /// `tool_use` block, serialised then re-parsed.
+    #[test]
+    #[ignore = "bug: untagged ContentBlock Serialize emits no `type`; parse_content_block drops untyped non-text blocks"]
+    fn test_reparsing_own_output_should_preserve_all_blocks() {
+        let original = parse_message(json!({
+            "type": "assistant",
+            "message": {"content": [
+                {"type": "thinking", "thinking": "t", "signature": "s"},
+                {"type": "tool_use", "id": "toolu_1", "name": "Read", "input": {"path": "/a"}}
+            ]}
+        }))
+        .unwrap()
+        .unwrap();
+        let serialised = serde_json::to_value(&original).unwrap();
+        let reparsed = parse_message(serialised).unwrap().unwrap();
+        assert_eq!(original, reparsed);
+    }
+
+    /// The round trip above hides one real asymmetry: `ContentBlock` is
+    /// `#[serde(untagged)]`, so serialising an assistant message emits content
+    /// blocks with **no `"type"` discriminator**. It round-trips only because
+    /// untagged deserialisation guesses from the field shape — the output is
+    /// not the wire format the CLI itself produces.
+    #[test]
+    fn test_serialised_content_blocks_lose_their_type_discriminator() {
+        let parsed = parse_message(json!({
+            "type": "assistant",
+            "message": {"content": [{"type": "tool_use", "id": "toolu_1", "name": "Bash", "input": {}}]}
+        }))
+        .unwrap()
+        .unwrap();
+
+        let out = serde_json::to_value(&parsed).unwrap();
+        let block = &out["message"]["content"][0];
+        assert_eq!(
+            block,
+            &json!({"id": "toolu_1", "name": "Bash", "input": {}}),
+            "untagged ContentBlock drops `type` on the way out"
+        );
+        assert!(block.get("type").is_none());
+    }
+
+    /// Unknown envelope types are dropped, not rejected: `Ok(None)`. Covers
+    /// the forward-compatibility contract for message types the CLI adds
+    /// later.
+    #[test]
+    fn test_unknown_envelope_and_stream_event_types_are_dropped_not_errors() {
+        assert_eq!(
+            parse_message(json!({"type": "compact_boundary"})).unwrap(),
+            None
+        );
+        assert_eq!(
+            parse_message(json!({
+                "type": "stream_event",
+                "event": {"type": "message_pause"}
+            }))
+            .unwrap(),
+            None
+        );
     }
 }

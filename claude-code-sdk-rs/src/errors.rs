@@ -459,4 +459,325 @@ mod tests {
             _ => panic!("expected ChannelClosed from RecvError"),
         }
     }
+
+    // ====================================================================
+    // The `source()` chain — what a caller can still inspect
+    // ====================================================================
+
+    /// `CliJsonDecodeError` keeps the serde error as `#[source]`. The Display
+    /// text deliberately does *not* repeat it, so the underlying reason is only
+    /// reachable through `source()`: if that link were lost, "Failed to decode
+    /// JSON from CLI output: <line>" would be the whole diagnostic.
+    #[test]
+    fn test_cli_json_decode_error_exposes_serde_error_as_source() {
+        use std::error::Error;
+
+        let line = r#"{"type": "result",}"#.to_string();
+        let original = serde_json::from_str::<serde_json::Value>(&line).unwrap_err();
+        let original_text = original.to_string();
+
+        let err = SdkError::CliJsonDecodeError {
+            line,
+            original_error: original,
+        };
+
+        let source = err.source().expect("serde error must stay reachable");
+        assert_eq!(source.to_string(), original_text);
+        assert!(
+            !err.to_string().contains(&original_text),
+            "Display must not duplicate the source; the chain is the only path to it"
+        );
+    }
+
+    /// `#[from] std::io::Error` also wires the source chain, so the io kind
+    /// survives the conversion and a caller can still match on it.
+    #[test]
+    fn test_process_error_keeps_io_error_as_source() {
+        use std::error::Error;
+
+        let sdk_err: SdkError =
+            std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied").into();
+        let source = sdk_err.source().expect("io error must stay reachable");
+        let io_err = source
+            .downcast_ref::<std::io::Error>()
+            .expect("source is the original io::Error");
+        assert_eq!(io_err.kind(), std::io::ErrorKind::PermissionDenied);
+    }
+
+    /// Same for the serde `#[from]`, including the fact that `JsonError`'s
+    /// Display *does* embed the message (unlike `CliJsonDecodeError`).
+    #[test]
+    fn test_json_error_keeps_serde_error_as_source() {
+        use std::error::Error;
+
+        let json_err = serde_json::from_str::<serde_json::Value>("{").unwrap_err();
+        let text = json_err.to_string();
+        let sdk_err: SdkError = json_err.into();
+        assert!(sdk_err.to_string().starts_with("JSON error: "));
+        assert!(sdk_err.to_string().contains(&text));
+        assert!(sdk_err.source().is_some());
+    }
+
+    /// Variants built from plain data carry no cause — asserted so that adding
+    /// a `#[source]` later is a visible change.
+    #[test]
+    fn test_data_only_variants_have_no_source() {
+        use std::error::Error;
+
+        assert!(SdkError::timeout(1).source().is_none());
+        assert!(SdkError::parse_error("e", "r").source().is_none());
+        assert!(SdkError::ChannelClosed.source().is_none());
+        assert!(
+            SdkError::CliNotFound {
+                searched_paths: "/usr/bin".into()
+            }
+            .source()
+            .is_none()
+        );
+    }
+
+    // ====================================================================
+    // Display text that callers (and the diagram) rely on
+    // ====================================================================
+
+    /// The parse error prints both halves, and labels the raw payload — this
+    /// is the only place the offending CLI line is shown to a human.
+    #[test]
+    fn test_display_message_parse_error_labels_the_raw_payload() {
+        let err = SdkError::parse_error("Missing 'type' field", r#"{"foo":1}"#);
+        assert_eq!(
+            err.to_string(),
+            "Failed to parse message: Missing 'type' field\nRaw message: {\"foo\":1}"
+        );
+    }
+
+    #[test]
+    fn test_display_timeout_and_unexpected_response_are_exact() {
+        assert_eq!(
+            SdkError::timeout(30).to_string(),
+            "Timeout waiting for response after 30 seconds"
+        );
+        assert_eq!(
+            SdkError::unexpected_response("result", "system").to_string(),
+            "Unexpected response type: expected result, got system"
+        );
+    }
+
+    /// The error code is kept on the variant but never rendered: a CLI error
+    /// with `code: Some("E42")` prints exactly like one without. Pinned
+    /// because it means logs alone cannot tell the two apart.
+    #[test]
+    fn test_display_cli_error_omits_the_code() {
+        let with_code = SdkError::cli_error("boom", Some("E42".into()));
+        let without = SdkError::cli_error("boom", None);
+        assert_eq!(with_code.to_string(), "Claude CLI error: boom");
+        assert_eq!(with_code.to_string(), without.to_string());
+    }
+
+    /// `CliNotFound` has to stay actionable: it names the install command and
+    /// lists every path searched, one per line.
+    #[test]
+    fn test_display_cli_not_found_lists_every_searched_path() {
+        let err = SdkError::CliNotFound {
+            searched_paths: "/usr/local/bin/claude\n/opt/homebrew/bin/claude".into(),
+        };
+        let msg = err.to_string();
+        assert!(msg.starts_with(
+            "Claude CLI not found. Install with: npm install -g @anthropic-ai/claude-code"
+        ));
+        assert!(msg.contains("Searched in:"));
+        assert!(msg.contains("/usr/local/bin/claude"));
+        assert!(msg.contains("/opt/homebrew/bin/claude"));
+    }
+
+    // ====================================================================
+    // Channel conversions
+    // ====================================================================
+
+    /// `RecvError::Lagged(n)` means "the broadcast dropped n messages behind
+    /// you" — the receiver is still usable. It is mapped onto `ChannelClosed`,
+    /// which `is_recoverable()` reports as true, so a retry loop behaves; but
+    /// the count `n` is discarded and the two situations become
+    /// indistinguishable downstream.
+    #[test]
+    fn test_from_recv_error_lagged_collapses_into_channel_closed() {
+        let sdk_err: SdkError = tokio::sync::broadcast::error::RecvError::Lagged(7).into();
+        assert!(matches!(sdk_err, SdkError::ChannelClosed));
+        assert_eq!(sdk_err.to_string(), "Channel closed unexpectedly");
+        assert!(
+            !sdk_err.to_string().contains('7'),
+            "the number of dropped messages is lost in the conversion"
+        );
+        assert!(sdk_err.is_recoverable());
+    }
+
+    /// The `SendError<T>` conversion is generic over the payload and drops it:
+    /// whatever could not be sent is gone, and every payload type collapses to
+    /// the same unit variant.
+    #[test]
+    fn test_from_send_error_is_payload_agnostic_and_drops_it() {
+        let from_i32: SdkError = tokio::sync::mpsc::error::SendError(42i32).into();
+        let from_string: SdkError =
+            tokio::sync::mpsc::error::SendError("a message".to_string()).into();
+        assert!(matches!(from_i32, SdkError::ChannelSendError));
+        assert!(matches!(from_string, SdkError::ChannelSendError));
+        assert_eq!(from_i32.to_string(), from_string.to_string());
+        assert!(
+            !from_string.to_string().contains("a message"),
+            "the undelivered payload is not reported"
+        );
+    }
+
+    // ====================================================================
+    // The two classifiers, pinned over every variant
+    // ====================================================================
+
+    /// One row per `SdkError` variant, so that adding a variant without
+    /// deciding its classification shows up here as a count mismatch rather
+    /// than as a silent `false` in production.
+    fn every_variant() -> Vec<(&'static str, SdkError, bool, bool)> {
+        // (name, error, is_recoverable, is_config_error)
+        vec![
+            (
+                "CliNotFound",
+                SdkError::CliNotFound {
+                    searched_paths: "p".into(),
+                },
+                false,
+                true,
+            ),
+            (
+                "ConnectionError",
+                SdkError::ConnectionError("c".into()),
+                false,
+                false,
+            ),
+            (
+                "ProcessError",
+                SdkError::ProcessError(std::io::Error::other("io")),
+                false,
+                false,
+            ),
+            (
+                "MessageParseError",
+                SdkError::parse_error("e", "r"),
+                false,
+                false,
+            ),
+            (
+                "JsonError",
+                SdkError::JsonError(serde_json::from_str::<serde_json::Value>("{").unwrap_err()),
+                false,
+                false,
+            ),
+            (
+                "CliJsonDecodeError",
+                SdkError::CliJsonDecodeError {
+                    line: "x".into(),
+                    original_error: serde_json::from_str::<serde_json::Value>("{").unwrap_err(),
+                },
+                false,
+                false,
+            ),
+            (
+                "TransportError",
+                SdkError::TransportError("t".into()),
+                false,
+                false,
+            ),
+            ("Timeout", SdkError::timeout(1), true, false),
+            (
+                "SessionNotFound",
+                SdkError::SessionNotFound("s".into()),
+                false,
+                false,
+            ),
+            (
+                "ConfigError",
+                SdkError::ConfigError("c".into()),
+                false,
+                true,
+            ),
+            (
+                "ControlRequestError",
+                SdkError::ControlRequestError("c".into()),
+                false,
+                false,
+            ),
+            (
+                "UnexpectedResponse",
+                SdkError::unexpected_response("a", "b"),
+                false,
+                false,
+            ),
+            ("CliError", SdkError::cli_error("m", None), false, false),
+            ("ChannelSendError", SdkError::ChannelSendError, false, false),
+            ("ChannelClosed", SdkError::ChannelClosed, true, false),
+            ("InvalidState", SdkError::invalid_state("s"), false, false),
+            (
+                "ProcessExited",
+                SdkError::ProcessExited { code: Some(2) },
+                true,
+                false,
+            ),
+            (
+                "UnexpectedStreamEnd",
+                SdkError::UnexpectedStreamEnd,
+                true,
+                false,
+            ),
+            (
+                "NotSupported",
+                SdkError::NotSupported {
+                    feature: "f".into(),
+                },
+                false,
+                true,
+            ),
+        ]
+    }
+
+    #[test]
+    fn test_classifiers_over_every_variant() {
+        assert_eq!(
+            every_variant().len(),
+            19,
+            "SdkError has 19 variants; a new one must be classified in this table"
+        );
+        for (name, err, recoverable, config) in every_variant() {
+            assert_eq!(
+                err.is_recoverable(),
+                recoverable,
+                "{name}: is_recoverable mismatch"
+            );
+            assert_eq!(
+                err.is_config_error(),
+                config,
+                "{name}: is_config_error mismatch"
+            );
+            assert!(
+                !(recoverable && config),
+                "{name}: the two classes must stay disjoint"
+            );
+        }
+    }
+
+    /// Every variant must render something non-empty: an error whose Display
+    /// is blank is worse than no error at all.
+    #[test]
+    fn test_every_variant_renders_a_non_empty_message() {
+        for (name, err, _, _) in every_variant() {
+            let msg = err.to_string();
+            assert!(!msg.trim().is_empty(), "{name}: empty Display");
+        }
+    }
+
+    /// `ConnectionError` and `TransportError` are the two buckets a transport
+    /// failure lands in, and neither is classified recoverable — so the retry
+    /// helpers will not retry a dropped pipe. Pinned as current behaviour.
+    #[test]
+    fn test_transport_failures_are_not_classified_recoverable() {
+        assert!(!SdkError::ConnectionError("broken pipe".into()).is_recoverable());
+        assert!(!SdkError::TransportError("broken pipe".into()).is_recoverable());
+    }
 }
