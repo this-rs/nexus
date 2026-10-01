@@ -12,7 +12,7 @@ use super::{DefaultToolContextExtractor, MemoryConfig, MessageContextAggregator,
 #[cfg(feature = "memory")]
 use chrono::Utc;
 #[cfg(not(feature = "memory"))]
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::SystemTime;
 
 use serde_json::Value;
 #[cfg(feature = "memory")]
@@ -27,10 +27,23 @@ fn current_timestamp() -> i64 {
     }
     #[cfg(not(feature = "memory"))]
     {
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0)
+        unix_seconds(SystemTime::now())
+    }
+}
+
+/// Converts a wall-clock instant into a Unix timestamp in seconds.
+///
+/// Instants before the epoch yield a **negative** timestamp.
+/// `SystemTime::duration_since(UNIX_EPOCH)` reports them as an `Err` carrying
+/// the distance travelled backwards; swallowing that error with
+/// `unwrap_or(0)` would stamp every message of a machine whose clock sits
+/// before 1970 with the epoch itself, and `RelevanceScorer::recency_score`
+/// would then read those messages as more than half a century old.
+#[cfg(any(not(feature = "memory"), test))]
+fn unix_seconds(time: std::time::SystemTime) -> i64 {
+    match time.duration_since(std::time::UNIX_EPOCH) {
+        Ok(forward) => forward.as_secs() as i64,
+        Err(backward) => -(backward.duration().as_secs() as i64),
     }
 }
 
@@ -577,6 +590,11 @@ impl SummaryGenerator {
     /// This is a basic implementation that extracts the first
     /// and last sentences. For production use, consider using
     /// an LLM for abstractive summarization.
+    ///
+    /// When the content holds no sentence at all (only delimiters and
+    /// whitespace) the fallback keeps a prefix of `threshold` **bytes**: the
+    /// cut is moved back to the preceding character boundary, because slicing
+    /// in the middle of a multi-byte character would panic.
     pub fn generate_simple_summary(&self, content: &str) -> String {
         if !self.needs_summary(content) {
             return content.to_string();
@@ -590,7 +608,13 @@ impl SummaryGenerator {
             .collect();
 
         match sentences.len() {
-            0 => content[..self.threshold.min(content.len())].to_string() + "...",
+            0 => {
+                let mut end = self.threshold.min(content.len());
+                while end > 0 && !content.is_char_boundary(end) {
+                    end -= 1;
+                }
+                content[..end].to_string() + "..."
+            },
             1 => sentences[0].to_string(),
             2 => format!("{}. ... {}", sentences[0], sentences[1]),
             _ => format!("{}. ... {}", sentences[0], sentences[sentences.len() - 1]),
@@ -795,6 +819,263 @@ mod tests {
 
         // Next turn should be 6
         assert_eq!(manager.turn_index(), 6);
+    }
+
+    // -----------------------------------------------------------------------
+    // current_timestamp / unix_seconds
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn unix_seconds_keeps_the_sign_of_a_pre_epoch_clock() {
+        use std::time::{Duration, UNIX_EPOCH};
+
+        assert_eq!(unix_seconds(UNIX_EPOCH), 0);
+        assert_eq!(
+            unix_seconds(UNIX_EPOCH + Duration::from_secs(1_700_000_000)),
+            1_700_000_000
+        );
+        // A clock standing before 1970 used to be flattened onto the epoch by
+        // `unwrap_or(0)`, which made every message look 55 years old to the
+        // recency scorer instead of brand new.
+        assert_eq!(
+            unix_seconds(UNIX_EPOCH - Duration::from_secs(86_400)),
+            -86_400
+        );
+    }
+
+    #[test]
+    fn recorded_messages_carry_a_plausible_timestamp() {
+        let config = MemoryConfig::default().with_enabled(true);
+        let mut manager = ConversationMemoryManager::new(config);
+
+        manager.record_user_message("Q");
+        let messages = manager.take_pending_messages();
+
+        // 2020-01-01: the only thing worth asserting on a real clock is that
+        // it is not the silent epoch-zero fallback.
+        assert!(
+            messages[0].created_at > 1_577_836_800,
+            "created_at fell back to the epoch: {}",
+            messages[0].created_at
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Builder
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn builder_carries_url_key_and_token_budget_into_the_config() {
+        let manager = MemoryIntegrationBuilder::default()
+            .url("http://127.0.0.1:7700")
+            .key("cle-factice")
+            .token_budget(123)
+            .build();
+
+        let config = manager.config();
+        assert_eq!(config.meilisearch_url, "http://127.0.0.1:7700");
+        assert_eq!(config.meilisearch_key.as_deref(), Some("cle-factice"));
+        assert_eq!(config.token_budget, 123);
+
+        // Neither a conversation id nor a cwd was given: `build` leaves the
+        // generated id in place and no cwd at all.
+        assert!(manager.conversation_id().starts_with("conv-"));
+        assert_eq!(manager.cwd(), None);
+    }
+
+    #[test]
+    fn a_disabled_manager_ignores_tool_calls() {
+        let mut manager = MemoryIntegrationBuilder::new().enabled(false).build();
+
+        manager.process_tool_call("Bash", &serde_json::json!({"command": "cd /ailleurs"}));
+
+        assert!(!manager.is_enabled());
+        assert_eq!(manager.cwd(), None, "a disabled manager must not track cwd");
+        assert!(manager.current_context("requête").files.is_empty());
+    }
+
+    #[test]
+    fn is_resumed_is_true_for_a_brand_new_conversation_after_one_turn() {
+        let config = MemoryConfig::default().with_enabled(true);
+        let mut manager = ConversationMemoryManager::new(config);
+        assert!(!manager.is_resumed());
+
+        manager.record_user_message("Q1");
+        manager.record_assistant_message("A1");
+
+        // Nothing was resumed: `resume_conversation` was never called and the
+        // conversation id is still the one generated by `new`. `is_resumed()`
+        // only looks at `turn_index > 0`, so it answers "yes" as soon as a
+        // first turn completes — the name promises more than the code does.
+        assert!(manager.conversation_id().starts_with("conv-"));
+        assert!(
+            manager.is_resumed(),
+            "documents the false positive of is_resumed()"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // SummaryGenerator
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn default_threshold_counts_bytes_not_characters() {
+        let generator = SummaryGenerator::default_threshold();
+
+        assert!(!generator.needs_summary(&"x".repeat(500)));
+        assert!(generator.needs_summary(&"x".repeat(501)));
+        // The doc-comment advertises "500 chars" but the comparison is on
+        // `str::len()`, i.e. bytes: 251 two-byte characters already trip it.
+        assert!(generator.needs_summary(&"é".repeat(251)));
+        assert!(!generator.needs_summary(&"é".repeat(250)));
+    }
+
+    #[test]
+    fn summary_of_delimiters_only_stops_on_a_char_boundary() {
+        // `split(['.', '!', '?'])` yields nothing but blanks here — `trim()`
+        // eats the em space — so the `0 =>` fallback runs. Threshold 2 lands
+        // inside the em space (bytes 1..4), which used to panic with
+        // "byte index 2 is not a char boundary".
+        let generator = SummaryGenerator::new(2);
+        assert!(generator.needs_summary(".\u{2003}."));
+
+        assert_eq!(
+            generator.generate_simple_summary(".\u{2003}."),
+            "....",
+            "the cut must fall back to byte 1, keeping the leading '.'"
+        );
+    }
+
+    #[test]
+    fn summary_without_sentences_keeps_the_byte_prefix() {
+        let generator = SummaryGenerator::new(2);
+
+        // All-ASCII: the threshold is already a boundary, nothing moves.
+        assert_eq!(generator.generate_simple_summary("!!!!!!"), "!!...");
+        // A no-break space is whitespace too, so still zero sentences; the
+        // threshold lands inside its two bytes and walks back to 1.
+        assert_eq!(generator.generate_simple_summary("!\u{00A0}?"), "!...");
+    }
+
+    #[test]
+    fn summary_of_a_single_sentence_returns_it_untouched() {
+        let generator = SummaryGenerator::new(10);
+        let content = "une seule phrase sans ponctuation finale";
+        assert!(generator.needs_summary(content));
+
+        // The `1 =>` arm hands back the whole sentence: no shortening, no
+        // ellipsis. A content above the threshold can come out unsummarised.
+        assert_eq!(generator.generate_simple_summary(content), content);
+    }
+
+    #[test]
+    fn summary_of_two_sentences_rewrites_the_first_terminator() {
+        let generator = SummaryGenerator::new(10);
+
+        // Both original terminators are lost: the first is replaced by a '.',
+        // the second disappears with the trailing empty split.
+        assert_eq!(
+            generator.generate_simple_summary("Première ! Seconde ?"),
+            "Première. ... Seconde"
+        );
+    }
+
+    #[test]
+    fn short_content_is_returned_verbatim() {
+        let generator = SummaryGenerator::new(500);
+
+        assert_eq!(generator.generate_simple_summary("Court."), "Court.");
+    }
+
+    /// A config that depends on nothing but the mock server's address, so the
+    /// `MEILISEARCH_URL` / `MEILISEARCH_KEY` environment variables cannot leak
+    /// into the test.
+    #[cfg(feature = "memory")]
+    fn mock_config(url: &str) -> MemoryConfig {
+        MemoryConfig {
+            meilisearch_url: url.to_string(),
+            meilisearch_key: None,
+            messages_index: "nexus_messages".to_string(),
+            conversations_index: "nexus_conversations".to_string(),
+            summary_threshold: 500,
+            max_context_items: 5,
+            token_budget: 2000,
+            min_relevance_score: 0.3,
+            enabled: true,
+        }
+    }
+
+    /// `ContextInjector::new` goes through `MeilisearchMemoryProvider::new`,
+    /// which refuses a disabled config with `MemoryError::Disabled`. The two
+    /// `if !self.config.enabled` guards inside `get_context_prefix` and
+    /// `store_messages` are therefore unreachable through the only public
+    /// constructor; the struct is assembled by hand here to pin what they
+    /// promise — a silent short-circuit, with no request at all.
+    #[cfg(feature = "memory")]
+    #[tokio::test]
+    async fn a_disabled_injector_short_circuits_without_calling_the_server() {
+        use wiremock::matchers::{method, path, path_regex};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let task = serde_json::json!({
+            "taskUid": 0,
+            "indexUid": "nexus_messages",
+            "status": "enqueued",
+            "type": "indexCreation",
+            "enqueuedAt": "2026-10-01T00:00:00Z",
+        });
+        Mock::given(method("POST"))
+            .and(path("/indexes"))
+            .respond_with(ResponseTemplate::new(202).set_body_json(task.clone()))
+            .mount(&server)
+            .await;
+        Mock::given(method("PATCH"))
+            .and(path_regex(r"^/indexes/[^/]+/settings$"))
+            .respond_with(ResponseTemplate::new(202).set_body_json(task))
+            .mount(&server)
+            .await;
+
+        let provider = MeilisearchMemoryProvider::new(mock_config(&server.uri()))
+            .await
+            .expect("the mock server answers the bootstrap");
+        // Drops the bootstrap mocks and the request log: from here on any
+        // outgoing request would both fail and be visible.
+        server.reset().await;
+
+        let injector = ContextInjector {
+            provider: Arc::new(provider),
+            config: mock_config(&server.uri()).with_enabled(false),
+        };
+
+        assert_eq!(
+            injector
+                .get_context_prefix("jwt", Some("/w"), &["/w/a.rs".to_string()])
+                .await
+                .unwrap(),
+            None,
+            "a disabled injector injects nothing"
+        );
+        injector
+            .store_messages(&[MessageDocument::new(
+                "m-1",
+                "conv-1",
+                "user",
+                "bonjour",
+                0,
+                1_700_000_000,
+            )])
+            .await
+            .expect("a disabled injector swallows the write silently");
+
+        assert!(
+            server
+                .received_requests()
+                .await
+                .expect("the mock server records every request")
+                .is_empty(),
+            "neither guard may reach the network"
+        );
     }
 }
 

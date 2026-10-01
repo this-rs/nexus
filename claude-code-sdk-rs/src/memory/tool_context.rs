@@ -606,4 +606,192 @@ mod tests {
         assert_eq!(ctx1.files.len(), 2); // Deduplicated
         assert_eq!(ctx1.cwd, Some("/projects".to_string()));
     }
+
+    #[test]
+    fn test_tool_context_merge_keeps_the_existing_cwd() {
+        let mut ctx = ToolContext::with_cwd("/premier");
+
+        ctx.merge(ToolContext {
+            files: vec!["/a.rs".to_string()],
+            cwd: Some("/second".to_string()),
+        });
+
+        assert_eq!(
+            ctx.cwd.as_deref(),
+            Some("/premier"),
+            "merge only fills an absent cwd, it never overwrites one"
+        );
+        assert_eq!(ctx.files, vec!["/a.rs".to_string()]);
+        assert!(!ctx.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // Missing fields
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_read_without_a_file_path_yields_nothing() {
+        let extractor = DefaultToolContextExtractor::new();
+
+        let context = extractor.extract_context("Read", &json!({"offset": 10}));
+
+        assert!(context.is_empty());
+    }
+
+    #[test]
+    fn test_glob_without_a_path_yields_nothing() {
+        let extractor = DefaultToolContextExtractor::new();
+
+        let context = extractor.extract_context("Glob", &json!({"pattern": "**/*.rs"}));
+
+        assert!(context.is_empty());
+    }
+
+    #[test]
+    fn test_bash_without_a_command_yields_nothing() {
+        let extractor = DefaultToolContextExtractor::new();
+
+        let context = extractor.extract_context("Bash", &json!({"description": "lister"}));
+
+        assert!(context.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // Glob/Grep classification probes the real filesystem
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_grep_classifies_a_dotted_path_by_probing_the_filesystem() {
+        let extractor = DefaultToolContextExtractor::new();
+        let temp = tempfile::tempdir().expect("a scratch directory");
+
+        let existing_dir = temp.path().join("release-1.2");
+        std::fs::create_dir(&existing_dir).expect("create the dotted directory");
+        let existing_dir = existing_dir.to_str().expect("UTF-8 path");
+        let absent = temp.path().join("absent-1.2");
+        let absent = absent.to_str().expect("UTF-8 path");
+
+        let on_disk = extractor.extract_context("Grep", &json!({"path": existing_dir}));
+        let not_on_disk = extractor.extract_context("Grep", &json!({"path": absent}));
+
+        // Two paths of the very same shape, classified in opposite ways: the
+        // `Path::is_dir()` probe reads the real filesystem, so whether a
+        // dotted path becomes a cwd or a file depends on the machine the SDK
+        // happens to run on. Nothing else in the input decides it.
+        assert_eq!(on_disk.cwd.as_deref(), Some(existing_dir));
+        assert!(on_disk.files.is_empty());
+
+        assert_eq!(not_on_disk.files, vec![absent.to_string()]);
+        assert!(not_on_disk.cwd.is_none());
+    }
+
+    #[test]
+    fn test_glob_treats_a_dot_free_path_as_a_directory_without_probing() {
+        let extractor = DefaultToolContextExtractor::new();
+
+        // This path does not exist anywhere, yet the absence of a dot alone is
+        // enough to call it a directory.
+        let context =
+            extractor.extract_context("Glob", &json!({"path": "/n-existe-pas/vraiment/jamais"}));
+
+        assert_eq!(
+            context.cwd.as_deref(),
+            Some("/n-existe-pas/vraiment/jamais")
+        );
+        assert!(context.files.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // cd parsing
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_extract_bash_cd_single_quoted() {
+        let extractor = DefaultToolContextExtractor::new();
+
+        let context =
+            extractor.extract_context("Bash", &json!({"command": "cd '/projets/mon app'"}));
+
+        assert_eq!(context.cwd.as_deref(), Some("/projets/mon app"));
+        // The path scanner does not know about quoting: it stops at the space
+        // and reports the truncated head as a file touched by the command.
+        assert_eq!(context.files, vec!["/projets/mon".to_string()]);
+    }
+
+    #[test]
+    fn test_extract_bash_cd_relative_target_is_ignored() {
+        let extractor = DefaultToolContextExtractor::new();
+
+        let context = extractor.extract_context("Bash", &json!({"command": "cd ../autre/dossier"}));
+
+        assert!(
+            context.cwd.is_none(),
+            "only an absolute cd target updates the cwd"
+        );
+        // The scanner starts a path at the first '/', so the tail of a
+        // relative target is reported as an absolute file.
+        assert_eq!(context.files, vec!["/autre/dossier".to_string()]);
+    }
+
+    #[test]
+    fn test_parse_cd_argument_refuses_a_blank_argument() {
+        let extractor = DefaultToolContextExtractor::new();
+
+        // Unreachable through `extract_cd_path`: the command is trimmed before
+        // the split, so the slice following "cd " or "&& cd " always ends on a
+        // non-whitespace byte. Pinned here because the guard exists.
+        assert_eq!(extractor.parse_cd_argument("   "), None);
+        // An empty quoted argument reaches the absolute-path check instead.
+        assert_eq!(extractor.parse_cd_argument("\"\""), None);
+    }
+
+    // -----------------------------------------------------------------------
+    // Absolute path scanning
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_bash_deduplicates_a_repeated_absolute_path() {
+        let extractor = DefaultToolContextExtractor::new();
+
+        let context =
+            extractor.extract_context("Bash", &json!({"command": "diff /w/a.rs /w/a.rs"}));
+
+        assert_eq!(context.files, vec!["/w/a.rs".to_string()]);
+    }
+
+    #[test]
+    fn test_bash_drops_common_directories_before_a_delimiter() {
+        let extractor = DefaultToolContextExtractor::new();
+
+        let context = extractor.extract_context("Bash", &json!({"command": "ls /tmp && cat /etc"}));
+
+        assert!(
+            context.files.is_empty(),
+            "both are bare common directories, got {:?}",
+            context.files
+        );
+        assert!(context.cwd.is_none());
+    }
+
+    #[test]
+    fn test_looks_like_file_path_heuristic() {
+        let extractor = DefaultToolContextExtractor::new();
+
+        assert!(extractor.looks_like_file_path("/w/a.rs"));
+        assert!(
+            !extractor.looks_like_file_path("/opt"),
+            "a single component has no depth"
+        );
+        assert!(
+            !extractor.looks_like_file_path("/w/a--"),
+            "trailing dashes read as a command flag"
+        );
+        assert!(
+            !extractor.looks_like_file_path("/w/a=-b"),
+            "an inline flag assignment is not a path"
+        );
+        // Unreachable in production: `extract_absolute_paths` only ever builds
+        // candidates that start with '/'.
+        assert!(!extractor.looks_like_file_path("relatif/a.rs"));
+    }
 }

@@ -528,4 +528,91 @@ mod tests {
         assert_eq!(score.recency, 0.0);
         assert_eq!(score.total, 0.0);
     }
+
+    #[test]
+    fn test_scorer_exposes_its_config() {
+        let scorer = RelevanceScorer::new(RelevanceConfig::with_weights(0.1, 0.2, 0.3, 0.4));
+
+        let config = scorer.config();
+
+        assert_eq!(config.semantic_weight, 0.1);
+        assert_eq!(config.recency_weight, 0.4);
+        assert_eq!(
+            config.recency_half_life_hours, 24.0,
+            "with_weights only overrides the four weights"
+        );
+    }
+
+    #[test]
+    fn test_cwd_match_without_a_single_shared_component() {
+        let scorer = RelevanceScorer::default();
+
+        // Two relative paths share nothing at all, so `common_ancestor`
+        // returns None — unlike two absolute paths, which always share the
+        // root component and go through the depth check instead.
+        assert_eq!(
+            scorer.cwd_match_score(Some("maison/user"), Some("var/log")),
+            0.0
+        );
+    }
+
+    #[test]
+    fn test_cwd_match_common_ancestor_depth_scale() {
+        let scorer = RelevanceScorer::default();
+
+        // Root + one shared name = depth 2, the shallowest ancestor that
+        // scores: 0.25 * 2/5.
+        let shallow = scorer.cwd_match_score(Some("/a/x"), Some("/a/y"));
+        assert!((shallow - 0.1).abs() < 1e-9, "expected 0.1, got {shallow}");
+
+        // Depth 6 saturates the `min(1.0)` clamp, capping the bonus at 0.25 —
+        // half of what a direct parent/child relationship earns.
+        let deep = scorer.cwd_match_score(Some("/a/b/c/d/e/x"), Some("/a/b/c/d/e/y"));
+        assert_eq!(deep, 0.25);
+    }
+
+    #[test]
+    fn test_files_overlap_deduplicates_each_side() {
+        let scorer = RelevanceScorer::default();
+
+        // The slices become sets first, so repeats do not shrink the index:
+        // the union of the smallest possible pair is never empty, which makes
+        // the `union_size == 0` guard dead code.
+        let current = vec!["/a.rs".to_string(), "/a.rs".to_string()];
+        let stored = vec!["/a.rs".to_string()];
+
+        assert_eq!(scorer.files_overlap_score(&current, &stored), 1.0);
+    }
+
+    #[test]
+    fn test_recency_from_timestamps_floors_a_future_message() {
+        let scorer = RelevanceScorer::default();
+
+        // The age is clamped with `max(0)`, so a message stamped in the future
+        // scores a full 1.0 through the zero-age path rather than through the
+        // negative-age branch of `recency_score`.
+        assert_eq!(
+            scorer.recency_score_from_timestamps(1_700_003_600, 1_700_000_000),
+            1.0
+        );
+    }
+
+    #[test]
+    fn test_relevance_score_new_applies_the_config_weights() {
+        let config = RelevanceConfig::with_weights(1.0, 0.0, 0.0, 0.0);
+
+        let score = RelevanceScore::new(0.5, 1.0, 1.0, 1.0, &config);
+
+        assert_eq!(
+            score,
+            RelevanceScore {
+                semantic: 0.5,
+                cwd_match: 1.0,
+                files_overlap: 1.0,
+                recency: 1.0,
+                total: 0.5,
+            },
+            "the components are stored raw, only the total is weighted"
+        );
+    }
 }
