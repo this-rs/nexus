@@ -1,0 +1,67 @@
+# Hosts this repository is allowed to reference in a http(s) URL.
+#
+# WHY THIS FILE EXISTS
+# Private or machine-local services must never be referenced from a public
+# repository. Naming the forbidden services here would defeat the purpose, so
+# the rule is inverted: every host reachable over http(s) from a tracked file
+# must be listed below. Anything else fails the readiness gate
+# (`claude-code-api/tests/release_readiness.rs`, check `foreign-host`).
+#
+# The gate runs offline: it never resolves or contacts any of these hosts.
+#
+# Adding a host is a deliberate act. Add it in the same pull request as the
+# code or documentation that references it, and say in the pull request why the
+# host is public.
+#
+# Format: one host per line, lowercase, no scheme and no path.
+# `#` starts a comment. Blank lines are ignored.
+
+# Documentation placeholders under real top-level domains. Hosts under the
+# reserved TLDs .test, .invalid, .example and .localhost need no entry: they
+# can never resolve, so the gate exempts them outright.
+custom
+example.com
+http.example.com
+sse.example.com
+http.test.com
+sse.test.com
+
+# Anthropic and Claude.
+api.anthropic.com
+claude.ai
+console.anthropic.com
+docs.anthropic.com
+platform.claude.com
+
+# Rust toolchain and ecosystem.
+crates.io
+docs.rs
+rust-lang.org
+www.rust-lang.org
+rust-lang.github.io
+tokio.rs
+embarkstudios.github.io
+
+# Forge, CI and badges.
+codecov.io
+docs.codecov.io
+docs.github.com
+github.com
+img.shields.io
+
+# Specifications and conventions.
+git-cliff.org
+jsonlines.org
+keepachangelog.com
+modelcontextprotocol.io
+semver.org
+www.conventionalcommits.org
+
+# Node and other registries referenced by the documentation.
+nodejs.org
+registry.npmjs.org
+www.npmjs.com
+
+# Third-party platforms named in the compatibility documentation.
+platform.openai.com
+www.google.com

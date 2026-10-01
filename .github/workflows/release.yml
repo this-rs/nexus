@@ -12,10 +12,25 @@ permissions:
   contents: write
 
 jobs:
+  # Refuse a tag that disagrees with the manifests.
+  #
+  # Every later job derives the published version from the tag, and a crates.io
+  # version can never be reused -- so a mistyped tag is unrecoverable. This job
+  # is cheap, runs offline, and gates the whole workflow.
+  verify-version:
+    name: version-consistency
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify version consistency against the tag
+        run: script/check-version-consistency.sh "${GITHUB_REF}"
+
   # Create GitHub Release
   create-release:
     name: Create Release
     runs-on: ubuntu-latest
+    needs: verify-version
     outputs:
       upload_url: ${{ steps.create_release.outputs.upload_url }}
       version: ${{ steps.get_version.outputs.version }}
