@@ -32,7 +32,7 @@ use futures::StreamExt;
 #[tokio::main]
 async fn main() -> nexus_claude::Result<()> {
     let options = ClaudeCodeOptions::builder()
-        .model("claude-opus-4-5-20251101")  // Latest Opus 4.5
+        .model("opus")  // alias: resolves to the newest Opus in the catalogue
         .auto_download_cli(true)             // Auto-download CLI
         .max_budget_usd(10.0)                // Budget limit
         .build();
@@ -119,7 +119,7 @@ The API server will start on `http://localhost:8080` by default.
 curl -X POST http://localhost:8080/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "claude-opus-4-5-20251101",
+    "model": "opus",
     "messages": [
       {"role": "user", "content": "Hello, Claude!"}
     ]
@@ -128,20 +128,30 @@ curl -X POST http://localhost:8080/v1/chat/completions \
 
 ## Supported Models
 
-### Latest Models
-- **Opus 4.5** (November 2025) - Most capable model
-  - Recommended: `"opus"` (alias for latest)
-  - Full name: `"claude-opus-4-5-20251101"`
-  - SWE-bench: 80.9% (industry-leading)
-- **Sonnet 4.5** - Balanced performance
-  - Recommended: `"sonnet"` (alias for latest)
-  - Full name: `"claude-sonnet-4-5-20250929"`
-- **Sonnet 4** - Cost-effective
-  - Full name: `"claude-sonnet-4-20250514"`
+**The model list is served by the running server, not by this file.** Ask it:
 
-### Previous Generation
-- **Claude 3.5 Sonnet** (`claude-3-5-sonnet-20241022`)
-- **Claude 3.5 Haiku** (`claude-3-5-haiku-20241022`) - Fastest response times
+```bash
+curl -s http://localhost:8080/v1/models | jq '.data[].id'
+```
+
+`claude-code-api` resolves the catalogue at runtime through `ModelRegistry`
+(`claude-code-api/src/core/model_registry.rs`): with `ANTHROPIC_API_KEY` set it fetches
+`GET https://api.anthropic.com/v1/models` and caches the result; without a key, or when
+that request fails, it serves the static fallback `ClaudeModel::all()`
+(`claude-code-api/src/models/claude.rs`). `GET /v1/models/refresh` forces a re-fetch, and
+the response says which of the two sources answered.
+
+Aliases accepted in a request's `model` field, resolved to the newest matching id:
+
+- `opus` — newest Opus
+- `sonnet` — newest Sonnet
+- `haiku` — newest Haiku
+
+> This section used to enumerate model ids and name "Opus 4.5 (November 2025)" as the most
+> capable model. Every such list went stale within weeks of being written, which is why the
+> catalogue became dynamic and the enumeration was removed rather than refreshed.
+> `cargo test --test docs_model_drift` fails if a model id reappears in the documentation
+> without existing in `ClaudeModel::all()`.
 
 ## Core Features
 
@@ -197,7 +207,7 @@ Process images with text:
 
 ```python
 response = client.chat.completions.create(
-    model="claude-opus-4-20250514",
+    model="opus",
     messages=[{
         "role": "user",
         "content": [
@@ -212,7 +222,7 @@ response = client.chat.completions.create(
 
 ```python
 stream = client.chat.completions.create(
-    model="claude-opus-4-20250514",
+    model="opus",
     messages=[{"role": "user", "content": "Write a long story"}],
     stream=True
 )
@@ -258,7 +268,7 @@ Use tools for AI integrations:
 
 ```python
 response = client.chat.completions.create(
-    model="claude-3-5-haiku-20241022",
+    model="haiku",
     messages=[
         {"role": "user", "content": "Please preview this URL: https://rust-lang.org"}
     ],
@@ -416,7 +426,7 @@ from langchain.chat_models import ChatOpenAI
 llm = ChatOpenAI(
     base_url="http://localhost:8080/v1",
     api_key="not-needed",
-    model="claude-opus-4-20250514"
+    model="opus"
 )
 
 response = llm.invoke("Explain quantum computing")
@@ -435,7 +445,7 @@ const client = new OpenAI({
 
 async function chat() {
   const response = await client.chat.completions.create({
-    model: 'claude-opus-4-20250514',
+    model: "opus",
     messages: [{ role: 'user', content: 'Hello!' }]
   });
 

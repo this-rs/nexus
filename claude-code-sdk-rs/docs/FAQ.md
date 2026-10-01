@@ -91,7 +91,7 @@ export ANTHROPIC_USER_EMAIL="your-actual-email@example.com"
 # Create .env file in project root
 cat > .env << EOF
 ANTHROPIC_USER_EMAIL=dev@example.com
-CLAUDE_MODEL=claude-sonnet-4-5-20250929
+CLAUDE_MODEL=sonnet
 EOF
 
 # Don't commit .env to git!
@@ -140,7 +140,7 @@ fn main() {
 ```rust
 // Method 1: Directly in code
 let options = ClaudeCodeOptions::builder()
-    .model("claude-sonnet-4-5-20250929")
+    .model("sonnet")
     .build();
 
 // Method 2: Using helper function
@@ -151,9 +151,9 @@ let options = ClaudeCodeOptions::builder()
 
 // Method 3: Via environment variable
 // In .env or shell:
-// export CLAUDE_MODEL="claude-sonnet-4-5-20250929"
+// export CLAUDE_MODEL="sonnet"
 let model = std::env::var("CLAUDE_MODEL")
-    .unwrap_or_else(|_| "claude-sonnet-4-5-20250929".to_string());
+    .unwrap_or_else(|_| "sonnet".to_string());
 let options = ClaudeCodeOptions::builder()
     .model(model)
     .build();
@@ -164,9 +164,9 @@ let options = ClaudeCodeOptions::builder()
 **A:**
 
 **Full names (specific versions):**
-- `claude-sonnet-4-5-20250929` - Sonnet 4.5 (latest)
-- `claude-opus-4-1-20250805` - Opus 4.1
-- `claude-3-5-haiku-20241022` - Haiku 3.5
+- `sonnet` - Sonnet 4.5 (latest)
+- `opus` - Opus 4.1
+- `haiku` - Haiku 3.5
 
 **Aliases (may change over time):**
 - `sonnet` - Latest Sonnet (currently points to Sonnet 4.5)
@@ -326,7 +326,7 @@ async fn production_setup() -> Result<ClaudeSDKClient> {
 
     // Configure with limits
     let options = ClaudeCodeOptions::builder()
-        .model("claude-sonnet-4-5-20250929")
+        .model("sonnet")
         .max_output_tokens(4000)
         .max_turns(10)
         .build();

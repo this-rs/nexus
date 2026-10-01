@@ -54,7 +54,7 @@ pub enum ClientMode {
 ```rust
 let options = ClaudeCodeOptions::builder()
     .system_prompt("You are a helpful assistant")
-    .model("claude-3-5-sonnet-20241022")
+    .model("sonnet")
     .permission_mode(PermissionMode::AcceptEdits)
     .build();
 ```
@@ -113,7 +113,7 @@ let options = ClaudeCodeOptions::builder()
 
 - **`model: Option<String>`**
   - 指定使用的模型
-  - 示例：`"claude-3-5-sonnet-20241022"`
+  - 示例：`"sonnet"`
 
 - **`cwd: Option<PathBuf>`**
   - 工作目录路径

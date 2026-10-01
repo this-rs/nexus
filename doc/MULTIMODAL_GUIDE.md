@@ -14,7 +14,7 @@ Claude Code API 现在支持在对话中包含图片。本指南将介绍如何�
 
 ```json
 {
-  "model": "claude-opus-4-20250514",
+  "model": "opus",
   "messages": [
     {
       "role": "user",
@@ -35,7 +35,7 @@ Claude Code API 现在支持在对话中包含图片。本指南将介绍如何�
 curl -X POST http://localhost:8080/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "claude-opus-4-20250514",
+    "model": "opus",
     "messages": [{
       "role": "user",
       "content": [
@@ -52,7 +52,7 @@ curl -X POST http://localhost:8080/v1/chat/completions \
 curl -X POST http://localhost:8080/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "claude-opus-4-20250514",
+    "model": "opus",
     "messages": [{
       "role": "user",
       "content": [
@@ -72,7 +72,7 @@ IMAGE_BASE64=$(base64 -i image.png)
 curl -X POST http://localhost:8080/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d "{
-    \"model\": \"claude-opus-4-20250514\",
+    \"model\": \"opus\",
     \"messages\": [{
       \"role\": \"user\",
       \"content\": [
@@ -89,7 +89,7 @@ curl -X POST http://localhost:8080/v1/chat/completions \
 curl -X POST http://localhost:8080/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "claude-opus-4-20250514",
+    "model": "opus",
     "messages": [{
       "role": "user",
       "content": [
@@ -108,7 +108,7 @@ curl -X POST http://localhost:8080/v1/chat/completions \
 curl -X POST http://localhost:8080/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "claude-opus-4-20250514",
+    "model": "opus",
     "messages": [{
       "role": "user",
       "content": [
@@ -122,7 +122,7 @@ curl -X POST http://localhost:8080/v1/chat/completions \
 curl -X POST http://localhost:8080/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "claude-opus-4-20250514",
+    "model": "opus",
     "conversation_id": "your-conversation-id",
     "messages": [{
       "role": "user",
@@ -163,7 +163,7 @@ def chat_with_image(text, image_path):
     response = requests.post(
         "http://localhost:8080/v1/chat/completions",
         json={
-            "model": "claude-opus-4-20250514",
+            "model": "opus",
             "messages": [{
                 "role": "user",
                 "content": [
@@ -183,7 +183,7 @@ def chat_with_base64_image(text, image_path):
     response = requests.post(
         "http://localhost:8080/v1/chat/completions",
         json={
-            "model": "claude-opus-4-20250514",
+            "model": "opus",
             "messages": [{
                 "role": "user",
                 "content": [

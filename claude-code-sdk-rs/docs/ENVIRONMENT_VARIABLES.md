@@ -7,7 +7,7 @@ This guide covers all environment variables supported by the cc-sdk.
 | Variable | Purpose | Required | Example |
 |----------|---------|----------|---------|
 | `ANTHROPIC_USER_EMAIL` | Account identification | **Recommended** | `user@example.com` |
-| `CLAUDE_MODEL` | Default model | Optional | `claude-sonnet-4-5-20250929` |
+| `CLAUDE_MODEL` | Default model | Optional | `sonnet` |
 | `CLAUDE_CODE_MAX_OUTPUT_TOKENS` | Max output tokens | Optional | `8192` |
 | `CLAUDE_CODE_CLI_PATH` | CLI executable path | Optional | `/usr/local/bin/claude` |
 | `RUST_LOG` | Logging level | Optional | `debug` |
@@ -94,13 +94,13 @@ ANTHROPIC_USER_EMAIL="test@example.com" cargo run --example account_info
 **Type**: String (model identifier)
 **Required**: Optional
 **Default**: Uses Claude CLI default (usually latest Sonnet)
-**Example**: `claude-sonnet-4-5-20250929`
+**Example**: `sonnet`
 
 ### Supported Models
 
-- `claude-sonnet-4-5-20250929` - Latest Sonnet 4.5 (recommended)
-- `claude-opus-4-1-20250805` - Opus 4.1 (most capable)
-- `claude-3-5-haiku-20241022` - Haiku 3.5 (fastest, cheapest)
+- `sonnet` - Latest Sonnet 4.5 (recommended)
+- `opus` - Opus 4.1 (most capable)
+- `haiku` - Haiku 3.5 (fastest, cheapest)
 - `sonnet` - Alias for latest Sonnet
 - `opus` - Alias for latest Opus
 - `haiku` - Alias for latest Haiku
@@ -108,14 +108,14 @@ ANTHROPIC_USER_EMAIL="test@example.com" cargo run --example account_info
 ### Setting the Variable
 
 ```bash
-export CLAUDE_MODEL="claude-sonnet-4-5-20250929"
+export CLAUDE_MODEL="sonnet"
 ```
 
 ### Usage in Code
 
 ```rust
 let model = std::env::var("CLAUDE_MODEL")
-    .unwrap_or_else(|_| "claude-sonnet-4-5-20250929".to_string());
+    .unwrap_or_else(|_| "sonnet".to_string());
 
 let options = ClaudeCodeOptions::builder()
     .model(model)
@@ -242,7 +242,7 @@ cp examples/.env.example .env
 ```bash
 # .env
 ANTHROPIC_USER_EMAIL=your-email@example.com
-CLAUDE_MODEL=claude-sonnet-4-5-20250929
+CLAUDE_MODEL=sonnet
 CLAUDE_CODE_MAX_OUTPUT_TOKENS=8192
 RUST_LOG=nexus_claude=info
 ```
@@ -315,7 +315,7 @@ async fn main() -> Result<()> {
 
     // Read configuration from environment
     let model = std::env::var("CLAUDE_MODEL")
-        .unwrap_or_else(|_| "claude-sonnet-4-5-20250929".to_string());
+        .unwrap_or_else(|_| "sonnet".to_string());
 
     let max_tokens = std::env::var("CLAUDE_CODE_MAX_OUTPUT_TOKENS")
         .ok()
@@ -378,7 +378,7 @@ if std::env::var("ANTHROPIC_USER_EMAIL").is_err() {
 ```rust
 // Make sure to read and use the variable
 let model = std::env::var("CLAUDE_MODEL")
-    .unwrap_or_else(|_| "claude-sonnet-4-5-20250929".to_string());
+    .unwrap_or_else(|_| "sonnet".to_string());
 
 let options = ClaudeCodeOptions::builder()
     .model(model)  // Use the env var

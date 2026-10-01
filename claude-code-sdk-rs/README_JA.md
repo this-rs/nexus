@@ -1,5 +1,13 @@
 # nexus-claude - Claude Code SDK for Rust
 
+> [!WARNING]
+> **この翻訳は古くなっています — 照合日 2026-10-01。**
+>
+> 正典は [README.md](README.md) です。英語版の 16 節に対し本ファイルは 14 節しかありません。
+> モデル ID を本ファイルから写さないでください。目録は
+> `claude-code-api/src/core/model_registry.rs` が実行時に解決します。
+
+
 [![Crates.io](https://img.shields.io/crates/v/nexus-claude.svg)](https://crates.io/crates/nexus-claude)
 [![Documentation](https://docs.rs/nexus-claude/badge.svg)](https://docs.rs/nexus-claude)
 [![License](https://img.shields.io/crates/l/nexus-claude.svg)](LICENSE)

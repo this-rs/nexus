@@ -1,5 +1,16 @@
 # Claude Models Guide (2025)
 
+> [!NOTE]
+> **Model ids are no longer written in this document.** The catalogue is resolved at
+> runtime by `ModelRegistry` (`claude-code-api/src/core/model_registry.rs`): it fetches
+> `GET https://api.anthropic.com/v1/models` when `ANTHROPIC_API_KEY` is set, and falls
+> back to `ClaudeModel::all()` otherwise. The version-specific ids that used to appear
+> below had all been retired, so they were replaced by the aliases `opus`, `sonnet` and
+> `haiku`. Ask the server for the exact ids:
+> `curl -s http://localhost:8080/v1/models | jq '.data[].id'`.
+> `cargo test -p claude-code-api --test docs_model_drift` keeps this true.
+
+
 This guide provides comprehensive information about using different Claude models with the cc-sdk.
 
 ## Available Models (as of December 2025)
@@ -8,7 +19,7 @@ This guide provides comprehensive information about using different Claude model
 The newest flagship model released on November 24, 2025. Industry-leading performance in coding, agents, and computer use.
 
 **Model identifiers:**
-- `"claude-opus-4-5-20251101"` - Full model name (recommended)
+- `"opus"` - Full model name (recommended)
 - `"opus"` - General alias (uses latest Opus)
 
 **Key features:**
@@ -26,7 +37,7 @@ use futures::StreamExt;
 #[tokio::main]
 async fn main() -> Result<()> {
     let options = ClaudeCodeOptions::builder()
-        .model("claude-opus-4-5-20251101")  // Use latest Opus 4.5
+        .model("opus")  // Use latest Opus 4.5
         .max_thinking_tokens(16000)  // Extended thinking supported
         .build();
 
@@ -47,7 +58,7 @@ async fn main() -> Result<()> {
 Released in September 2025, excellent balance of capability, speed, and cost.
 
 **Model identifiers:**
-- `"claude-sonnet-4-5-20250929"` - Full model name (recommended)
+- `"sonnet"` - Full model name (recommended)
 - `"sonnet"` - General alias (may use latest Sonnet)
 
 **Example usage:**
@@ -58,7 +69,7 @@ use futures::StreamExt;
 #[tokio::main]
 async fn main() -> Result<()> {
     let options = ClaudeCodeOptions::builder()
-        .model("claude-sonnet-4-5-20250929")  // Use Sonnet 4.5
+        .model("sonnet")  // Use Sonnet 4.5
         .build();
 
     let mut messages = query(
@@ -78,7 +89,7 @@ async fn main() -> Result<()> {
 Great balance between capability and cost, ideal for most applications.
 
 **Model identifiers:**
-- `"claude-sonnet-4-20250514"` - Full model name for specific version
+- `"sonnet"` - Full model name for specific version
 
 **Example usage:**
 ```rust
@@ -87,7 +98,7 @@ use nexus_claude::{InteractiveClient, ClaudeCodeOptions, Result};
 #[tokio::main]
 async fn main() -> Result<()> {
     let options = ClaudeCodeOptions::builder()
-        .model("claude-sonnet-4-20250514")
+        .model("sonnet")
         .permission_mode(nexus_claude::PermissionMode::AcceptEdits)
         .build();
 
@@ -107,11 +118,11 @@ async fn main() -> Result<()> {
 ### Previous Generation Models
 
 #### Claude 3.5 Sonnet
-- Model ID: `"claude-3-5-sonnet-20241022"`
+- Model ID: `"sonnet"`
 - Good for general tasks, previous generation
 
 #### Claude 3.5 Haiku
-- Model ID: `"claude-3-5-haiku-20241022"`
+- Model ID: `"haiku"`
 - Fastest response times, suitable for simple tasks
 
 ## Choosing the Right Model
@@ -161,7 +172,7 @@ extra_args.insert("temperature".to_string(), Some("0.7".to_string()));
 extra_args.insert("verbose".to_string(), None);
 
 let options = ClaudeCodeOptions::builder()
-    .model("claude-opus-4-5-20251101")  // Latest Opus 4.5
+    .model("opus")  // Latest Opus 4.5
     .permission_mode(PermissionMode::Plan)
     .extra_args(extra_args)
     .max_thinking_tokens(16000)
@@ -184,12 +195,12 @@ async fn create_client_with_model(model: &str) -> Result<InteractiveClient> {
 #[tokio::main]
 async fn main() -> Result<()> {
     // Try Opus 4.5 first
-    let mut client = create_client_with_model("claude-opus-4-5-20251101").await?;
+    let mut client = create_client_with_model("opus").await?;
 
     // Fallback to Sonnet 4.5 if needed
     if client.connect().await.is_err() {
         println!("Opus 4.5 unavailable, falling back to Sonnet 4.5");
-        client = create_client_with_model("claude-sonnet-4-5-20250929").await?;
+        client = create_client_with_model("sonnet").await?;
         client.connect().await?;
     }
 
@@ -203,8 +214,8 @@ async fn main() -> Result<()> {
 use nexus_claude::{ClaudeCodeOptions, Result};
 
 let options = ClaudeCodeOptions::builder()
-    .model("claude-opus-4-5-20251101")
-    .fallback_model("claude-sonnet-4-5-20250929")  // Auto-fallback
+    .model("opus")
+    .fallback_model("sonnet")  // Auto-fallback
     .build();
 ```
 
@@ -236,8 +247,8 @@ async fn test_model(model_name: &str) -> bool {
 #[tokio::main]
 async fn main() -> Result<()> {
     let models = vec![
-        "claude-opus-4-5-20251101",
-        "claude-sonnet-4-5-20250929",
+        "opus",
+        "sonnet",
         "opus",
         "sonnet",
         "haiku"
@@ -262,7 +273,7 @@ use nexus_claude::{query, ClaudeCodeOptions, SdkError, Result};
 
 async fn safe_query_with_fallback(prompt: &str) -> Result<()> {
     // Try with preferred model
-    let result = query_with_model(prompt, "claude-opus-4-5-20251101").await;
+    let result = query_with_model(prompt, "opus").await;
 
     match result {
         Ok(_) => Ok(()),
@@ -298,13 +309,13 @@ async fn query_with_model(prompt: &str, model: &str) -> Result<()> {
 You can also set the default model via environment variables:
 
 ```bash
-export CLAUDE_MODEL="claude-opus-4-5-20251101"
+export CLAUDE_MODEL="opus"
 ```
 
 Then in your code:
 ```rust
 let model = std::env::var("CLAUDE_MODEL")
-    .unwrap_or_else(|_| "claude-sonnet-4-5-20250929".to_string());
+    .unwrap_or_else(|_| "sonnet".to_string());
 let options = ClaudeCodeOptions::builder()
     .model(model)
     .build();
@@ -312,9 +323,9 @@ let options = ClaudeCodeOptions::builder()
 
 ## Version History
 
-- **2025-11**: Opus 4.5 released (`claude-opus-4-5-20251101`) ⭐ **Latest**
-- **2025-09**: Sonnet 4.5 released (`claude-sonnet-4-5-20250929`)
-- **2025-05**: Sonnet 4 released (`claude-sonnet-4-20250514`)
+- **2025-11**: Opus 4.5 released (`opus`) ⭐ **Latest**
+- **2025-09**: Sonnet 4.5 released (`sonnet`)
+- **2025-05**: Sonnet 4 released (`sonnet`)
 - **2024-10**: Claude 3.5 series (Sonnet, Haiku)
 
 ## See Also

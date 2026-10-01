@@ -19,7 +19,7 @@ When a request includes `tools` parameter, the API will:
 
 ```json
 {
-  "model": "claude-3-5-haiku-20241022",
+  "model": "haiku",
   "messages": [
     {
       "role": "user",
@@ -58,7 +58,7 @@ When a tool call is detected, the response will include:
   "id": "chatcmpl-...",
   "object": "chat.completion",
   "created": 1234567890,
-  "model": "claude-3-5-haiku-20241022",
+  "model": "haiku",
   "choices": [
     {
       "index": 0,
@@ -104,7 +104,7 @@ let config = OpenAIConfig::new()
 
 let provider = OpenAIProvider::from_config(
     config, 
-    "claude-3-5-haiku-20241022".to_string()
+    "haiku".to_string()
 );
 ```
 
@@ -119,7 +119,7 @@ client = OpenAI(
 )
 
 response = client.chat.completions.create(
-    model="claude-3-5-haiku-20241022",
+    model="haiku",
     messages=[{"role": "user", "content": "Get weather in Beijing"}],
     tools=[{
         "type": "function",
@@ -155,8 +155,8 @@ The API uses multiple strategies to detect JSON in Claude's responses:
 ## Valid Model Names
 
 Use these model names with claude-code-api:
-- `claude-3-5-haiku-20241022` (fastest)
-- `claude-3-5-sonnet-20241022` (balanced)
+- `haiku` (fastest)
+- `sonnet` (balanced)
 - `opus` (most capable, alias)
 - `sonnet` (alias)
 

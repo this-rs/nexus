@@ -764,7 +764,7 @@ impl AgentProvider for ClaudeCodeProvider {
             supports_web_search: true,
             supports_code_review: false, // CLI doesn't have dedicated review mode
             available_models: vec![
-                "claude-3-5-haiku-20241022".to_string(),
+                "haiku".to_string(),
                 "sonnet".to_string(),
                 "opus".to_string(),
             ],
@@ -804,7 +804,7 @@ impl AgentProvider for ClaudeCodeProvider {
 
         let model = match &task.model_preference {
             ModelPreference::Specific(m) => m.clone(),
-            ModelPreference::Speed | ModelPreference::Cost => "claude-3-5-haiku-20241022".to_string(),
+            ModelPreference::Speed | ModelPreference::Cost => "haiku".to_string(),
             ModelPreference::Quality => "opus".to_string(),
             ModelPreference::Balanced => "sonnet".to_string(),
         };
@@ -985,7 +985,7 @@ impl AgentProvider for CodexProvider {
             supports_web_search: true,
             supports_code_review: true, // Codex has dedicated review mode
             available_models: vec![
-                "claude-3-5-haiku-20241022".to_string(),
+                "haiku".to_string(),
                 "sonnet".to_string(),
                 "opus".to_string(),
             ],
@@ -1257,7 +1257,7 @@ async fn simple_query() -> Result<()> {
     // Create provider
     let provider = ClaudeCodeProvider::new(
         ClaudeCodeOptions::builder()
-            .model("claude-3-5-haiku-20241022")
+            .model("haiku")
             .max_output_tokens(2000)
             .build()
     );
@@ -1304,7 +1304,7 @@ async fn dynamic_routing_example() -> Result<()> {
     // Setup providers
     let claude_provider = Box::new(ClaudeCodeProvider::new(
         ClaudeCodeOptions::builder()
-            .model("claude-3-5-haiku-20241022")
+            .model("haiku")
             .max_output_tokens(2000)
             .build()
     )) as Box<dyn AgentProvider>;

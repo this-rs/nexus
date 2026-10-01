@@ -12,8 +12,8 @@ Error: API Error: 400 {"type":"error","error":{"type":"invalid_request_error","m
 **Cause**: Using `claude-3-opus-20240229` which is not a valid model name for Claude CLI.
 
 **Solution**: Use one of these valid model names:
-- `claude-3-5-haiku-20241022`
-- `claude-3-5-sonnet-20241022` 
+- `haiku`
+- `sonnet` 
 - `opus` (alias for latest Opus)
 - `sonnet` (alias for latest Sonnet)
 
@@ -82,7 +82,7 @@ curl http://localhost:8080/health
 curl -X POST http://localhost:8080/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "claude-3-5-haiku-20241022",
+    "model": "haiku",
     "messages": [{"role": "user", "content": "Return JSON: {\"test\": \"hello\"}"}],
     "tools": [{
       "type": "function",
@@ -151,7 +151,7 @@ let config = OpenAIConfig::new()
 
 let provider = OpenAIProvider::from_config(
     config,
-    "claude-3-5-haiku-20241022".to_string() // Valid model!
+    "haiku".to_string() // Valid model!
 );
 ```
 

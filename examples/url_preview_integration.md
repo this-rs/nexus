@@ -24,7 +24,7 @@ let config = OpenAIConfig::new()
 // Use a valid Claude model
 let provider = OpenAIProvider::from_config(
     config,
-    "claude-3-5-haiku-20241022".to_string()
+    "haiku".to_string()
 );
 ```
 
@@ -71,7 +71,7 @@ println!("Price: ${}", result.data.price);
 ### url-preview sends:
 ```json
 {
-  "model": "claude-3-5-haiku-20241022",
+  "model": "haiku",
   "messages": [
     {
       "role": "system",
@@ -141,7 +141,7 @@ println!("Price: ${}", result.data.price);
 
 ## Common Issues
 
-- **Model Name**: Make sure to use valid model names like `claude-3-5-haiku-20241022`, not `claude-3-opus-20240229`
+- **Model Name**: Make sure to use valid model names like `haiku`, not `claude-3-opus-20240229`
 - **Tool Calls**: claude-code-api returns `tool_calls` array, not the deprecated `function_call`
 - **Timeout**: For complex pages, increase timeout: `CLAUDE_CODE__CLAUDE__TIMEOUT_SECONDS=600`
 

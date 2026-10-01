@@ -164,7 +164,7 @@ use nexus_claude::{ClaudeSDKClient, ClaudeCodeOptions, Result};
 
 async fn start_session_with_verification() -> Result<()> {
     let options = ClaudeCodeOptions::builder()
-        .model("claude-sonnet-4-5-20250929")
+        .model("sonnet")
         .build();
 
     let mut client = ClaudeSDKClient::new(options);

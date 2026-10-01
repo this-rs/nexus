@@ -1,6 +1,17 @@
 # Claude Sonnet 4.5 Quick Start Guide
 
-Claude Sonnet 4.5 (`claude-sonnet-4-5-20250929`) is the latest model released in September 2025, offering the best balance of performance, speed, and cost-effectiveness.
+> [!NOTE]
+> **Model ids are no longer written in this document.** The catalogue is resolved at
+> runtime by `ModelRegistry` (`claude-code-api/src/core/model_registry.rs`): it fetches
+> `GET https://api.anthropic.com/v1/models` when `ANTHROPIC_API_KEY` is set, and falls
+> back to `ClaudeModel::all()` otherwise. The version-specific ids that used to appear
+> below had all been retired, so they were replaced by the aliases `opus`, `sonnet` and
+> `haiku`. Ask the server for the exact ids:
+> `curl -s http://localhost:8080/v1/models | jq '.data[].id'`.
+> `cargo test -p claude-code-api --test docs_model_drift` keeps this true.
+
+
+Claude Sonnet 4.5 (`sonnet`) is the latest model released in September 2025, offering the best balance of performance, speed, and cost-effectiveness.
 
 ## Why Choose Sonnet 4.5?
 
@@ -20,7 +31,7 @@ use futures::StreamExt;
 #[tokio::main]
 async fn main() -> Result<()> {
     let options = ClaudeCodeOptions::builder()
-        .model("claude-sonnet-4-5-20250929")
+        .model("sonnet")
         .build();
 
     let mut messages = query("Explain Rust borrowing", Some(options)).await?;
@@ -39,7 +50,7 @@ async fn main() -> Result<()> {
 use nexus_claude::model_recommendation::latest_sonnet;
 
 let options = ClaudeCodeOptions::builder()
-    .model(latest_sonnet())  // Returns "claude-sonnet-4-5-20250929"
+    .model(latest_sonnet())  // Returns "sonnet"
     .build();
 ```
 
@@ -51,7 +62,7 @@ use nexus_claude::{InteractiveClient, ClaudeCodeOptions, Result};
 #[tokio::main]
 async fn main() -> Result<()> {
     let options = ClaudeCodeOptions::builder()
-        .model("claude-sonnet-4-5-20250929")
+        .model("sonnet")
         .system_prompt("You are a helpful Rust expert")
         .build();
 
@@ -79,10 +90,10 @@ async fn main() -> Result<()> {
 
 ```rust
 // Before (Sonnet 4)
-.model("claude-sonnet-4-20250514")
+.model("sonnet")
 
 // After (Sonnet 4.5 - Latest)
-.model("claude-sonnet-4-5-20250929")
+.model("sonnet")
 // Or simply use the helper
 .model(nexus_claude::model_recommendation::latest_sonnet())
 ```
@@ -95,10 +106,10 @@ use nexus_claude::model_recommendation::ModelRecommendation;
 let recommender = ModelRecommendation::default();
 
 // Sonnet 4.5 is recommended for these task types:
-recommender.suggest("balanced");   // → "claude-sonnet-4-5-20250929"
-recommender.suggest("general");    // → "claude-sonnet-4-5-20250929"
-recommender.suggest("latest");     // → "claude-sonnet-4-5-20250929"
-recommender.suggest("standard");   // → "claude-sonnet-4-5-20250929"
+recommender.suggest("balanced");   // → "sonnet"
+recommender.suggest("general");    // → "sonnet"
+recommender.suggest("latest");     // → "sonnet"
+recommender.suggest("standard");   // → "sonnet"
 ```
 
 ## Advanced Configuration
@@ -107,7 +118,7 @@ recommender.suggest("standard");   // → "claude-sonnet-4-5-20250929"
 
 ```rust
 let options = ClaudeCodeOptions::builder()
-    .model("claude-sonnet-4-5-20250929")
+    .model("sonnet")
     .max_thinking_tokens(8000)     // Sonnet 4.5 supports extended thinking
     .max_output_tokens(4000)        // Control response length
     .max_turns(5)                   // Limit conversation length
@@ -120,7 +131,7 @@ let options = ClaudeCodeOptions::builder()
 use nexus_claude::PermissionMode;
 
 let options = ClaudeCodeOptions::builder()
-    .model("claude-sonnet-4-5-20250929")
+    .model("sonnet")
     .permission_mode(PermissionMode::AcceptEdits)
     .allowed_tools(vec![
         "Read".to_string(),
@@ -136,7 +147,7 @@ let options = ClaudeCodeOptions::builder()
 use nexus_claude::token_tracker::BudgetLimit;
 
 let options = ClaudeCodeOptions::builder()
-    .model("claude-sonnet-4-5-20250929")
+    .model("sonnet")
     .build();
 
 let mut client = ClaudeSDKClient::new(options);

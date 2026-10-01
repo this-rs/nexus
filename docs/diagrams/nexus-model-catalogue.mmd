@@ -1,0 +1,101 @@
+%% name: nexus-model-catalogue
+%% covers: nexus:claude-code-api/src/core/model_registry.rs nexus:claude-code-api/src/models/claude.rs nexus:claude-code-api/src/api/models.rs nexus:claude-code-api/tests/docs_model_drift.rs nexus:README.md nexus:README_CN.md nexus:README_JA.md nexus:docs/valid-models.md nexus:docs/tool-calling.md nexus:docs/url-preview-integration.md nexus:docs/url-preview-troubleshooting.md nexus:claude-code-sdk-rs/docs/models-guide.md nexus:claude-code-sdk-rs/examples/README_MODELS.md
+%% verified: 9540068
+%%
+%% Le sha ci-dessus est l'etat du depot contre lequel les CONSTATS ont ete
+%% releves. Les correctifs qu'ils ont motives arrivent dans la meme PR.
+%%
+%% CONSTAT MESURE (01/10/2026, avant correctif)
+%%   Aucun des 7 identifiants de modele ecrits dans la documentation n'existait
+%%   dans le catalogue de repli. Zero recouvrement, pas "quelques-uns perimes" :
+%%     docs                            catalogue (ClaudeModel::all)
+%%     claude-opus-4-5-20251101   x11   claude-opus-5-5
+%%     claude-sonnet-4-5-20250929 x36   claude-opus-5
+%%     claude-opus-4-20250514     x25   claude-fable-5-1
+%%     claude-3-5-haiku-20241022  x19   claude-fable-5
+%%     claude-3-5-sonnet-20241022 x6    claude-sonnet-5
+%%     claude-sonnet-4-20250514   x5    claude-opus-4-8 / 4-7 / 4-6 / 4-5
+%%     claude-opus-4-1-20250805   x3    claude-sonnet-4-6 / 4-5, claude-haiku-4-5
+%%   Reparti sur 16 fichiers. Un lecteur qui recopiait n'importe lequel de ces
+%%   identifiants obtenait un 404 not_found_error.
+%%
+%% PROUVE (comment)
+%%   - documentation_names_no_model_the_code_does_not_know : rejoue avec un
+%%     identifiant perime reintroduit dans docs/tool-calling.md -> ECHEC, puis
+%%     retire -> VERT. Le test lit le catalogue dans le texte source parce que
+%%     claude-code-api ne declare aucune cible [lib] : une passe d'integration
+%%     ne peut rien importer de ce crate.
+%%   - the_catalogue_parser_finds_the_known_series : garde l'extracteur, pour
+%%     qu'un catalogue deplace echoue au lieu de rendre le test ci-dessus vide.
+%%   - every_translation_carries_a_dated_staleness_notice : rejoue en effacant
+%%     la date du bandeau de README_JA.md -> ECHEC.
+%%
+%% REFUSE
+%%   - Rafraichir la liste d'identifiants dans la prose : refuse. C'est ce qui
+%%     avait ete fait les fois precedentes, et la liste etait de nouveau fausse
+%%     quelques semaines plus tard. La prose renvoie desormais a GET /v1/models.
+%%   - Interroger api.anthropic.com depuis le test : refuse. Un portillon qui a
+%%     besoin du reseau echoue pour des raisons etrangeres au changement relu,
+%%     et exigerait une cle dans la CI.
+%%   - Traduire README_CN / README_JA dans cette PR : refuse, hors perimetre.
+%%     Elles portent un bandeau date a la place, ce qui est verifiable ; une
+%%     traduction faite a la hate ne l'est pas.
+
+flowchart TB
+    subgraph runtime["Resolution a l'execution"]
+        KEY["✅ ANTHROPIC_API_KEY present — ModelRegistry::new journalise l'absence de cle et sert le repli"]
+        FETCH["✅ ModelRegistry::fetch_remote — GET api.anthropic.com/v1/models, en-tetes x-api-key + anthropic-version"]
+        FALLBACK["✅ ClaudeModel::all — catalogue statique de repli, 12 entrees au sha verifie"]
+        CACHE["✅ ModelRegistry::get_models — sert le cache, ModelRegistry::needs_refresh decide du rafraichissement"]
+        IS_DYN["✅ ModelRegistry::is_dynamic — dit laquelle des deux sources a repondu"]
+    end
+
+    subgraph served["Ce que le serveur expose"]
+        LIST["✅ list_models sur GET /v1/models — la seule liste qui fasse foi"]
+        REFRESH["✅ refresh_models sur POST /v1/models/refresh — force un re-fetch"]
+        ALIAS["🟠 Aliases opus / sonnet / haiku — documentes et utilises partout dans la doc, resolution non relue a ce sha"]
+    end
+
+    subgraph docs["Documentation"]
+        PROSE["✅ README.md section Supported Models — renvoie a GET /v1/models, n'enumere plus"]
+        VALID["✅ docs/valid-models.md — table des deux sources, plus de liste d'identifiants"]
+        GUIDES["✅ 16 fichiers corriges — identifiants remplaces par des aliases"]
+        STALE["🔴 README_CN / README_JA / SDK README_CN / README_JA — perimes, bandeau date du 01/10/2026 au lieu d'une traduction"]
+        CHANGELOG["⚪ CHANGELOG.md — garde ses identifiants retires : il raconte l'histoire, pas l'etat actuel, et reste hors du balayage"]
+    end
+
+    subgraph gate["Portillon hors reseau"]
+        SWEEP["✅ checked_documents — balaye les .md, exclut CHANGELOG, RELEASE_* et les traductions"]
+        DETECT["✅ model_ids_in plus looks_like_a_model_id — distingue un identifiant de claude-code-api ou claude-agent-sdk"]
+        PARSE["✅ catalogue_ids — lit les champs id du texte source, faute de cible [lib] a importer"]
+        COMPARE["✅ documentation_names_no_model_the_code_does_not_know — echoue si un identifiant cite est absent du catalogue"]
+        BANNER["✅ every_translation_carries_a_dated_staleness_notice — exige bandeau, date, renvoi a README.md et mention du registre"]
+        AUTHORITY["✅ the_english_readme_carries_no_staleness_notice — l'autorite ne peut pas se declarer elle-meme perimee"]
+        ESCAPE["🟠 DOCUMENTED_COUNTER_EXAMPLES — un seul identifiant tolere, montre comme refuse dans la prose ; la liste n'est pas censee croitre"]
+    end
+
+    KEY -->|cle presente| FETCH
+    KEY -->|pas de cle ou echec| FALLBACK
+    FETCH --> CACHE
+    FALLBACK --> CACHE
+    CACHE --> LIST
+    CACHE --> IS_DYN
+    REFRESH --> FETCH
+    LIST --> ALIAS
+
+    LIST -.->|source de verite citee par| PROSE
+    LIST -.->|source de verite citee par| VALID
+    PROSE --> GUIDES
+    VALID --> GUIDES
+
+    SWEEP --> DETECT
+    DETECT --> COMPARE
+    PARSE --> COMPARE
+    FALLBACK -.->|lu comme texte par| PARSE
+    GUIDES -.->|verifie par| COMPARE
+    PROSE -.->|verifie par| COMPARE
+    VALID -.->|verifie par| COMPARE
+    STALE -.->|verifie par| BANNER
+    PROSE -.->|verifie par| AUTHORITY
+    COMPARE --> ESCAPE
+    CHANGELOG -.->|hors balayage, volontairement| SWEEP

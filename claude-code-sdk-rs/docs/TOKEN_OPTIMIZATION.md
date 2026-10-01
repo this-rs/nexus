@@ -19,7 +19,7 @@ use nexus_claude::token_tracker::BudgetLimit;
 
 let options = ClaudeCodeOptions::builder()
     // 1. Use cheaper model for simple tasks
-    .model("claude-3-5-haiku-20241022")  // ~15x cheaper than Opus
+    .model("haiku")  // ~15x cheaper than Opus
 
     // 2. Limit conversation length
     .max_turns(Some(3))
@@ -52,7 +52,7 @@ client.set_budget_limit(
 
 | Model | Relative Cost | Best For |
 |-------|---------------|----------|
-| **Haiku** (`claude-3-5-haiku-20241022`) | **1x** (baseline) | Simple tasks, fast responses |
+| **Haiku** (`haiku`) | **1x** (baseline) | Simple tasks, fast responses |
 | **Sonnet** (`sonnet`) | **~5x** | Balanced tasks, general use |
 | **Opus** (`opus`) | **~15x** | Complex tasks, critical work |
 
@@ -64,14 +64,14 @@ use nexus_claude::ModelRecommendation;
 let recommender = ModelRecommendation::default();
 
 // Automatic recommendations
-let model = recommender.suggest("simple").unwrap();  // → "claude-3-5-haiku-20241022"
+let model = recommender.suggest("simple").unwrap();  // → "haiku"
 let model = recommender.suggest("balanced").unwrap(); // → "sonnet"
 let model = recommender.suggest("complex").unwrap();  // → "opus"
 
 // Custom recommendations
 let mut custom = ModelRecommendation::default();
 custom.add("code_review", "sonnet");
-custom.add("documentation", "claude-3-5-haiku-20241022");
+custom.add("documentation", "haiku");
 ```
 
 ### Rule of Thumb
@@ -280,7 +280,7 @@ impl AccountPool {
 
 ```rust
 // GOOD: $0.01 for the same result
-.model("claude-3-5-haiku-20241022")
+.model("haiku")
 ```
 
 ### 2. ❌ No Output Limits
@@ -343,7 +343,7 @@ Typical ranges:
 
 **After optimization**:
 ```rust
-.model("claude-3-5-haiku-20241022")
+.model("haiku")
 .max_output_tokens(3000)
 .max_turns(Some(1))
 ```

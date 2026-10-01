@@ -46,3 +46,22 @@ diagrams:
     covers:
       - "nexus:docs/BUGS.md"
       - "nexus:claude-code-api/tests/bug_registry.rs"
+  - name: nexus-model-catalogue
+    file: docs/diagrams/nexus-model-catalogue.mmd
+    owner: theotime
+    status: verified
+    verified: 9540068
+    covers:
+      - "nexus:claude-code-api/src/core/model_registry.rs"
+      - "nexus:claude-code-api/src/models/claude.rs"
+      - "nexus:claude-code-api/src/api/models.rs"
+      - "nexus:claude-code-api/tests/docs_model_drift.rs"
+      - "nexus:README.md"
+      - "nexus:README_CN.md"
+      - "nexus:README_JA.md"
+      - "nexus:docs/valid-models.md"
+      - "nexus:docs/tool-calling.md"
+      - "nexus:docs/url-preview-integration.md"
+      - "nexus:docs/url-preview-troubleshooting.md"
+      - "nexus:claude-code-sdk-rs/docs/models-guide.md"
+      - "nexus:claude-code-sdk-rs/examples/README_MODELS.md"

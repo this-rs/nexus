@@ -1,5 +1,18 @@
 # Nexus - Claude Code SDK & API
 
+> [!WARNING]
+> **本翻译已过期 — 核对日期 2026-10-01。**
+>
+> 以 [README.md](README.md) 为准。本文件缺少英文版中的四个章节：
+> *Advanced Usage*、*Performance Optimization*、*Security*、*Troubleshooting*，
+> 并且 Rust 版本标记为 1.75+，而英文版要求 1.88+。
+> **「支持的模型」一节列出的模型 ID 在代码中已不存在**：模型目录现在由
+> `claude-code-api/src/core/model_registry.rs` 在运行时解析，请执行
+> `curl -s http://localhost:8080/v1/models` 查询。
+>
+> 在翻译更新之前，请勿依据本文件做出决定。
+
+
 [![版本](https://img.shields.io/badge/版本-0.5.0-blue.svg)](https://github.com/this-rs/nexus)
 [![许可证](https://img.shields.io/badge/许可证-MIT-green.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.75+-orange.svg)](https://www.rust-lang.org)

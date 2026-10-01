@@ -44,7 +44,7 @@ Simply include a `conversation_id` in your requests to use the same session:
 curl -X POST http://localhost:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "claude-3-5-sonnet-20241022",
+    "model": "sonnet",
     "conversation_id": "my-session-123",
     "messages": [{
       "role": "user",
@@ -56,7 +56,7 @@ curl -X POST http://localhost:8000/v1/chat/completions \
 curl -X POST http://localhost:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "claude-3-5-sonnet-20241022",
+    "model": "sonnet",
     "conversation_id": "my-session-123",
     "messages": [{
       "role": "user",

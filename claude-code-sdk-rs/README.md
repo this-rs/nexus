@@ -301,7 +301,7 @@ docker run -d -p 7700:7700 \
 export ANTHROPIC_USER_EMAIL="your-email@example.com"
 
 # Optional: Model selection
-export CLAUDE_MODEL="claude-sonnet-4-5-20250929"
+export CLAUDE_MODEL="sonnet"   # or a pinned id from GET /v1/models
 
 # Optional: Meilisearch configuration (for memory feature)
 export MEILISEARCH_URL="http://localhost:7700"

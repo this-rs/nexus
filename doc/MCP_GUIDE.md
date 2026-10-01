@@ -80,7 +80,7 @@ export CLAUDE_CODE__MCP__CONFIG_JSON='{"mcpServers":{"filesystem":{"command":"np
 curl -X POST http://localhost:8080/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "claude-opus-4-20250514",
+    "model": "opus",
     "messages": [{
       "role": "user",
       "content": "使用 MCP 文件系统服务器列出 /tmp 目录的内容"
@@ -109,7 +109,7 @@ curl -X POST http://localhost:8080/v1/chat/completions \
 curl -X POST http://localhost:8080/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "claude-opus-4-20250514",
+    "model": "opus",
     "messages": [{
       "role": "user",
       "content": "使用 GitHub MCP 获取 anthropics/claude-code 的最新提交"
@@ -136,7 +136,7 @@ curl -X POST http://localhost:8080/v1/chat/completions \
 curl -X POST http://localhost:8080/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "claude-opus-4-20250514",
+    "model": "opus",
     "messages": [{
       "role": "user",
       "content": "查询数据库中的用户表"
@@ -240,7 +240,7 @@ export CLAUDE_CODE__MCP__DEBUG=true
 curl -X POST http://localhost:8080/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "claude-opus-4-20250514",
+    "model": "opus",
     "messages": [{
       "role": "user",
       "content": "审查 owner/repo PR #123 的代码变更"
@@ -255,7 +255,7 @@ curl -X POST http://localhost:8080/v1/chat/completions \
 curl -X POST http://localhost:8080/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "claude-opus-4-20250514",
+    "model": "opus",
     "messages": [{
       "role": "user",
       "content": "分析销售数据库中上个月的销售趋势"
@@ -270,7 +270,7 @@ curl -X POST http://localhost:8080/v1/chat/completions \
 curl -X POST http://localhost:8080/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "claude-opus-4-20250514",
+    "model": "opus",
     "messages": [{
       "role": "user",
       "content": "整理我的项目文档并创建索引"
@@ -287,7 +287,7 @@ def claude_mcp_request(prompt):
     response = requests.post(
         "http://localhost:8080/v1/chat/completions",
         json={
-            "model": "claude-opus-4-20250514",
+            "model": "opus",
             "messages": [{
                 "role": "user",
                 "content": prompt

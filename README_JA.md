@@ -1,5 +1,18 @@
 # Nexus - Claude Code SDK & API
 
+> [!WARNING]
+> **この翻訳は古くなっています — 照合日 2026-10-01。**
+>
+> 正典は [README.md](README.md) です。本ファイルには英語版の 4 つの節
+> *Advanced Usage* / *Performance Optimization* / *Security* / *Troubleshooting*
+> が欠けており、Rust のバージョン表記も 1.75+ のまま（英語版は 1.88+）です。
+> **「サポートモデル」節に並ぶモデル ID はコード上に存在しません**。モデル目録は
+> `claude-code-api/src/core/model_registry.rs` が実行時に解決します。
+> `curl -s http://localhost:8080/v1/models` で確認してください。
+>
+> 翻訳が更新されるまで、本ファイルを判断の根拠にしないでください。
+
+
 [![バージョン](https://img.shields.io/badge/バージョン-0.5.0-blue.svg)](https://github.com/this-rs/nexus)
 [![ライセンス](https://img.shields.io/badge/ライセンス-MIT-green.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.75+-orange.svg)](https://www.rust-lang.org)

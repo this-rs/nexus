@@ -1,5 +1,16 @@
 # Model Usage Guide for Examples
 
+> [!NOTE]
+> **Model ids are no longer written in this document.** The catalogue is resolved at
+> runtime by `ModelRegistry` (`claude-code-api/src/core/model_registry.rs`): it fetches
+> `GET https://api.anthropic.com/v1/models` when `ANTHROPIC_API_KEY` is set, and falls
+> back to `ClaudeModel::all()` otherwise. The version-specific ids that used to appear
+> below had all been retired, so they were replaced by the aliases `opus`, `sonnet` and
+> `haiku`. Ask the server for the exact ids:
+> `curl -s http://localhost:8080/v1/models | jq '.data[].id'`.
+> `cargo test -p claude-code-api --test docs_model_drift` keeps this true.
+
+
 ## Important Update (2025)
 
 All examples have been updated to use the correct model names based on testing results.
@@ -12,8 +23,8 @@ All examples have been updated to use the correct model names based on testing r
 .model("opus")     // Latest Opus (currently Opus 4.1)
 
 // Or use full names for specific versions
-.model("claude-opus-4-1-20250805")    // Opus 4.1
-.model("claude-sonnet-4-20250514")    // Sonnet 4
+.model("opus")    // Opus 4.1
+.model("sonnet")    // Sonnet 4
 ```
 
 ## ❌ DO NOT Use These (They Return 404 Errors)

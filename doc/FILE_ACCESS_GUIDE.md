@@ -63,7 +63,7 @@ additional_dirs = [
 curl -X POST http://localhost:8080/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "claude-opus-4-20250514",
+    "model": "opus",
     "messages": [{
       "role": "user",
       "content": "请读取 /path/to/file.txt 并告诉我文件内容"
@@ -77,7 +77,7 @@ curl -X POST http://localhost:8080/v1/chat/completions \
 curl -X POST http://localhost:8080/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "claude-opus-4-20250514",
+    "model": "opus",
     "messages": [{
       "role": "user",
       "content": "请在 /tmp 目录创建一个 hello.txt 文件，内容为 Hello World"
@@ -91,7 +91,7 @@ curl -X POST http://localhost:8080/v1/chat/completions \
 curl -X POST http://localhost:8080/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "claude-opus-4-20250514",
+    "model": "opus",
     "messages": [{
       "role": "user",
       "content": "请修改 /path/to/config.json，将 port 值改为 8080"
@@ -105,7 +105,7 @@ curl -X POST http://localhost:8080/v1/chat/completions \
 curl -X POST http://localhost:8080/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "claude-opus-4-20250514",
+    "model": "opus",
     "messages": [{
       "role": "user",
       "content": "在 /Users/zhangalex/Work 目录下搜索所有 .md 文件"
@@ -119,7 +119,7 @@ curl -X POST http://localhost:8080/v1/chat/completions \
 curl -X POST http://localhost:8080/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "claude-opus-4-20250514",
+    "model": "opus",
     "messages": [{
       "role": "user",
       "content": "执行 ls -la 命令并告诉我结果"
@@ -136,7 +136,7 @@ def claude_file_operation(prompt):
     response = requests.post(
         "http://localhost:8080/v1/chat/completions",
         json={
-            "model": "claude-opus-4-20250514",
+            "model": "opus",
             "messages": [{
                 "role": "user",
                 "content": prompt
@@ -189,7 +189,7 @@ result = claude_file_operation("分析 /path/to/project 目录下的所有 Pytho
 curl -X POST http://localhost:8080/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "claude-opus-4-20250514",
+    "model": "opus",
     "messages": [{
       "role": "user",
       "content": "将 /source 目录下所有 .txt 文件复制到 /destination 目录"
@@ -203,7 +203,7 @@ curl -X POST http://localhost:8080/v1/chat/completions \
 curl -X POST http://localhost:8080/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "claude-opus-4-20250514",
+    "model": "opus",
     "messages": [{
       "role": "user",
       "content": "重构 /path/to/project 中的所有 Python 文件，将 print 语句改为 logging"
@@ -217,7 +217,7 @@ curl -X POST http://localhost:8080/v1/chat/completions \
 curl -X POST http://localhost:8080/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "claude-opus-4-20250514",
+    "model": "opus",
     "messages": [{
       "role": "user",
       "content": "分析 /path/to/project 的代码结构并生成架构文档"

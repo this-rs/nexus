@@ -165,14 +165,14 @@ export ANTHROPIC_API_KEY="your-key-here"
 ### Model errors
 
 Ensure you're using a valid model name. Recommended aliases:
-- `"opus"` - Latest Opus (currently claude-opus-4-5-20251101)
-- `"sonnet"` - Latest Sonnet (currently claude-sonnet-4-5-20250929)
+- `"opus"` - Latest Opus (currently opus)
+- `"sonnet"` - Latest Sonnet (currently sonnet)
 
 Full model names also work:
-- `claude-opus-4-5-20251101`
-- `claude-sonnet-4-5-20250929`
-- `claude-3-5-sonnet-20241022`
-- `claude-3-5-haiku-20241022`
+- `opus`
+- `sonnet`
+- `sonnet`
+- `haiku`
 
 ## New Advanced Examples
 

@@ -13,10 +13,10 @@ url-preview expects OpenAI-compatible API responses with `tool_calls` format (no
 ❌ **Problem**: url-preview examples use `claude-3-opus-20240229` which is invalid for Claude CLI.
 
 ✅ **Solution**: Use valid model names:
-- `claude-3-5-haiku-20241022` (fastest)
-- `claude-3-5-sonnet-20241022` (balanced)
+- `haiku` (fastest)
+- `sonnet` (balanced)
 - `opus` (most capable, alias for latest Opus)
-- `claude-opus-4-20250514` (specific version)
+- a pinned id from `GET /v1/models` (when you must pin)
 
 ### 2. Function Call Format
 
@@ -54,7 +54,7 @@ let config = async_openai::config::OpenAIConfig::new()
 
 // Use a VALID model name
 let provider = Arc::new(
-    OpenAIProvider::from_config(config, "claude-3-5-haiku-20241022".to_string())
+    OpenAIProvider::from_config(config, "haiku".to_string())
 );
 
 // Extract data
@@ -75,7 +75,7 @@ let result = extractor.extract::<YourSchema>(url, &fetcher).await?;
    // Change from:
    "claude-3-opus-20240229"
    // To:
-   "opus" // or "claude-3-5-sonnet-20241022"
+   "opus" // or "sonnet"
    ```
 
 3. Run url-preview example:
@@ -102,7 +102,7 @@ let result = extractor.extract::<YourSchema>(url, &fetcher).await?;
 url-preview sends requests like this:
 ```json
 {
-  "model": "claude-3-5-haiku-20241022",
+  "model": "haiku",
   "messages": [...],
   "tools": [{
     "type": "function",
