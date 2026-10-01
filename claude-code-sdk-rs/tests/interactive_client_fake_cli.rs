@@ -26,8 +26,10 @@ use tokio::sync::Mutex;
 /// stuck test fails instead of hanging.
 const WAIT: Duration = Duration::from_secs(10);
 
-/// The gap the fake leaves between two stdout lines so that a receive loop which
-/// re-subscribes between every message cannot miss one.
+/// The gap the fake leaves before its first line, so that a caller which
+/// subscribes only *after* writing its prompt cannot miss it. This is a
+/// property of the `send_message` + `receive_response` split, not of the
+/// receive loop: `send_and_receive` subscribes before it writes.
 const SPACING_MS: u64 = 300;
 
 /// A client over a real `SubprocessTransport` pointed at the fake.
@@ -164,19 +166,16 @@ async fn send_and_receive_stream_drives_a_whole_turn_without_losing_a_message() 
 }
 
 #[tokio::test]
-async fn send_and_receive_only_survives_a_real_cli_when_its_output_is_spaced_out() {
-    // `send_and_receive` sends first and subscribes afterwards, then drops and
-    // recreates its subscription for every single message. Against a real
-    // subprocess that only works if nothing is printed while it is unsubscribed,
-    // hence the sleeps: they are the test's way of staying deterministic, not
-    // something a real CLI would do.
+async fn send_and_receive_drives_a_real_cli_that_prints_its_turn_in_one_burst() {
+    // `send_and_receive` subscribes and writes under the same lock, then keeps
+    // that one subscription for the whole turn. The fake therefore prints its
+    // three lines back to back, with no sleep anywhere: the version that
+    // re-subscribed between every message lost the ones printed while it was
+    // unsubscribed and never returned.
     let fake = Transcript::new()
         .await_stdin()
-        .sleep_ms(SPACING_MS)
         .init("sess-blocking")
-        .sleep_ms(SPACING_MS)
         .assistant_text("bonjour")
-        .sleep_ms(SPACING_MS)
         .result_ok("bonjour")
         .wait_eof()
         .build();
@@ -185,7 +184,7 @@ async fn send_and_receive_only_survives_a_real_cli_when_its_output_is_spaced_out
 
     let messages = tokio::time::timeout(WAIT, client.send_and_receive("salut".to_string()))
         .await
-        .expect("the turn completes while the output stays spaced out")
+        .expect("a turn printed in one burst must still be collected whole")
         .expect("no transport error");
 
     assert_eq!(
@@ -201,11 +200,13 @@ async fn send_and_receive_only_survives_a_real_cli_when_its_output_is_spaced_out
 
 #[tokio::test]
 async fn send_message_then_receive_response_splits_the_same_turn_in_two() {
+    // Only the first gap is needed: `send_message` returns before
+    // `receive_response` subscribes, so the fake must not print until then.
+    // Once subscribed, the rest of the turn may arrive in one burst.
     let fake = Transcript::new()
         .await_stdin()
         .sleep_ms(SPACING_MS)
         .init("sess-two-steps")
-        .sleep_ms(SPACING_MS)
         .result_ok("done")
         .wait_eof()
         .build();
@@ -376,38 +377,50 @@ async fn the_hook_round_trip_works_over_the_real_stdin_and_control_channel() {
 }
 
 #[tokio::test]
-async fn the_two_stream_getters_answer_an_empty_stream_instead_of_refusing_before_connect() {
-    // Seven methods start with `if !self.connected { return Err(InvalidState) }`.
-    // `receive_messages_stream` and `receive_response_stream` do not: before
-    // connect they hand out a stream that is simply over, so a caller who forgot
-    // to connect sees "the CLI said nothing" instead of an error.
+async fn the_two_stream_getters_refuse_before_connect_like_the_other_seven() {
+    // All nine turn operations now start with
+    // `if !self.connected { return Err(InvalidState) }`. These two used to hand
+    // out a stream that was simply over, so a caller who forgot to connect read
+    // "the CLI said nothing" instead of an error.
     let fake = Transcript::new().await_stdin().result_ok("done").build();
     let mut client = client_for(&fake);
 
-    let messages = tokio::time::timeout(WAIT, collect_turn(client.receive_messages_stream().await))
+    let error = client
+        .receive_messages_stream()
         .await
-        .expect("an unconnected transport ends the stream at once");
+        .err()
+        .expect("an unconnected client has no messages to stream");
     assert!(
-        messages.is_empty(),
-        "no error, no message: {messages:?} — the missing guard is silent"
+        matches!(&error, SdkError::InvalidState { message } if message == "Not connected"),
+        "got {error:?}"
     );
 
-    let messages = tokio::time::timeout(WAIT, collect_turn(client.receive_response_stream().await))
+    let error = client
+        .receive_response_stream()
         .await
+        .err()
         .expect("same thing one layer up");
-    assert!(messages.is_empty());
+    assert!(
+        matches!(&error, SdkError::InvalidState { message } if message == "Not connected"),
+        "got {error:?}"
+    );
 
-    // The client is still usable: the relay task released the lock on its way out.
+    // Nothing was spawned and nothing was locked: the client is still usable.
     assert!(client.child_pid().await.is_none());
     client.connect().await.unwrap();
+    assert!(
+        client.receive_messages_stream().await.is_ok(),
+        "and once connected the very same call is accepted"
+    );
     client.disconnect().await.unwrap();
 }
 
 #[tokio::test]
-async fn initialize_hooks_mints_callback_ids_even_when_it_cannot_tell_the_cli_about_them() {
-    // No `connect()`, so the transport has no stdin channel. The callback ids are
-    // generated and stored *before* the send is attempted, so a failed
-    // initialize leaves the registry holding ids the CLI will never send back.
+async fn initialize_hooks_rolls_back_its_callback_ids_when_it_cannot_reach_the_cli() {
+    // No `connect()`, so the transport refuses to write. The callback ids are
+    // minted and registered *before* the send — a hook_callback fired the instant
+    // the CLI reads the init message must find its entry — so a failed send has
+    // to take them back out.
     let seen = Arc::new(Mutex::new(Vec::new()));
     let hook = Arc::new(RecordingHook { seen }) as Arc<dyn HookCallback>;
     let mut hooks = std::collections::HashMap::new();
@@ -425,17 +438,18 @@ async fn initialize_hooks_mints_callback_ids_even_when_it_cannot_tell_the_cli_ab
     // The message used to be the transport's internal "Stdin channel not available",
     // which told the caller nothing. `SubprocessTransport::send_sdk_control_request`
     // now applies the same `TransportState` guard as `send_message`, so an
-    // un-connected client is refused by name. The defect this test pins is the one
-    // below: the ids are minted before the send is attempted.
+    // un-connected client is refused by name.
     assert!(
         matches!(&error, SdkError::InvalidState { message } if message == "Not connected"),
         "got {error:?}"
     );
-    assert_eq!(
-        client.hook_callbacks().read().await.len(),
-        1,
-        "the id was minted before the failed send and is never rolled back"
+    assert!(
+        client.hook_callbacks().read().await.is_empty(),
+        "an id the CLI will never learn must not stay in the registry"
     );
+    // And retrying does not pile up one more leaked id per attempt.
+    client.initialize_hooks().await.unwrap_err();
+    assert!(client.hook_callbacks().read().await.is_empty());
     assert!(
         fake.stdin_lines().is_empty(),
         "nothing reached the CLI, which was never even spawned"

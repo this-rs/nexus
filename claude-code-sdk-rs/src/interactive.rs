@@ -17,6 +17,18 @@ use tokio::sync::{Mutex, RwLock};
 use tokio_stream::wrappers::ReceiverStream;
 use tracing::{debug, error, info, warn};
 
+/// The turn cannot complete: the CLI's message stream ended before a
+/// [`Message::Result`].
+///
+/// `send_and_receive` and `receive_response` used to answer this case with an
+/// endless `sleep(10 ms)` loop, so a CLI that died mid-turn made the caller
+/// wait forever.
+fn stream_ended_before_result() -> SdkError {
+    SdkError::TransportError(
+        "the CLI message stream ended before a Result message: the turn cannot complete".into(),
+    )
+}
+
 /// Interactive client for stateful conversations with Claude
 ///
 /// This is the recommended client for interactive use. It provides a clean API
@@ -30,6 +42,14 @@ pub struct InteractiveClient {
     hook_callbacks: Arc<RwLock<HashMap<String, Arc<dyn HookCallback>>>>,
     /// Counter for generating unique callback IDs
     callback_counter: Arc<Mutex<u64>>,
+    /// The CLI's stdin writer, cloned once at `connect()` and cleared at
+    /// `disconnect()`.
+    ///
+    /// `send_hook_response` writes through this clone, so it never has to take
+    /// the transport mutex just to ask for it. It MUST be cleared on
+    /// `disconnect`, or hook answers would go on being queued on a channel the
+    /// CLI no longer reads.
+    stdin_tx: Option<tokio::sync::mpsc::Sender<String>>,
 }
 
 impl InteractiveClient {
@@ -41,6 +61,7 @@ impl InteractiveClient {
             hooks: None,
             hook_callbacks: Arc::new(RwLock::new(HashMap::new())),
             callback_counter: Arc::new(Mutex::new(0)),
+            stdin_tx: None,
         }
     }
 
@@ -55,6 +76,7 @@ impl InteractiveClient {
             hooks: Some(hooks),
             hook_callbacks: Arc::new(RwLock::new(HashMap::new())),
             callback_counter: Arc::new(Mutex::new(0)),
+            stdin_tx: None,
         }
     }
 
@@ -71,6 +93,7 @@ impl InteractiveClient {
             hooks,
             hook_callbacks: Arc::new(RwLock::new(HashMap::new())),
             callback_counter: Arc::new(Mutex::new(0)),
+            stdin_tx: None,
         })
     }
 
@@ -135,16 +158,34 @@ impl InteractiveClient {
             return Ok(());
         }
 
-        let mut transport = self.transport.lock().await;
-        transport.connect().await?;
-        drop(transport); // Release lock immediately
+        let stdin_tx = {
+            let mut transport = self.transport.lock().await;
+            transport.connect().await?;
+            // Clone the stdin writer while we already hold the mutex, so
+            // `send_hook_response` never needs it again.
+            transport.clone_stdin_sender()
+        }; // Lock released immediately
 
+        self.stdin_tx = stdin_tx;
         self.connected = true;
         info!("Connected to Claude CLI");
         Ok(())
     }
 
-    /// Send a message and receive all messages until Result message
+    /// Send a message and collect every message of the turn, up to and
+    /// including the terminal [`Message::Result`].
+    ///
+    /// Like [`Self::send_and_receive_stream`], this subscribes to the message
+    /// stream **before** sending and keeps that one subscription for the whole
+    /// turn: a `broadcast` replays nothing, so a subscription dropped between
+    /// two messages loses whatever the CLI printed in between.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SdkError::InvalidState`] before `connect()`, whatever the
+    /// transport reports while writing or reading, and
+    /// [`SdkError::TransportError`] if the message stream ends before a
+    /// `Result` message — which is what a dead CLI looks like from here.
     pub async fn send_and_receive(&mut self, prompt: String) -> Result<Vec<Message>> {
         if !self.connected {
             return Err(SdkError::InvalidState {
@@ -152,45 +193,34 @@ impl InteractiveClient {
             });
         }
 
-        // Send message
-        {
+        // Subscribe and send under the SAME lock acquisition, so the response
+        // cannot land before the subscription exists.
+        let mut stream = {
             let mut transport = self.transport.lock().await;
+            let stream = transport.receive_messages();
             let message = InputMessage::user(prompt, "default".to_string());
             transport.send_message(message).await?;
-        } // Lock released here
+            stream
+        }; // Lock released here, after subscription and send
 
-        debug!("Message sent, waiting for response");
+        debug!("Message sent, subscription active");
 
-        // Receive messages
         let mut messages = Vec::new();
-        loop {
-            // Try to get a message
-            let msg_result = {
-                let mut transport = self.transport.lock().await;
-                let mut stream = transport.receive_messages();
-                stream.next().await
-            }; // Lock released here
-
-            // Process the message
-            if let Some(result) = msg_result {
-                match result {
-                    Ok(msg) => {
-                        debug!("Received: {:?}", msg);
-                        let is_result = matches!(msg, Message::Result { .. });
-                        messages.push(msg);
-                        if is_result {
-                            break;
-                        }
-                    },
-                    Err(e) => return Err(e),
-                }
-            } else {
-                // No more messages, wait a bit
-                tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+        while let Some(result) = stream.next().await {
+            match result {
+                Ok(msg) => {
+                    debug!("Received: {:?}", msg);
+                    let is_result = matches!(msg, Message::Result { .. });
+                    messages.push(msg);
+                    if is_result {
+                        return Ok(messages);
+                    }
+                },
+                Err(e) => return Err(e),
             }
         }
 
-        Ok(messages)
+        Err(stream_ended_before_result())
     }
 
     /// Send a message without waiting for response
@@ -326,7 +356,17 @@ impl InteractiveClient {
         })
     }
 
-    /// Receive messages until Result message (convenience method like Python SDK)
+    /// Collect the messages of the current turn without sending anything,
+    /// up to and including the terminal [`Message::Result`].
+    ///
+    /// Subscribes once and keeps that subscription until the turn ends, for
+    /// the same reason as [`Self::send_and_receive`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SdkError::InvalidState`] before `connect()`, whatever the
+    /// transport reports, and [`SdkError::TransportError`] if the stream ends
+    /// before a `Result` message.
     pub async fn receive_response(&mut self) -> Result<Vec<Message>> {
         if !self.connected {
             return Err(SdkError::InvalidState {
@@ -334,41 +374,40 @@ impl InteractiveClient {
             });
         }
 
-        let mut messages = Vec::new();
-        loop {
-            // Try to get a message
-            let msg_result = {
-                let mut transport = self.transport.lock().await;
-                let mut stream = transport.receive_messages();
-                stream.next().await
-            }; // Lock released here
+        // One subscription for the whole turn: see `send_and_receive`.
+        let mut stream = {
+            let mut transport = self.transport.lock().await;
+            transport.receive_messages()
+        };
 
-            // Process the message
-            if let Some(result) = msg_result {
-                match result {
-                    Ok(msg) => {
-                        debug!("Received: {:?}", msg);
-                        let is_result = matches!(msg, Message::Result { .. });
-                        messages.push(msg);
-                        if is_result {
-                            break;
-                        }
-                    },
-                    Err(e) => return Err(e),
-                }
-            } else {
-                // No more messages, wait a bit
-                tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+        let mut messages = Vec::new();
+        while let Some(result) = stream.next().await {
+            match result {
+                Ok(msg) => {
+                    debug!("Received: {:?}", msg);
+                    let is_result = matches!(msg, Message::Result { .. });
+                    messages.push(msg);
+                    if is_result {
+                        return Ok(messages);
+                    }
+                },
+                Err(e) => return Err(e),
             }
         }
 
-        Ok(messages)
+        Err(stream_ended_before_result())
     }
 
     /// Receive messages as a stream (streaming output support)
     ///
     /// Returns a stream of messages that can be iterated over asynchronously.
     /// This is similar to Python SDK's `receive_messages()` method.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SdkError::InvalidState`] if called before `connect()`. It used
+    /// to hand out a stream that was simply over, so a caller who forgot to
+    /// connect read "the CLI said nothing" instead of an error.
     ///
     /// # Example
     ///
@@ -385,7 +424,7 @@ impl InteractiveClient {
     ///     client.send_message("Hello!".to_string()).await?;
     ///     
     ///     // Receive messages as a stream
-    ///     let mut stream = client.receive_messages_stream().await;
+    ///     let mut stream = client.receive_messages_stream().await?;
     ///     while let Some(msg) = stream.next().await {
     ///         match msg {
     ///             Ok(message) => println!("Received: {:?}", message),
@@ -396,16 +435,30 @@ impl InteractiveClient {
     ///     Ok(())
     /// }
     /// ```
-    pub async fn receive_messages_stream(&mut self) -> impl Stream<Item = Result<Message>> + '_ {
+    pub async fn receive_messages_stream(
+        &mut self,
+    ) -> Result<impl Stream<Item = Result<Message>> + '_> {
+        if !self.connected {
+            return Err(SdkError::InvalidState {
+                message: "Not connected".into(),
+            });
+        }
+
         // Create a channel for messages
         let (tx, rx) = tokio::sync::mpsc::channel(100);
-        let transport = self.transport.clone();
 
-        // Spawn a task to receive messages from transport
+        // Subscribe here, under a short-lived guard. The relay below must NOT
+        // hold the transport mutex: it only exits when `tx.send` fails, i.e. at
+        // the message *after* the caller dropped the stream, so a guard held
+        // inside the task starves every other method of the client until one
+        // more message happens to arrive.
+        let mut stream = {
+            let mut transport = self.transport.lock().await;
+            transport.receive_messages()
+        };
+
+        // Spawn a task to forward the already-subscribed stream
         tokio::spawn(async move {
-            let mut transport = transport.lock().await;
-            let mut stream = transport.receive_messages();
-
             while let Some(result) = stream.next().await {
                 // Send each message through the channel
                 if tx.send(result).await.is_err() {
@@ -416,18 +469,25 @@ impl InteractiveClient {
         });
 
         // Return the receiver as a stream
-        ReceiverStream::new(rx)
+        Ok(ReceiverStream::new(rx))
     }
 
     /// Receive messages as an async iterator until a Result message
     ///
     /// This is a convenience method that collects messages until a Result message
     /// is received, similar to Python SDK's `receive_response()`.
-    pub async fn receive_response_stream(&mut self) -> impl Stream<Item = Result<Message>> + '_ {
-        // Create a stream that stops after Result message
-        async_stream::stream! {
-            let mut stream = self.receive_messages_stream().await;
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SdkError::InvalidState`] if called before `connect()`, through
+    /// [`Self::receive_messages_stream`].
+    pub async fn receive_response_stream(
+        &mut self,
+    ) -> Result<impl Stream<Item = Result<Message>> + '_> {
+        let mut stream = self.receive_messages_stream().await?;
 
+        // Create a stream that stops after Result message
+        Ok(async_stream::stream! {
             while let Some(result) = stream.next().await {
                 match &result {
                     Ok(msg) => {
@@ -443,7 +503,7 @@ impl InteractiveClient {
                     }
                 }
             }
-        }
+        })
     }
 
     /// Change the permission mode of the active CLI subprocess session.
@@ -534,6 +594,8 @@ impl InteractiveClient {
         // Generate callback IDs and register callbacks (mirrors Query::initialize)
         let mut counter = self.callback_counter.lock().await;
         let mut callbacks_map = self.hook_callbacks.write().await;
+        // Every id minted below, so a failed send can take them back out.
+        let mut minted: Vec<String> = Vec::new();
 
         let hooks_json: HashMap<String, serde_json::Value> = hooks
             .iter()
@@ -549,6 +611,7 @@ impl InteractiveClient {
                                 let callback_id =
                                     format!("hook_{}_{}", *counter, uuid::Uuid::new_v4().simple());
                                 callbacks_map.insert(callback_id.clone(), hook_cb.clone());
+                                minted.push(callback_id.clone());
                                 callback_id
                             })
                             .collect();
@@ -581,9 +644,24 @@ impl InteractiveClient {
         });
 
         // Send via transport stdin
-        {
+        let sent = {
             let mut transport = self.transport.lock().await;
-            transport.send_sdk_control_request(control_msg).await?;
+            transport.send_sdk_control_request(control_msg).await
+        };
+
+        // The ids are registered BEFORE the send, so that a hook_callback the
+        // CLI fires the instant it reads the init message always finds its
+        // entry. A failed send therefore has to take them back out: otherwise
+        // the registry keeps growing entries nothing can ever address, one per
+        // failed attempt.
+        if let Err(e) = sent {
+            let rolled_back = minted.len();
+            let mut callbacks_map = self.hook_callbacks.write().await;
+            for id in minted {
+                callbacks_map.remove(&id);
+            }
+            warn!("initialize_hooks rolled back {rolled_back} callback id(s)");
+            return Err(e);
         }
 
         info!("initialize_hooks: sent init with hook callback IDs to CLI");
@@ -633,11 +711,11 @@ impl InteractiveClient {
                 .get("input")
                 .cloned()
                 .unwrap_or(serde_json::json!({}));
-            let tool_use_id = request_data
-                .get("tool_use_id")
-                .or_else(|| request_data.get("toolUseId"))
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string());
+            let tool_use_id = match manual_tool_use_id(request_data) {
+                Ok(id) => id,
+                // Refuse rather than pretend there is no tool at all.
+                Err(e) => return Some(Err(e)),
+            };
             (cb_id.to_string(), input, tool_use_id)
         };
 
@@ -677,12 +755,15 @@ impl InteractiveClient {
     /// Writes a `control_response` JSON message to stdin with the serialized
     /// `HookJSONOutput`.
     ///
-    /// It writes through a cloned stdin sender, so it does not *hold* the
-    /// transport mutex while writing — but it does take it, briefly, to obtain
-    /// that clone (`clone_stdin_sender` needs `&self` on the transport). A task
-    /// that keeps the mutex, such as the relay spawned by
-    /// `receive_messages_stream`, therefore blocks this method; see
-    /// `send_hook_response_waits_for_the_transport_lock_before_writing_to_stdin`.
+    /// **Lock-free on a connected client**: it writes through the stdin sender
+    /// cloned once by `connect()`, so it neither holds nor takes the transport
+    /// mutex. A task that keeps that mutex — a caller streaming a turn, say —
+    /// cannot delay a hook answer.
+    ///
+    /// On a client that was never connected, or one already disconnected, there
+    /// is no cached sender and the method falls back to
+    /// `Transport::send_sdk_control_response`, which does take the mutex
+    /// briefly.
     ///
     /// # Arguments
     /// * `request_id` - The request_id from the original hook_callback control message
@@ -719,13 +800,8 @@ impl InteractiveClient {
             },
         };
 
-        // Use stdin_tx directly (lock-free path) if available
-        let stdin_tx = {
-            let transport = self.transport.lock().await;
-            transport.clone_stdin_sender()
-        };
-
-        if let Some(tx) = stdin_tx {
+        // Use the sender cached at connect() — no mutex on this path at all.
+        if let Some(tx) = &self.stdin_tx {
             let json = serde_json::to_string(&response_json)?;
             tx.send(json).await.map_err(|e| {
                 SdkError::ConnectionError(format!("Failed to send hook response: {}", e))
@@ -831,6 +907,9 @@ impl InteractiveClient {
         transport.disconnect().await?;
         drop(transport);
 
+        // The CLI's stdin is closed: a cached sender would now be a channel
+        // nobody reads.
+        self.stdin_tx = None;
         self.connected = false;
         info!("Disconnected from Claude CLI");
         Ok(())
@@ -840,6 +919,31 @@ impl InteractiveClient {
 // ============================================================================
 // Standalone hook helpers (for use without client lock)
 // ============================================================================
+
+/// Read `tool_use_id` (or `toolUseId`) off a `hook_callback` request, refusing a
+/// value that is present but is not a string.
+///
+/// This is the manual fallback both dispatchers take when
+/// `SDKHookCallbackRequest` fails to deserialize — and an ill-typed
+/// `tool_use_id` is one of the few things that makes it fail. The fallback used
+/// to call `.as_str()` and hand the callback `None`, i.e. tell a `PreToolUse`
+/// hook that there is no tool at all while the CLI was asking about one. The
+/// request is malformed, whichever callback it names, so it is answered with an
+/// `error` control response instead: the CLI gets a definite answer, and no hook
+/// ever decides about a tool it could not identify.
+fn manual_tool_use_id(request_data: &serde_json::Value) -> Result<Option<String>> {
+    match request_data
+        .get("tool_use_id")
+        .or_else(|| request_data.get("toolUseId"))
+    {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(serde_json::Value::String(id)) => Ok(Some(id.clone())),
+        Some(other) => Err(SdkError::MessageParseError {
+            error: format!("hook_callback tool_use_id must be a string, got {other}"),
+            raw: other.to_string(),
+        }),
+    }
+}
 
 /// Check if a raw SDK control JSON message is a `hook_callback`.
 ///
@@ -885,11 +989,11 @@ pub async fn dispatch_hook_from_registry(
                 .get("input")
                 .cloned()
                 .unwrap_or(serde_json::json!({}));
-            let tool_use_id = request_data
-                .get("tool_use_id")
-                .or_else(|| request_data.get("toolUseId"))
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string());
+            let tool_use_id = match manual_tool_use_id(request_data) {
+                Ok(id) => id,
+                // Refuse rather than pretend there is no tool at all.
+                Err(e) => return Some(Err(e)),
+            };
             (cb_id.to_string(), input, tool_use_id)
         };
 
@@ -1672,6 +1776,8 @@ mod tests {
 
     #[tokio::test]
     async fn every_turn_operation_is_refused_before_connect() {
+        // All nine of them: the two stream getters used to hand out an empty
+        // stream instead.
         let (transport, _handle) = MockTransport::pair();
         let mut client = InteractiveClient::from_transport(transport);
 
@@ -1687,8 +1793,16 @@ mod tests {
         assert_not_connected(client.set_permission_mode("plan").await.err());
         assert_not_connected(client.interrupt().await.err());
         {
-            // The stream borrows the client, so scope it.
+            // The streams borrow the client, so scope them.
             let stream = client.send_and_receive_stream("hi".to_string()).await;
+            assert_not_connected(stream.err());
+        }
+        {
+            let stream = client.receive_messages_stream().await;
+            assert_not_connected(stream.err());
+        }
+        {
+            let stream = client.receive_response_stream().await;
             assert_not_connected(stream.err());
         }
 
@@ -1850,33 +1964,38 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn send_and_receive_never_returns_when_the_stream_ends_without_a_result() {
+    async fn send_and_receive_reports_a_stream_that_ends_without_a_result() {
+        // This used to be the infinite `else { sleep 10 ms }` branch: the loop
+        // consumed the script, then polled an exhausted stream forever.
         let (transport, handle) = ScriptedBuilder::new().msg(system_message("init")).build();
         let mut client = InteractiveClient::from_transport(transport);
         client.connect().await.unwrap();
 
-        let outcome = tokio::time::timeout(
-            std::time::Duration::from_millis(150),
+        let error = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
             client.send_and_receive("hi".to_string()),
         )
-        .await;
+        .await
+        .expect("an exhausted stream must end the turn, not spin on a 10 ms sleep")
+        .expect_err("there was no Result message to return");
 
         assert!(
-            outcome.is_err(),
-            "send_and_receive returned {outcome:?}; a stream that ended without a \
-             Result message is supposed to leave it spinning on a 10 ms sleep"
+            matches!(&error, SdkError::TransportError(why) if why.contains("ended before a Result")),
+            "got {error:?}"
         );
         assert!(
             handle.queue.lock().expect("queue").is_empty(),
-            "the loop consumed the script, then kept polling an exhausted stream"
+            "the whole script was consumed before the stream ended"
         );
     }
 
     #[tokio::test]
-    async fn send_and_receive_loses_messages_emitted_before_it_subscribes() {
-        // `send_and_receive` re-subscribes to the broadcast on every iteration
-        // of its loop, and a tokio broadcast replays nothing: anything the CLI
-        // printed before the subscription is gone.
+    async fn send_and_receive_cannot_see_what_was_broadcast_before_the_call() {
+        // The subscription now opens inside the call, before the prompt is
+        // written, and stays open for the whole turn — but a tokio broadcast
+        // still replays nothing, so what the CLI printed *before* the call is
+        // gone for good. A caller who needs that history must hold a
+        // `subscribe_messages()` stream across turns instead.
         let (transport, handle) = MockTransport::pair();
         let mut client = InteractiveClient::from_transport(transport);
         client.connect().await.unwrap();
@@ -1901,24 +2020,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn send_and_receive_survives_a_broadcast_when_it_is_subscribed() {
+    async fn send_and_receive_keeps_one_subscription_for_the_whole_turn() {
+        // The two messages are broadcast back to back. The old loop dropped its
+        // subscription after the first one and a tokio broadcast replays
+        // nothing, so `done` was lost and the turn never ended; now a single
+        // subscription spans the turn and both messages arrive.
         let (transport, handle) = MockTransport::pair();
         let mut client = InteractiveClient::from_transport(transport);
         client.connect().await.unwrap();
 
         let tx = handle.inbound_message_tx.clone();
-        let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let feeder_done = done.clone();
         let feeder = tokio::spawn(async move {
             await_subscribers(&tx, 1).await;
             tx.send(system_message("init")).expect("subscribed");
-            // The loop drops its subscription after every message and a tokio
-            // broadcast replays nothing, so the terminal message has to be
-            // offered again and again until one lands inside a window.
-            while !feeder_done.load(std::sync::atomic::Ordering::SeqCst) {
-                let _ = tx.send(result_message("done"));
-                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-            }
+            tx.send(result_message("done")).expect("subscribed");
         });
 
         let messages = tokio::time::timeout(
@@ -1926,13 +2041,17 @@ mod tests {
             client.send_and_receive("hi".to_string()),
         )
         .await
-        .expect("the turn completes once both messages land in a subscription window")
+        .expect("a burst of messages must not fall outside the subscription window")
         .expect("no transport error");
-        done.store(true, std::sync::atomic::Ordering::SeqCst);
         feeder.await.expect("feeder");
 
         assert_eq!(system_subtypes(&messages), vec!["init".to_string()]);
         assert!(matches!(messages.last(), Some(Message::Result { .. })));
+        assert_eq!(
+            handle.inbound_message_tx.receiver_count(),
+            0,
+            "the turn's subscription is dropped when the turn ends"
+        );
     }
 
     // ========================================================================
@@ -2058,19 +2177,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn receive_response_never_returns_when_the_stream_ends_without_a_result() {
+    async fn receive_response_reports_a_stream_that_ends_without_a_result() {
         let (transport, _handle) = ScriptedBuilder::new().msg(system_message("init")).build();
         let mut client = InteractiveClient::from_transport(transport);
         client.connect().await.unwrap();
 
-        let outcome = tokio::time::timeout(
-            std::time::Duration::from_millis(150),
-            client.receive_response(),
-        )
-        .await;
+        let error =
+            tokio::time::timeout(std::time::Duration::from_secs(5), client.receive_response())
+                .await
+                .expect("an exhausted stream must not leave receive_response in a 10 ms busy loop")
+                .expect_err("there was no Result message to return");
         assert!(
-            outcome.is_err(),
-            "an exhausted stream leaves receive_response in its 10 ms busy loop; got {outcome:?}"
+            matches!(&error, SdkError::TransportError(why) if why.contains("ended before a Result")),
+            "got {error:?}"
         );
     }
 
@@ -2088,7 +2207,7 @@ mod tests {
         let mut client = InteractiveClient::from_transport(transport);
         client.connect().await.unwrap();
 
-        let stream = client.receive_messages_stream().await;
+        let stream = client.receive_messages_stream().await.unwrap();
         let mut stream = std::pin::pin!(stream);
         let mut collected = Vec::new();
         while let Some(item) = stream.next().await {
@@ -2107,38 +2226,32 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn receive_messages_stream_holds_the_transport_lock_after_its_reader_is_gone() {
-        // The spawned forwarder takes `self.transport.lock()` and keeps the guard
-        // for its whole life. It only exits when a *further* message makes the
-        // channel send fail, so dropping the stream is not enough to free the
-        // client: every other method deadlocks in the meantime.
+    async fn receive_messages_stream_leaves_the_transport_lock_free() {
+        // The relay used to take `self.transport.lock()` and keep the guard for
+        // its whole life, which starved every other method of the client until
+        // one further message made its channel send fail. The subscription now
+        // happens before the spawn, under a guard that is dropped immediately.
         let (transport, handle) = MockTransport::pair();
         let mut client = InteractiveClient::from_transport(transport);
         client.connect().await.unwrap();
 
-        drop(client.receive_messages_stream().await);
+        drop(client.receive_messages_stream().await.unwrap());
         await_subscribers(&handle.inbound_message_tx, 1).await;
 
-        let blocked = tokio::time::timeout(
+        tokio::time::timeout(
             std::time::Duration::from_millis(150),
             client.send_message("hi".to_string()),
         )
-        .await;
-        assert!(
-            blocked.is_err(),
-            "send_message should still be waiting for the transport mutex; got {blocked:?}"
-        );
-
-        // One message unblocks the forwarder: its send fails, it breaks, the
-        // guard drops, and the client becomes usable again.
-        handle.inbound_message_tx.send(system_message("late")).ok();
-        tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            client.send_message("hi".to_string()),
-        )
         .await
-        .expect("the lock is released once the forwarder exits")
+        .expect("the relay owns a broadcast subscription, not the transport mutex")
         .expect("send_message succeeds");
+
+        // What has NOT changed: the relay itself still only notices the dropped
+        // receiver on its next send, so its subscription outlives the stream by
+        // one message.
+        assert_eq!(handle.inbound_message_tx.receiver_count(), 1);
+        handle.inbound_message_tx.send(system_message("late")).ok();
+        await_subscribers(&handle.inbound_message_tx, 0).await;
     }
 
     #[tokio::test]
@@ -2151,7 +2264,7 @@ mod tests {
         let mut client = InteractiveClient::from_transport(transport);
         client.connect().await.unwrap();
 
-        let stream = client.receive_response_stream().await;
+        let stream = client.receive_response_stream().await.unwrap();
         let mut stream = std::pin::pin!(stream);
         let mut collected = Vec::new();
         while let Some(item) = stream.next().await {
@@ -2172,7 +2285,7 @@ mod tests {
         let mut client = InteractiveClient::from_transport(transport);
         client.connect().await.unwrap();
 
-        let stream = client.receive_response_stream().await;
+        let stream = client.receive_response_stream().await.unwrap();
         let mut stream = std::pin::pin!(stream);
         let error = stream.next().await.expect("one item").unwrap_err();
         assert!(
@@ -2320,8 +2433,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dispatch_hook_callback_falls_back_to_manual_fields_and_drops_a_malformed_tool_use_id()
-    {
+    async fn dispatch_hook_callback_refuses_a_malformed_tool_use_id() {
         let callback = Arc::new(TestHookCallback::new());
         let (client, id) = client_with_one_callback(callback.clone()).await;
 
@@ -2336,18 +2448,24 @@ mod tests {
             }
         });
 
-        let output = client
+        let error = client
             .dispatch_hook_callback(&control_msg)
             .await
-            .expect("the manual path finds the callback through its camelCase key")
-            .expect("the callback ran");
-        match output {
-            HookJSONOutput::Sync(sync) => assert_eq!(sync.continue_, Some(true)),
-            other => panic!("expected a Sync output, got {other:?}"),
+            .expect("a malformed request is answered, not ignored")
+            .expect_err("42 is not a tool use id");
+        match error {
+            SdkError::MessageParseError { error, raw } => {
+                assert!(
+                    error.contains("tool_use_id must be a string"),
+                    "got {error}"
+                );
+                assert_eq!(raw, "42");
+            },
+            other => panic!("expected MessageParseError, got {other:?}"),
         }
-        assert_eq!(callback.calls().await, 1);
-        // The ill-typed toolUseId is silently dropped rather than refused: the
-        // callback is told there is no tool_use_id at all.
+        // The callback is never told "there is no tool" about a request that
+        // named one.
+        assert_eq!(callback.calls().await, 0);
         assert_eq!(callback.last_tool_use_id().await, None);
     }
 
@@ -2397,6 +2515,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn dispatch_hook_callback_keeps_a_well_typed_tool_use_id_on_the_manual_path() {
+        let callback = Arc::new(TestHookCallback::new());
+        let (client, id) = client_with_one_callback(callback.clone()).await;
+
+        // No `input`, so `SDKHookCallbackRequest` cannot deserialize and the
+        // manual path takes over — but `tool_use_id` IS a string here, so it is
+        // carried through rather than refused. The request still fails further
+        // on, because the substituted `{}` is not a HookInput.
+        let control_msg = serde_json::json!({
+            "request": {
+                "subtype": "hook_callback",
+                "callback_id": id,
+                "tool_use_id": "toolu_7"
+            }
+        });
+
+        let error = client
+            .dispatch_hook_callback(&control_msg)
+            .await
+            .expect("the callback was found")
+            .expect_err("an empty input cannot be a HookInput");
+        assert!(
+            matches!(&error, SdkError::MessageParseError { error, .. } if error.contains("Invalid hook input")),
+            "a usable tool_use_id must not be mistaken for a malformed one: {error:?}"
+        );
+        assert_eq!(callback.calls().await, 0);
+    }
+
+    #[tokio::test]
     async fn dispatch_hook_callback_reads_a_flat_control_message_too() {
         let callback = Arc::new(TestHookCallback::new());
         let (client, id) = client_with_one_callback(callback.clone()).await;
@@ -2428,7 +2575,9 @@ mod tests {
     #[tokio::test]
     async fn send_hook_response_writes_one_json_line_to_stdin_when_the_transport_has_one() {
         let (transport, mut handle) = ScriptedBuilder::new().with_stdin().build();
-        let client = InteractiveClient::from_transport(transport);
+        let mut client = InteractiveClient::from_transport(transport);
+        // The stdin writer is cached by connect(); before it there is none.
+        client.connect().await.unwrap();
 
         let output = Ok(HookJSONOutput::Sync(SyncHookJSONOutput {
             continue_: Some(false),
@@ -2460,7 +2609,8 @@ mod tests {
     #[tokio::test]
     async fn send_hook_response_reports_a_closed_stdin_channel() {
         let (transport, handle) = ScriptedBuilder::new().with_stdin().build();
-        let client = InteractiveClient::from_transport(transport);
+        let mut client = InteractiveClient::from_transport(transport);
+        client.connect().await.unwrap();
         // Drop the receiving half: the CLI is gone.
         drop(handle.stdin_rx);
 
@@ -2551,8 +2701,8 @@ mod tests {
         );
         assert_eq!(callback.calls().await, 0);
 
-        // The manual fallback path, with a tool_use_id that does come through.
-        let output = dispatch_hook_from_registry(
+        // The manual fallback path, refusing an ill-typed tool_use_id.
+        let error = dispatch_hook_from_registry(
             &serde_json::json!({
                 "request": {
                     "subtype": "hook_callback",
@@ -2564,11 +2714,34 @@ mod tests {
             &registry,
         )
         .await
+        .expect("a malformed request is answered, not ignored")
+        .expect_err("42 is not a tool use id");
+        assert!(
+            matches!(&error, SdkError::MessageParseError { error, .. } if error.contains("tool_use_id must be a string")),
+            "got {error:?}"
+        );
+        assert_eq!(callback.calls().await, 0, "a refused request runs nothing");
+
+        // The manual fallback with a tool_use_id that IS a string: no `input` at
+        // all is what makes the structured parse fail here, `{}` is substituted,
+        // the id comes through untouched — and the request then fails on the
+        // HookInput parse, not on the id.
+        let error = dispatch_hook_from_registry(
+            &serde_json::json!({
+                "subtype": "hook_callback",
+                "callbackId": "cb-1",
+                "tool_use_id": "toolu_7"
+            }),
+            &registry,
+        )
+        .await
         .expect("found through the camelCase key")
-        .expect("the callback ran");
-        assert!(matches!(output, HookJSONOutput::Sync(_)));
-        assert_eq!(callback.calls().await, 1);
-        assert_eq!(callback.last_tool_use_id().await, None);
+        .expect_err("an empty input cannot be a HookInput");
+        assert!(
+            matches!(&error, SdkError::MessageParseError { raw, .. } if raw == "{}"),
+            "a usable tool_use_id must not be mistaken for a malformed one: {error:?}"
+        );
+        assert_eq!(callback.calls().await, 0);
 
         // The structured path, with a usable tool_use_id.
         dispatch_hook_from_registry(
@@ -2583,7 +2756,7 @@ mod tests {
         .await
         .expect("found")
         .expect("ran");
-        assert_eq!(callback.calls().await, 2);
+        assert_eq!(callback.calls().await, 1);
         assert_eq!(
             callback.last_tool_use_id().await,
             Some("toolu_9".to_string())
@@ -2605,7 +2778,7 @@ mod tests {
             matches!(&error, SdkError::MessageParseError { error, .. } if error.contains("Invalid hook input")),
             "got {error:?}"
         );
-        assert_eq!(callback.calls().await, 2, "a parse failure runs nothing");
+        assert_eq!(callback.calls().await, 1, "a parse failure runs nothing");
     }
 
     #[test]
@@ -2662,47 +2835,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn send_hook_response_waits_for_the_transport_lock_before_writing_to_stdin() {
-        // The relay spawned by `receive_messages_stream` keeps `transport.lock()`
-        // for its whole life. `send_hook_response` needs the same mutex to clone
-        // the stdin sender, so the "lock-free" write path is only lock-free once
-        // it has that clone in hand.
-        let (transport, handle) = MockTransport::pair();
-        let mut client = InteractiveClient::from_transport(transport);
-        client.connect().await.unwrap();
-        drop(client.receive_messages_stream().await);
-        await_subscribers(&handle.inbound_message_tx, 1).await;
-
-        let output = Ok(HookJSONOutput::Sync(SyncHookJSONOutput::default()));
-        let blocked = tokio::time::timeout(
-            std::time::Duration::from_millis(150),
-            client.send_hook_response("req-blocked", &output),
-        )
-        .await;
-        assert!(
-            blocked.is_err(),
-            "send_hook_response should still be queued behind the relay's guard; got {blocked:?}"
-        );
-
-        // Freeing the relay frees the method.
-        handle.inbound_message_tx.send(system_message("late")).ok();
-        tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            client.send_hook_response("req-unblocked", &output),
-        )
-        .await
-        .expect("the guard is gone")
-        .expect("the fallback write succeeds");
-    }
-
-    #[tokio::test]
-    #[ignore = "known defect: send_hook_response cannot write while another task holds the transport mutex; the fix is to cache the stdin sender on InteractiveClient at connect() instead of asking the transport for it on every call"]
     async fn send_hook_response_should_not_need_the_transport_lock_at_all() {
-        let (transport, handle) = MockTransport::pair();
+        let (transport, mut handle) = ScriptedBuilder::new().with_stdin().build();
         let mut client = InteractiveClient::from_transport(transport);
         client.connect().await.unwrap();
-        drop(client.receive_messages_stream().await);
-        await_subscribers(&handle.inbound_message_tx, 1).await;
+
+        let transport_mutex = client.transport.clone();
+        let _held = transport_mutex.lock().await;
 
         let output = Ok(HookJSONOutput::Sync(SyncHookJSONOutput::default()));
         tokio::time::timeout(
@@ -2710,7 +2849,54 @@ mod tests {
             client.send_hook_response("req-1", &output),
         )
         .await
-        .expect("a hook answer must not wait for a streaming relay")
+        .expect("a hook answer must not wait for the transport mutex")
         .expect("the write succeeds");
+
+        let line = handle
+            .stdin_rx
+            .as_mut()
+            .expect("stdin")
+            .recv()
+            .await
+            .expect("one line");
+        let parsed: serde_json::Value = serde_json::from_str(&line).expect("valid JSON");
+        assert_eq!(parsed["response"]["request_id"], "req-1");
+    }
+
+    #[tokio::test]
+    async fn disconnect_forgets_the_cached_stdin_sender_and_connect_re_arms_it() {
+        // Caching the sender at connect() without clearing it here would be a
+        // worse defect than the mutex it removes: hook answers would keep being
+        // queued on a channel the CLI no longer reads.
+        let (transport, mut handle) = ScriptedBuilder::new().with_stdin().build();
+        let mut client = InteractiveClient::from_transport(transport);
+        client.connect().await.unwrap();
+        client.disconnect().await.unwrap();
+
+        let output = Ok(HookJSONOutput::Sync(SyncHookJSONOutput::default()));
+        client
+            .send_hook_response("req-after-disconnect", &output)
+            .await
+            .expect("the fallback answers through the transport");
+        assert!(
+            handle.stdin_rx.as_mut().expect("stdin").try_recv().is_err(),
+            "nothing may be written to the stdin of a disconnected client"
+        );
+
+        // A reconnect re-arms the cached sender.
+        client.connect().await.unwrap();
+        client
+            .send_hook_response("req-reconnected", &output)
+            .await
+            .unwrap();
+        let line = handle
+            .stdin_rx
+            .as_mut()
+            .expect("stdin")
+            .recv()
+            .await
+            .expect("one line");
+        let parsed: serde_json::Value = serde_json::from_str(&line).expect("valid JSON");
+        assert_eq!(parsed["response"]["request_id"], "req-reconnected");
     }
 }

@@ -36,7 +36,7 @@ async fn main() -> Result<()> {
 
     // Receive messages as a stream
     {
-        let stream = client.receive_messages_stream().await;
+        let stream = client.receive_messages_stream().await?;
         pin!(stream);
         while let Some(result) = stream.next().await {
             match result {
@@ -59,7 +59,7 @@ async fn main() -> Result<()> {
 
     // Use the convenience method that stops at Result message
     {
-        let stream = client.receive_response_stream().await;
+        let stream = client.receive_response_stream().await?;
         pin!(stream);
         while let Some(result) = stream.next().await {
             match result {
@@ -78,7 +78,7 @@ async fn main() -> Result<()> {
         .await?;
 
     {
-        let stream = client.receive_response_stream().await;
+        let stream = client.receive_response_stream().await?;
         pin!(stream);
         while let Some(result) = stream.next().await {
             match result {
@@ -95,7 +95,7 @@ async fn main() -> Result<()> {
         .await?;
 
     {
-        let stream = client.receive_response_stream().await;
+        let stream = client.receive_response_stream().await?;
         pin!(stream);
         while let Some(result) = stream.next().await {
             match result {
@@ -113,7 +113,7 @@ async fn main() -> Result<()> {
 
     // Process messages as they arrive
     let message_count = {
-        let stream = client.receive_messages_stream().await;
+        let stream = client.receive_messages_stream().await?;
         pin!(stream);
         let mut count = 0;
 

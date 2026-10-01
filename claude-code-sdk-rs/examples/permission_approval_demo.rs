@@ -95,7 +95,13 @@ async fn main() -> Result<()> {
         tokio::spawn(async move {
             // Hold the lock for the entire stream duration
             let mut c = client.lock().await;
-            let mut stream = c.receive_messages_stream().await;
+            let mut stream = match c.receive_messages_stream().await {
+                Ok(stream) => stream,
+                Err(e) => {
+                    let _ = msg_tx.send(Err(e)).await;
+                    return;
+                },
+            };
 
             while let Some(result) = stream.next().await {
                 if msg_tx.send(result).await.is_err() {
