@@ -653,10 +653,10 @@ mod header_parsing {
             "2026-10-01",
             "TODO",
             "HEAD",
-            "abc123",                      // too short
-            "ABC1234",                     // uppercase is not what git emits
-            "zzzzzzz",                     // not hex
-            &"a".repeat(41),               // too long
+            "abc123",        // too short
+            "ABC1234",       // uppercase is not what git emits
+            "zzzzzzz",       // not hex
+            &"a".repeat(41), // too long
         ] {
             let mmd = format!("%% name: x\n%% covers: nexus:a.rs\n%% verified: {bad}\n");
             let err = parse_header(&mmd).expect_err(&format!("{bad} should be refused"));
