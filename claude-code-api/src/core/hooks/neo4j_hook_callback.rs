@@ -201,7 +201,7 @@ impl Neo4jHookCallback {
         let output_truncated = if output_json.len() > self.config.max_output_size {
             format!(
                 "{}...[truncated]",
-                &output_json[..self.config.max_output_size]
+                floor_char_boundary(&output_json, self.config.max_output_size)
             )
         } else {
             output_json.clone()
@@ -233,18 +233,23 @@ impl Neo4jHookCallback {
         .param("tool_name", input.tool_name.clone())
         .param("input", input_json.clone())
         .param("output", output_truncated)
-        .param("duration_ms", duration_ms.unwrap_or(-1))
+        // `Option<i64>` so an untimed tool use stores `null`, which is what the
+        // schema at the top of this module documents (`duration_ms: Int?`) and
+        // what `handle_stop`'s `sum(COALESCE(t.duration_ms, 0))` expects. The
+        // previous sentinel `-1` was indistinguishable from a measurement and
+        // subtracted a millisecond per untimed tool from the session total.
+        .param("duration_ms", duration_ms)
         .param("session_id", input.session_id.clone())
         .param("now", now.to_rfc3339());
 
         if let Err(e) = self.graph.run(q).await {
             warn!("Failed to store tool usage in Neo4j: {}", e);
+        } else if let Some(ms) = duration_ms {
+            debug!("Stored tool usage: {} ({}ms)", input.tool_name, ms);
         } else {
-            debug!(
-                "Stored tool usage: {} ({}ms)",
-                input.tool_name,
-                duration_ms.unwrap_or(-1)
-            );
+            // Not `(-1ms)`: the log carried the same sentinel as the node, so a
+            // tool call nobody timed read as a measured one.
+            debug!("Stored tool usage: {} (untimed)", input.tool_name);
         }
 
         // Index in Meilisearch if configured
@@ -364,19 +369,50 @@ impl HookCallback for Neo4jHookCallback {
             HookInput::PostToolUse(post) => self.handle_post_tool_use(post, tool_use_id).await,
             HookInput::UserPromptSubmit(prompt) => self.handle_user_prompt_submit(prompt).await,
             HookInput::Stop(stop) => self.handle_stop(stop).await,
-            // Other hook types - just continue
-            _ => Ok(HookJSONOutput::Sync(SyncHookJSONOutput::default())),
+            // Other hook types are not persisted. `SubagentStop` and
+            // `PreCompact` reach this arm, so nothing records a sub-agent
+            // finishing or a context compaction even though the schema above
+            // lists `event_type: "compact"`. Name the dropped event rather than
+            // discarding it without a trace.
+            other => {
+                debug!("Hook event not persisted by Neo4jHookCallback: {other:?}");
+                Ok(HookJSONOutput::Sync(SyncHookJSONOutput::default()))
+            },
         }
     }
 }
 
 /// Truncate a string for search indexing
+///
+/// `max_len` is a **byte** budget, so the cut is rounded down to the nearest
+/// UTF-8 character boundary (see [`floor_char_boundary`]): the summaries come
+/// from `serde_json`, which emits non-ASCII verbatim.
 fn truncate_for_search(s: &str, max_len: usize) -> String {
     if s.len() <= max_len {
         s.to_string()
     } else {
-        format!("{}...", &s[..max_len])
+        format!("{}...", floor_char_boundary(s, max_len))
     }
+}
+
+/// The longest prefix of `s` that is at most `max_bytes` long **and** ends on a
+/// UTF-8 character boundary.
+///
+/// Both truncations in this module measure a byte budget against a string built
+/// by `serde_json`, which does not escape non-ASCII: a tool input or response
+/// holding one accent, one emoji or one CJK glyph can put a multi-byte character
+/// astride the limit. Slicing there with `&s[..max_bytes]` panics, and a panic
+/// inside a hook callback takes the hook down rather than storing a shorter
+/// string, so the cut walks back to the start of that character instead.
+fn floor_char_boundary(s: &str, max_bytes: usize) -> &str {
+    if s.len() <= max_bytes {
+        return s;
+    }
+    let mut end = max_bytes;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
 }
 
 #[cfg(test)]
@@ -387,6 +423,110 @@ mod tests {
     fn test_truncate_for_search() {
         assert_eq!(truncate_for_search("hello", 10), "hello");
         assert_eq!(truncate_for_search("hello world", 5), "hello...");
+    }
+
+    /// `max_len` is a byte budget, so the boundary cases are the exact length
+    /// and one byte over it.
+    #[test]
+    fn truncate_for_search_keeps_a_string_of_exactly_max_len() {
+        assert_eq!(truncate_for_search("hello", 5), "hello");
+        assert_eq!(truncate_for_search("hello!", 5), "hello...");
+    }
+
+    #[test]
+    fn truncate_for_search_with_a_zero_budget_is_only_the_ellipsis() {
+        assert_eq!(truncate_for_search("hello", 0), "...");
+        assert_eq!(truncate_for_search("", 0), "");
+    }
+
+    /// Regression test for the panic: `truncate_for_search` used to slice at
+    /// `&s[..max_len]`, which aborts when the budget lands inside a multi-byte
+    /// character. `é` is two bytes, so a budget of 4 on `"aaaéaaa"` falls between
+    /// them. Against the previous code this test panics with
+    /// "byte index 4 is not a char boundary".
+    #[test]
+    fn truncate_for_search_does_not_panic_on_a_multibyte_boundary() {
+        assert_eq!(truncate_for_search("aaaéaaa", 4), "aaa...");
+        // A 3-byte CJK glyph and a 4-byte emoji, cut at every offset inside them.
+        assert_eq!(truncate_for_search("ab漢字", 3), "ab...");
+        assert_eq!(truncate_for_search("ab漢字", 4), "ab...");
+        assert_eq!(truncate_for_search("ab漢字", 5), "ab漢...");
+        assert_eq!(truncate_for_search("ab🦀!", 3), "ab...");
+        assert_eq!(truncate_for_search("ab🦀!", 5), "ab...");
+        assert_eq!(truncate_for_search("ab🦀!", 6), "ab🦀...");
+    }
+
+    /// The whole budget may be eaten by a single character, in which case the
+    /// prefix is empty rather than a panic.
+    #[test]
+    fn floor_char_boundary_returns_an_empty_prefix_when_the_first_char_is_too_wide() {
+        assert_eq!(floor_char_boundary("🦀x", 1), "");
+        assert_eq!(floor_char_boundary("🦀x", 3), "");
+        assert_eq!(floor_char_boundary("🦀x", 4), "🦀");
+    }
+
+    #[test]
+    fn floor_char_boundary_returns_the_whole_string_when_it_fits() {
+        assert_eq!(floor_char_boundary("héllo", 6), "héllo");
+        assert_eq!(floor_char_boundary("héllo", 99), "héllo");
+    }
+
+    /// `INDEX_TOOL_USAGE` is the index `handle_post_tool_use` claims to write to.
+    /// It is a `pub const` that `hooks::mod` does not re-export and that nothing
+    /// in the crate reads: the Meilisearch branch builds a
+    /// [`ToolUsageDocument`] and then only `debug!`s it. See the report.
+    #[test]
+    fn index_tool_usage_names_an_index_nothing_writes_to() {
+        assert_eq!(INDEX_TOOL_USAGE, "nexus_tool_usage");
+    }
+
+    /// The document is the hook's Meilisearch contract, so its field names are
+    /// part of the stored shape: `created_at` is a Unix timestamp (seconds),
+    /// unlike the Neo4j node, which stores an ISO-8601 `datetime()`.
+    #[test]
+    fn tool_usage_document_serialises_with_the_field_names_meilisearch_indexes() {
+        let doc = ToolUsageDocument {
+            id: "doc-1".to_string(),
+            tool_name: "Read".to_string(),
+            input_summary: "{\"file\":\"a.txt\"}".to_string(),
+            output_summary: "ok".to_string(),
+            session_id: "sess-1".to_string(),
+            created_at: 1_700_000_000,
+        };
+
+        let json = serde_json::to_value(&doc).expect("a document is serialisable");
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "id": "doc-1",
+                "tool_name": "Read",
+                "input_summary": "{\"file\":\"a.txt\"}",
+                "output_summary": "ok",
+                "session_id": "sess-1",
+                "created_at": 1_700_000_000,
+            })
+        );
+
+        let back: ToolUsageDocument =
+            serde_json::from_value(json).expect("and round-trips back out of the index");
+        assert_eq!(back.id, doc.id);
+        assert_eq!(back.created_at, doc.created_at);
+    }
+
+    #[test]
+    fn config_can_be_built_without_meilisearch_indexing() {
+        let config = Neo4jHookCallbackConfig {
+            max_output_size: 16,
+            index_in_meilisearch: false,
+            log_pre_tool_use: true,
+        };
+        // `Clone` + `Debug` are part of the public surface: the gateway stores
+        // the config by value in the callback and logs it on startup.
+        let clone = config.clone();
+        assert_eq!(clone.max_output_size, 16);
+        assert!(!clone.index_in_meilisearch);
+        assert!(clone.log_pre_tool_use);
+        assert!(format!("{config:?}").contains("max_output_size: 16"));
     }
 
     #[test]
