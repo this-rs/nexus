@@ -1,0 +1,144 @@
+%% name: po-bugs
+%% covers: nexus:docs/BUGS.md nexus:claude-code-api/tests/bug_registry.rs
+%% verified: 8ac7830
+%%
+%% Le sha ci-dessus est l'etat du depot contre lequel les CONSTATS ont ete
+%% releves. Les verdicts par bug ont ete releves le 01/10/2026 contre
+%% origin/main des depots backend et frontend, et non contre le rapport du
+%% 30/09 qui les proposait.
+%%
+%% PROUVE
+%%   - Les treize entrees ont ete relues dans le code : huit sont fermees,
+%%     cinq sont vivantes. Chaque verdict cite une fonction et un commit.
+%%   - Le statut vient de git, jamais du champ de statut d'une tache :
+%%     git merge-base --is-ancestor dit qu'aucune des trois branches de
+%%     correctif n'est un ancetre d'origin/main, alors que deux des taches
+%%     correspondantes sont marquees completed.
+%%   - La porte attrape quatre mutations rejouees sans elle : un glyphe
+%%     change dans la table, une ligne sans noeud, un .mmd non indexe, et
+%%     une ligne ✅ qui ne cite aucun commit.
+%%
+%% SOURCES LUES
+%%   - WhereBuilder::add_search_filter, add_assigned_to_filter, add_tags_filter
+%%     (backend src/neo4j/client.rs)
+%%   - require_auth (backend src/auth/middleware.rs), Claims::anonymous
+%%     (backend src/auth/jwt.rs)
+%%   - retract_sharing (backend src/api/sharing_handlers.rs), persist_tombstone
+%%     (backend src/neo4j/sharing.rs)
+%%   - update_task, get_progress_batch, retry_plan_task (backend
+%%     src/api/handlers.rs), get_neighborhood (backend src/api/graph_handlers.rs)
+%%   - fetch_active_plans_and_tasks, CompactionContext::to_markdown,
+%%     pending_objectives_oneliner (backend src/chat/compaction_context.rs)
+%%   - on_task_completed_cascade_steps (backend src/events/reactions.rs)
+%%   - update_workspace_milestone (backend src/api/workspace_handlers.rs,
+%%     src/neo4j/workspace.rs, src/orchestrator/runner.rs)
+%%   - runnerApi.retryTask, progressApi.getBatch, neighborhoodApi.get,
+%%     protocolApi.triggerEvent (frontend src/services/)
+%%   - parse_registry_rows, parse_diagram_nodes, parse_index
+%%     (claude-code-api/tests/bug_registry.rs)
+%%
+%% NON ETABLI
+%%   - Les noeuds 🔴 par domaine (artefact 3 de la convention) : les
+%%     diagrammes backend et frontend n'existent pas encore, tache 0.2.
+%%   - La severite est posee a la main ; aucune regle ne la derive du code.
+%%   - Les memes format!("{:?}") existent sur PlanStatus, NoteStatus,
+%%     StepStatus, ReleaseStatus, MilestoneStatus : non audites ici.
+%%
+%% LEGENDE
+%%   ✅ verifie — le noeud dit comment
+%%   🟠 decide, non ecrit — le noeud dit quelle tache l'ecrira
+%%   🔴 refuse ou casse — la raison est dans le noeud
+%%   ⚪ amont — hors perimetre, le noeud dit ou cela vit
+%%
+%% Les noeuds citent des noms de fonctions, jamais de numeros de ligne.
+
+flowchart LR
+    subgraph cycle["The cycle — docs/BUGS.md §2"]
+        direction LR
+        d1["discovery<br/>🟠 any source; not mechanisable"] --> d2["verify against the default branch<br/>✅ done for all 13 entries on 2026-10-01;<br/>5 of 11 reports were already stale"]
+        d2 --> d3["task tagged bug + gotcha note<br/>🟠 convention; PO holds the link,<br/>no gate in this repository"]
+        d3 --> d4["red test, fails without the fix<br/>🟠 required by the PR template,<br/>task 1.2; not gated here"]
+        d4 --> d5["PR = one vertical slice<br/>fix + test + diagram + doc<br/>🟠 reviewer-checked, task 1.2"]
+        d5 --> d6["merged → ✅ node carrying its proof<br/>✅ gated: every_closed_bug_cites_its_proof<br/>_and_every_open_one_says_where_the_fix_is"]
+    end
+
+    subgraph routes["Domain: front↔back route contract"]
+        b1["route-retry-task-missing<br/>sev-high<br/>✅ retry_plan_task registered;<br/>backend 11da6159, locked by<br/>frontend apiContract.test.ts"]
+        b2["route-progress-batch-missing<br/>sev-medium<br/>✅ get_progress_batch registered;<br/>backend 621765cc"]
+        b3["route-graph-neighborhood-missing<br/>sev-medium<br/>✅ graph_handlers::get_neighborhood<br/>registered; backend f863694f"]
+        b4["route-protocol-run-history-missing<br/>sev-low<br/>✅ closed by deleting the caller<br/>protocolApi.getRunHistory;<br/>frontend ab15de4"]
+        b5["protocol-trigger-event-field-mismatch<br/>sev-high<br/>✅ triggerEvent now posts trigger,<br/>matching FireTransitionBody;<br/>frontend ab15de4 + contract test"]
+    end
+
+    subgraph security["Domain: security & sharing"]
+        b6["cypher-injection-wherebuilder<br/>sev-high<br/>🟠 WhereBuilder::add_search_filter and<br/>add_assigned_to_filter interpolate raw;<br/>fix only on unmerged fix/inject-escape"]
+        b7["auth-anonymous-without-config<br/>sev-high<br/>🔴 require_auth returns early with<br/>Claims::anonymous when auth_config is None;<br/>product decision pending on task 9f873bd5"]
+        b8["tombstone-placeholder-signature<br/>sev-high<br/>🟠 retract_sharing signs with a 128-zero<br/>placeholder, then persist_tombstone broadcasts;<br/>fix only on unmerged fix/tombstone-placeholder"]
+    end
+
+    subgraph chat["Domain: chat events & status rendering"]
+        b10["chat-input-request-never-emitted<br/>sev-low<br/>✅ variant deleted; it was only ever built<br/>in cfg(test) since 217564e;<br/>backend dde8bfbf"]
+        b11["chat-input-request-frontend-dead-listeners<br/>sev-low<br/>🔴 InputRequestBlock, useChat, chatAssembly<br/>still consume an event no producer emits;<br/>new, PO task 96c8c56c"]
+        b12["task-status-debug-in-api-payloads<br/>sev-high<br/>✅ WaveTask.status and DependencyGraphNode.status<br/>typed TaskStatus so serde owns the wire form;<br/>backend 03f78569 + serialization test"]
+        b13["task-status-debug-in-ws-and-compaction<br/>sev-medium<br/>🔴 update_task emits CrudEvent Failed, and<br/>fetch_active_plans_and_tasks prints INPROGRESS;<br/>new, PO task 73300ba4"]
+    end
+
+    subgraph data["Domain: workspace data"]
+        b9["workspace-milestone-update-panic<br/>sev-medium<br/>✅ update_workspace_milestone returns<br/>AppError::NotFound; neo4j run_matched<br/>returns bool; backend dde8bfbf"]
+    end
+
+    d6 --> b1
+    d6 --> b2
+    d6 --> b3
+    d6 --> b4
+    d6 --> b5
+    d6 --> b9
+    d6 --> b10
+    d6 --> b12
+    d3 --> b11
+    d3 --> b13
+    d5 --> b6
+    d5 --> b8
+    d3 --> b7
+
+    subgraph stale["Why 🟠 is not ✅ — the failure mode this registry exists to catch"]
+        s1["fix/inject-escape<br/>🔴 not an ancestor of origin/main;<br/>PO task efbb040e reads completed"]
+        s2["fix/tombstone-placeholder<br/>🔴 not an ancestor of origin/main;<br/>PO task 48b57611 reads completed"]
+        s3["fix/auth-hardening<br/>🔴 not an ancestor of origin/main;<br/>task 9f873bd5 blocked on a decision"]
+        s4["all three branch from a stale main<br/>🔴 thousands of lines of divergence,<br/>so none can be fast-forwarded as it stands"]
+    end
+
+    b6 --> s1
+    b8 --> s2
+    b7 --> s3
+    s1 --> s4
+    s2 --> s4
+    s3 --> s4
+
+    subgraph dedup["Deduplication — only genuinely new bugs got a task"]
+        p1["plan b36d511f<br/>⚪ 7 tasks; 3 already own the live bugs,<br/>the registry points at them, creates nothing"]
+        p2["plan 3c0dcc12<br/>⚪ draft, 0 tasks: nothing to duplicate"]
+        p3["2 tasks created: 96c8c56c, 73300ba4<br/>✅ both found by re-reading the code,<br/>neither had any prior owner"]
+    end
+
+    s1 --> p1
+    s2 --> p1
+    s3 --> p1
+    b11 --> p3
+    b13 --> p3
+    d3 --> p1
+    d3 --> p2
+
+    subgraph gate["Enforcement — claude-code-api/tests/bug_registry.rs"]
+        g1["parse_registry_rows<br/>✅ reads the table between the<br/>BUG-TABLE markers in docs/BUGS.md"]
+        g2["parse_diagram_nodes<br/>✅ reads every bug node in this file"]
+        g3["the_registry_and_the_diagram_agree<br/>✅ fails on a row without a node,<br/>a node without a row, or a glyph mismatch"]
+        g4["the_index_lists_every_diagram<br/>✅ INDEX.yml ↔ docs/diagrams/*.mmd,<br/>and each %% name: matches its entry"]
+    end
+
+    b1 --> g1
+    b6 --> g1
+    b13 --> g1
+    g1 --> g3
+    g2 --> g3
+    g3 --> g4

@@ -37,3 +37,12 @@ diagrams:
       - "nexus:.github/workflows/release.yml"
       - "nexus:script/check-version-consistency.sh"
       - "nexus:claude-code-api/tests/release_readiness.rs"
+
+  - name: po-bugs
+    file: docs/diagrams/po-bugs.mmd
+    owner: theotime
+    status: verified
+    verified: 8ac7830
+    covers:
+      - "nexus:docs/BUGS.md"
+      - "nexus:claude-code-api/tests/bug_registry.rs"
