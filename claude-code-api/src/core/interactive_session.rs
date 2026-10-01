@@ -104,6 +104,56 @@ fn build_process_died_event(reason: &str) -> ClaudeCodeOutput {
     }
 }
 
+/// Arguments whose VALUE (the next argument) must never reach a log.
+///
+/// `--mcp-config` is either a path or a whole JSON document describing each MCP
+/// server, `env` block and HTTP headers included — in practice the
+/// orchestrator's database password, search key and session token.
+const SECRET_BEARING_ARGS: [&str; 1] = ["--mcp-config"];
+
+/// A loggable description of the command about to be spawned.
+///
+/// `Debug for Command` prints every argument verbatim, so logging `{:?}` on the
+/// command leaked the `--mcp-config` payload at `info` level on every session
+/// creation. This keeps what a person debugging a launch needs — the program,
+/// the working directory, every argument, and the NAMES of the environment
+/// variables set — and replaces the value that follows a secret-bearing
+/// argument, plus every environment value.
+///
+/// Same discipline as `describe_command_redacted` in
+/// `claude-code-sdk-rs/src/transport/subprocess.rs`; duplicated rather than
+/// shared because that one is `pub(crate)` to the SDK crate.
+fn describe_command_redacted(cmd: &std::process::Command) -> String {
+    let mut args: Vec<String> = Vec::new();
+    let mut redact_next = false;
+    for arg in cmd.get_args() {
+        let arg = arg.to_string_lossy();
+        if redact_next {
+            args.push(format!("<redacted {} bytes>", arg.len()));
+            redact_next = false;
+            continue;
+        }
+        redact_next = SECRET_BEARING_ARGS.contains(&arg.as_ref());
+        args.push(arg.into_owned());
+    }
+
+    let mut env_keys: Vec<String> = cmd
+        .get_envs()
+        .map(|(k, _)| k.to_string_lossy().into_owned())
+        .collect();
+    env_keys.sort();
+
+    format!(
+        "program={} cwd={} args={:?} env_keys={:?}",
+        cmd.get_program().to_string_lossy(),
+        cmd.get_current_dir()
+            .map(|d| d.display().to_string())
+            .unwrap_or_else(|| "<inherited>".to_string()),
+        args,
+        env_keys,
+    )
+}
+
 impl InteractiveSessionManager {
     pub fn new(_claude_manager: Arc<ClaudeManager>, claude_command: String) -> Self {
         let manager = Self {
@@ -352,11 +402,16 @@ impl InteractiveSessionManager {
             cmd.arg("--dangerously-skip-permissions");
         }
 
-        // MCP configuration
-        if self.mcp_config.enabled
-            && let Some(ref config_file) = self.mcp_config.config_file
-        {
-            cmd.arg("--mcp-config").arg(config_file);
+        // MCP configuration.
+        // `config_file` wins over `config_json`, same precedence as
+        // `ClaudeManager::create_session`. Before this, `config_json` was read
+        // nowhere on the interactive path and the option was silently ignored.
+        if self.mcp_config.enabled {
+            if let Some(ref config_file) = self.mcp_config.config_file {
+                cmd.arg("--mcp-config").arg(config_file);
+            } else if let Some(ref config_json) = self.mcp_config.config_json {
+                cmd.arg("--mcp-config").arg(config_json);
+            }
         }
 
         cmd.stdin(Stdio::piped())
@@ -373,9 +428,11 @@ impl InteractiveSessionManager {
             });
         }
 
+        // Never `{:?}` the command: that prints the `--mcp-config` payload,
+        // which carries the MCP servers' credentials.
         info!(
-            "Starting interactive Claude session with command: {:?}",
-            cmd
+            "Starting interactive Claude session with command: {}",
+            describe_command_redacted(cmd.as_std())
         );
 
         let mut child = cmd.spawn()?;
@@ -717,13 +774,21 @@ impl InteractiveSessionManager {
         }
     }
 
-    /// Pre-warm a default process for faster first request.
+    /// Does nothing, successfully.
+    ///
+    /// **Not implemented.** Pre-warming an interactive session would mean
+    /// spawning a CLI process with no conversation to attach it to: the process
+    /// is keyed by `conversation_id` in [`Self::create_session`], and the first
+    /// request brings its own id, so a pre-warmed process could never be
+    /// claimed by it. Nothing is spawned, and `Ok(())` is returned
+    /// unconditionally — no caller can observe a failure here.
+    ///
+    /// `create_app` logs "Failed to pre-warm Claude process" if this returns
+    /// `Err`; that branch is therefore dead. Kept as a no-op (rather than
+    /// removed) because it is part of the startup sequence in `lib.rs`, which
+    /// belongs to another owner.
     pub async fn prewarm_default_session(&self) -> Result<()> {
-        info!("Pre-warming default Claude process for faster first request");
-
-        // TODO: Implement pre-warming logic
-        // Skipped for now — called from main.rs
-
+        debug!("Pre-warming requested — interactive sessions have no pre-warm path, skipping");
         Ok(())
     }
 
@@ -759,8 +824,351 @@ impl Drop for InteractiveSessionManager {
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::io::Write as _;
+    use std::path::PathBuf;
+    use std::time::Duration;
+    use tempfile::TempDir;
 
-    // ── build_process_died_event ──
+    // ───────────────────────────── test harness ─────────────────────────────
+
+    const STDERR_LINE: &str = "fake CLI diagnostic on stderr";
+
+    /// A stand-in for the `claude` CLI, portable between Unix and Windows.
+    ///
+    /// This crate has no transport abstraction: [`InteractiveSessionManager::create_session`]
+    /// calls `Command::new(&self.claude_command)` directly, so the command string
+    /// is the only seam. [`FakeCli`] writes a tiny script into a `TempDir` which
+    ///
+    /// 1. records its own argv in a file — that is how the tests below assert on
+    ///    the command line the production code actually built;
+    /// 2. prints a canned `stream-json` transcript on stdout;
+    /// 3. optionally writes one line on stderr;
+    /// 4. then either exits, or blocks until its stdin is closed (which models a
+    ///    live CLI waiting for the next turn).
+    ///
+    /// A blocking variant needs no explicit kill: its stdin is closed when the
+    /// session (or the `Child`) is dropped, the reader sees EOF and the process
+    /// exits on its own. Nothing here spawns a real `claude`, touches the network
+    /// or outlives the test.
+    struct FakeCli {
+        _dir: TempDir,
+        script: PathBuf,
+        argv: PathBuf,
+    }
+
+    impl FakeCli {
+        fn build(stdout: &str, with_stderr: bool, keep_alive: bool) -> Self {
+            let dir = tempfile::tempdir().expect("tempdir for the fake CLI");
+            let payload = dir.path().join("payload.ndjson");
+            std::fs::write(&payload, stdout).expect("write the fake CLI payload");
+            let argv = dir.path().join("argv.txt");
+            let script = dir
+                .path()
+                .join(if cfg!(windows) { "fake.cmd" } else { "fake.sh" });
+
+            let body = if cfg!(windows) {
+                let mut body = String::from("@echo off\r\n");
+                // Redirection first: an argument that ends in a digit would
+                // otherwise be read by cmd.exe as a stream number.
+                body.push_str(&format!("> \"{}\" echo %*\r\n", argv.display()));
+                body.push_str(&format!("type \"{}\"\r\n", payload.display()));
+                if with_stderr {
+                    body.push_str(&format!("echo {STDERR_LINE} 1>&2\r\n"));
+                }
+                if keep_alive {
+                    // `sort` reads stdin until EOF; while the session holds stdin
+                    // open it never returns, so the process stays alive.
+                    body.push_str("sort >nul 2>nul\r\n");
+                }
+                body.push_str("exit /b 0\r\n");
+                body
+            } else {
+                let mut body = String::from("#!/bin/sh\n");
+                body.push_str(&format!("echo \"$@\" > '{}'\n", argv.display()));
+                body.push_str(&format!("cat '{}'\n", payload.display()));
+                if with_stderr {
+                    body.push_str(&format!("echo '{STDERR_LINE}' 1>&2\n"));
+                }
+                if keep_alive {
+                    body.push_str("cat > /dev/null\n");
+                }
+                body.push_str("exit 0\n");
+                body
+            };
+
+            let mut file = std::fs::File::create(&script).expect("create the fake CLI script");
+            file.write_all(body.as_bytes())
+                .expect("write the fake CLI script");
+            drop(file);
+
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
+                    .expect("chmod the fake CLI script");
+            }
+
+            Self {
+                _dir: dir,
+                script,
+                argv,
+            }
+        }
+
+        /// Prints `transcript`, then exits 0.
+        fn emitting(transcript: &str) -> Self {
+            Self::build(transcript, false, false)
+        }
+
+        /// Prints nothing and exits 0 — the process is dead almost at once.
+        fn exiting() -> Self {
+            Self::build("", false, false)
+        }
+
+        /// Prints nothing and stays alive until its stdin is closed.
+        fn blocking() -> Self {
+            Self::build("", false, true)
+        }
+
+        /// Prints `transcript` and then stays alive until its stdin is closed.
+        fn emitting_then_blocking(transcript: &str) -> Self {
+            Self::build(transcript, false, true)
+        }
+
+        /// Writes one line on stderr, prints `transcript`, then exits.
+        fn noisy_on_stderr(transcript: &str) -> Self {
+            Self::build(transcript, true, false)
+        }
+
+        fn command(&self) -> String {
+            self.script.to_string_lossy().into_owned()
+        }
+
+        fn recorded_argv(&self) -> String {
+            std::fs::read_to_string(&self.argv).unwrap_or_default()
+        }
+
+        /// Forgets the argv of a previous spawn, so [`Self::argv`] can wait for
+        /// the next one instead of reading a stale line.
+        fn forget_argv(&self) {
+            let _ = std::fs::remove_file(&self.argv);
+        }
+
+        /// The argv of the last spawn, waiting for the script to record it.
+        ///
+        /// `create_session` returns as soon as the process is spawned, so the
+        /// script may not have run yet. Never use this in a `start_paused` test:
+        /// the sleep below would not advance real time.
+        async fn argv(&self) -> String {
+            for _ in 0..400 {
+                let argv = self.recorded_argv();
+                if !argv.trim().is_empty() {
+                    return argv;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            panic!("the fake CLI never recorded its argv");
+        }
+    }
+
+    // ── transcript builders ──
+
+    fn line(value: serde_json::Value) -> String {
+        format!("{value}\n")
+    }
+
+    fn assistant_line(text: &str) -> String {
+        line(json!({
+            "type": "assistant",
+            "message": {"role": "assistant", "content": [{"type": "text", "text": text}]}
+        }))
+    }
+
+    fn sidechain_line(text: &str) -> String {
+        line(json!({
+            "type": "assistant",
+            "parent_tool_use_id": "toolu_sidechain",
+            "message": {"role": "assistant", "content": [{"type": "text", "text": text}]}
+        }))
+    }
+
+    fn result_line() -> String {
+        line(json!({"type": "result", "subtype": "success", "is_error": false}))
+    }
+
+    // ── manager & session builders ──
+
+    fn claude_manager(command: &str) -> Arc<ClaudeManager> {
+        Arc::new(ClaudeManager::new(
+            command.to_string(),
+            FileAccessConfig::default(),
+            MCPConfig::default(),
+        ))
+    }
+
+    /// A manager built field by field, i.e. **without** the background cleanup
+    /// task `new()` spawns. Tests that need the task use `new()` explicitly.
+    fn manager_with(
+        command: String,
+        file_access_config: FileAccessConfig,
+        mcp_config: MCPConfig,
+    ) -> InteractiveSessionManager {
+        InteractiveSessionManager {
+            sessions: Arc::new(RwLock::new(HashMap::new())),
+            claude_command: command,
+            file_access_config,
+            mcp_config,
+        }
+    }
+
+    fn manager(cli: &FakeCli) -> InteractiveSessionManager {
+        manager_with(
+            cli.command(),
+            FileAccessConfig::default(),
+            MCPConfig::default(),
+        )
+    }
+
+    fn spawn_fake(cli: &FakeCli) -> Child {
+        Command::new(cli.command())
+            .arg("--model")
+            .arg("manual-test")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn the fake CLI")
+    }
+
+    /// A child process that has already exited **and been reaped**, so
+    /// `try_wait()` is guaranteed to report it dead without any sleeping.
+    async fn dead_child(cli: &FakeCli) -> Child {
+        let mut child = spawn_fake(cli);
+        let status = child.wait().await.expect("wait on the fake CLI");
+        assert!(status.success(), "the fake CLI should exit 0");
+        child
+    }
+
+    /// A session wired by hand, so a test owns both ends of its channels.
+    fn manual_session(
+        conversation_id: &str,
+        child: Child,
+        stdin_capacity: usize,
+        broadcast_capacity: usize,
+    ) -> (
+        InteractiveSession,
+        mpsc::Receiver<String>,
+        broadcast::Sender<ClaudeCodeOutput>,
+    ) {
+        let (stdin_tx, stdin_rx) = mpsc::channel::<String>(stdin_capacity);
+        let (output_tx, _) = broadcast::channel(broadcast_capacity);
+        let session = InteractiveSession {
+            id: format!("session-of-{conversation_id}"),
+            conversation_id: conversation_id.to_string(),
+            child,
+            stdin_tx,
+            output_tx: output_tx.clone(),
+            model: "manual-model".to_string(),
+            created_at: std::time::Instant::now(),
+            last_used: Arc::new(parking_lot::Mutex::new(std::time::Instant::now())),
+            interaction_lock: Arc::new(tokio::sync::Mutex::new(())),
+        };
+        (session, stdin_rx, output_tx)
+    }
+
+    /// Drains a response channel to its close, failing rather than hanging.
+    async fn collect_all(mut rx: mpsc::Receiver<ClaudeCodeOutput>) -> Vec<ClaudeCodeOutput> {
+        let mut collected = Vec::new();
+        loop {
+            match tokio::time::timeout(Duration::from_secs(10), rx.recv()).await {
+                Ok(Some(output)) => collected.push(output),
+                Ok(None) => return collected,
+                Err(_) => panic!(
+                    "the response channel never closed ({} message(s) collected)",
+                    collected.len()
+                ),
+            }
+        }
+    }
+
+    fn types_of(outputs: &[ClaudeCodeOutput]) -> Vec<&str> {
+        outputs.iter().map(|o| o.r#type.as_str()).collect()
+    }
+
+    fn texts_of(outputs: &[ClaudeCodeOutput]) -> Vec<String> {
+        outputs
+            .iter()
+            .filter_map(|o| {
+                o.data
+                    .pointer("/message/content/0/text")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+            })
+            .collect()
+    }
+
+    /// Waits until the response collector of `send_to_existing_session` has
+    /// subscribed to the broadcast channel, so a test can inject messages
+    /// without racing it.
+    async fn await_subscriber(output_tx: &broadcast::Sender<ClaudeCodeOutput>) {
+        for _ in 0..1_000 {
+            if output_tx.receiver_count() > 0 {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+        panic!("no collector ever subscribed to the broadcast channel");
+    }
+
+    /// An in-memory `tracing` sink, to assert on what actually reaches the log.
+    #[derive(Clone, Default)]
+    struct LogSink(Arc<parking_lot::Mutex<Vec<u8>>>);
+
+    impl LogSink {
+        fn contents(&self) -> String {
+            String::from_utf8_lossy(&self.0.lock()).into_owned()
+        }
+    }
+
+    impl std::io::Write for LogSink {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogSink {
+        type Writer = LogSink;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    /// Installs a thread-local `tracing` subscriber capturing up to `level`.
+    ///
+    /// The `rebuild_interest_cache` call is not optional: a callsite first hit by
+    /// another test while no subscriber was installed is cached as
+    /// `Interest::never`, and a never-interested callsite does not even evaluate
+    /// its arguments — so the assertions below would otherwise depend on the
+    /// order the tests happen to run in.
+    fn capture_logs(level: tracing::Level) -> (LogSink, tracing::subscriber::DefaultGuard) {
+        let sink = LogSink::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(sink.clone())
+            .with_max_level(level)
+            .with_ansi(false)
+            .finish();
+        let guard = tracing::subscriber::set_default(subscriber);
+        tracing::callsite::rebuild_interest_cache();
+        (sink, guard)
+    }
+
+    // ───────────────────── build_process_died_event ─────────────────────
 
     #[test]
     fn test_process_died_event_has_result_type() {
@@ -785,15 +1193,15 @@ mod tests {
 
     #[test]
     fn test_process_died_event_detected_as_result_by_collector() {
-        // Response collectors break on `type == "result"` — verify the synthetic event
-        // would trigger that break condition.
+        // Response collectors break on `type == "result"` — verify the synthetic
+        // event would trigger that break condition.
         let event = build_process_died_event("dead");
         assert_eq!(event.r#type, "result");
         // The subtype distinguishes it from a normal result
         assert_eq!(event.subtype, Some("process_died".to_string()));
     }
 
-    // ── SessionStatus enum ──
+    // ───────────────────────── SessionStatus enum ─────────────────────────
 
     #[test]
     fn test_session_status_variants_exist() {
@@ -803,22 +1211,1682 @@ mod tests {
         let _not_found = SessionStatus::NotFound;
     }
 
-    // ── Liveness detection with a real process ──
+    // ──────────────────── describe_command_redacted (S2) ────────────────────
+
+    /// A value that must never reach the log. Not a real credential: the point
+    /// is that the redaction is keyed on the *argument*, not on the shape of the
+    /// value.
+    const MCP_SENTINEL: &str =
+        r#"{"mcpServers":{"orc":{"env":{"TOKEN":"sentinel-must-not-be-logged"}}}}"#;
+
+    #[test]
+    fn test_redaction_hides_the_value_after_mcp_config() {
+        let mut cmd = std::process::Command::new("claude");
+        cmd.arg("--model")
+            .arg("opus")
+            .arg("--mcp-config")
+            .arg(MCP_SENTINEL);
+
+        let described = describe_command_redacted(&cmd);
+
+        assert!(
+            !described.contains("sentinel-must-not-be-logged"),
+            "the MCP payload must not appear in the log line: {described}"
+        );
+        assert!(
+            described.contains(&format!("<redacted {} bytes>", MCP_SENTINEL.len())),
+            "the redaction should state the size it replaced: {described}"
+        );
+        // What a human debugging a spawn still needs is kept.
+        assert!(described.contains("program=claude"), "{described}");
+        assert!(described.contains("--mcp-config"), "{described}");
+        assert!(described.contains("--model"), "{described}");
+        assert!(described.contains("opus"), "{described}");
+    }
+
+    #[test]
+    fn test_redaction_only_swallows_one_argument() {
+        let mut cmd = std::process::Command::new("claude");
+        cmd.arg("--mcp-config")
+            .arg("secret-payload")
+            .arg("--continue")
+            .arg("--dangerously-skip-permissions");
+
+        let described = describe_command_redacted(&cmd);
+
+        assert!(!described.contains("secret-payload"), "{described}");
+        assert!(
+            described.contains("--continue"),
+            "the argument after the secret must stay readable: {described}"
+        );
+        assert!(
+            described.contains("--dangerously-skip-permissions"),
+            "{described}"
+        );
+    }
+
+    #[test]
+    fn test_redaction_keeps_env_names_but_no_env_values() {
+        let mut cmd = std::process::Command::new("claude");
+        cmd.env("ANTHROPIC_AUTH_TOKEN", "sentinel-env-value");
+
+        let described = describe_command_redacted(&cmd);
+
+        assert!(
+            described.contains("ANTHROPIC_AUTH_TOKEN"),
+            "the variable name is useful: {described}"
+        );
+        assert!(
+            !described.contains("sentinel-env-value"),
+            "its value is not: {described}"
+        );
+    }
+
+    #[test]
+    fn test_redaction_reports_the_working_directory() {
+        let mut cmd = std::process::Command::new("claude");
+        assert!(
+            describe_command_redacted(&cmd).contains("cwd=<inherited>"),
+            "an unset cwd must be shown as inherited, not omitted"
+        );
+
+        cmd.current_dir("/workspace/nexus");
+        assert!(describe_command_redacted(&cmd).contains("/workspace/nexus"));
+    }
+
+    #[test]
+    fn test_redaction_tolerates_a_trailing_secret_flag() {
+        // `--mcp-config` with no value: the loop must not look past the end.
+        let mut cmd = std::process::Command::new("claude");
+        cmd.arg("--mcp-config");
+
+        let described = describe_command_redacted(&cmd);
+        assert!(described.contains("--mcp-config"), "{described}");
+        assert!(!described.contains("<redacted"), "{described}");
+    }
+
+    #[tokio::test]
+    async fn test_create_session_never_logs_the_inline_mcp_payload() {
+        // End-to-end proof for S2: the `info!` of `create_session` is fed by
+        // `describe_command_redacted`. Replayed against the previous code
+        // (`info!("… {:?}", cmd)`) this fails, because `Debug for Command` prints
+        // every argument verbatim.
+        let (logs, argv) = create_session_capturing_logs(MCPConfig {
+            enabled: true,
+            config_file: None,
+            config_json: Some(MCP_SENTINEL.to_string()),
+            strict: false,
+            debug: false,
+        })
+        .await;
+
+        assert!(
+            logs.contains("Starting interactive Claude session with command:"),
+            "the spawn must still be logged: {logs}"
+        );
+        assert!(
+            !logs.contains("sentinel-must-not-be-logged"),
+            "the MCP payload reached the log: {logs}"
+        );
+        assert!(
+            logs.contains(&format!("<redacted {} bytes>", MCP_SENTINEL.len())),
+            "the payload should be replaced by a redaction marker: {logs}"
+        );
+        // And the argument really was on the command line.
+        assert!(argv.contains("--mcp-config"), "argv: {argv}");
+    }
+
+    /// Spawns one session with `mcp` and returns everything that reached the
+    /// log, plus the argv the CLI actually received.
+    async fn create_session_capturing_logs(mcp: MCPConfig) -> (String, String) {
+        let cli = FakeCli::emitting(&result_line());
+        let manager = manager_with(cli.command(), FileAccessConfig::default(), mcp);
+
+        let (tx, rx) = mpsc::channel(16);
+        let sink = {
+            let (sink, _guard) = capture_logs(tracing::Level::INFO);
+            manager
+                .create_session(
+                    "log-check".to_string(),
+                    "opus".to_string(),
+                    String::new(),
+                    tx,
+                    false,
+                )
+                .await
+                .expect("the fake CLI spawns");
+            let _ = collect_all(rx).await;
+            sink
+        };
+
+        (sink.contents(), cli.argv().await)
+    }
+
+    #[tokio::test]
+    async fn test_create_session_never_logs_the_mcp_config_path() {
+        // The pre-existing leak: `config_file` was the one MCP form this file did
+        // pass, and `info!("… {:?}", cmd)` printed it verbatim. Replayed without
+        // the correction this assertion fails on the value itself.
+        const PATH_SENTINEL: &str = "sentinel-must-not-be-logged.json";
+        let (logs, argv) = create_session_capturing_logs(MCPConfig {
+            enabled: true,
+            config_file: Some(PATH_SENTINEL.to_string()),
+            config_json: None,
+            strict: false,
+            debug: false,
+        })
+        .await;
+
+        assert!(argv.contains("--mcp-config"), "argv: {argv}");
+        assert!(
+            !logs.contains("sentinel-must-not-be-logged"),
+            "whatever follows --mcp-config must be redacted, path or document: {logs}"
+        );
+        assert!(
+            logs.contains(&format!("<redacted {} bytes>", PATH_SENTINEL.len())),
+            "{logs}"
+        );
+    }
+
+    // ───────────────────────────── new() ─────────────────────────────
+
+    #[tokio::test]
+    async fn test_new_starts_empty_and_ignores_its_claude_manager() {
+        // `new` takes an `Arc<ClaudeManager>` it binds to `_claude_manager` and
+        // never uses; only the command string matters.
+        let manager =
+            InteractiveSessionManager::new(claude_manager("claude"), "claude".to_string());
+        assert_eq!(manager.active_sessions(), 0);
+        assert_eq!(manager.claude_command, "claude");
+    }
+
+    #[tokio::test]
+    async fn test_new_spawns_a_cleanup_task_that_reaps_dead_sessions() {
+        // The background loop sleeps 300 s then calls `cleanup_expired_sessions`.
+        // Real-process setup happens first, on the real clock; the clock is only
+        // paused to jump over the sleep.
+        let cli = FakeCli::exiting();
+        let manager = InteractiveSessionManager::new(claude_manager("claude"), cli.command());
+        let sessions = manager.sessions.clone();
+
+        let (session, _stdin_rx, _output_tx) =
+            manual_session("reaped", dead_child(&cli).await, 4, 4);
+        sessions.write().insert("reaped".to_string(), session);
+        assert_eq!(manager.active_sessions(), 1);
+
+        tokio::time::pause();
+        tokio::time::advance(Duration::from_secs(301)).await;
+        for _ in 0..1_000 {
+            if sessions.read().is_empty() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+
+        assert_eq!(
+            manager.active_sessions(),
+            0,
+            "the 5-minute cleanup task should have removed the dead session"
+        );
+    }
+
+    // ───────────────── get_or_create_session_and_send ─────────────────
+
+    #[tokio::test]
+    async fn test_unknown_conversation_creates_a_session_and_streams_to_the_result() {
+        let transcript = format!("{}{}", assistant_line("Bonjour Nexus"), result_line());
+        let cli = FakeCli::emitting(&transcript);
+        let manager = manager(&cli);
+
+        let (id, rx) = manager
+            .get_or_create_session_and_send(
+                Some("conv-new".to_string()),
+                "claude-opus-4-5".to_string(),
+                "hello".to_string(),
+            )
+            .await
+            .expect("session creation");
+
+        assert_eq!(id, "conv-new");
+        let outputs = collect_all(rx).await;
+        assert_eq!(types_of(&outputs), vec!["assistant", "result"]);
+        assert_eq!(texts_of(&outputs), vec!["Bonjour Nexus".to_string()]);
+        assert_eq!(outputs[1].subtype.as_deref(), Some("success"));
+        assert_eq!(manager.active_sessions(), 1);
+        // The requested model is what the CLI was started with.
+        let argv = cli.argv().await;
+        assert!(argv.contains("--model"), "argv: {argv}");
+        assert!(argv.contains("claude-opus-4-5"), "argv: {argv}");
+        assert!(
+            !argv.contains("--continue"),
+            "a brand new session must not resume another one: {argv}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_absent_conversation_id_is_replaced_by_a_fresh_uuid() {
+        let cli = FakeCli::emitting(&result_line());
+        let manager = manager(&cli);
+
+        let (id, rx) = manager
+            .get_or_create_session_and_send(None, "opus".to_string(), "hi".to_string())
+            .await
+            .expect("session creation");
+
+        assert!(
+            Uuid::parse_str(&id).is_ok(),
+            "a generated conversation_id should be a UUID, got {id}"
+        );
+        assert!(manager.sessions.read().contains_key(&id));
+        let _ = collect_all(rx).await;
+    }
+
+    #[tokio::test]
+    async fn test_dead_session_is_removed_and_recovered_with_continue() {
+        let cli = FakeCli::emitting(&result_line());
+        let manager = manager(&cli);
+        let (session, _stdin_rx, _output_tx) =
+            manual_session("conv-dead", dead_child(&cli).await, 4, 4);
+        manager
+            .sessions
+            .write()
+            .insert("conv-dead".to_string(), session);
+        cli.forget_argv(); // only the recovery spawn should be inspected
+
+        let (id, rx) = manager
+            .get_or_create_session_and_send(
+                Some("conv-dead".to_string()),
+                "opus".to_string(),
+                "still there?".to_string(),
+            )
+            .await
+            .expect("recovery");
+
+        assert_eq!(id, "conv-dead");
+        let outputs = collect_all(rx).await;
+        assert_eq!(types_of(&outputs), vec!["result"]);
+        assert_eq!(
+            manager.active_sessions(),
+            1,
+            "the dead session is replaced, not duplicated"
+        );
+        let argv = cli.argv().await;
+        assert!(
+            argv.contains("--continue"),
+            "recovery must resume the conversation: {argv}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_alive_session_is_reused_without_spawning_a_process() {
+        let cli = FakeCli::blocking();
+        let manager = manager(&cli);
+        let (session, mut stdin_rx, output_tx) =
+            manual_session("conv-alive", spawn_fake(&cli), 4, 16);
+        manager
+            .sessions
+            .write()
+            .insert("conv-alive".to_string(), session);
+
+        let (id, rx) = manager
+            .get_or_create_session_and_send(
+                Some("conv-alive".to_string()),
+                "a-model-never-spawned".to_string(),
+                "second turn".to_string(),
+            )
+            .await
+            .expect("reuse");
+        assert_eq!(id, "conv-alive");
+
+        // The message goes to the existing process, and the collector filters
+        // sidechain traffic out of the caller's stream.
+        await_subscriber(&output_tx).await;
+        output_tx
+            .send(
+                serde_json::from_str::<ClaudeCodeOutput>(sidechain_line("subagent").trim())
+                    .unwrap(),
+            )
+            .expect("broadcast the sidechain message");
+        output_tx
+            .send(
+                serde_json::from_str::<ClaudeCodeOutput>(assistant_line("deuxième tour").trim())
+                    .unwrap(),
+            )
+            .expect("broadcast the answer");
+        output_tx
+            .send(serde_json::from_str::<ClaudeCodeOutput>(result_line().trim()).unwrap())
+            .expect("broadcast the result");
+
+        let outputs = collect_all(rx).await;
+        assert_eq!(
+            types_of(&outputs),
+            vec!["assistant", "result"],
+            "the sidechain message must not reach the caller"
+        );
+        assert_eq!(texts_of(&outputs), vec!["deuxième tour".to_string()]);
+        assert_eq!(
+            stdin_rx.recv().await.as_deref(),
+            Some("second turn"),
+            "the message should be written to the existing process stdin"
+        );
+        let argv = cli.argv().await;
+        assert!(
+            argv.contains("manual-test") && !argv.contains("a-model-never-spawned"),
+            "reusing a session must not start a second CLI: {argv}"
+        );
+    }
+
+    // ──────────────────── send_to_existing_session ────────────────────
+
+    #[tokio::test]
+    async fn test_send_to_a_missing_session_just_closes_the_channel() {
+        let cli = FakeCli::exiting();
+        let manager = manager(&cli);
+        let (tx, rx) = mpsc::channel(4);
+
+        manager
+            .send_to_existing_session("ghost".to_string(), "hello".to_string(), tx)
+            .await;
+
+        assert!(
+            collect_all(rx).await.is_empty(),
+            "no session means no output at all — not an error message"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_closed_stdin_channel_is_reported_as_an_error_output() {
+        let cli = FakeCli::blocking();
+        let manager = manager(&cli);
+        let (session, stdin_rx, _output_tx) = manual_session("conv-x", spawn_fake(&cli), 4, 16);
+        drop(stdin_rx); // the stdin writer task is gone
+        manager
+            .sessions
+            .write()
+            .insert("conv-x".to_string(), session);
+
+        let (tx, rx) = mpsc::channel(4);
+        manager
+            .send_to_existing_session("conv-x".to_string(), "hello".to_string(), tx)
+            .await;
+
+        let outputs = collect_all(rx).await;
+        assert_eq!(types_of(&outputs), vec!["error"]);
+        assert!(
+            outputs[0].data["error"]
+                .as_str()
+                .unwrap_or_default()
+                .starts_with("Failed to send message:"),
+            "unexpected payload: {:?}",
+            outputs[0].data
+        );
+    }
+
+    #[tokio::test]
+    async fn test_error_message_also_ends_the_collection() {
+        let cli = FakeCli::blocking();
+        let manager = manager(&cli);
+        let (session, mut stdin_rx, output_tx) = manual_session("conv-e", spawn_fake(&cli), 4, 16);
+        manager
+            .sessions
+            .write()
+            .insert("conv-e".to_string(), session);
+
+        let (tx, rx) = mpsc::channel(4);
+        manager
+            .send_to_existing_session("conv-e".to_string(), "boom".to_string(), tx)
+            .await;
+        await_subscriber(&output_tx).await;
+        output_tx
+            .send(ClaudeCodeOutput {
+                r#type: "error".to_string(),
+                subtype: None,
+                data: json!({"error": "CLI refused"}),
+            })
+            .expect("broadcast the error");
+
+        let outputs = collect_all(rx).await;
+        assert_eq!(
+            types_of(&outputs),
+            vec!["error"],
+            "an error message terminates the response like a result does"
+        );
+        assert_eq!(stdin_rx.recv().await.as_deref(), Some("boom"));
+    }
+
+    #[tokio::test]
+    async fn test_a_lagging_collector_drops_the_whole_response() {
+        // Broadcast capacity 1 and three messages published before the collector
+        // is ever polled: `recv()` returns `RecvError::Lagged`, which the code
+        // treats like a closed channel — the caller gets nothing at all, not a
+        // partial answer. Worth knowing: it is silent.
+        let cli = FakeCli::blocking();
+        let manager = manager(&cli);
+        let (session, _stdin_rx, output_tx) = manual_session("conv-lag", spawn_fake(&cli), 4, 1);
+        manager
+            .sessions
+            .write()
+            .insert("conv-lag".to_string(), session);
+
+        let (tx, rx) = mpsc::channel(8);
+        manager
+            .send_to_existing_session("conv-lag".to_string(), "hello".to_string(), tx)
+            .await;
+        await_subscriber(&output_tx).await;
+
+        // `broadcast::Sender::send` is synchronous, so nothing can poll the
+        // collector between these three lines.
+        for i in 0..3 {
+            output_tx
+                .send(ClaudeCodeOutput {
+                    r#type: "assistant".to_string(),
+                    subtype: None,
+                    data: json!({"n": i}),
+                })
+                .expect("broadcast");
+        }
+
+        assert!(
+            collect_all(rx).await.is_empty(),
+            "a lagged collector forwards nothing"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_safety_timeout_ends_an_unanswered_turn() {
+        // No `result` ever arrives: the 30-second net is the only way out.
+        let cli = FakeCli::blocking();
+        let manager = manager(&cli);
+        let (session, mut stdin_rx, output_tx) = manual_session("conv-t", spawn_fake(&cli), 4, 16);
+        manager
+            .sessions
+            .write()
+            .insert("conv-t".to_string(), session);
+
+        let (tx, mut rx) = mpsc::channel(4);
+        manager
+            .send_to_existing_session("conv-t".to_string(), "no answer".to_string(), tx)
+            .await;
+        await_subscriber(&output_tx).await;
+        assert_eq!(stdin_rx.recv().await.as_deref(), Some("no answer"));
+
+        let (sink, _guard) = capture_logs(tracing::Level::ERROR);
+        tokio::time::advance(Duration::from_secs(31)).await;
+
+        assert!(
+            tokio::time::timeout(Duration::from_secs(600), rx.recv())
+                .await
+                .expect("the collector must give up")
+                .is_none(),
+            "after the safety timeout the caller gets an empty, closed channel"
+        );
+        assert!(
+            sink.contents()
+                .contains("Safety timeout waiting for response after"),
+            "giving up must be audible in the log: {}",
+            sink.contents()
+        );
+    }
+
+    // ───────────────────────── create_session ─────────────────────────
+
+    #[tokio::test]
+    async fn test_spawn_failure_is_surfaced_as_an_error() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let missing = dir.path().join("no-such-claude");
+        let manager = manager_with(
+            missing.to_string_lossy().into_owned(),
+            FileAccessConfig::default(),
+            MCPConfig::default(),
+        );
+
+        let (tx, _rx) = mpsc::channel(4);
+        let err = manager
+            .create_session(
+                "conv".to_string(),
+                "opus".to_string(),
+                "hi".to_string(),
+                tx,
+                false,
+            )
+            .await
+            .expect_err("spawning a missing binary must fail");
+
+        assert!(
+            err.downcast_ref::<std::io::Error>().is_some(),
+            "the spawn error should be propagated as-is, got: {err}"
+        );
+        assert_eq!(
+            manager.active_sessions(),
+            0,
+            "a failed spawn must not register a session"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_skip_permissions_is_forwarded_only_when_configured() {
+        let cli = FakeCli::emitting(&result_line());
+        let permissive = manager_with(
+            cli.command(),
+            FileAccessConfig {
+                skip_permissions: true,
+                additional_dirs: vec![],
+            },
+            MCPConfig::default(),
+        );
+        let (tx, rx) = mpsc::channel(4);
+        permissive
+            .create_session(
+                "c".to_string(),
+                "opus".to_string(),
+                String::new(),
+                tx,
+                false,
+            )
+            .await
+            .unwrap();
+        let _ = collect_all(rx).await;
+        assert!(cli.argv().await.contains("--dangerously-skip-permissions"));
+
+        let strict_cli = FakeCli::emitting(&result_line());
+        let strict = manager(&strict_cli);
+        let (tx, rx) = mpsc::channel(4);
+        strict
+            .create_session(
+                "c".to_string(),
+                "opus".to_string(),
+                String::new(),
+                tx,
+                false,
+            )
+            .await
+            .unwrap();
+        let _ = collect_all(rx).await;
+        assert!(
+            !strict_cli
+                .argv()
+                .await
+                .contains("--dangerously-skip-permissions"),
+            "the default config must keep the CLI permission prompts"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_mcp_config_file_is_passed_to_the_cli() {
+        let cli = FakeCli::emitting(&result_line());
+        let manager = manager_with(
+            cli.command(),
+            FileAccessConfig::default(),
+            MCPConfig {
+                enabled: true,
+                config_file: Some("mcp-servers.json".to_string()),
+                config_json: Some(MCP_SENTINEL.to_string()),
+                strict: true,
+                debug: true,
+            },
+        );
+
+        let (tx, rx) = mpsc::channel(4);
+        manager
+            .create_session(
+                "c".to_string(),
+                "opus".to_string(),
+                String::new(),
+                tx,
+                false,
+            )
+            .await
+            .unwrap();
+        let _ = collect_all(rx).await;
+
+        let argv = cli.argv().await;
+        assert!(argv.contains("--mcp-config"), "argv: {argv}");
+        assert!(argv.contains("mcp-servers.json"), "argv: {argv}");
+        assert!(
+            !argv.contains("sentinel-must-not-be-logged"),
+            "the file wins over the inline JSON: {argv}"
+        );
+        // Known divergence with `ClaudeManager::create_session`: `strict` and
+        // `debug` are read nowhere on the interactive path.
+        assert!(
+            !argv.contains("--strict-mcp-config") && !argv.contains("--debug"),
+            "argv: {argv}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_inline_mcp_json_is_passed_when_no_file_is_configured() {
+        // Before the fix, `config_json` was read nowhere in this file: an
+        // interactive session silently ran without any MCP server while
+        // `ClaudeManager` honoured the same setting. This test fails on the old
+        // code (no `--mcp-config` at all in the argv).
+        let cli = FakeCli::emitting(&result_line());
+        let manager = manager_with(
+            cli.command(),
+            FileAccessConfig::default(),
+            MCPConfig {
+                enabled: true,
+                config_file: None,
+                config_json: Some(MCP_SENTINEL.to_string()),
+                strict: false,
+                debug: false,
+            },
+        );
+
+        let (tx, rx) = mpsc::channel(4);
+        manager
+            .create_session(
+                "c".to_string(),
+                "opus".to_string(),
+                String::new(),
+                tx,
+                false,
+            )
+            .await
+            .unwrap();
+        let _ = collect_all(rx).await;
+
+        let argv = cli.argv().await;
+        assert!(argv.contains("--mcp-config"), "argv: {argv}");
+        assert!(argv.contains("mcpServers"), "argv: {argv}");
+    }
+
+    #[tokio::test]
+    async fn test_disabled_mcp_config_passes_nothing() {
+        let cli = FakeCli::emitting(&result_line());
+        let manager = manager_with(
+            cli.command(),
+            FileAccessConfig::default(),
+            MCPConfig {
+                enabled: false,
+                config_file: Some("mcp-servers.json".to_string()),
+                config_json: Some(MCP_SENTINEL.to_string()),
+                strict: false,
+                debug: false,
+            },
+        );
+
+        let (tx, rx) = mpsc::channel(4);
+        manager
+            .create_session(
+                "c".to_string(),
+                "opus".to_string(),
+                String::new(),
+                tx,
+                false,
+            )
+            .await
+            .unwrap();
+        let _ = collect_all(rx).await;
+
+        assert!(
+            !cli.argv().await.contains("--mcp-config"),
+            "`enabled: false` must disable the flag even when a config is present"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_unparseable_and_blank_lines_are_skipped() {
+        let transcript = format!("\n   \nnot json at all\n{}", result_line());
+        let cli = FakeCli::emitting(&transcript);
+        let manager = manager(&cli);
+
+        let (tx, rx) = mpsc::channel(8);
+        manager
+            .create_session(
+                "c".to_string(),
+                "opus".to_string(),
+                String::new(),
+                tx,
+                false,
+            )
+            .await
+            .unwrap();
+
+        let outputs = collect_all(rx).await;
+        assert_eq!(
+            types_of(&outputs),
+            vec!["result"],
+            "garbage is dropped, the stream keeps going"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_a_line_without_a_type_becomes_unknown() {
+        let transcript = format!("{}{}", line(json!({"hello": "world"})), result_line());
+        let cli = FakeCli::emitting(&transcript);
+        let manager = manager(&cli);
+
+        let (tx, rx) = mpsc::channel(8);
+        manager
+            .create_session(
+                "c".to_string(),
+                "opus".to_string(),
+                String::new(),
+                tx,
+                false,
+            )
+            .await
+            .unwrap();
+
+        let outputs = collect_all(rx).await;
+        assert_eq!(types_of(&outputs), vec!["unknown", "result"]);
+        assert!(
+            outputs[0].subtype.is_none(),
+            "a missing subtype stays None rather than becoming a placeholder"
+        );
+        assert_eq!(outputs[0].data["hello"], json!("world"));
+    }
+
+    #[tokio::test]
+    async fn test_initial_collector_filters_sidechain_output() {
+        let transcript = format!(
+            "{}{}{}",
+            sidechain_line("subagent chatter"),
+            assistant_line("real answer"),
+            result_line()
+        );
+        let cli = FakeCli::emitting(&transcript);
+        let manager = manager(&cli);
+
+        let (tx, rx) = mpsc::channel(8);
+        manager
+            .create_session(
+                "c".to_string(),
+                "opus".to_string(),
+                String::new(),
+                tx,
+                false,
+            )
+            .await
+            .unwrap();
+
+        let outputs = collect_all(rx).await;
+        assert_eq!(texts_of(&outputs), vec!["real answer".to_string()]);
+        assert_eq!(types_of(&outputs), vec!["assistant", "result"]);
+    }
+
+    #[tokio::test]
+    async fn test_initial_collector_stops_on_an_error_line() {
+        let transcript = format!(
+            "{}{}",
+            line(json!({"type": "error", "error": "quota exhausted"})),
+            assistant_line("never read")
+        );
+        let cli = FakeCli::emitting(&transcript);
+        let manager = manager(&cli);
+
+        let (tx, rx) = mpsc::channel(8);
+        manager
+            .create_session(
+                "c".to_string(),
+                "opus".to_string(),
+                String::new(),
+                tx,
+                false,
+            )
+            .await
+            .unwrap();
+
+        let outputs = collect_all(rx).await;
+        assert_eq!(types_of(&outputs), vec!["error"]);
+        assert_eq!(outputs[0].data["error"], json!("quota exhausted"));
+    }
+
+    #[tokio::test]
+    async fn test_only_the_first_response_is_forwarded_and_eof_closes_it() {
+        // A `text` line containing "Human:" flips `is_first_response` off: the
+        // next lines are broadcast but no longer forwarded to the caller. The
+        // caller only learns the turn is over through the synthetic
+        // `result/process_died` emitted at stdout EOF.
+        let transcript = format!(
+            "{}{}",
+            line(json!({"type": "text", "text": "Human: next question?"})),
+            assistant_line("answered after the handover")
+        );
+        let cli = FakeCli::emitting(&transcript);
+        let manager = manager(&cli);
+
+        let (tx, rx) = mpsc::channel(8);
+        manager
+            .create_session(
+                "c".to_string(),
+                "opus".to_string(),
+                String::new(),
+                tx,
+                false,
+            )
+            .await
+            .unwrap();
+
+        let outputs = collect_all(rx).await;
+        assert_eq!(types_of(&outputs), vec!["text", "result"]);
+        assert_eq!(
+            outputs[1].subtype.as_deref(),
+            Some("process_died"),
+            "stdout EOF must be reported as an end-of-response"
+        );
+        assert_eq!(outputs[1].data["is_error"], json!(true));
+        assert!(
+            texts_of(&outputs).is_empty(),
+            "the assistant line after the handover is not forwarded"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_silent_cli_only_yields_the_process_died_event() {
+        let cli = FakeCli::exiting();
+        let manager = manager(&cli);
+
+        let (tx, rx) = mpsc::channel(8);
+        manager
+            .create_session(
+                "c".to_string(),
+                "opus".to_string(),
+                String::new(),
+                tx,
+                false,
+            )
+            .await
+            .unwrap();
+
+        let outputs = collect_all(rx).await;
+        assert_eq!(types_of(&outputs), vec!["result"]);
+        assert_eq!(outputs[0].subtype.as_deref(), Some("process_died"));
+        assert_eq!(
+            outputs[0].data["error"],
+            json!("CLI process terminated unexpectedly")
+        );
+        assert_eq!(
+            manager.active_sessions(),
+            1,
+            "a session whose process already died stays in the map until a send or a cleanup"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_stderr_is_logged_and_never_mixed_into_the_response() {
+        let cli = FakeCli::noisy_on_stderr(&result_line());
+        let manager = manager(&cli);
+
+        let (tx, rx) = mpsc::channel(8);
+        let (logs, outputs) = {
+            let (sink, _guard) = capture_logs(tracing::Level::WARN);
+            manager
+                .create_session(
+                    "c".to_string(),
+                    "opus".to_string(),
+                    String::new(),
+                    tx,
+                    false,
+                )
+                .await
+                .unwrap();
+            let outputs = collect_all(rx).await;
+            // The stderr reader is a task of its own; give it its turn.
+            for _ in 0..200 {
+                if sink.contents().contains("Claude stderr") {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+            (sink.contents(), outputs)
+        };
+
+        assert_eq!(
+            types_of(&outputs),
+            vec!["result"],
+            "stderr is logged, never mixed into the output stream"
+        );
+        assert!(
+            logs.contains(&format!("Claude stderr: {STDERR_LINE}")),
+            "the stderr line must reach the log verbatim: {logs}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_a_dropped_caller_stops_the_initial_collector() {
+        let cli = FakeCli::emitting_then_blocking(&result_line());
+        let manager = manager(&cli);
+
+        let (tx, rx) = mpsc::channel(8);
+        drop(rx); // the HTTP client went away before the first line arrived
+
+        manager
+            .create_session(
+                "c".to_string(),
+                "opus".to_string(),
+                String::new(),
+                tx,
+                false,
+            )
+            .await
+            .expect("the session is created anyway");
+
+        // Subscribing before the first await guarantees we see the CLI output
+        // the initial collector is about to fail to forward.
+        let mut broadcast = {
+            let sessions = manager.sessions.read();
+            sessions
+                .get("c")
+                .expect("session stored")
+                .output_tx
+                .subscribe()
+        };
+        let event = tokio::time::timeout(Duration::from_secs(10), broadcast.recv())
+            .await
+            .expect("the CLI output must still be broadcast")
+            .expect("the broadcast is open");
+        assert_eq!(
+            event.r#type, "result",
+            "the output still reaches the subscribers, only the caller is gone"
+        );
+        for _ in 0..50 {
+            tokio::task::yield_now().await;
+        }
+
+        assert_eq!(
+            manager.active_sessions(),
+            1,
+            "losing the caller must not tear the session down"
+        );
+        let mut sessions = manager.sessions.write();
+        let session = sessions.get_mut("c").expect("session stored");
+        assert!(
+            matches!(session.child.try_wait(), Ok(None)),
+            "the CLI process must survive the loss of its caller"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_initial_collector_gives_up_after_the_safety_timeout() {
+        let cli = FakeCli::blocking();
+        let manager = manager(&cli);
+
+        let (tx, mut rx) = mpsc::channel(8);
+        manager
+            .create_session(
+                "c".to_string(),
+                "opus".to_string(),
+                String::new(),
+                tx,
+                false,
+            )
+            .await
+            .unwrap();
+
+        let (sink, _guard) = capture_logs(tracing::Level::ERROR);
+        tokio::time::advance(Duration::from_secs(31)).await;
+
+        assert!(
+            tokio::time::timeout(Duration::from_secs(600), rx.recv())
+                .await
+                .expect("the collector must give up")
+                .is_none(),
+            "a CLI that says nothing for 30 s closes the caller's channel empty"
+        );
+        assert!(
+            sink.contents()
+                .contains("Safety timeout waiting for initial response after"),
+            "giving up must be audible in the log: {}",
+            sink.contents()
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_empty_message_writes_nothing_and_a_real_one_makes_the_round_trip() {
+        // `cat` with no redirection echoes stdin to stdout, so the round trip
+        // proves the stdin writer, the stdout reader and the broadcast are wired
+        // together — and that an empty initial message is written nowhere.
+        // Unix only: cmd.exe has no portable `cat`.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let script = dir.path().join("echo.sh");
+        std::fs::write(&script, "#!/bin/sh\nexec cat\n").expect("write the echo script");
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let manager = manager_with(
+            script.to_string_lossy().into_owned(),
+            FileAccessConfig::default(),
+            MCPConfig::default(),
+        );
+
+        let (tx, mut rx) = mpsc::channel(8);
+        manager
+            .create_session(
+                "c".to_string(),
+                "opus".to_string(),
+                String::new(),
+                tx,
+                false,
+            )
+            .await
+            .unwrap();
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(300), rx.recv())
+                .await
+                .is_err(),
+            "an empty initial message must not be written to the CLI stdin"
+        );
+
+        let stdin_tx = {
+            let sessions = manager.sessions.read();
+            sessions.get("c").expect("session stored").stdin_tx.clone()
+        };
+        stdin_tx
+            .send(json!({"type": "result", "subtype": "echo"}).to_string())
+            .await
+            .expect("the stdin writer is still draining the channel");
+
+        let echoed = tokio::time::timeout(Duration::from_secs(10), rx.recv())
+            .await
+            .expect("the echo must come back")
+            .expect("the channel is still open");
+        assert_eq!(echoed.r#type, "result");
+        assert_eq!(echoed.subtype.as_deref(), Some("echo"));
+    }
+
+    #[tokio::test]
+    async fn test_stdin_writer_stops_after_the_pipe_breaks() {
+        // The CLI exits at once; the first write to its stdin fails, the writer
+        // task breaks out of its loop and the channel it was draining closes —
+        // which is the only way a caller can observe the failure.
+        let cli = FakeCli::exiting();
+        let manager = manager(&cli);
+
+        let (tx, rx) = mpsc::channel(8);
+        manager
+            .create_session(
+                "c".to_string(),
+                "opus".to_string(),
+                String::new(),
+                tx,
+                false,
+            )
+            .await
+            .unwrap();
+        let _ = collect_all(rx).await;
+
+        let stdin_tx = {
+            let sessions = manager.sessions.read();
+            sessions.get("c").expect("session stored").stdin_tx.clone()
+        };
+
+        let mut closed = false;
+        for _ in 0..200 {
+            if stdin_tx.send("knock".to_string()).await.is_err() {
+                closed = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(
+            closed,
+            "writing to a dead process should kill the stdin writer task"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_session_is_stored_under_its_conversation_id() {
+        let cli = FakeCli::emitting_then_blocking(&result_line());
+        let manager = manager(&cli);
+
+        let (tx, rx) = mpsc::channel(8);
+        manager
+            .create_session(
+                "conv-key".to_string(),
+                "opus-for-the-record".to_string(),
+                String::new(),
+                tx,
+                false,
+            )
+            .await
+            .unwrap();
+        let _ = collect_all(rx).await;
+
+        let sessions = manager.sessions.read();
+        let session = sessions.get("conv-key").expect("stored under its id");
+        assert_eq!(session.conversation_id, "conv-key");
+        assert_eq!(session.model, "opus-for-the-record");
+        assert!(
+            Uuid::parse_str(&session.id).is_ok(),
+            "each session also gets its own UUID: {}",
+            session.id
+        );
+    }
+
+    #[tokio::test]
+    async fn test_both_collectors_name_the_sidechain_they_skip() {
+        // The `debug!` that explains the filtering is only useful if it carries
+        // the parent_tool_use_id; this is the only place that is checked.
+        let transcript = format!("{}{}", sidechain_line("subagent"), result_line());
+        let cli = FakeCli::emitting(&transcript);
+        let manager = manager(&cli);
+
+        let (tx, rx) = mpsc::channel(8);
+        let logs = {
+            let (sink, _guard) = capture_logs(tracing::Level::DEBUG);
+            manager
+                .create_session(
+                    "conv-side".to_string(),
+                    "opus".to_string(),
+                    String::new(),
+                    tx,
+                    false,
+                )
+                .await
+                .unwrap();
+            let outputs = collect_all(rx).await;
+            assert_eq!(types_of(&outputs), vec!["result"]);
+
+            // Second turn on the same session, through the other collector.
+            let (tx, rx) = mpsc::channel(8);
+            manager
+                .send_to_existing_session("conv-side".to_string(), "again".to_string(), tx)
+                .await;
+            let output_tx = {
+                let sessions = manager.sessions.read();
+                sessions
+                    .get("conv-side")
+                    .expect("session stored")
+                    .output_tx
+                    .clone()
+            };
+            await_subscriber(&output_tx).await;
+            output_tx
+                .send(
+                    serde_json::from_str::<ClaudeCodeOutput>(sidechain_line("subagent").trim())
+                        .unwrap(),
+                )
+                .expect("broadcast the sidechain message");
+            output_tx
+                .send(serde_json::from_str::<ClaudeCodeOutput>(result_line().trim()).unwrap())
+                .expect("broadcast the result");
+            assert_eq!(types_of(&collect_all(rx).await), vec!["result"]);
+            sink.contents()
+        };
+
+        assert!(
+            logs.contains("Initial: skipping sidechain message")
+                && logs.contains("Interactive: skipping sidechain message"),
+            "both collectors must say what they dropped: {logs}"
+        );
+        assert_eq!(
+            logs.lines()
+                .filter(
+                    |l| l.contains("skipping sidechain message") && l.contains("toolu_sidechain")
+                )
+                .count(),
+            2,
+            "each skip must name the sidechain it belongs to: {logs}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_mcp_enabled_without_any_configuration_passes_nothing() {
+        let cli = FakeCli::emitting(&result_line());
+        let manager = manager_with(
+            cli.command(),
+            FileAccessConfig::default(),
+            MCPConfig {
+                enabled: true,
+                config_file: None,
+                config_json: None,
+                strict: false,
+                debug: false,
+            },
+        );
+
+        let (tx, rx) = mpsc::channel(4);
+        manager
+            .create_session(
+                "c".to_string(),
+                "opus".to_string(),
+                String::new(),
+                tx,
+                false,
+            )
+            .await
+            .unwrap();
+        let _ = collect_all(rx).await;
+
+        assert!(
+            !cli.argv().await.contains("--mcp-config"),
+            "`enabled: true` with nothing to point at must not pass a bare flag"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_a_failed_spawn_is_propagated_to_the_caller_on_both_paths() {
+        // The two `self.create_session(...).await?` of
+        // `get_or_create_session_and_send`: a new conversation, and the recovery
+        // of a dead one. Neither may swallow the spawn error.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let missing = dir.path().join("no-such-claude");
+        let manager = manager_with(
+            missing.to_string_lossy().into_owned(),
+            FileAccessConfig::default(),
+            MCPConfig::default(),
+        );
+
+        let err = manager
+            .get_or_create_session_and_send(
+                Some("fresh".to_string()),
+                "opus".to_string(),
+                "hi".to_string(),
+            )
+            .await
+            .expect_err("a new session that cannot spawn must fail");
+        assert!(err.downcast_ref::<std::io::Error>().is_some(), "{err}");
+
+        let cli = FakeCli::exiting();
+        let (session, _stdin_rx, _output_tx) = manual_session("dead", dead_child(&cli).await, 4, 4);
+        manager.sessions.write().insert("dead".to_string(), session);
+
+        let err = manager
+            .get_or_create_session_and_send(
+                Some("dead".to_string()),
+                "opus".to_string(),
+                "hi".to_string(),
+            )
+            .await
+            .expect_err("a recovery that cannot spawn must fail too");
+        assert!(err.downcast_ref::<std::io::Error>().is_some(), "{err}");
+        assert_eq!(
+            manager.active_sessions(),
+            0,
+            "the dead session is gone even though the replacement never started"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_an_empty_message_fails_on_the_newline_alone() {
+        // `write_all(b"")` is a no-op that cannot fail, so an empty message sent
+        // to a dead process fails on the newline that follows it. Nothing
+        // prevents an empty message here: only `create_session` filters those.
+        let cli = FakeCli::exiting();
+        let manager = manager(&cli);
+
+        let (tx, rx) = mpsc::channel(8);
+        manager
+            .create_session(
+                "c".to_string(),
+                "opus".to_string(),
+                String::new(),
+                tx,
+                false,
+            )
+            .await
+            .unwrap();
+        let _ = collect_all(rx).await;
+
+        let stdin_tx = {
+            let sessions = manager.sessions.read();
+            sessions.get("c").expect("session stored").stdin_tx.clone()
+        };
+
+        let logs = {
+            let (sink, _guard) = capture_logs(tracing::Level::ERROR);
+            let mut closed = false;
+            for _ in 0..200 {
+                if stdin_tx.send(String::new()).await.is_err() {
+                    closed = true;
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            assert!(closed, "the stdin writer must give up on a dead process");
+            sink.contents()
+        };
+
+        assert!(
+            logs.contains("Failed to write newline:"),
+            "the newline is the write that fails for an empty message: {logs}"
+        );
+    }
+
+    // ───────────────────────── interrupt_session ─────────────────────────
+
+    #[tokio::test]
+    async fn test_interrupt_sends_a_control_request_on_stdin() {
+        let cli = FakeCli::blocking();
+        let manager = manager(&cli);
+        let (session, mut stdin_rx, _output_tx) = manual_session("conv-i", spawn_fake(&cli), 4, 4);
+        manager
+            .sessions
+            .write()
+            .insert("conv-i".to_string(), session);
+
+        assert!(manager.interrupt_session("conv-i").expect("interrupt sent"));
+
+        let sent = stdin_rx.recv().await.expect("something on stdin");
+        let parsed: serde_json::Value = serde_json::from_str(&sent).expect("valid JSON");
+        assert_eq!(parsed["type"], json!("control_request"));
+        assert_eq!(parsed["request"]["type"], json!("interrupt"));
+        assert!(
+            Uuid::parse_str(parsed["request"]["request_id"].as_str().unwrap()).is_ok(),
+            "the interrupt must carry a fresh request_id: {parsed}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_interrupt_on_an_unknown_session_is_not_an_error() {
+        let cli = FakeCli::exiting();
+        let manager = manager(&cli);
+        assert!(
+            !manager.interrupt_session("ghost").expect("no error"),
+            "an unknown conversation yields Ok(false), not Err"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_interrupt_tolerates_a_full_stdin_channel() {
+        let cli = FakeCli::blocking();
+        let manager = manager(&cli);
+        let (session, _stdin_rx, _output_tx) = manual_session("conv-f", spawn_fake(&cli), 1, 4);
+        // Fill the single slot so `try_send` reports Full.
+        session
+            .stdin_tx
+            .try_send("occupied".to_string())
+            .expect("first slot");
+        manager
+            .sessions
+            .write()
+            .insert("conv-f".to_string(), session);
+
+        assert!(
+            manager.interrupt_session("conv-f").expect("no error"),
+            "a full channel still reports success — the interrupt is simply delayed"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_interrupt_fails_when_the_stdin_channel_is_closed() {
+        let cli = FakeCli::blocking();
+        let manager = manager(&cli);
+        let (session, stdin_rx, _output_tx) = manual_session("conv-c", spawn_fake(&cli), 1, 4);
+        drop(stdin_rx);
+        manager
+            .sessions
+            .write()
+            .insert("conv-c".to_string(), session);
+
+        let err = manager
+            .interrupt_session("conv-c")
+            .expect_err("a closed channel must be an error");
+        assert_eq!(err.to_string(), "Session conv-c stdin channel is closed");
+    }
+
+    // ────────────────────────── close_session ──────────────────────────
+
+    #[tokio::test]
+    async fn test_close_session_removes_it_and_kills_the_process() {
+        let cli = FakeCli::blocking();
+        let manager = manager(&cli);
+        let (session, _stdin_rx, _output_tx) = manual_session("conv-k", spawn_fake(&cli), 4, 4);
+        manager
+            .sessions
+            .write()
+            .insert("conv-k".to_string(), session);
+
+        manager.close_session("conv-k").await.expect("close");
+
+        assert_eq!(manager.active_sessions(), 0);
+        assert!(
+            manager.close_session("conv-k").await.is_err(),
+            "closing twice must not silently succeed"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_close_unknown_session_names_it_in_the_error() {
+        let cli = FakeCli::exiting();
+        let manager = manager(&cli);
+        let err = manager
+            .close_session("ghost")
+            .await
+            .expect_err("unknown session");
+        assert_eq!(err.to_string(), "Session not found: ghost");
+    }
+
+    #[tokio::test]
+    async fn test_close_session_on_an_already_reaped_process_still_succeeds() {
+        // `child.id()` is None once the process has been reaped, so the process
+        // group kill is skipped; `child.kill()` is a no-op on a child whose exit
+        // status tokio already holds, and the close reports success.
+        let cli = FakeCli::exiting();
+        let manager = manager(&cli);
+        let (session, _stdin_rx, _output_tx) =
+            manual_session("conv-reaped", dead_child(&cli).await, 4, 4);
+        manager
+            .sessions
+            .write()
+            .insert("conv-reaped".to_string(), session);
+
+        manager
+            .close_session("conv-reaped")
+            .await
+            .expect("closing a session whose process already exited is not an error");
+        assert_eq!(manager.active_sessions(), 0);
+        assert_eq!(
+            manager
+                .close_session("conv-reaped")
+                .await
+                .expect_err("it is gone now")
+                .to_string(),
+            "Session not found: conv-reaped"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_drop_tolerates_a_session_whose_process_is_already_reaped() {
+        let cli = FakeCli::exiting();
+        let manager = manager(&cli);
+        let (session, _stdin_rx, _output_tx) =
+            manual_session("conv-reaped", dead_child(&cli).await, 4, 4);
+        manager
+            .sessions
+            .write()
+            .insert("conv-reaped".to_string(), session);
+
+        let sessions = manager.sessions.clone();
+        drop(manager);
+
+        assert!(
+            sessions.read().is_empty(),
+            "Drop must drain the map even when there is no pid left to signal"
+        );
+    }
+
+    // ─────────────────────── prewarm / active_sessions ───────────────────────
+
+    #[tokio::test]
+    async fn test_prewarm_does_nothing_and_cannot_fail() {
+        // Pins the documented behaviour of a function whose name promises work:
+        // no process is spawned, no session is registered, and the `Err` branch
+        // `create_app` logs about is unreachable.
+        let cli = FakeCli::blocking();
+        let manager = manager(&cli);
+
+        manager
+            .prewarm_default_session()
+            .await
+            .expect("the no-op cannot fail");
+
+        assert_eq!(
+            manager.active_sessions(),
+            0,
+            "prewarm_default_session registers nothing"
+        );
+        assert!(
+            cli.recorded_argv().is_empty(),
+            "prewarm_default_session spawns no CLI"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_active_sessions_counts_the_map() {
+        let cli = FakeCli::blocking();
+        let manager = manager(&cli);
+        assert_eq!(manager.active_sessions(), 0);
+        for id in ["a", "b"] {
+            let (session, _stdin_rx, _output_tx) = manual_session(id, spawn_fake(&cli), 4, 4);
+            manager.sessions.write().insert(id.to_string(), session);
+        }
+        assert_eq!(manager.active_sessions(), 2);
+    }
+
+    // ───────────────────────────── Drop ─────────────────────────────
+
+    #[tokio::test]
+    async fn test_dropping_the_manager_drains_every_session() {
+        let cli = FakeCli::blocking();
+        let manager = manager(&cli);
+        let (session, _stdin_rx, _output_tx) = manual_session("conv-d", spawn_fake(&cli), 4, 4);
+        manager
+            .sessions
+            .write()
+            .insert("conv-d".to_string(), session);
+
+        // The map is shared, so it can still be observed after the drop.
+        let sessions = manager.sessions.clone();
+        let clone = manager.clone();
+        drop(manager);
+
+        assert!(
+            sessions.read().is_empty(),
+            "Drop must drain the session map and kill the processes"
+        );
+        assert_eq!(
+            clone.active_sessions(),
+            0,
+            "InteractiveSessionManager is Clone over a shared map: dropping ONE clone \
+             kills the sessions of all the others"
+        );
+    }
+
+    // ─────────────────────── cleanup_expired_sessions ───────────────────────
+
+    #[tokio::test]
+    async fn test_cleanup_removes_dead_sessions() {
+        let cli = FakeCli::exiting();
+        let sessions: Arc<RwLock<HashMap<String, InteractiveSession>>> =
+            Arc::new(RwLock::new(HashMap::new()));
+        let (session, _stdin_rx, _output_tx) =
+            manual_session("conv-dead", dead_child(&cli).await, 1, 1);
+        sessions.write().insert("conv-dead".to_string(), session);
+
+        // A very long timeout, so only the liveness check can trigger.
+        InteractiveSessionManager::cleanup_expired_sessions(sessions.clone(), 9999).await;
+
+        assert!(
+            sessions.read().is_empty(),
+            "a dead process must be reaped even when the session is fresh"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_cleanup_keeps_alive_sessions() {
+        let cli = FakeCli::blocking();
+        let sessions: Arc<RwLock<HashMap<String, InteractiveSession>>> =
+            Arc::new(RwLock::new(HashMap::new()));
+        let (session, _stdin_rx, _output_tx) = manual_session("conv-alive", spawn_fake(&cli), 1, 1);
+        sessions.write().insert("conv-alive".to_string(), session);
+
+        InteractiveSessionManager::cleanup_expired_sessions(sessions.clone(), 9999).await;
+
+        assert_eq!(
+            sessions.read().len(),
+            1,
+            "a live process within its idle window must be kept"
+        );
+
+        let removed = sessions.write().remove("conv-alive");
+        if let Some(mut session) = removed {
+            let _ = session.child.kill().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn test_cleanup_removes_expired_sessions() {
+        let cli = FakeCli::blocking();
+        let sessions: Arc<RwLock<HashMap<String, InteractiveSession>>> =
+            Arc::new(RwLock::new(HashMap::new()));
+        let (session, _stdin_rx, _output_tx) =
+            manual_session("conv-expired", spawn_fake(&cli), 1, 1);
+        sessions.write().insert("conv-expired".to_string(), session);
+
+        // `timeout_minutes = 0` makes every session immediately expired, which
+        // also avoids an `Instant` subtraction overflow on Windows.
+        InteractiveSessionManager::cleanup_expired_sessions(sessions.clone(), 0).await;
+
+        assert!(
+            sessions.read().is_empty(),
+            "an idle session past its timeout must be removed even though it is alive"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_cleanup_emits_process_died_for_dead_sessions() {
+        let cli = FakeCli::exiting();
+        let sessions: Arc<RwLock<HashMap<String, InteractiveSession>>> =
+            Arc::new(RwLock::new(HashMap::new()));
+        let (session, _stdin_rx, output_tx) =
+            manual_session("conv-dead-notify", dead_child(&cli).await, 1, 16);
+        let mut subscriber = output_tx.subscribe();
+        sessions
+            .write()
+            .insert("conv-dead-notify".to_string(), session);
+
+        InteractiveSessionManager::cleanup_expired_sessions(sessions.clone(), 9999).await;
+
+        let event = tokio::time::timeout(Duration::from_secs(5), subscriber.recv())
+            .await
+            .expect("the synthetic event must be emitted")
+            .expect("the broadcast is still open");
+        assert_eq!(event.r#type, "result");
+        assert_eq!(event.subtype.as_deref(), Some("process_died"));
+        assert_eq!(
+            event.data["error"],
+            json!("CLI process terminated unexpectedly (detected during cleanup)")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_cleanup_notifies_nothing_for_a_merely_expired_session() {
+        let cli = FakeCli::blocking();
+        let sessions: Arc<RwLock<HashMap<String, InteractiveSession>>> =
+            Arc::new(RwLock::new(HashMap::new()));
+        let (session, _stdin_rx, output_tx) = manual_session("conv-idle", spawn_fake(&cli), 1, 16);
+        let mut subscriber = output_tx.subscribe();
+        sessions.write().insert("conv-idle".to_string(), session);
+
+        InteractiveSessionManager::cleanup_expired_sessions(sessions.clone(), 0).await;
+
+        assert!(
+            subscriber.try_recv().is_err(),
+            "an idle session is killed without a process_died event, so a subscriber \
+             waiting on it is left hanging"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_cleanup_on_an_empty_map_is_a_no_op() {
+        let sessions: Arc<RwLock<HashMap<String, InteractiveSession>>> =
+            Arc::new(RwLock::new(HashMap::new()));
+        InteractiveSessionManager::cleanup_expired_sessions(sessions.clone(), 0).await;
+        assert!(sessions.read().is_empty());
+    }
+
+    // ───────────── liveness detection, with a portable fake process ─────────────
 
     #[tokio::test]
     async fn test_try_wait_on_dead_process() {
-        // Spawn a process that exits immediately
-        let mut child = Command::new("true")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .expect("failed to spawn `true`");
+        let cli = FakeCli::exiting();
+        let mut child = dead_child(&cli).await;
 
-        // Wait for it to finish
-        let _ = child.wait().await;
-
-        // try_wait should report it as exited
         let result = child.try_wait();
         assert!(result.is_ok());
         assert!(
@@ -827,18 +2895,61 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_an_unreadable_process_status_is_treated_as_death() {
+        // `waitpid` steals the exit status, so tokio's `try_wait` can only answer
+        // ECHILD. That is the `Err` arm of the liveness probe, unreachable from a
+        // test any other way, and the code treats it like a dead process:
+        // the session is dropped and recreated with `--continue`.
+        let cli = FakeCli::exiting();
+        let manager = manager(&cli);
+        let mut child = spawn_fake(&cli);
+        let pid = child.id().expect("a fresh child has a pid") as i32;
+        let mut status = 0;
+        assert!(
+            unsafe { libc::waitpid(pid, &mut status, 0) } > 0,
+            "waitpid should have reaped the fake CLI"
+        );
+        assert!(
+            child.try_wait().is_err(),
+            "tokio cannot reap what waitpid already took"
+        );
+
+        let (session, _stdin_rx, _output_tx) = manual_session("conv-ghost", child, 4, 4);
+        manager
+            .sessions
+            .write()
+            .insert("conv-ghost".to_string(), session);
+        cli.forget_argv();
+
+        let (id, rx) = manager
+            .get_or_create_session_and_send(
+                Some("conv-ghost".to_string()),
+                "opus".to_string(),
+                "hi".to_string(),
+            )
+            .await
+            .expect("recovery");
+
+        assert_eq!(id, "conv-ghost");
+        let outputs = collect_all(rx).await;
+        assert_eq!(types_of(&outputs), vec!["result"]);
+        assert_eq!(outputs[0].subtype.as_deref(), Some("process_died"));
+        assert!(
+            cli.argv().await.contains("--continue"),
+            "an unreadable status must trigger the same recovery as a dead process"
+        );
+        assert_eq!(manager.active_sessions(), 1);
+    }
+
     #[tokio::test]
     async fn test_try_wait_on_alive_process() {
-        // Spawn a long-running process
-        let mut child = Command::new("sleep")
-            .arg("60")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .expect("failed to spawn `sleep`");
+        // The fake CLI blocks on stdin instead of calling `sleep 60`, so nothing
+        // survives the test and the test runs on Windows too.
+        let cli = FakeCli::blocking();
+        let mut child = spawn_fake(&cli);
 
-        // try_wait should report it as still running
         let result = child.try_wait();
         assert!(result.is_ok());
         assert!(
@@ -846,207 +2957,6 @@ mod tests {
             "try_wait should return None for a running process"
         );
 
-        // Clean up
         let _ = child.kill().await;
-    }
-
-    // ── Cleanup integration test ──
-
-    #[tokio::test]
-    async fn test_cleanup_removes_dead_sessions() {
-        let sessions: Arc<RwLock<HashMap<String, InteractiveSession>>> =
-            Arc::new(RwLock::new(HashMap::new()));
-
-        // Spawn a process that exits immediately
-        let mut child = Command::new("true")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .expect("failed to spawn");
-        let stdin = child.stdin.take().unwrap();
-        let _ = child.wait().await; // Wait for it to die
-
-        let (stdin_tx, mut stdin_rx) = mpsc::channel::<String>(1);
-        let (output_tx, _) = broadcast::channel(1);
-
-        // Consume stdin_rx so the channel doesn't hang
-        tokio::spawn(async move { while stdin_rx.recv().await.is_some() {} });
-        // Drop the real stdin so the process doesn't hang
-        drop(stdin);
-
-        let session = InteractiveSession {
-            id: "test-id".to_string(),
-            conversation_id: "conv-dead".to_string(),
-            child,
-            stdin_tx,
-            output_tx,
-            model: "test".to_string(),
-            created_at: std::time::Instant::now(),
-            last_used: Arc::new(parking_lot::Mutex::new(std::time::Instant::now())),
-            interaction_lock: Arc::new(tokio::sync::Mutex::new(())),
-        };
-
-        sessions.write().insert("conv-dead".to_string(), session);
-        assert_eq!(sessions.read().len(), 1);
-
-        // Run cleanup with a very long timeout (so only dead detection triggers)
-        InteractiveSessionManager::cleanup_expired_sessions(sessions.clone(), 9999).await;
-
-        assert_eq!(
-            sessions.read().len(),
-            0,
-            "Dead session should have been removed"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_cleanup_keeps_alive_sessions() {
-        let sessions: Arc<RwLock<HashMap<String, InteractiveSession>>> =
-            Arc::new(RwLock::new(HashMap::new()));
-
-        // Spawn a long-running process
-        let mut child = Command::new("sleep")
-            .arg("60")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .expect("failed to spawn");
-        let stdin = child.stdin.take().unwrap();
-
-        let (stdin_tx, mut stdin_rx) = mpsc::channel::<String>(1);
-        let (output_tx, _) = broadcast::channel(1);
-
-        tokio::spawn(async move { while stdin_rx.recv().await.is_some() {} });
-        drop(stdin);
-
-        let session = InteractiveSession {
-            id: "test-id".to_string(),
-            conversation_id: "conv-alive".to_string(),
-            child,
-            stdin_tx,
-            output_tx,
-            model: "test".to_string(),
-            created_at: std::time::Instant::now(),
-            last_used: Arc::new(parking_lot::Mutex::new(std::time::Instant::now())),
-            interaction_lock: Arc::new(tokio::sync::Mutex::new(())),
-        };
-
-        sessions.write().insert("conv-alive".to_string(), session);
-
-        // Cleanup with long timeout — alive process should stay
-        InteractiveSessionManager::cleanup_expired_sessions(sessions.clone(), 9999).await;
-
-        assert_eq!(
-            sessions.read().len(),
-            1,
-            "Alive session should not be removed"
-        );
-
-        // Clean up the process (extract from lock scope to avoid holding RwLock across await)
-        let removed = sessions.write().remove("conv-alive");
-        if let Some(mut s) = removed {
-            let _ = s.child.kill().await;
-        }
-    }
-
-    #[tokio::test]
-    async fn test_cleanup_removes_expired_sessions() {
-        let sessions: Arc<RwLock<HashMap<String, InteractiveSession>>> =
-            Arc::new(RwLock::new(HashMap::new()));
-
-        // Spawn a long-running process
-        let mut child = Command::new("sleep")
-            .arg("60")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .expect("failed to spawn");
-        let stdin = child.stdin.take().unwrap();
-
-        let (stdin_tx, mut stdin_rx) = mpsc::channel::<String>(1);
-        let (output_tx, _) = broadcast::channel(1);
-
-        tokio::spawn(async move { while stdin_rx.recv().await.is_some() {} });
-        drop(stdin);
-
-        let session = InteractiveSession {
-            id: "test-id".to_string(),
-            conversation_id: "conv-expired".to_string(),
-            child,
-            stdin_tx,
-            output_tx,
-            model: "test".to_string(),
-            created_at: std::time::Instant::now(),
-            last_used: Arc::new(parking_lot::Mutex::new(std::time::Instant::now())),
-            interaction_lock: Arc::new(tokio::sync::Mutex::new(())),
-        };
-
-        sessions.write().insert("conv-expired".to_string(), session);
-
-        // Use timeout_minutes=0 so ANY session is immediately "expired".
-        // This avoids Instant subtraction overflow on Windows.
-        InteractiveSessionManager::cleanup_expired_sessions(sessions.clone(), 0).await;
-
-        assert_eq!(
-            sessions.read().len(),
-            0,
-            "Expired session should have been removed"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_cleanup_emits_process_died_for_dead_sessions() {
-        let sessions: Arc<RwLock<HashMap<String, InteractiveSession>>> =
-            Arc::new(RwLock::new(HashMap::new()));
-
-        // Spawn a process that exits immediately
-        let mut child = Command::new("true")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .expect("failed to spawn");
-        let stdin = child.stdin.take().unwrap();
-        let _ = child.wait().await;
-
-        let (stdin_tx, mut stdin_rx) = mpsc::channel::<String>(1);
-        let (output_tx, _) = broadcast::channel(16);
-
-        // Subscribe BEFORE cleanup so we can receive the synthetic event
-        let mut subscriber = output_tx.subscribe();
-
-        tokio::spawn(async move { while stdin_rx.recv().await.is_some() {} });
-        drop(stdin);
-
-        let session = InteractiveSession {
-            id: "test-id".to_string(),
-            conversation_id: "conv-dead-notify".to_string(),
-            child,
-            stdin_tx,
-            output_tx,
-            model: "test".to_string(),
-            created_at: std::time::Instant::now(),
-            last_used: Arc::new(parking_lot::Mutex::new(std::time::Instant::now())),
-            interaction_lock: Arc::new(tokio::sync::Mutex::new(())),
-        };
-
-        sessions
-            .write()
-            .insert("conv-dead-notify".to_string(), session);
-
-        // Run cleanup
-        InteractiveSessionManager::cleanup_expired_sessions(sessions.clone(), 9999).await;
-
-        // Should have received a process_died event
-        let event =
-            tokio::time::timeout(std::time::Duration::from_secs(1), subscriber.recv()).await;
-
-        assert!(event.is_ok(), "Should receive event within timeout");
-        let event = event.unwrap().expect("Should receive event");
-        assert_eq!(event.r#type, "result");
-        assert_eq!(event.subtype.as_deref(), Some("process_died"));
     }
 }
