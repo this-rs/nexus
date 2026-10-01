@@ -814,8 +814,12 @@ async fn dropping_the_transport_kills_the_child() {
 // ===========================================================================
 
 /// A CLI that exits before printing anything is **not** reported as an error:
-/// `connect` succeeds and the stream is simply empty. Documented, not endorsed —
-/// see the report in the commit message.
+/// `connect` only checks that `spawn()` worked, so it still returns `Ok`.
+///
+/// What it no longer does is keep *claiming* the session: `is_connected()` used
+/// to answer `true` for ever, with an empty stream, which is how
+/// `OptimizedClient`'s pool handed a dead child to the next caller. The stdout
+/// reader now clears a liveness flag on EOF.
 #[tokio::test]
 async fn a_cli_that_exits_immediately_produces_an_empty_stream() {
     let fake = Transcript::new().exit_with(3).build();
@@ -831,8 +835,10 @@ async fn a_cli_that_exits_immediately_produces_an_empty_stream() {
         messages.is_empty(),
         "nothing was printed, so nothing arrives: {messages:?}"
     );
-    // And the SDK still believes it is connected.
-    assert!(transport.is_connected());
+    assert!(
+        poll_until(WAIT, || !transport.is_connected()).await,
+        "the CLI is gone: the transport must stop reporting a live session"
+    );
     transport.disconnect().await.unwrap();
 }
 
@@ -891,14 +897,16 @@ async fn a_truncated_final_line_is_dropped() {
 
 /// The CLI dying mid-turn, after an assistant message but before the result.
 ///
-/// What the SDK does today: the messages already printed arrive (plus the
-/// `System`/`error` the stderr handler emits once stderr hits EOF), and then the
-/// stream simply stops yielding — it does **not** end, and no error is surfaced.
-/// A consumer looping on `receive_messages()` waits forever. This test pins the
-/// current behaviour; see `stream_ends_when_the_cli_dies_mid_stream` below for the
-/// behaviour we would want.
+/// Everything already printed arrives — including the `System`/`error` the
+/// stderr handler emits once stderr hits EOF — and then the stream **ends**. No
+/// error is surfaced (the broadcast carries `Message`, not `Result`, so a
+/// consumer learns of the death from the end of the stream, not from an item).
+///
+/// It used to end *nothing*: the broadcast `Sender` was stored on the transport,
+/// so it outlived the child and a consumer looping on `receive_messages()` blocked
+/// for ever. See `stream_ends_when_the_cli_dies_mid_stream` below.
 #[tokio::test]
-async fn a_cli_dying_mid_turn_yields_no_error_and_no_termination() {
+async fn a_cli_dying_mid_turn_delivers_what_it_printed_then_ends() {
     let fake = Transcript::new()
         .await_stdin()
         .assistant_text("half an answer")
@@ -933,33 +941,33 @@ async fn a_cli_dying_mid_turn_yields_no_error_and_no_termination() {
         .expect("the CLI's stderr must surface as a System/error message");
     assert!(details.contains("going down"), "got {details}");
 
-    // The child is gone. Nothing more ever arrives, and the stream never ends:
-    // the next poll just hangs, which is the bug recorded below.
+    // The child is gone. A stream subscribed now is already finished: it yields
+    // `None` at once instead of hanging.
     let mut stream = transport.receive_messages();
-    let hung = tokio::time::timeout(
+    let ended = tokio::time::timeout(
         Duration::from_millis(500),
         futures::StreamExt::next(&mut stream),
     )
     .await;
     assert!(
-        hung.is_err(),
-        "today the stream neither ends nor errors once the child is gone, got {hung:?}"
+        matches!(ended, Ok(None)),
+        "once the child is gone the stream must end, not hang, got {ended:?}"
     );
 
     transport.disconnect().await.unwrap();
 }
 
-/// The behaviour we want: when the child is gone, the message stream ends so a
+/// When the child is gone the message stream ends, so a
 /// `while let Some(_) = stream.next()` loop terminates.
 ///
-/// BUG (`SubprocessTransport::spawn_process` / `receive_messages`): the broadcast
-/// sender is stored in `self.message_broadcast_tx` and therefore outlives the
-/// child. When the stdout reader task exits because the CLI died, nothing closes
-/// the channel and nothing reports the exit status, so every consumer blocks
-/// forever. The fix is for the stdout task (or a child-reaping task) to drop the
-/// sender — and ideally to broadcast the non-zero exit status first.
+/// Was a bug (`SubprocessTransport::spawn_process` / `receive_messages`): the
+/// broadcast sender was stored in `self.message_broadcast_tx` and therefore
+/// outlived the child, so when the stdout reader task exited because the CLI had
+/// died, nothing closed the channel and every consumer blocked for ever. The
+/// transport now keeps only a `Receiver` — the senders live in the two reader
+/// tasks and go with them. Still missing, and reported: the non-zero exit status
+/// is not broadcast before the channel closes.
 #[tokio::test]
-#[ignore = "known SDK bug: the message stream never terminates after the CLI exits"]
 async fn stream_ends_when_the_cli_dies_mid_stream() {
     let fake = Transcript::new()
         .await_stdin()

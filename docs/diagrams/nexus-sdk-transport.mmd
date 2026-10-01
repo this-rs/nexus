@@ -1,0 +1,258 @@
+%% name: nexus-sdk-transport
+%% covers: claude-code-sdk-rs/src/transport/*.rs
+%% verified: 2026-10-01
+flowchart TD
+    subgraph legend["Légende"]
+        direction LR
+        L1["✅ écrit et vérifié par un test"]
+        L2["🟠 décidé, non écrit"]
+        L3["🔴 bug confirmé / code non branché"]
+        L4["⚪ hors de ce dépôt"]
+    end
+
+    %% ===================================================================
+    %% Le contrat — transport/mod.rs
+    %% ===================================================================
+    subgraph contrat["Contrat — transport/mod.rs"]
+        direction TB
+        TRAIT["✅ trait Transport<br/>connect, send_message, receive_messages,<br/>send_control_request, receive_control_response,<br/>send_sdk_control_request, send_sdk_control_response,<br/>disconnect, end_input<br/><i>vérifié : appelé via un objet-trait dyn Transport</i>"]
+        DEFAULTS["✅ méthodes par défaut du trait<br/>subscribe_messages, take_sdk_control_receiver,<br/>clone_stdin_sender, child_pid renvoient None ;<br/>end_input ne fait rien<br/><i>vérifié : MockTransport n’en redéfinit que deux</i>"]
+        STATE["🔴 enum TransportState<br/>Disconnected, Connecting, Connected,<br/>Disconnecting, Error<br/>aucune variante n’exprime « ouvert en lecture,<br/>fermé en écriture » → end_input ne peut pas dire vrai"]
+        INPUTMSG["✅ InputMessage::user et InputMessage::tool_result<br/><i>vérifié : ligne relue sur le stdin du faux CLI</i>"]
+        TRAIT --- DEFAULTS
+        TRAIT --- STATE
+        TRAIT --- INPUTMSG
+    end
+
+    %% ===================================================================
+    %% Le double en mémoire — transport/mock.rs
+    %% ===================================================================
+    subgraph mockmod["Double en mémoire — transport/mock.rs"]
+        direction TB
+        MOCK["✅ MockTransport::pair<br/>rend un Box de dyn Transport plus un MockTransportHandle<br/><i>vérifié : tests e2e du protocole de contrôle</i>"]
+        MOCKCONN["🔴 MockTransport::connect<br/>un AtomicBool, pas de machine à états :<br/>send_message réussit avant connect, donc le double<br/>ne reproduit pas le refus de SubprocessTransport"]
+        MOCKRESP["🔴 MockTransport::receive_control_response<br/>control_resp_rx vaut None dès la construction :<br/>renvoie Ok de None quoi qu’il arrive, canal mort"]
+        MOCKSUB["✅ MockTransport::subscribe_messages<br/>redéfinit le défaut None pour que les écouteurs<br/>hors bande voient inbound_message_tx<br/><i>vérifié : messages injectés par le handle</i>"]
+        MOCK --> MOCKCONN
+        MOCK --> MOCKRESP
+        MOCK --> MOCKSUB
+    end
+
+    %% ===================================================================
+    %% Localiser le binaire — subprocess.rs
+    %% ===================================================================
+    subgraph lookup["Localiser le CLI — subprocess.rs"]
+        direction TB
+        CTOR["✅ SubprocessTransport::new, new_async,<br/>with_cli_path, for_print_mode<br/><i>vérifié : options.cli_path court-circuite la recherche</i>"]
+        EXPLICIT["✅ chemin explicite adopté tel quel<br/>for_print_mode l’honore depuis le correctif<br/><i>vérifié : test rejoué sans le correctif</i>"]
+        FIND["✅ find_claude_cli<br/><i>vérifié : PATH et HOME en bac à sable,<br/>binaires plantés dans un tempdir</i>"]
+        FOUNDPATH["✅ trouvé sur le PATH<br/><i>vérifié : binaire planté sur un PATH bac à sable</i>"]
+        FOUNDCACHE["✅ CLI auto-téléchargé, dans le cache du SDK<br/><i>vérifié : fichier planté au chemin rendu par get_cached_cli_path</i>"]
+        FOUNDLOC["✅ installation native sous HOME<br/><i>vérifié : fichier planté sous un HOME bac à sable</i>"]
+        ERRNODE["✅ CliNotFound, diagnostic « Node.js is not installed »<br/>et mention de auto_download_cli<br/><i>vérifié : PATH vide</i>"]
+        ERRLIST["✅ CliNotFound, diagnostic npm install -g<br/>plus tous les chemins essayés<br/><i>vérifié : faux node planté sur le PATH</i>"]
+        ERRHOME["🟠 CliNotFound « Unable to determine home directory »<br/>inatteignable depuis un test : sans HOME,<br/>dirs retombe sur getpwuid et réussit"]
+        DOWNLOAD["⚪ cli_download::download_cli<br/>réseau : hors test"]
+        CTOR -->|"options.cli_path présent"| EXPLICIT
+        CTOR -->|"absent"| FIND
+        CTOR -->|"new_async, auto_download_cli<br/>et recherche échouée"| DOWNLOAD
+        FIND -->|"1. which claude puis claude-code"| FOUNDPATH
+        FIND -->|"2. get_cached_cli_path,<br/>exists ET is_file"| FOUNDCACHE
+        FIND -->|"3. liste sous HOME ;<br/>un répertoire du bon nom est refusé"| FOUNDLOC
+        FIND -->|"rien trouvé, ni node ni npm"| ERRNODE
+        FIND -->|"rien trouvé, mais node présent"| ERRLIST
+        FIND -->|"dirs::home_dir renvoie None"| ERRHOME
+    end
+
+    %% ===================================================================
+    %% Ouvrir la session
+    %% ===================================================================
+    subgraph connexion["Ouvrir la session — connect, spawn_process"]
+        direction TB
+        CONNECT["✅ Transport::connect<br/><i>vérifié : faux CLI, src/bin/fake_claude.rs</i>"]
+        IDEMPOTENT["✅ Ok sans second enfant<br/><i>vérifié : child_pid inchangé</i>"]
+        VERSION["✅ check_cli_version puis get_cli_version<br/>puis SemVer::parse<br/><i>vérifié : version lue dans un fichier voisin du binaire</i>"]
+        OLDWARN["🔴 warn seulement, connect réussit quand même<br/>check_cli_version rend un Result qui ne peut jamais<br/>être Err, donc le if let Err de connect est mort<br/><i>test rouge laissé en ignore</i>"]
+        NOVER["✅ version illisible → None, aucun diagnostic<br/>jamais 0.0.0, qui ferait croire à un CLI antique<br/><i>vérifié : version « nightly-build » en fichier voisin</i>"]
+        SPAWN["✅ spawn_process<br/><i>vérifié : faux CLI réellement lancé</i>"]
+        BUILDCMD["✅ build_command<br/><i>vérifié : argv et environnement relus<br/>sans lancer un seul processus</i>"]
+        USER["✅ apply_process_user<br/>vide → ConfigError ; NUL → ConfigError ;<br/>nom ou uid inconnu → « User not found » ;<br/>sinon setuid et setgid sur l’enfant<br/><i>vérifié : refus AVANT tout spawn</i>"]
+        SPAWNERR["✅ SdkError::ProcessError<br/>si Command::spawn échoue<br/><i>vérifié : cli_path pointé sur un fichier non exécutable</i>"]
+        REDACT["✅ describe_command_redacted<br/>valeur de --mcp-config et TOUTES les valeurs<br/>d’environnement remplacées, les noms conservés<br/><i>vérifié : test rejoué sans le correctif du debug</i>"]
+        PGID["✅ pre_exec puis setpgid de 0 et 0<br/>retour vérifié : un échec refuse le lancement, sinon<br/>kill de -pid viserait le groupe du SDK lui-même<br/><i>vérifié : getpgid de l’enfant égale son pid</i>"]
+        CONNECT -->|"state déjà Connected"| IDEMPOTENT
+        CONNECT --> VERSION
+        VERSION -->|"plus ancienne que MIN_CLI_VERSION, 2.1.280"| OLDWARN
+        VERSION -->|"sortie --version non sémantique"| NOVER
+        VERSION --> SPAWN
+        SPAWN --> BUILDCMD
+        SPAWN -->|"options.user renseigné"| USER
+        SPAWN -->|"échec"| SPAWNERR
+        BUILDCMD --> REDACT
+        BUILDCMD --> PGID
+    end
+
+    %% ===================================================================
+    %% La ligne de commande
+    %% ===================================================================
+    subgraph cmd["Ligne de commande — build_command, build_settings_value"]
+        direction TB
+        ALWAYS["✅ toujours : --output-format stream-json,<br/>--input-format stream-json, --verbose,<br/>--setting-sources avec une valeur vide<br/>quand aucune source n’est choisie<br/><i>vérifié : argv relu sans lancer de processus</i>"]
+        PROMPT["✅ system_prompt_v2 l’emporte sur les champs dépréciés<br/>String → --system-prompt ;<br/>Preset avec append → --append-system-prompt seul ;<br/>Preset sans append → AUCUN drapeau de prompt ;<br/>sans v2 → --system-prompt vide même si rien n’est défini<br/><i>vérifié : argv relu, les trois formes comparées</i>"]
+        PRESETDROP["🔴 le nom du preset est jeté<br/>tout ToolsConfig::Preset devient --tools default,<br/>claude_code compris"]
+        TOKENS["✅ max_output_tokens passe par l’ENVIRONNEMENT,<br/>borné entre 1 et 32000 ; sinon la variable ambiante<br/>CLAUDE_CODE_MAX_OUTPUT_TOKENS est policée :<br/>trop grande → 32000, illisible → 8192, correcte → intacte<br/><i>vérifié : variable restaurée par un garde, test serial</i>"]
+        SETTINGS["✅ build_settings_value<br/>ni settings ni sandbox → pas de --settings ;<br/>settings seul → passé tel quel, jamais reparsé ;<br/>sandbox → document fusionné, options.sandbox gagne<br/><i>vérifié : valeur de --settings reparsée dans le test</i>"]
+        SETTINGSFAIL["🔴 toute faute côté settings est avalée<br/>fichier absent, JSON invalide, JSON non-objet :<br/>un warn puis un document réduit au sandbox,<br/>jamais une erreur que l’appelant puisse voir"]
+        SCHEMA["✅ output_format suivi seulement si type vaut<br/>json_schema ET qu’un schema existe ;<br/>sinon ignoré en silence<br/><i>vérifié : quatre formats refusés, un accepté</i>"]
+        EXTRA["✅ extra_args : clé déjà préfixée passée telle quelle,<br/>sinon préfixée de deux tirets ;<br/>valeur None → drapeau nu<br/><i>vérifié : trois formes de clé, plus une sans valeur</i>"]
+        ALWAYS --- PROMPT
+        PROMPT --- PRESETDROP
+        ALWAYS --- TOKENS
+        ALWAYS --- SETTINGS
+        SETTINGS --- SETTINGSFAIL
+        ALWAYS --- SCHEMA
+        ALWAYS --- EXTRA
+    end
+
+    %% ===================================================================
+    %% Les trois tâches posées sur les tuyaux
+    %% ===================================================================
+    subgraph tasks["Trois tâches sur les tuyaux — spawn_process"]
+        direction TB
+        TASKS["✅ une tâche stdin, une tâche stdout, une tâche stderr<br/><i>vérifié : faux CLI scripté par transcription</i>"]
+
+        STDIN["✅ tâche stdin<br/>écrit la ligne, un retour à la ligne, puis flush<br/><i>vérifié : ligne relue dans le fichier stdin du faux CLI</i>"]
+        STDINDEAD["✅ enfant mort : error puis abandon de la tâche<br/>le receveur est lâché, donc l’envoi suivant<br/>devient ChannelSendError au lieu de disparaître<br/><i>vérifié : envoi après la mort du faux CLI</i>"]
+        STDIN -->|"write_all ou flush échoue"| STDINDEAD
+
+        STDOUT["✅ tâche stdout<br/>BufReader::lines, ligne vide ignorée<br/><i>vérifié : transcription scriptée ligne par ligne</i>"]
+        CTLRESP["✅ control_response relayé sur le canal SDK,<br/>puis si request_id ou requestId est présent<br/><i>vérifié : control_response scripté, canal SDK lu</i>"]
+        ACK["🔴 ControlResponse::InterruptAck fabriqué pour<br/>N’IMPORTE QUEL control_response : la réponse à<br/>initialize ou set_model arrive comme un accusé<br/>d’interruption. request_counter est incrémenté<br/>et jamais relu<br/><i>test rouge laissé en ignore</i>"]
+        CTLREQ["✅ control_request relayé entier<br/>can_use_tool, hook_callback<br/><i>vérifié : can_use_tool et hook_callback scriptés</i>"]
+        CTLNEW["✅ type control : seul le contenu du champ control<br/>est relayé, sans son enveloppe<br/><i>vérifié : enveloppe control scriptée, charge utile comparée</i>"]
+        CTLLEG["✅ sdk_control_request, format legacy, relayé entier<br/><i>vérifié : enveloppe legacy scriptée</i>"]
+        CTLSYS["✅ system dont le subtype commence par sdk_control:<br/>relayé ET conservé comme Message :<br/>seul des cinq cas à ne pas court-circuiter<br/><i>vérifié : présent sur le canal SDK ET dans le flux</i>"]
+        NOTYPE["✅ champ type absent ou non textuel :<br/>aucun routage, la ligne va au parseur<br/><i>vérifié : trois lignes sans type utilisable</i>"]
+        PARSE["✅ message_parser::parse_message<br/><i>vérifié : les trois issues scriptées</i>"]
+        BCAST["✅ diffusé sur le canal broadcast<br/><i>vérifié : message relu dans le flux</i>"]
+        IGNORED["✅ JSON hors modèle ignoré<br/><i>vérifié : type inconnu du modèle</i>"]
+        SWALLOW["🔴 erreur de parsing : un warn et rien de plus<br/>l’élément du flux est un Result de Message mais le<br/>canal d’erreur n’est jamais emprunté : un bloc thinking<br/>sans signature efface tout le message assistant<br/><i>épinglé par thinking_blocks_need_a_signature</i>"]
+        BADJSON["✅ ligne non JSON : un warn, le flux reste intact<br/><i>vérifié : ligne non JSON, puis le flux continue</i>"]
+        STDOUT -->|"type control_response"| CTLRESP
+        CTLRESP --> ACK
+        STDOUT -->|"type control_request"| CTLREQ
+        STDOUT -->|"type control"| CTLNEW
+        STDOUT -->|"type sdk_control_request"| CTLLEG
+        STDOUT -->|"type system, subtype sdk_control:"| CTLSYS
+        STDOUT -->|"type inutilisable"| NOTYPE
+        STDOUT --> PARSE
+        STDOUT -->|"ligne illisible"| BADJSON
+        PARSE -->|"Ok de Some"| BCAST
+        PARSE -->|"Ok de None"| IGNORED
+        PARSE -->|"Err"| SWALLOW
+
+        STDERR["✅ tâche stderr<br/><i>vérifié : lignes stderr scriptées</i>"]
+        SINKS["✅ debug_stderr, qui ajoute --debug-to-stderr,<br/>et stderr_callback reçoivent CHAQUE ligne,<br/>y compris celles que les filtres écartent ensuite<br/><i>vérifié : les deux puits capturés par le test</i>"]
+        NOISE["✅ filtré : bruit d’interruption de hook<br/><i>vérifié : trois formes de bruit absentes des details</i>"]
+        MINIFIED["✅ filtré : bundle JS minifié, zéro valeur diagnostique<br/><i>vérifié : ligne de 600 octets avec le marqueur</i>"]
+        DIAG["✅ un error dédié par motif connu, ligne conservée<br/><i>vérifié : cinq motifs scriptés, tous conservés</i>"]
+        SYSERR["✅ Message::System de subtype error,<br/>source stderr, details = lignes retenues<br/>n’arrive qu’à la mort du CLI, pas avant<br/><i>vérifié : details relus dans le Message::System</i>"]
+        STDERR --> SINKS
+        STDERR -->|"Error in hook callback, AbortError court,<br/>ligne commençant par six espaces et at"| NOISE
+        STDERR -->|"ligne de plus de 500 octets portant un<br/>marqueur du bundle minifié"| MINIFIED
+        STDERR -->|"command not found, ENOENT, Unauthorized,<br/>model not available, Error:"| DIAG
+        STDERR -->|"EOF et error_buffer non vide"| SYSERR
+
+        TASKS --> STDIN
+        TASKS --> STDOUT
+        TASKS --> STDERR
+    end
+
+    %% ===================================================================
+    %% Fin de session
+    %% ===================================================================
+    subgraph eof["Fin de la session"]
+        direction TB
+        STDOUTEOF["✅ stdout atteint EOF<br/>stdout_alive passe à false, PUIS le Sender est lâché<br/><i>vérifié : faux CLI qui sort au milieu du tour</i>"]
+        CLOSED["✅ dernier Sender disparu : chaque flux se TERMINE<br/>un while let Some sur le flux finit enfin par sortir.<br/>Le Sender vit dans les deux tâches, jamais dans self :<br/>self ne garde qu’un Receiver pour resubscribe<br/><i>vérifié : test rejoué sans le correctif</i>"]
+        DEAD["✅ is_connected devient false<br/>un CLI qui sort aussitôt n’est plus annoncé vivant<br/>pour toujours. connect, lui, renvoie toujours Ok :<br/>seul spawn est vérifié"]
+        EXITCODE["🟠 diffuser le code de sortie non nul avant de fermer<br/>décidé, non écrit : le Child appartient à disconnect,<br/>le lecteur stdout ne peut pas l’attendre"]
+        STDOUTEOF --> CLOSED
+        STDOUTEOF --> DEAD
+        CLOSED --- EXITCODE
+    end
+
+    %% ===================================================================
+    %% Écrire et lire
+    %% ===================================================================
+    subgraph io["Écrire et lire, session ouverte"]
+        direction TB
+        SEND["✅ send_message, send_control_request,<br/>send_sdk_control_request, send_sdk_control_response<br/><i>vérifié : les quatre chemins appelés</i>"]
+        NOTCONN["✅ InvalidState « Not connected »<br/>la paire SDK applique la même garde depuis le correctif<br/><i>vérifié : test rejoué sans le correctif</i>"]
+        CLOSEDIN["✅ InvalidState qui NOMME end_input<br/>le message disait « Stdin channel not available »,<br/>ce qui ne disait pas pourquoi<br/><i>vérifié : message du refus comparé après end_input</i>"]
+        WIRE["✅ une ligne JSON sur le stdin de l’enfant<br/>send_control_request : enveloppe interrupt imbriquée ;<br/>send_sdk_control_request : verbatim ;<br/>send_sdk_control_response : enveloppé en control_response<br/><i>vérifié : les trois formes relues sur le stdin du faux CLI</i>"]
+        RECV["✅ receive_messages et subscribe_messages<br/>passent par message_stream sur un resubscribe<br/><i>vérifié : les deux appelés, dont via un objet-trait</i>"]
+        EMPTY["✅ pas connecté : flux vide immédiat, aucune attente<br/><i>vérifié : flux demandé avant connect</i>"]
+        LAG["✅ abonné en retard : Lagged, un warn, saut des messages<br/>écrasés, le flux survit<br/><i>vérifié : tampon de 2 contre 40 messages</i>"]
+        LOST["🔴 abonné trop tard : tout ce qui a été écrit avant le<br/>premier subscribe est perdu, un broadcast tokio ne<br/>rejoue rien. system/init porte session_id, le modèle<br/>et la liste des outils. Correctif = tampon ou rediffusion,<br/>donc signalé plutôt que tranché<br/><i>épinglé par messages_emitted_before_subscribe_are_lost</i>"]
+        TAKECTL["✅ take_sdk_control_receiver déplace le canal,<br/>une seule fois ; receive_sdk_control_request l’emprunte<br/>et renvoie None une fois le canal parti<br/><i>vérifié : pris deux fois, puis emprunt après retrait</i>"]
+        CLONEIN["✅ clone_stdin_sender : écriture hors verrou<br/>pendant qu’un flux tient le transport<br/><i>vérifié : ligne envoyée par le clone, réponse scriptée</i>"]
+        SEND -->|"state différent de Connected"| NOTCONN
+        SEND -->|"stdin_tx absent, donc après end_input"| CLOSEDIN
+        SEND -->|"sinon"| WIRE
+        RECV --> EMPTY
+        RECV --> LAG
+        RECV --> LOST
+    end
+
+    %% ===================================================================
+    %% Fermer
+    %% ===================================================================
+    subgraph shutdown["Fermer — disconnect, end_input, Drop"]
+        direction TB
+        DISC["✅ Transport::disconnect<br/><i>vérifié : faux CLI vivant, puis arrêté</i>"]
+        NOOP["✅ Ok : avant connect, et au second appel<br/><i>vérifié : appelé avant connect et deux fois de suite</i>"]
+        CLOSESTDIN["✅ stdin_tx lâché, donc EOF pour le CLI<br/><i>vérifié : wait_eof du faux CLI ne rend qu’à EOF</i>"]
+        SIGINT["✅ kill de -pid avec SIGINT, puis 200 ms d’attente<br/><i>vérifié : enfant repris en moins de 200 ms</i>"]
+        SIGTERM["🟠 kill de -pid avec SIGTERM, puis 500 ms d’attente<br/>même limite que la marche suivante"]
+        SIGKILL["🟠 kill de -pid avec SIGKILL, puis child.kill<br/>écrit, mais aucun double de test ne l’atteint :<br/>il faudrait un enfant qui INSTALLE un gestionnaire<br/>de SIGINT, ce que fake_claude ne fait pas.<br/><i>vérifié indirectement : disconnect reste borné et ne<br/>laisse aucun processus, enfant mis en SIGSTOP</i>"]
+        REAPED["✅ child repris, state Disconnected, child_pid à None<br/><i>vérifié : child_pid à None, pid absent du système</i>"]
+        ENDIN["🔴 end_input ferme stdin mais laisse state à Connected<br/>is_connected continue d’annoncer une session à deux voies.<br/>La variante manque dans transport/mod.rs, hors périmètre<br/><i>test rouge laissé en ignore</i>"]
+        DROPKILL["✅ Drop : kill de -pid avec SIGKILL puis start_kill<br/>un test qui panique ne fuit pas de processus<br/><i>vérifié : pid sondé par kill de signal 0</i>"]
+        DISC -->|"state différent de Connected"| NOOP
+        DISC --> CLOSESTDIN
+        CLOSESTDIN --> SIGINT
+        SIGINT -->|"sorti à temps"| REAPED
+        SIGINT -->|"timeout ou erreur d’attente"| SIGTERM
+        SIGTERM -->|"sorti à temps"| REAPED
+        SIGTERM -->|"timeout"| SIGKILL
+        SIGKILL --> REAPED
+    end
+
+    %% ===================================================================
+    %% Les liens entre blocs, posés après les blocs pour ne pas
+    %% arracher un noeud de son sous-graphe.
+    %% ===================================================================
+    CALLER["⚪ appelants : ClaudeSDKClient, InteractiveClient,<br/>Query, OptimizedClient::ConnectionPool"] --> TRAIT
+    TRAIT --> CTOR
+    TRAIT --> MOCK
+    TRAIT --> SEND
+    TRAIT --> RECV
+    TRAIT --> DISC
+    TRAIT --> TAKECTL
+    TRAIT --> CLONEIN
+    EXPLICIT --> CONNECT
+    FOUNDPATH --> CONNECT
+    FOUNDCACHE --> CONNECT
+    FOUNDLOC --> CONNECT
+    BUILDCMD --> ALWAYS
+    SPAWN --> TASKS
+    WIRE --> CLI["⚪ le vrai claude CLI,<br/>ou src/bin/fake_claude.rs sous test"]
+    CLI --> STDOUT
+    CLI --> STDERR
+    STDOUT --> STDOUTEOF
+    BCAST --> RECV
+    DEAD --> DISC
+    STATE --- ENDIN
+    ENDIN --- CLOSEDIN
+    DISC --- DROPKILL
