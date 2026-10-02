@@ -1,0 +1,44 @@
+%% name: nexus-ci-pipeline
+%% covers: .github/workflows/ci.yml, .github/workflows/release.yml
+%% verified: 2026-10-02
+flowchart TD
+    subgraph PR["Pull Request"]
+        direction TB
+        push[Push / PR] --> fmt
+
+        fmt["fmt\n✅ rustfmt --check\n✅ diagram index derived & current"]
+        fmt --> clippy["clippy\n✅ -D warnings"]
+        fmt --> test["test matrix\nubuntu / macos / windows\nstable + beta + nightly"]
+        fmt --> docs["docs\ncargo doc"]
+        fmt --> msrv["MSRV 1.88\ncargo build"]
+
+        clippy --> ok{CI Success}
+        test --> ok
+        docs --> ok
+        msrv --> ok
+
+        test --> cov["coverage\ncargo llvm-cov\n+ logic-only report"]
+        cov --> cc["Codecov\n🟠 project: informational\n✅ patch: blocking ≥80 %"]
+    end
+
+    subgraph REL["Release (tag v*)"]
+        direction TB
+        tag[Tag push v*] --> changelog[Generate changelog]
+        changelog --> ghrel[Create GitHub Release]
+        ghrel --> build[Build artifacts]
+
+        build --> linux["Linux\nx64 / ARM64\ntar.gz"]
+        build --> macos["macOS\nx64 / ARM64\ntar.gz"]
+        build --> win["Windows\nx64\nzip"]
+
+        linux & macos & win --> upload[Upload to Release]
+
+        ghrel --> pub[Publish to crates.io]
+        pub --> sdk[nexus-claude]
+        pub --> api[claude-code-api]
+        sdk & api --> vbranch[Update version branch]
+    end
+
+    subgraph ADV["Advisory (non-blocking)"]
+        security["security\ncargo-deny audit"]
+    end
