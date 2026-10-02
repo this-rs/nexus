@@ -231,14 +231,16 @@ fn record_invocation(argv: &[String]) {
         "env_names": names,
     });
 
-    if let Ok(mut file) = std::fs::File::create(&path) {
-        let _ = file.write_all(
-            serde_json::to_string_pretty(&record)
-                .unwrap_or_default()
-                .as_bytes(),
-        );
-        let _ = file.write_all(b"\n");
-        let _ = file.flush();
+    // Write the whole record beside the target, then rename it into place. The test
+    // harness polls for the file's existence and parses it at once; `File::create`
+    // truncates first, so a reader arriving between the truncate and the write saw
+    // an empty file ("EOF while parsing a value"), which flaked on slow runners.
+    // A rename is atomic: the reader sees either no file or the complete record.
+    let tmp = format!("{path}.tmp");
+    let mut body = serde_json::to_string_pretty(&record).unwrap_or_default();
+    body.push('\n');
+    if std::fs::write(&tmp, body).is_ok() && std::fs::rename(&tmp, &path).is_err() {
+        let _ = std::fs::remove_file(&tmp);
     }
 }
 

@@ -104,6 +104,95 @@ fn build_process_died_event(reason: &str) -> ClaudeCodeOutput {
     }
 }
 
+/// How long the initial-response collector waits for *any* message from a freshly
+/// spawned CLI before giving up on the turn.
+///
+/// A safety net, not the normal exit: a `result` message is. Thirty seconds of
+/// total silence from the CLI means something is wrong, and the caller gets an
+/// empty, closed channel rather than hanging.
+const INITIAL_RESPONSE_SAFETY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// The body of the initial-response collector that [`InteractiveSessionManager::create_session`]
+/// spawns: forward everything the CLI says about its first turn to `caller_tx`,
+/// stop on `result`/`error`, and give up after `safety_timeout` of silence.
+///
+/// Sidechain messages (from Task tool subagents) are filtered out; they do not
+/// end a turn.
+///
+/// `safety_timeout` is a parameter rather than a constant read in place so that
+/// the giving-up arm can be exercised in real time, with no child process and no
+/// paused clock. The test that used to do it the other way round — `create_session`
+/// under `#[tokio::test(start_paused = true)]` plus a 31-second jump — hung
+/// forever on Windows; see
+/// `test_initial_collector_gives_up_after_the_safety_timeout`.
+async fn collect_initial_response(
+    mut cli_rx: mpsc::Receiver<ClaudeCodeOutput>,
+    caller_tx: mpsc::Sender<ClaudeCodeOutput>,
+    safety_timeout: std::time::Duration,
+) {
+    let start_time = std::time::Instant::now();
+
+    loop {
+        match tokio::time::timeout(safety_timeout, cli_rx.recv()).await {
+            Ok(Some(output)) => {
+                // Skip sidechain messages (from Task tool subagents)
+                if output.is_sidechain() {
+                    debug!(
+                        "Initial: skipping sidechain message (parent_tool_use_id: {:?})",
+                        output.parent_tool_use_id()
+                    );
+                    continue;
+                }
+
+                // Detect end-of-response via Result message
+                let is_result = output.r#type == "result";
+                let is_error = output.r#type == "error";
+
+                if caller_tx.send(output).await.is_err() {
+                    break;
+                }
+
+                if is_result {
+                    info!("Initial response complete (received result message)");
+                    break;
+                }
+                if is_error {
+                    break;
+                }
+            },
+            Ok(None) => break, // Channel closed
+            Err(_) => {
+                // Safety timeout (30s with no messages at all)
+                error!(
+                    "Safety timeout waiting for initial response after {:?}",
+                    start_time.elapsed()
+                );
+                break;
+            },
+        }
+    }
+}
+
+/// Drains a CLI's stderr, logging every non-empty line at WARN, and returns on
+/// EOF.
+///
+/// Extracted from [`InteractiveSessionManager::create_session`] so that a test can
+/// `await` it to completion. That await is a **real** barrier: it returns only once
+/// the child has closed its stderr, which means the child has run.
+/// `tokio::task::yield_now()` cannot stand in for it — yielding re-polls Rust tasks
+/// that are already runnable, it does not make a forked `sh` execute its next
+/// command — which is how
+/// `test_stderr_is_logged_and_never_mixed_into_the_response` came to depend on a
+/// race. See that test for the measurements.
+async fn log_stderr_lines(stderr: tokio::process::ChildStderr) {
+    let reader = BufReader::new(stderr);
+    let mut lines = reader.lines();
+
+    while let Ok(Some(line)) = lines.next_line().await {
+        warn!("Claude stderr: {}", line);
+    }
+}
+
 /// Arguments whose VALUE (the next argument) must never reach a log.
 ///
 /// `--mcp-config` is either a path or a whole JSON document describing each MCP
@@ -455,57 +544,16 @@ impl InteractiveSessionManager {
         let (output_tx, _) = broadcast::channel(100);
 
         // Dedicated channel for initial request
-        let (initial_tx, mut initial_rx) = mpsc::channel::<ClaudeCodeOutput>(100);
+        let (initial_tx, initial_rx) = mpsc::channel::<ClaudeCodeOutput>(100);
 
         // Initial response collector task
         // Uses Result message detection instead of timeout heuristic.
         // Sidechain messages (from Task tool subagents) are filtered out.
-        let initial_response_tx_clone = initial_response_tx.clone();
-        tokio::spawn(async move {
-            let start_time = std::time::Instant::now();
-
-            loop {
-                match tokio::time::timeout(std::time::Duration::from_secs(30), initial_rx.recv())
-                    .await
-                {
-                    Ok(Some(output)) => {
-                        // Skip sidechain messages (from Task tool subagents)
-                        if output.is_sidechain() {
-                            debug!(
-                                "Initial: skipping sidechain message (parent_tool_use_id: {:?})",
-                                output.parent_tool_use_id()
-                            );
-                            continue;
-                        }
-
-                        // Detect end-of-response via Result message
-                        let is_result = output.r#type == "result";
-                        let is_error = output.r#type == "error";
-
-                        if initial_response_tx_clone.send(output).await.is_err() {
-                            break;
-                        }
-
-                        if is_result {
-                            info!("Initial response complete (received result message)");
-                            break;
-                        }
-                        if is_error {
-                            break;
-                        }
-                    },
-                    Ok(None) => break, // Channel closed
-                    Err(_) => {
-                        // Safety timeout (30s with no messages at all)
-                        error!(
-                            "Safety timeout waiting for initial response after {:?}",
-                            start_time.elapsed()
-                        );
-                        break;
-                    },
-                }
-            }
-        });
+        tokio::spawn(collect_initial_response(
+            initial_rx,
+            initial_response_tx,
+            INITIAL_RESPONSE_SAFETY_TIMEOUT,
+        ));
 
         // Handle stdin
         tokio::spawn(async move {
@@ -600,14 +648,7 @@ impl InteractiveSessionManager {
         });
 
         // Handle stderr
-        tokio::spawn(async move {
-            let reader = BufReader::new(stderr);
-            let mut lines = reader.lines();
-
-            while let Ok(Some(line)) = lines.next_line().await {
-                warn!("Claude stderr: {}", line);
-            }
-        });
+        tokio::spawn(log_stderr_lines(stderr));
 
         // Send initial message (if not empty)
         if !initial_message.is_empty() {
@@ -824,7 +865,6 @@ impl Drop for InteractiveSessionManager {
 mod tests {
     use super::*;
     use serde_json::json;
-    use std::io::Write as _;
     use std::path::PathBuf;
     use std::time::Duration;
     use tempfile::TempDir;
@@ -862,9 +902,6 @@ mod tests {
             let payload = dir.path().join("payload.ndjson");
             std::fs::write(&payload, stdout).expect("write the fake CLI payload");
             let argv = dir.path().join("argv.txt");
-            let script = dir
-                .path()
-                .join(if cfg!(windows) { "fake.cmd" } else { "fake.sh" });
 
             let body = if cfg!(windows) {
                 let mut body = String::from("@echo off\r\n");
@@ -896,17 +933,7 @@ mod tests {
                 body
             };
 
-            let mut file = std::fs::File::create(&script).expect("create the fake CLI script");
-            file.write_all(body.as_bytes())
-                .expect("write the fake CLI script");
-            drop(file);
-
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
-                    .expect("chmod the fake CLI script");
-            }
+            let script = crate::fake_exec::plant_fake_cli(dir.path(), &body);
 
             Self {
                 _dir: dir,
@@ -1110,6 +1137,13 @@ mod tests {
     /// Waits until the response collector of `send_to_existing_session` has
     /// subscribed to the broadcast channel, so a test can inject messages
     /// without racing it.
+    ///
+    /// Yielding is a sound barrier *here*, and the reason is worth keeping: the
+    /// event waited for is a Rust task being polled, and that is exactly what a
+    /// yield hands it. It is **not** a sound barrier for anything that needs an
+    /// OS process to run — the whole budget below is microseconds of wall clock,
+    /// and no number of yields will make a child write to a pipe. Wait for the
+    /// side effect itself in that case; see [`log_stderr_lines`].
     async fn await_subscriber(output_tx: &broadcast::Sender<ClaudeCodeOutput>) {
         for _ in 0..1_000 {
             if output_tx.receiver_count() > 0 {
@@ -1692,6 +1726,28 @@ mod tests {
         );
     }
 
+    /// DO NOT add a read of this child's stdout or stderr. It would hang on
+    /// Windows, and the hang would be silent.
+    ///
+    /// This test combines a **paused clock** with a **real child process**, and
+    /// it only survives that combination because nothing ever reads the child's
+    /// pipes. On Windows a child's stdio is `Blocking<ArcFile>`, so a pending
+    /// read is handed to `spawn_blocking`, whose `BlockingSchedule` calls
+    /// `clock.inhibit_auto_advance()`. The virtual clock then stops advancing
+    /// while a real `park_timeout` waits for a timer that can never fire:
+    /// a genuine deadlock, not a slow test. Unix takes a different path
+    /// (`PollEvented` on a pipe) and never shows it.
+    ///
+    /// Two tests in this crate already cost a 49-minute Windows job that wrote
+    /// no `test result:` line at all — a hang is an *absence of verdict*, so it
+    /// also hid two further Windows defects behind it. They were fixed by
+    /// extracting the timing logic so it is tested without a live child
+    /// (`collect_initial_response`, `sweep_expired_idle`). This test is the last
+    /// one still holding the dangerous pair, and it is only safe by omission.
+    ///
+    /// If you need the child's output here, drop `start_paused` and use a real
+    /// short timeout instead, or extract the logic under test the way the other
+    /// two were.
     #[tokio::test(start_paused = true)]
     async fn test_safety_timeout_ends_an_unanswered_turn() {
         // No `result` ever arrives: the 30-second net is the only way out.
@@ -2104,43 +2160,64 @@ mod tests {
         );
     }
 
+    /// Two facts about stderr, each behind its own barrier.
+    ///
+    /// The logging half used to go through `create_session` and then spin
+    /// `tokio::task::yield_now()` up to 200 times waiting for the warning to show
+    /// up in the capture. That was never a barrier. `collect_all` returns as soon
+    /// as the *stdout* `result` line has been read, and the fake CLI writes its
+    /// stderr line only afterwards — with a `cat` process exiting in between — so
+    /// what the loop had to wait for was **a separate OS process running its next
+    /// command**. Yielding cannot make that happen: it re-polls Rust tasks that are
+    /// already runnable, and the whole 200-yield budget is a few tens of
+    /// microseconds of wall clock. Instrumented over 200 samples the line was
+    /// already there after 3 yields at the median (max 13) on an idle machine, and
+    /// after 5 (max 19) at load average 180 — a margin that looks wide in yields
+    /// and is paper-thin in time. On `ubuntu-latest / beta` it ran out and the
+    /// capture came back empty.
+    ///
+    /// Awaiting [`log_stderr_lines`] to EOF replaces it: the reader returns only
+    /// once the child has closed its stderr, so the write has provably happened,
+    /// in real time, with no budget to exhaust. It also runs first, while no other
+    /// stderr reader exists, so the capture can only hold what this reader wrote.
     #[tokio::test]
     async fn test_stderr_is_logged_and_never_mixed_into_the_response() {
         let cli = FakeCli::noisy_on_stderr(&result_line());
-        let manager = manager(&cli);
 
-        let (tx, rx) = mpsc::channel(8);
-        let (logs, outputs) = {
+        // Logged verbatim — the production reader, driven to EOF.
+        let mut child = spawn_fake(&cli);
+        let stderr = child.stderr.take().expect("stderr is piped");
+        let logs = {
             let (sink, _guard) = capture_logs(tracing::Level::WARN);
-            manager
-                .create_session(
-                    "c".to_string(),
-                    "opus".to_string(),
-                    String::new(),
-                    tx,
-                    false,
-                )
+            tokio::time::timeout(Duration::from_secs(30), log_stderr_lines(stderr))
                 .await
-                .unwrap();
-            let outputs = collect_all(rx).await;
-            // The stderr reader is a task of its own; give it its turn.
-            for _ in 0..200 {
-                if sink.contents().contains("Claude stderr") {
-                    break;
-                }
-                tokio::task::yield_now().await;
-            }
-            (sink.contents(), outputs)
+                .expect("the reader must reach EOF once the CLI exits");
+            sink.contents()
         };
+        child.wait().await.expect("reap the fake CLI");
 
-        assert_eq!(
-            types_of(&outputs),
-            vec!["result"],
-            "stderr is logged, never mixed into the output stream"
-        );
         assert!(
             logs.contains(&format!("Claude stderr: {STDERR_LINE}")),
             "the stderr line must reach the log verbatim: {logs}"
+        );
+
+        // Never mixed in — through a whole session, the caller sees `result` only.
+        let manager = manager(&cli);
+        let (tx, rx) = mpsc::channel(8);
+        manager
+            .create_session(
+                "c".to_string(),
+                "opus".to_string(),
+                String::new(),
+                tx,
+                false,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            types_of(&collect_all(rx).await),
+            vec!["result"],
+            "stderr is logged, never mixed into the output stream"
         );
     }
 
@@ -2198,32 +2275,68 @@ mod tests {
         );
     }
 
-    #[tokio::test(start_paused = true)]
+    /// A CLI that says nothing at all: the collector gives up, closes the
+    /// caller's channel empty, and says so in the log.
+    ///
+    /// Deliberately **not** `start_paused`, and deliberately without a child
+    /// process. This test used to run `create_session` against
+    /// `FakeCli::blocking()` under a paused clock and jump the clock by 31
+    /// seconds. It hung forever on Windows, for two compounding reasons:
+    ///
+    /// * `create_session` spawns the collector and returns without ever
+    ///   yielding (an empty initial message writes nothing), so the 31-second
+    ///   jump landed *before* the collector had been polled even once. The
+    ///   collector then registered its 30-second timer against the clock as
+    ///   already advanced, and the jump was wasted — only auto-advance could
+    ///   still reach the deadline.
+    /// * Auto-advance was unavailable. On Windows a child's stdout/stderr are
+    ///   `tokio::io::blocking::Blocking` handles, so each pending read is a task
+    ///   on the blocking pool, and `BlockingSchedule::new` calls
+    ///   `Clock::inhibit_auto_advance()` for the lifetime of that task. The fake
+    ///   CLI never writes and never exits, so the read never completes, the
+    ///   inhibition never lifts, and `park_thread_timeout` parks for the *real*
+    ///   duration left on a clock that will never move. On Unix those pipes are
+    ///   `PollEvented`, no blocking task exists, and auto-advance works — which
+    ///   is why the same test passed on macOS and Linux.
+    ///
+    /// So the collector is called directly, in real time, with a short timeout.
+    /// The production value is asserted on its own below, and the collector
+    /// being wired into `create_session` is covered by
+    /// `test_initial_collector_filters_sidechain_output`,
+    /// `test_initial_collector_stops_on_an_error_line`,
+    /// `test_only_the_first_response_is_forwarded_and_eof_closes_it` and
+    /// `test_a_dropped_caller_stops_the_initial_collector`.
+    #[tokio::test]
     async fn test_initial_collector_gives_up_after_the_safety_timeout() {
-        let cli = FakeCli::blocking();
-        let manager = manager(&cli);
+        assert_eq!(
+            INITIAL_RESPONSE_SAFETY_TIMEOUT,
+            Duration::from_secs(30),
+            "production still gives a fresh CLI 30 s of silence before giving up"
+        );
 
+        // `_cli_tx` is the CLI side of the collector's input. A named binding, so
+        // that it stays alive and silent for the whole call: dropping it early
+        // would close the channel and send the collector down its `Ok(None)` arm
+        // instead of the timeout arm. The log assertion below is what tells the
+        // two arms apart — only the timeout arm writes anything.
+        let (_cli_tx, cli_rx) = mpsc::channel::<ClaudeCodeOutput>(8);
         let (tx, mut rx) = mpsc::channel(8);
-        manager
-            .create_session(
-                "c".to_string(),
-                "opus".to_string(),
-                String::new(),
-                tx,
-                false,
-            )
-            .await
-            .unwrap();
 
         let (sink, _guard) = capture_logs(tracing::Level::ERROR);
-        tokio::time::advance(Duration::from_secs(31)).await;
+        // A real-time bound two orders of magnitude over the timeout under test,
+        // so that a regression fails the job instead of holding a runner for
+        // GitHub's six-hour limit.
+        tokio::time::timeout(
+            Duration::from_secs(30),
+            collect_initial_response(cli_rx, tx, Duration::from_millis(100)),
+        )
+        .await
+        .expect("the collector must give up on its own");
 
         assert!(
-            tokio::time::timeout(Duration::from_secs(600), rx.recv())
-                .await
-                .expect("the collector must give up")
-                .is_none(),
-            "a CLI that says nothing for 30 s closes the caller's channel empty"
+            rx.recv().await.is_none(),
+            "a CLI that says nothing for the safety timeout closes the caller's \
+             channel empty"
         );
         assert!(
             sink.contents()
@@ -2241,10 +2354,7 @@ mod tests {
         // together — and that an empty initial message is written nowhere.
         // Unix only: cmd.exe has no portable `cat`.
         let dir = tempfile::tempdir().expect("tempdir");
-        let script = dir.path().join("echo.sh");
-        std::fs::write(&script, "#!/bin/sh\nexec cat\n").expect("write the echo script");
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let script = crate::fake_exec::plant_fake_cli(dir.path(), "#!/bin/sh\nexec cat\n");
 
         let manager = manager_with(
             script.to_string_lossy().into_owned(),
@@ -2504,8 +2614,10 @@ mod tests {
     #[tokio::test]
     async fn test_an_empty_message_fails_on_the_newline_alone() {
         // `write_all(b"")` is a no-op that cannot fail, so an empty message sent
-        // to a dead process fails on the newline that follows it. Nothing
-        // prevents an empty message here: only `create_session` filters those.
+        // to a dead process fails on the newline that follows it — never on the
+        // body. Nothing prevents an empty message here: only `create_session`
+        // filters those. Which *operation* first notices the dead pipe is
+        // platform-dependent; see the assertions at the bottom.
         let cli = FakeCli::exiting();
         let manager = manager(&cli);
 
@@ -2541,9 +2653,33 @@ mod tests {
             sink.contents()
         };
 
+        // The dead pipe is reported one step apart on the two platforms, so both
+        // shapes are named here rather than loosening the pattern:
+        //
+        // * Unix — `ChildStdin` is a `PollEvented` pipe, so the one-byte write
+        //   gets `EPIPE` on the spot: "Failed to write newline".
+        // * Windows — `ChildStdin` is a `tokio::io::blocking::Blocking` handle.
+        //   The byte is copied into its buffer and handed to the blocking pool,
+        //   so `write_all` reports success and the closed pipe is only observed
+        //   by the next operation: "Failed to flush stdin: The pipe is being
+        //   closed. (os error 232)".
+        //
+        // Either way the proven fact is the same one: the newline that follows an
+        // empty message could not be delivered, and the writer said so before
+        // giving up. The negative assertion is what keeps this from degenerating
+        // into "any error will do" — the empty body itself must never be the
+        // failure, because `write_all(b"")` does not call `poll_write` at all.
+        let failed_at_the_newline = logs.contains("Failed to write newline:");
+        let failed_at_the_flush = logs.contains("Failed to flush stdin:");
         assert!(
-            logs.contains("Failed to write newline:"),
-            "the newline is the write that fails for an empty message: {logs}"
+            failed_at_the_newline || failed_at_the_flush,
+            "the newline after an empty message must fail and be logged — at the \
+             write on Unix, at the flush on Windows: {logs}"
+        );
+        assert!(
+            !logs.contains("Failed to write to stdin:"),
+            "an empty payload is a no-op write and must never be the failure \
+             itself: {logs}"
         );
     }
 

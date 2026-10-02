@@ -45,7 +45,10 @@ impl RetryPolicy {
         E: std::fmt::Display,
     {
         let mut attempt = 0;
-        let mut delay_ms = self.config.initial_delay_ms;
+        // The ceiling applies to every wait, the first one included: a config
+        // whose initial delay already exceeds `max_delay_ms` must not wait
+        // longer than the ceiling it declares before its first retry.
+        let mut delay_ms = self.config.initial_delay_ms.min(self.config.max_delay_ms);
 
         loop {
             attempt += 1;
@@ -132,8 +135,12 @@ impl CircuitBreaker {
             return false;
         }
 
-        // Check if we should reset
-        if let Some(last_failure) = *self.last_failure.lock()
+        // Check if we should reset. The instant is copied out and the guard
+        // dropped on this very line: `reset()` takes the same lock, and
+        // `parking_lot::Mutex` is not reentrant, so holding the guard across the
+        // call below deadlocks the caller for good.
+        let last_failure = *self.last_failure.lock();
+        if let Some(last_failure) = last_failure
             && last_failure.elapsed() > self.recovery_timeout
         {
             self.reset();
@@ -288,6 +295,72 @@ mod tests {
         assert!(cb.is_open(), "Should be open after threshold failures");
         // Still open because recovery timeout hasn't elapsed
         assert!(cb.is_open(), "Should stay open before recovery timeout");
+    }
+
+    /// `recovery_timeout` is compared against `std::time::Instant::elapsed`,
+    /// i.e. the real monotonic clock, which `tokio::time::pause` cannot touch.
+    /// A zero recovery timeout is therefore the only way into the reset branch
+    /// without sleeping: spin until the monotonic clock has moved by at least
+    /// one tick, which takes nanoseconds and cannot flake.
+    #[test]
+    fn test_circuit_breaker_closes_once_recovery_timeout_elapsed() {
+        let cb = CircuitBreaker::new(2, 0);
+        cb.record_failure();
+        cb.record_failure();
+        assert_eq!(
+            cb.failures.load(std::sync::atomic::Ordering::Relaxed),
+            2,
+            "precondition: at threshold"
+        );
+
+        let tick = std::time::Instant::now();
+        while tick.elapsed().is_zero() {
+            std::hint::spin_loop();
+        }
+
+        assert!(
+            !probe_is_open(&cb),
+            "an elapsed recovery timeout must close the circuit again"
+        );
+        cb.record_failure();
+        assert!(
+            !probe_is_open(&cb),
+            "the recovery must have reset the counter, so one failure is below threshold"
+        );
+    }
+
+    /// Calls `is_open` on a worker thread so that a lock it never releases ends
+    /// the test with a readable failure instead of hanging the whole suite. The
+    /// deadline is only ever paid by a regression; a healthy `is_open` answers
+    /// in microseconds.
+    fn probe_is_open(cb: &CircuitBreaker) -> bool {
+        let cb = cb.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(cb.is_open());
+        });
+        rx.recv_timeout(Duration::from_secs(5)).expect(
+            "is_open deadlocked: it must not hold the last_failure guard across its reset() call",
+        )
+    }
+
+    /// A zero threshold means "never let anything through": `is_open` returns
+    /// true on a breaker that has not recorded a single failure, which is the
+    /// one path through `is_open` where `last_failure` is still `None`.
+    #[test]
+    fn test_circuit_breaker_with_zero_threshold_is_open_from_the_start() {
+        let cb = CircuitBreaker::new(0, 60);
+        assert!(cb.is_open());
+        assert!(cb.last_failure.lock().is_none(), "no failure was recorded");
+    }
+
+    /// The retryable list is consulted before the definitive one, so an error
+    /// that matches both is retried. Pinned, not changed: which list wins is a
+    /// policy decision for the owner of the module, not a typo to patch.
+    #[test]
+    fn test_should_retry_checks_the_retryable_list_first() {
+        assert!(RetryPolicy::should_retry(&"invalid connection string"));
+        assert!(!RetryPolicy::should_retry(&"invalid request body"));
     }
 
     #[test]

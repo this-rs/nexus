@@ -14,6 +14,16 @@ pub mod middleware;
 pub mod models;
 pub mod utils;
 
+/// Planting the fake `claude` executable the unit tests spawn.
+///
+/// The same file backs `tests/support/fake_exec.rs` for the integration tests;
+/// it is shared rather than duplicated because the invariant it enforces — never
+/// execute an inode this process opened for writing — has to hold at *every*
+/// site or `ETXTBSY` comes back at whichever one was left out.
+#[cfg(test)]
+#[path = "../tests/support/fake_exec.rs"]
+mod fake_exec;
+
 use anyhow::Result;
 use axum::{
     Router,
