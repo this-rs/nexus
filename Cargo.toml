@@ -5,6 +5,10 @@ resolver = "2"
 [workspace.package]
 version = "0.5.0"
 edition = "2024"
+# The minimum Rust the CI "MSRV" job builds with. Declared HERE (not only in the CI file) so that
+# cargo's resolver can see it: Cargo.lock is not committed, so every CI run re-resolves, and a
+# dependency release that raises its own MSRV would otherwise break the build overnight.
+rust-version = "1.88"
 authors = ["Théotime Rivière"]
 license = "MIT"
 repository = "https://github.com/this-rs/nexus"
