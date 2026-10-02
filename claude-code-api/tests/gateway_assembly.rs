@@ -13,6 +13,10 @@
 //! * `/v1/sessions` and `/v1/projects` are `404` while `api::sessions` and
 //!   `api::projects` carry handlers. The tests below show what those handlers
 //!   can answer, which is the evidence for leaving the routes unmounted.
+//!
+//! What the mounted middleware *checks* is `tests/auth_token_verification.rs`'s
+//! subject; this file only asserts that it is in the stack, in the right place,
+//! and driven by the configuration.
 
 mod support;
 
@@ -46,11 +50,15 @@ async fn body_json(response: axum::response::Response) -> serde_json::Value {
 ///
 /// Before `build_router` layered `core::auth::auth_middleware`, each of these
 /// returned its normal success status with no credential presented at all.
+///
+/// `/health` is the one exemption — see
+/// `core::auth::UNAUTHENTICATED_PATHS` and
+/// `tests/auth_token_verification.rs::health_stays_anonymous_so_a_liveness_probe_keeps_working`.
 #[tokio::test]
 async fn auth_enabled_refuses_every_route_to_an_anonymous_caller() {
     let server = test_app_with(TestSettings::new().auth(true, TEST_SECRET).build()).await;
 
-    for path in ["/health", "/v1/models", "/stats", "/v1/conversations"] {
+    for path in ["/v1/models", "/stats", "/v1/conversations"] {
         assert_eq!(
             server.get(path).await.status_code(),
             StatusCode::UNAUTHORIZED,
@@ -89,73 +97,30 @@ async fn auth_enabled_admits_a_token_minted_by_auth_manager() {
     assert!(claims.exp > claims.iat, "exp must be after iat");
 
     let server = test_app_with(TestSettings::new().auth(true, TEST_SECRET).build()).await;
-    server
-        .get("/health")
-        .add_header("authorization", format!("Bearer {token}"))
-        .await
-        .assert_text("OK");
-}
-
-/// How strong the protection actually is: the mounted middleware checks for the
-/// `Bearer ` prefix and stops there.
-///
-/// `core::auth::auth_middleware` never calls `AuthManager::verify_token`, so an
-/// unsigned string, a token signed with a different secret, and an expired
-/// token are all admitted. This test pins that weakness so it cannot be mistaken
-/// for verification; the specification is the `#[ignore]`d test below.
-#[tokio::test]
-async fn wired_auth_checks_the_bearer_prefix_and_not_the_token() {
-    let server = test_app_with(TestSettings::new().auth(true, TEST_SECRET).build()).await;
-
-    // Not a JWT at all.
-    server
-        .get("/health")
-        .add_header("authorization", "Bearer not-a-jwt")
-        .await
-        .assert_text("OK");
-
-    // A structurally valid JWT signed with somebody else's secret.
-    let forged = AuthManager::new("a-completely-different-secret".to_string(), true)
-        .generate_token("intruder", 1)
-        .expect("generate_token must succeed");
-    assert!(
-        AuthManager::new(TEST_SECRET.to_string(), true)
-            .verify_token(&forged)
-            .is_err(),
-        "the forged token must not verify against the gateway secret"
+    assert_eq!(
+        server
+            .get("/v1/models")
+            .add_header("authorization", format!("Bearer {token}"))
+            .await
+            .status_code(),
+        StatusCode::OK
     );
-    server
-        .get("/health")
-        .add_header("authorization", format!("Bearer {forged}"))
-        .await
-        .assert_text("OK");
-
-    // Even the empty bearer.
-    server
-        .get("/health")
-        .add_header("authorization", "Bearer ")
-        .await
-        .assert_text("OK");
 }
 
-/// The specification, red today.
+/// The bearer prefix is not a credential.
 ///
-/// Faulty function: `core::auth::auth_middleware` in
-/// `claude-code-api/src/core/auth.rs`. Triggering input:
-/// `Authorization: Bearer not-a-jwt` with `auth.enabled = true`. It returns
-/// `Ok(next.run(req))` on the strength of the prefix alone and never calls
-/// `AuthManager::verify_token`, so an unsigned or forged token is accepted.
-///
-/// The fix belongs to `core/auth.rs` (the middleware needs the secret, i.e.
-/// `AuthManager` in router state or an extension), which is outside this file's
-/// ownership — hence `#[ignore]` rather than a change.
+/// This was the hole, and it was `#[ignore]`d here as the specification while
+/// `core::auth::auth_middleware` returned `Ok(next.run(req))` on the strength of
+/// the prefix alone, never calling `AuthManager::verify_token`. The middleware now
+/// receives the `AuthManager` as state and verifies; the full battery of
+/// forged, expired and tampered tokens is in
+/// `tests/auth_token_verification.rs`.
 #[tokio::test]
-#[ignore = "core::auth::auth_middleware accepts any Bearer string; fix belongs in core/auth.rs"]
 async fn auth_enabled_must_refuse_an_unverifiable_bearer_token() {
     let server = test_app_with(TestSettings::new().auth(true, TEST_SECRET).build()).await;
 
     let response = server
-        .get("/health")
+        .get("/v1/models")
         .add_header("authorization", "Bearer not-a-jwt")
         .await;
 
@@ -163,6 +128,19 @@ async fn auth_enabled_must_refuse_an_unverifiable_bearer_token() {
         response.status_code(),
         StatusCode::UNAUTHORIZED,
         "a bearer token that does not verify against auth.secret_key must be refused"
+    );
+
+    // A structurally valid JWT signed with somebody else's secret is refused too.
+    let forged = AuthManager::new("another-test-secret-not-a-real-key".to_string(), true)
+        .generate_token("intruder", 1)
+        .expect("generate_token must succeed");
+    assert_eq!(
+        server
+            .get("/v1/models")
+            .add_header("authorization", format!("Bearer {forged}"))
+            .await
+            .status_code(),
+        StatusCode::UNAUTHORIZED
     );
 }
 
@@ -174,7 +152,7 @@ async fn auth_enabled_refuses_a_non_bearer_scheme() {
     for header in ["Basic dXNlcjpwYXNz", "bearer lowercase-scheme", "Token abc"] {
         assert_eq!(
             server
-                .get("/health")
+                .get("/v1/models")
                 .add_header("authorization", header)
                 .await
                 .status_code(),
@@ -211,7 +189,7 @@ async fn a_refused_request_still_carries_its_request_id() {
     let server = test_app_with(TestSettings::new().auth(true, TEST_SECRET).build()).await;
 
     let response = server
-        .get("/health")
+        .get("/v1/models")
         .add_header("x-request-id", "nexus-auth-401")
         .await;
 
@@ -276,35 +254,53 @@ async fn create_app_carries_auth_enabled_from_settings_to_the_stack() {
     let server = axum_test::TestServer::new(app).expect("TestServer over create_app's router");
 
     assert_eq!(
-        server.get("/health").await.status_code(),
+        server.get("/v1/models").await.status_code(),
         StatusCode::UNAUTHORIZED
     );
 }
 
-/// `build_components` reads the flag rather than inventing one, and
-/// `build_router` consumes it: flipping the field by hand on an otherwise
+/// `build_components` reads `auth.enabled` and `auth.secret_key` into the
+/// `AuthManager` rather than inventing either, and `build_router` obeys
+/// `AuthManager::is_enabled`: swapping the manager by hand on an otherwise
 /// anonymous component set is enough to protect the router.
+///
+/// `AppComponents` used to carry an `auth_enabled: bool` beside no manager at
+/// all, which is how the switch and the key came to live apart and only the
+/// switch was consulted.
 #[tokio::test]
-async fn build_components_mirrors_auth_enabled_and_build_router_obeys_the_field() {
+async fn build_components_carries_the_auth_manager_and_build_router_obeys_it() {
     let mut components =
         test_components(TestSettings::new().auth(false, TEST_SECRET).build()).await;
     assert!(
-        !components.auth_enabled,
+        !components.auth.is_enabled(),
         "auth.enabled = false must arrive as false"
     );
 
-    components.auth_enabled = true;
+    components.auth = std::sync::Arc::new(AuthManager::new(TEST_SECRET.to_string(), true));
     let server = axum_test::TestServer::new(build_router(components))
         .expect("TestServer over the hand-flipped router");
     assert_eq!(
-        server.get("/health").await.status_code(),
+        server.get("/v1/models").await.status_code(),
         StatusCode::UNAUTHORIZED
     );
 
     let enabled = test_components(TestSettings::new().auth(true, TEST_SECRET).build()).await;
     assert!(
-        enabled.auth_enabled,
+        enabled.auth.is_enabled(),
         "auth.enabled = true must arrive as true"
+    );
+    // The secret arrived with it: a token minted from the same string verifies
+    // against the manager the gateway built.
+    let token = AuthManager::new(TEST_SECRET.to_string(), true)
+        .generate_token("nexus-operator", 1)
+        .expect("generate_token must succeed");
+    assert_eq!(
+        enabled
+            .auth
+            .verify_token(&token)
+            .expect("the manager must hold auth.secret_key, not a default")
+            .sub,
+        "nexus-operator"
     );
 }
 

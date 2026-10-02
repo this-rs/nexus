@@ -37,6 +37,57 @@ pub struct AuthConfig {
     pub token_expiry_hours: i64,
 }
 
+/// The value `auth.secret_key` defaults to, i.e. the one every reader of this
+/// public repository knows.
+pub const PLACEHOLDER_SECRET_KEY: &str = "change-me-in-production";
+
+/// Why the gateway refuses to start.
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum AuthConfigError {
+    #[error(
+        "auth.enabled is true but auth.secret_key is still the placeholder shipped in the \
+         repository: anyone can mint a token this gateway would accept. Set auth.secret_key \
+         (config/<RUN_MODE>.toml, config/local.toml or CLAUDE_CODE__AUTH__SECRET_KEY), or set \
+         auth.enabled = false to serve anonymously on purpose."
+    )]
+    PlaceholderSecretKey,
+    #[error(
+        "auth.enabled is true but auth.secret_key is empty: an empty HMAC key is a known key. \
+         Set auth.secret_key, or set auth.enabled = false to serve anonymously on purpose."
+    )]
+    EmptySecretKey,
+}
+
+impl AuthConfig {
+    /// Refuse a configuration that claims to authenticate and cannot.
+    ///
+    /// `auth.enabled = true` with the shipped placeholder secret is strictly
+    /// worse than `auth.enabled = false`: both serve every caller, but the
+    /// former tells the operator it does not. A warning in the log would not
+    /// change that — this very gap was *documented* for a release and stayed
+    /// open — so the gateway stops instead.
+    ///
+    /// Nothing that works today breaks: the shipped default is
+    /// `auth.enabled = false`, which is never rejected, and the only
+    /// configuration refused is the one that is already unauthenticated while
+    /// believing otherwise. The remedy is one line of configuration.
+    ///
+    /// The check deliberately does not judge the *strength* of a secret an
+    /// operator chose; it only refuses the two values that are public knowledge.
+    pub fn validate(&self) -> Result<(), AuthConfigError> {
+        if !self.enabled {
+            return Ok(());
+        }
+        if self.secret_key.is_empty() {
+            return Err(AuthConfigError::EmptySecretKey);
+        }
+        if self.secret_key == PLACEHOLDER_SECRET_KEY {
+            return Err(AuthConfigError::PlaceholderSecretKey);
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Deserialize, Serialize, Clone, Default)]
 pub struct FileAccessConfig {
     pub skip_permissions: bool,
@@ -81,7 +132,7 @@ impl Settings {
             .set_default("claude.max_concurrent_sessions", 10)?
             .set_default("claude.use_interactive_sessions", false)?
             .set_default("auth.enabled", false)?
-            .set_default("auth.secret_key", "change-me-in-production")?
+            .set_default("auth.secret_key", PLACEHOLDER_SECRET_KEY)?
             .set_default("auth.token_expiry_hours", 24)?
             .set_default("file_access.skip_permissions", false)?
             .set_default("file_access.additional_dirs", Vec::<String>::new())?

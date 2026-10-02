@@ -35,6 +35,7 @@ use tracing::info;
 
 use crate::api::chat::ChatState;
 use crate::core::{
+    auth::AuthManager,
     claude_manager::ClaudeManager,
     config::Settings,
     model_registry::ModelRegistry,
@@ -51,18 +52,20 @@ pub struct AppComponents {
     pub conversation_state: api::conversations::ConversationState,
     pub stats_state: api::stats::StatsState,
     pub model_registry: Arc<ModelRegistry>,
-    /// Mirror of `settings.auth.enabled`: when true, [`build_router`] layers
-    /// [`core::auth::auth_middleware`] over **every** route, `/health` included.
+    /// The gateway's authentication, secret included.
     ///
-    /// The flag exists because `auth.enabled` used to be inert — `core::auth`
-    /// was compiled and never mounted, so the gateway served every request
-    /// anonymously whatever the configuration said.
+    /// This replaces an `auth_enabled: bool` mirror of `settings.auth.enabled`.
+    /// The bool was enough to *mount* a middleware and not enough to make it
+    /// check anything: `auth.secret_key` never reached the stack, so the mounted
+    /// [`core::auth::auth_middleware`] demanded an `Authorization: Bearer …`
+    /// header and nothing more — any string got through and
+    /// [`core::auth::AuthManager::verify_token`] was never called.
     ///
-    /// Note what the mounted middleware does and does not do: it demands an
-    /// `Authorization: Bearer …` header and nothing more. It never calls
-    /// [`core::auth::AuthManager::verify_token`], so any bearer string is
-    /// accepted and `auth.secret_key` is still unused.
-    pub auth_enabled: bool,
+    /// Carrying the [`AuthManager`] itself means the flag
+    /// ([`AuthManager::is_enabled`]) and the secret cannot disagree, and
+    /// `build_router` hands the manager to the middleware as state rather than
+    /// handling the key itself.
+    pub auth: Arc<AuthManager>,
 }
 
 /// The route table and middleware stack of the gateway.
@@ -73,6 +76,10 @@ pub struct AppComponents {
 /// Routes served: `/health`, `/v1/models`, `/v1/models/refresh`,
 /// `/v1/chat/completions`, `/v1/sessions/:conversation_id/interrupt`,
 /// `/v1/conversations` and `/v1/conversations/:id`, `/stats`.
+///
+/// When `auth.enabled` is true every one of those is behind
+/// [`core::auth::auth_middleware`] except `/health`, which stays anonymous so a
+/// liveness probe keeps working.
 ///
 /// Deliberately **not** served: `/v1/sessions` and `/v1/projects`. The handlers
 /// in [`api::sessions`] and [`api::projects`] exist but are placeholders — they
@@ -85,7 +92,7 @@ pub fn build_router(components: AppComponents) -> Router {
         conversation_state,
         stats_state,
         model_registry,
-        auth_enabled,
+        auth,
     } = components;
 
     let cors = CorsLayer::permissive();
@@ -135,8 +142,25 @@ pub fn build_router(components: AppComponents) -> Router {
     // stack. It sits *inside* `request_id` and `error_handler` so a rejected
     // request still carries an `x-request-id` and still gets logged, and inside
     // the CORS layer so a preflight `OPTIONS` is answered rather than refused.
-    let routes = if auth_enabled {
-        routes.layer(axum::middleware::from_fn(core::auth::auth_middleware))
+    //
+    // `from_fn_with_state` rather than `from_fn`: the middleware needs the
+    // secret to verify a token, and middleware state is the one way to give it
+    // one that the compiler checks. An `Extension` layer carrying the
+    // `AuthManager` would have type-checked whether or not the layer was
+    // actually mounted, turning a forgotten line into a runtime `500` — and it
+    // would have published the key into the extensions map of every request,
+    // where every downstream handler can read it. Only the verified
+    // [`core::auth::Claims`] belong there.
+    //
+    // `/health` is served without a credential; the reasoning is on
+    // [`core::auth::UNAUTHENTICATED_PATHS`]. Note that this is decided inside the
+    // middleware, so `Router::layer` still wraps the fallback too and an
+    // unrouted path is `401` rather than `404` to an anonymous caller.
+    let routes = if auth.is_enabled() {
+        routes.layer(axum::middleware::from_fn_with_state(
+            auth,
+            core::auth::auth_middleware,
+        ))
     } else {
         routes
     };
@@ -167,6 +191,15 @@ pub async fn build_components(settings: Settings) -> Result<AppComponents> {
         interactive_session::InteractiveSessionManager,
         storage::{InMemoryConversationConfig, InMemoryConversationStore},
     };
+
+    // Before anything is built: a gateway that claims to authenticate with a
+    // publicly known key does not start. See
+    // [`core::config::AuthConfig::validate`].
+    settings.auth.validate()?;
+    let auth = Arc::new(AuthManager::new(
+        settings.auth.secret_key.clone(),
+        settings.auth.enabled,
+    ));
 
     let claude_manager = Arc::new(ClaudeManager::new(
         settings.claude.command.clone(),
@@ -240,7 +273,7 @@ pub async fn build_components(settings: Settings) -> Result<AppComponents> {
         conversation_state,
         stats_state,
         model_registry: Arc::new(ModelRegistry::new()),
-        auth_enabled: settings.auth.enabled,
+        auth,
     })
 }
 

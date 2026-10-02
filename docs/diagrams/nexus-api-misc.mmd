@@ -1,6 +1,6 @@
 %% name: nexus-api-misc
 %% covers: claude-code-api/src/lib.rs, claude-code-api/src/main.rs, claude-code-api/src/middleware/*.rs, claude-code-api/src/models/*.rs, claude-code-api/src/utils/*.rs
-%% verified: 2026-10-01
+%% verified: 2026-10-02
 flowchart TD
     subgraph legend["Légende"]
         direction LR
@@ -59,7 +59,7 @@ flowchart TD
 
     subgraph served["Table de routes montée"]
         direction TB
-        rhealth["✅ health_check renvoie la chaîne OK<br/>sans état ; protégé comme le reste quand auth.enabled vaut true"]
+        rhealth["✅ health_check renvoie la chaîne OK<br/>sans état ; EXEMPT d'authentification par UNAUTHENTICATED_PATHS<br/>pour qu'une sonde de vivacité sans jeton reste possible"]
         rmodels["✅ api::models::list_models et refresh_models<br/>état Arc de ModelRegistry"]
         rchat["✅ api::chat::chat_completions<br/>état ChatState"]
         rint["🔴 api::chat::interrupt_session<br/>sous /v1/sessions/:conversation_id/interrupt<br/>seule route qui n'utilise pas ApiError : elle fabrique son JSON<br/>à la main et met une chaîne nue sous error, là où toutes les<br/>autres mettent un objet message, type, param, code<br/><i>vérifié : les deux formes comparées dans le même test</i>"]
@@ -101,14 +101,17 @@ flowchart TD
         mauth{"auth_enabled"}
         mauth -->|"false, défaut livré"| anon["✅ aucune couche posée, tout est servi en anonyme<br/><i>vérifié : credential absurde ignoré, 200 quand même</i>"]
         mauth -->|"true"| authmw
-        authmw["✅ core::auth::auth_middleware monté par from_fn,<br/>à l'intérieur de request_id et de la couche CORS<br/><i>vérifié : 401 anonyme sur health, v1/models, stats,<br/>v1/conversations, v1/chat/completions et v1/models/refresh</i>"]
+        authmw["✅ core::auth::auth_middleware monté par from_fn_with_state<br/>avec un Arc de AuthManager, à l'intérieur de request_id et de CORS<br/>la couche englobe aussi le fallback : un chemin inconnu rend 401 avant 404,<br/>donc la table de routes n'est pas énumérable en anonyme<br/><i>vérifié : 401 anonyme sur v1/models, stats, v1/conversations,<br/>v1/chat/completions, v1/models/refresh, healthz et no-such-route</i>"]
         authmw -->|"aucun en-tête Authorization — refusé"| a401["✅ 401 UNAUTHORIZED<br/>la réponse porte quand même son x-request-id"]
         authmw -->|"schéma Basic, bearer minuscule ou Token — refusé"| a401
-        authmw -->|"préfixe Bearer suivi de n'importe quoi"| apass
-        apass["🔴 next.run sans aucune vérification<br/>verify_token n'est jamais appelé : un jeton non signé,<br/>signé avec un autre secret, ou un Bearer vide passent<br/><i>vérifié : un test affirme le passage, un test rouge ignoré<br/>porte la spécification et nomme auth_middleware</i>"]
-        amgr["🔴 AuthManager::new, generate_token et verify_token<br/>écrits, testés, jamais appelés par le middleware<br/>auth.secret_key et auth.token_expiry_hours restent inertes<br/><i>vérifié : aller-retour generate puis verify, hors routeur</i>"]
-        apass -.->|"devrait appeler"| amgr
-        authmw --> ahealth["🟠 /health est protégé lui aussi<br/>aucune liste d'exemption n'existe : une sonde de santé<br/>sans jeton reçoit 401 — comportement épinglé, politique à trancher"]
+        authmw -->|"chemin dans UNAUTHENTICATED_PATHS"| ahealth
+        authmw -->|"préfixe Bearer, jeton vérifié par verify_token"| apass
+        authmw -->|"jeton non signé, autre secret, expiré ou altéré — refusé"| a401
+        apass["✅ next.run APRÈS vérification de la signature et de exp<br/>les Claims vérifiées sont insérées en extension de requête,<br/>donc un handler lit Extension de Claims et obtient le sub signé<br/><i>vérifié : Bearer x rend 401 (rendait 200) ; jeton d'un autre<br/>secret, expiré ou altéré rendent 401 ; sub lu en aval</i>"]
+        amgr["✅ AuthManager::verify_token appelé par le middleware<br/>auth.secret_key est enfin consulté<br/>🟠 auth.token_expiry_hours reste inerte : aucune route ne frappe<br/>de jeton, generate_token n'a pas d'appelant de production<br/><i>vérifié : le secret porté par la passerelle valide un jeton frappé<br/>avec la même chaîne</i>"]
+        apass -.->|"appelle"| amgr
+        ahealth["✅ /health reste anonyme<br/>exemption décidée DANS le middleware, pas en sortant la route<br/>de la couche — sortir la route aurait rendu le fallback anonyme<br/><i>vérifié : health rend OK sans jeton ; healthz, no-such-route<br/>et health/../stats rendent 401</i>"]
+        aboot["✅ refus de démarrer si auth.enabled vaut true<br/>avec le secret de notoriété publique ou un secret vide<br/>AuthConfig::validate appelée depuis build_components<br/><i>vérifié : build_components rend Err(PlaceholderSecretKey)</i>"]
     end
 
     %% =====================================================================

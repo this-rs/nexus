@@ -13,7 +13,7 @@
 diagrams:
   - name: nexus-api-core
     file: nexus-api-core.mmd
-    verified: 2026-10-01
+    verified: 2026-10-02
     covers:
       - claude-code-api/src/core/auth.rs
       - claude-code-api/src/core/cache.rs
@@ -43,7 +43,7 @@ diagrams:
       - claude-code-api/src/core/memory/*.rs
   - name: nexus-api-misc
     file: nexus-api-misc.mmd
-    verified: 2026-10-01
+    verified: 2026-10-02
     covers:
       - claude-code-api/src/lib.rs
       - claude-code-api/src/main.rs
