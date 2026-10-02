@@ -40,6 +40,7 @@
 pub mod claude_output;
 pub mod config;
 pub mod fake_cli;
+pub mod fake_exec;
 pub mod fakes;
 pub mod http_mocks;
 pub mod openai;
