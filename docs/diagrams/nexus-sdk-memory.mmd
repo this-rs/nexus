@@ -1,0 +1,203 @@
+%% name: nexus-sdk-memory
+%% covers: claude-code-sdk-rs/src/memory/*.rs
+%% verified: 2026-10-01
+flowchart TD
+    subgraph legend["Légende"]
+        direction LR
+        L1["✅ vérifié par un test"]
+        L2["🟠 décidé, non écrit"]
+        L3["🔴 bug / non branché"]
+        L4["⚪ hors dépôt"]
+    end
+
+    %% =====================================================================
+    %% Entrées : qui parle au domaine mémoire
+    %% =====================================================================
+    app["⚪ application hôte<br/>ou examples/memory_chat.rs"]
+    meili["⚪ Meilisearch<br/>HTTP, hors dépôt<br/><i>remplacé par wiremock dans les tests</i>"]
+
+    opts["🔴 ClaudeAgentOptions::memory_enabled()<br/>memory_threshold() / memory_token_budget()<br/>écrites par le builder, lues par personne<br/><i>aucun lecteur dans tout le dépôt</i>"]
+    app --> opts
+
+    %% =====================================================================
+    %% Capture d'un tour — integration.rs + tool_context.rs
+    %% =====================================================================
+    subgraph capture["Capture du tour — integration.rs, tool_context.rs"]
+        mgr_new["✅ ConversationMemoryManager::new()<br/>id = conv- + uuid4, turn_index = 0<br/><i>vérifié : tests unitaires en ligne</i>"]
+        mgr_enabled{"✅ config.enabled ?<br/><i>vérifié : test_disabled_memory_does_nothing</i>"}
+        mgr_noop["✅ retour silencieux<br/>aucun message enregistré, aucune erreur"]
+
+        tool_call["✅ ConversationMemoryManager::process_tool_call()<br/>délègue à MessageContextAggregator::process_tool_call()"]
+        extract{"✅ DefaultToolContextExtractor::extract_context()<br/>aiguillage sur le nom de l'outil"}
+        extract_file["✅ extract_file_path()<br/>Read / Write / Edit → champ file_path"]
+        extract_path["🔴 extract_path()<br/>Glob / Grep : Path::is_dir() OU absence de point<br/>→ classe en cwd, sinon en fichier<br/><i>sonde le système de fichiers réel</i>"]
+        extract_bash["✅ extract_from_bash()<br/>extract_cd_path() + extract_absolute_paths()<br/>filtrés par looks_like_file_path()"]
+        extract_none["✅ outil inconnu → ToolContext::new()<br/>variante refusée : rien n'est déduit"]
+
+        rec_user["✅ record_user_message()<br/>MessageDocument role=user, turn_index courant"]
+        rec_asst["✅ record_assistant_message()<br/>finalize() puis turn_index += 1 et aggregator.reset()"]
+        pending["✅ take_pending_messages()<br/>std::mem::take, le tampon repart vide"]
+        ts["🔴 current_timestamp()<br/>duration_since(UNIX_EPOCH).unwrap_or(0)<br/>une horloge avant 1970 date tout à l'époque 0"]
+    end
+
+    opts -.->|"le client n'interroge jamais le domaine mémoire"| mgr_new
+    app --> mgr_new --> mgr_enabled
+    mgr_enabled -->|"désactivée"| mgr_noop
+    mgr_enabled -->|"activée"| tool_call
+    tool_call --> extract
+    extract -->|"Read, Write, Edit"| extract_file
+    extract -->|"Glob, Grep"| extract_path
+    extract -->|"Bash"| extract_bash
+    extract -->|"tout le reste"| extract_none
+    mgr_enabled -->|"activée"| rec_user
+    mgr_enabled -->|"activée"| rec_asst
+    rec_user --> ts
+    rec_asst --> ts
+    rec_user --> pending
+    rec_asst --> pending
+
+    %% =====================================================================
+    %% Documents et configuration — message_document.rs
+    %% =====================================================================
+    subgraph docs["Documents — message_document.rs"]
+        msgdoc["✅ MessageDocument::new()<br/>cwd et summary omis du JSON si None<br/>files_touched dédupliqué par add_file_touched()"]
+        display["✅ display_content()<br/>préfère summary, retombe sur content"]
+        convdoc["✅ ConversationDocument::update_from_message()<br/>message_count = turn_index + 1, cwd posé une seule fois"]
+        cfg["🔴 MemoryConfig::default()<br/>lit MEILISEARCH_URL et MEILISEARCH_KEY<br/>une clé avec retour à la ligne fait paniquer le SDK<br/><i>vérifié : should_panic InvalidHeaderValue</i>"]
+    end
+
+    pending --> msgdoc
+    msgdoc --> display
+    pending --> convdoc
+    app --> cfg
+
+    %% =====================================================================
+    %% Résumés — integration.rs
+    %% =====================================================================
+    subgraph summary["Résumés — integration.rs"]
+        sum_need["✅ SummaryGenerator::needs_summary()<br/>content.len() en octets > seuil"]
+        sum_gen{"✅ generate_simple_summary()<br/>découpe sur . ! ? puis aiguille sur le nombre de phrases"}
+        sum_0["🔴 0 phrase → content[..seuil]<br/>panique si le seuil tombe au milieu d'un caractère UTF-8<br/><i>test ignoré : correctif hors de ce périmètre</i>"]
+        sum_1["✅ 1 phrase → la phrase seule"]
+        sum_n["✅ 2 phrases ou plus → première + ' ... ' + dernière"]
+    end
+
+    msgdoc --> sum_need --> sum_gen
+    sum_gen -->|"aucune phrase utile"| sum_0
+    sum_gen -->|"une phrase"| sum_1
+    sum_gen -->|"deux ou plus"| sum_n
+
+    %% =====================================================================
+    %% Démarrage du fournisseur — provider.rs
+    %% =====================================================================
+    subgraph boot["Démarrage — provider.rs"]
+        injector["🟠 ContextInjector::new()<br/>enveloppe le fournisseur dans un Arc<br/><i>aucun test : seuls les exemples l'appellent</i>"]
+        pbuild["✅ MemoryProviderBuilder::build()<br/>relaie MeilisearchMemoryProvider::new()<br/><i>vérifié : wiremock + cas Disabled</i>"]
+        pnew{"✅ MeilisearchMemoryProvider::new()<br/>config.enabled ?<br/><i>vérifié : wiremock</i>"}
+        pdisabled["✅ Err(MemoryError::Disabled)<br/>option refusée : pas de fournisseur hors ligne"]
+        pclient["🔴 Client::new()<br/>ne valide ni l'URL ni la clé<br/>le map_err vers MemoryError::Meilisearch est mort :<br/>une URL absurde n'échoue qu'à la première requête<br/><i>vérifié : hôte 'not-a-url'</i>"]
+        setup["✅ setup_indexes()<br/>create_index puis set_settings, messages avant conversations<br/><i>vérifié : wiremock, ordre et corps des 4 requêtes</i>"]
+        setup_swallow["🔴 let _ = create_index(...)<br/>un 500 du serveur est avalé comme un index déjà présent<br/><i>vérifié : wiremock renvoie 500, new() réussit</i>"]
+        setup_err["✅ set_settings avec ?<br/>un rejet arrête le démarrage avant l'index conversations<br/><i>vérifié : wiremock renvoie 400</i>"]
+    end
+
+    cfg --> pbuild --> pnew
+    app --> injector --> pnew
+    pnew -->|"désactivée"| pdisabled
+    pnew -->|"activée"| pclient --> setup
+    setup --> setup_swallow
+    setup --> setup_err
+    setup --> meili
+
+    %% =====================================================================
+    %% Lecture et injection — provider.rs + scoring.rs
+    %% =====================================================================
+    subgraph read["Lecture et injection — provider.rs, scoring.rs"]
+        prefix{"🟠 ContextInjector::get_context_prefix()<br/>config.enabled ?<br/><i>aucun test</i>"}
+        prefix_off["🟠 Ok(None)<br/>désactivée, ou aucun résultat pertinent"]
+        retrieve["✅ MeilisearchMemoryProvider::retrieve_context()<br/>limite envoyée = limit * 2, showRankingScore = true<br/><i>vérifié : wiremock, corps de la requête</i>"]
+        filter{"🔴 build_filter()<br/>cwd seul, égalité stricte, interpolé sans échappement<br/>le doc-commentaire annonce 'exact match or prefix'<br/><i>vérifié : filtre exact affirmé, y compris l'injection</i>"}
+        filter_none["✅ aucun cwd → aucun filtre envoyé<br/>files n'alimente jamais le filtre, seulement le score"]
+        score["✅ score_results()<br/>compute_age_hours() puis RelevanceScorer::compute_score()<br/><i>vérifié : tri décroissant affirmé</i>"]
+        scorer["✅ RelevanceScorer::compute_score()<br/>semantic_score + cwd_match_score + files_overlap_score + recency_score<br/>pondérés par RelevanceConfig<br/><i>vérifié : tests unitaires en ligne</i>"]
+        retain["✅ retain(total >= min_relevance_score)<br/>un hit sans _rankingScore retombe à semantic = 0.0"]
+        take["✅ take(max_context_items.min(limit))<br/>limit = 0 coûte un aller-retour pour rien"]
+        budget{"✅ apply_token_budget()<br/>budget = token_budget * 4 caractères<br/>mesure display_content(), donc le résumé<br/><i>vérifié : ordre de sortie affirmé</i>"}
+        budget_skip["✅ trop gros et la sélection n'est pas vide<br/>→ sauté, la boucle continue : un résultat moins bien classé passe devant"]
+        budget_one["✅ trop gros et sélection vide<br/>→ gardé quand même puis break"]
+        prefix_empty{"🟠 résultats vides ?<br/><i>aucun test</i>"}
+        fmt{"✅ ContextFormatter::format_for_prompt()<br/>liste vide → chaîne vide"}
+        fmt_age["✅ format_age()<br/>minutes.max(1) : jamais '0 min', futur ramené à 1 min"]
+        fmt_trunc["✅ truncate(content, 200)<br/>recule jusqu'à une frontière de caractère UTF-8<br/><i>vérifié : test rejoué sans le correctif, panique à l'octet 200</i>"]
+    end
+
+    injector --> prefix
+    prefix -->|"désactivée"| prefix_off
+    prefix -->|"activée"| retrieve
+    retrieve --> filter
+    filter -->|"cwd absent"| filter_none
+    retrieve --> meili
+    retrieve --> score --> scorer
+    score --> retain --> take --> budget
+    budget -->|"ne tient pas"| budget_skip
+    budget -->|"ne tient pas et rien de gardé"| budget_one
+    budget --> prefix_empty
+    prefix_empty -->|"aucun résultat au-dessus du seuil"| prefix_off
+    prefix_empty -->|"au moins un résultat"| fmt
+    fmt --> fmt_age
+    fmt --> fmt_trunc
+
+    %% =====================================================================
+    %% Écriture — provider.rs
+    %% =====================================================================
+    subgraph write["Écriture — provider.rs"]
+        store_one["✅ store_message()<br/>POST documents?primaryKey=id sur l'index messages<br/><i>vérifié : wiremock, corps exact du document</i>"]
+        store_many{"✅ store_messages()<br/>lot vide ?<br/><i>vérifié : wiremock, zéro requête reçue</i>"}
+        store_empty["✅ Ok(()) sans requête HTTP"]
+        store_batch["✅ un seul POST pour tout le lot<br/><i>vérifié : wiremock, une requête, deux documents</i>"]
+        upd_conv["✅ update_conversation()<br/>POST sur l'index conversations<br/><i>vérifié : wiremock</i>"]
+        inj_store["🟠 ContextInjector::store_messages()<br/>désactivée ou lot vide → Ok(()) avant tout appel<br/><i>aucun test</i>"]
+    end
+
+    pending --> inj_store --> store_many
+    store_many -->|"vide"| store_empty
+    store_many -->|"non vide"| store_batch --> meili
+    app --> store_one --> meili
+    convdoc --> upd_conv --> meili
+
+    %% =====================================================================
+    %% Pagination et santé — provider.rs
+    %% =====================================================================
+    subgraph page["Pagination et santé — provider.rs"]
+        opt_def["✅ GetMessagesOptions<br/>effective_limit = 50, effective_offset = 0, is_newest_first = true"]
+        getmsgs{"✅ get_conversation_messages()<br/>tri turn_index:desc ou :asc selon newest_first<br/><i>vérifié : wiremock, sort/limit/offset affirmés</i>"}
+        getmsgs_filter["🔴 filtre conversation_id construit par format!<br/>identifiant interpolé sans échappement des guillemets<br/><i>vérifié : wiremock, filtre injecté affirmé tel quel</i>"]
+        getmsgs_total["🔴 estimated_total_hits.unwrap_or(0)<br/>le serveur omet l'estimation → total_count = 0<br/>alors que des messages sont renvoyés, et has_more = false<br/><i>vérifié : wiremock, charge sans estimatedTotalHits</i>"]
+        count{"✅ count_conversation_messages()<br/>limite 0 : aucun document rapatrié<br/><i>vérifié : wiremock</i>"}
+        list["✅ list_conversations()<br/>tri updated_at:desc, aucun filtre<br/><i>vérifié : wiremock</i>"]
+        health{"🔴 health_check() -> MemoryResult&lt;bool&gt;<br/>Ok(true) ou Err, jamais Ok(false)<br/><i>vérifié : 503 → Err, le faux booléen est affirmé mort</i>"}
+        loaded["✅ LoadedConversation<br/>messages_chronological() inverse la page<br/>hypothèse : load_conversation force newest_first(true)"]
+        parse_err["✅ document illisible → MemoryError::Meilisearch<br/>la variante Serialization ne sert jamais ici<br/><i>vérifié : wiremock, champ model manquant</i>"]
+    end
+
+    app --> opt_def --> getmsgs
+    getmsgs --> getmsgs_filter
+    getmsgs --> getmsgs_total
+    getmsgs --> meili
+    getmsgs --> loaded
+    app --> count --> meili
+    app --> list --> meili
+    list --> parse_err
+    app --> health --> meili
+
+    %% =====================================================================
+    %% Erreurs — provider.rs
+    %% =====================================================================
+    subgraph errors["Erreurs — provider.rs"]
+        err_from["✅ From&lt;meilisearch_sdk::errors::Error&gt;<br/>aplatit la cause en String : la variante d'origine est perdue<br/><i>vérifié : Error::Timeout → message exact</i>"]
+        err_config["🔴 MemoryError::Config<br/>variante jamais construite par le code de production"]
+    end
+
+    meili --> err_from
+    setup_err --> err_from
+    parse_err --> err_from

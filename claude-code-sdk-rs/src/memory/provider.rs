@@ -681,11 +681,20 @@ impl ContextFormatter {
     }
 
     /// Truncates text with ellipsis.
+    ///
+    /// `max_len` is a **byte** budget. When it falls inside a multi-byte UTF-8
+    /// character the cut is moved back to the preceding character boundary:
+    /// slicing on a byte index that is not a boundary would panic, and the
+    /// content stored in memory is routinely non-ASCII.
     fn truncate(s: &str, max_len: usize) -> String {
         if s.len() <= max_len {
             s.to_string()
         } else {
-            format!("{}...", &s[..max_len])
+            let mut end = max_len;
+            while end > 0 && !s.is_char_boundary(end) {
+                end -= 1;
+            }
+            format!("{}...", &s[..end])
         }
     }
 }
@@ -886,6 +895,376 @@ mod tests {
         let json_err = serde_json::from_str::<i32>("invalid").unwrap_err();
         let mem_err: MemoryError = json_err.into();
 
-        matches!(mem_err, MemoryError::Serialization(_));
+        assert!(
+            matches!(mem_err, MemoryError::Serialization(_)),
+            "a serde failure must stay a Serialization error, got {mem_err:?}"
+        );
+        assert!(mem_err.to_string().starts_with("Serialization error: "));
+    }
+
+    #[test]
+    fn test_memory_error_from_meilisearch_error_flattens_to_a_string() {
+        // The `From<meilisearch_sdk::errors::Error>` impl drops the structured
+        // cause and keeps only `Display`, so the variant is unrecoverable
+        // downstream: assert exactly what callers can still read.
+        let mem_err: MemoryError = meilisearch_sdk::errors::Error::Timeout.into();
+
+        match mem_err {
+            MemoryError::Meilisearch(msg) => {
+                assert_eq!(msg, "A task did not succeed in time.");
+            },
+            other => panic!("expected MemoryError::Meilisearch, got {other:?}"),
+        }
+    }
+
+    // ========================================================================
+    // Pure helpers of MeilisearchMemoryProvider
+    //
+    // `Client::new` only assembles a reqwest client; no request leaves the
+    // process until a method is called. Building the struct by hand therefore
+    // exercises the private helpers without a server and without `new()`'s
+    // index bootstrap.
+    // ========================================================================
+
+    fn unreachable_config() -> MemoryConfig {
+        // Port 1 is privileged and closed: if one of these tests ever issued a
+        // request, it would fail loudly instead of reaching a real Meilisearch.
+        MemoryConfig::default().with_url("http://127.0.0.1:1")
+    }
+
+    fn offline_provider(config: MemoryConfig) -> MeilisearchMemoryProvider {
+        let client = Client::new(&config.meilisearch_url, config.meilisearch_key.as_deref())
+            .expect("assembling the reqwest client does not touch the network");
+        MeilisearchMemoryProvider {
+            client,
+            config,
+            scorer: RelevanceScorer::new(RelevanceConfig::default()),
+        }
+    }
+
+    fn ids(results: &[ScoredMemoryResult]) -> Vec<&str> {
+        results.iter().map(|r| r.document.id.as_str()).collect()
+    }
+
+    fn scored(id: &str, content: impl Into<String>) -> ScoredMemoryResult {
+        ScoredMemoryResult {
+            document: MessageDocument::new(id, "conv-1", "user", content, 0, 1_700_000_000),
+            score: RelevanceScore::zero(),
+        }
+    }
+
+    #[test]
+    fn test_build_filter_ignores_files_and_returns_none_without_cwd() {
+        let provider = offline_provider(unreachable_config());
+
+        // `files` is part of the query context but deliberately never reaches
+        // the filter: it only feeds the Jaccard component of the score.
+        let ctx = QueryContext::new("jwt").with_files(vec!["/src/auth.rs".to_string()]);
+
+        assert_eq!(provider.build_filter(&ctx), None);
+    }
+
+    #[test]
+    fn test_build_filter_emits_a_strict_equality_not_a_prefix() {
+        let provider = offline_provider(unreachable_config());
+        let ctx = QueryContext::new("jwt").with_cwd("/projects/app");
+
+        // The doc comment announces "exact match or prefix" and the inline
+        // comment a "STARTS_WITH-like filter"; the code emits plain equality,
+        // so a message stored in a sub-directory is excluded.
+        assert_eq!(
+            provider.build_filter(&ctx).as_deref(),
+            Some(r#"cwd = "/projects/app""#)
+        );
+    }
+
+    #[test]
+    fn test_build_filter_interpolates_the_cwd_without_escaping() {
+        let provider = offline_provider(unreachable_config());
+        let ctx = QueryContext::new("jwt").with_cwd(r#"/a" OR role = "user"#);
+
+        // Known defect, documented here rather than silently fixed: a double
+        // quote inside the cwd closes the literal and the remainder is parsed
+        // as filter syntax by the server.
+        assert_eq!(
+            provider.build_filter(&ctx).as_deref(),
+            Some(r#"cwd = "/a" OR role = "user""#)
+        );
+    }
+
+    #[test]
+    fn test_compute_age_hours_converts_seconds_to_hours() {
+        let provider = offline_provider(unreachable_config());
+        let now = Utc::now().timestamp();
+
+        let age = provider.compute_age_hours(now - 7200);
+
+        assert!((age - 2.0).abs() < 0.05, "expected ~2 hours, got {age}");
+    }
+
+    #[test]
+    fn test_compute_age_hours_clamps_future_timestamps_to_zero() {
+        let provider = offline_provider(unreachable_config());
+        let now = Utc::now().timestamp();
+
+        // A clock skew that puts a message in the future must not produce a
+        // negative age (which `recency_score` would turn into a full score).
+        assert_eq!(provider.compute_age_hours(now + 86_400), 0.0);
+    }
+
+    #[test]
+    fn test_score_results_sorts_descending_and_drops_below_min_relevance() {
+        let now = Utc::now().timestamp();
+        let provider = offline_provider(unreachable_config().with_min_relevance_score(0.3));
+
+        let strong = SearchHit {
+            document: MessageDocument::new("strong", "conv-1", "user", "jwt", 0, now)
+                .with_cwd("/w")
+                .with_files_touched(vec!["/w/a.rs".to_string()]),
+            score: Some(2.0),
+        };
+        // No `_rankingScore` in the hit: the semantic component falls back to
+        // 0.0 instead of failing, and only recency keeps this hit alive.
+        let weak = SearchHit {
+            document: MessageDocument::new("weak", "conv-1", "user", "jwt", 1, now),
+            score: None,
+        };
+        let ctx = QueryContext::new("jwt")
+            .with_cwd("/w")
+            .with_files(vec!["/w/a.rs".to_string()]);
+
+        let results = provider.score_results(vec![weak, strong], &ctx);
+
+        assert_eq!(ids(&results), vec!["strong"]);
+        assert_eq!(results[0].score.semantic, 1.0);
+        assert!((results[0].score.total - 1.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_score_results_keeps_weak_hits_when_the_threshold_is_zero() {
+        let now = Utc::now().timestamp();
+        let provider = offline_provider(unreachable_config().with_min_relevance_score(0.0));
+
+        let strong = SearchHit {
+            document: MessageDocument::new("strong", "conv-1", "user", "jwt", 0, now)
+                .with_cwd("/w"),
+            score: Some(2.0),
+        };
+        let weak = SearchHit {
+            document: MessageDocument::new("weak", "conv-1", "user", "jwt", 1, now),
+            score: None,
+        };
+        let ctx = QueryContext::new("jwt").with_cwd("/w");
+
+        let results = provider.score_results(vec![weak, strong], &ctx);
+
+        assert_eq!(ids(&results), vec!["strong", "weak"]);
+        assert_eq!(results[1].score.semantic, 0.0);
+        assert_eq!(results[1].score.cwd_match, 0.0);
+    }
+
+    #[test]
+    fn test_score_results_on_no_hits() {
+        let provider = offline_provider(unreachable_config());
+
+        let results = provider.score_results(vec![], &QueryContext::new("jwt"));
+
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_apply_token_budget_skips_an_oversized_result_but_keeps_filling() {
+        // 10 tokens * 4 chars = 40 characters of budget.
+        let provider = offline_provider(unreachable_config().with_token_budget(10));
+
+        let results = vec![
+            scored("a", "x".repeat(30)),
+            scored("b", "x".repeat(20)), // does not fit in the 10 chars left
+            scored("c", "x".repeat(5)),  // still fits: the loop does not stop
+        ];
+
+        // The budget is a filter, not a prefix: "b" is dropped and the lower
+        // ranked "c" takes its place.
+        assert_eq!(ids(&provider.apply_token_budget(results)), vec!["a", "c"]);
+    }
+
+    #[test]
+    fn test_apply_token_budget_always_keeps_one_result_even_over_budget() {
+        let provider = offline_provider(unreachable_config().with_token_budget(0));
+
+        let results = vec![scored("a", "x".repeat(100)), scored("b", "y")];
+
+        // With a zero budget the first result is kept anyway and the loop
+        // breaks, so "b" never gets a chance.
+        assert_eq!(ids(&provider.apply_token_budget(results)), vec!["a"]);
+    }
+
+    #[test]
+    fn test_apply_token_budget_on_empty_input() {
+        let provider = offline_provider(unreachable_config());
+
+        assert!(provider.apply_token_budget(Vec::new()).is_empty());
+    }
+
+    #[test]
+    fn test_apply_token_budget_measures_the_summary_not_the_content() {
+        // 2 tokens * 4 chars = 8 characters of budget.
+        let provider = offline_provider(unreachable_config().with_token_budget(2));
+
+        let summarized = ScoredMemoryResult {
+            document: MessageDocument::new(
+                "a",
+                "conv-1",
+                "user",
+                "x".repeat(1000),
+                0,
+                1_700_000_000,
+            )
+            .with_summary("court"),
+            score: RelevanceScore::zero(),
+        };
+
+        // Had the 1000-char content been measured, the "always keep one"
+        // branch would have fired and "b" would be missing.
+        assert_eq!(
+            ids(&provider.apply_token_budget(vec![summarized, scored("b", "zz")])),
+            vec!["a", "b"]
+        );
+    }
+
+    // ========================================================================
+    // ContextFormatter
+    // ========================================================================
+
+    #[test]
+    fn test_format_for_prompt_numbers_entries_and_truncates_at_200_bytes() {
+        let now = Utc::now().timestamp();
+        let result = ScoredMemoryResult {
+            document: MessageDocument::new(
+                "m1",
+                "conv-1",
+                "assistant",
+                "x".repeat(250),
+                0,
+                now - 7200,
+            ),
+            score: RelevanceScore::zero(),
+        };
+
+        let out = ContextFormatter::format_for_prompt(std::slice::from_ref(&result));
+
+        assert!(out.starts_with("## Contexte historique (pour référence)\n\n"));
+        assert!(out.contains("1. [Il y a 2 h] (assistant)"), "got: {out}");
+        assert!(out.contains(&format!("\"{}...\"", "x".repeat(200))));
+        assert!(
+            out.trim_end()
+                .ends_with("## Conversation actuelle (prioritaire)")
+        );
+    }
+
+    #[test]
+    fn test_format_for_prompt_prefers_the_summary_over_the_content() {
+        let now = Utc::now().timestamp();
+        let result = ScoredMemoryResult {
+            document: MessageDocument::new("m1", "conv-1", "user", "contenu complet", 0, now)
+                .with_summary("résumé"),
+            score: RelevanceScore::zero(),
+        };
+
+        let out = ContextFormatter::format_for_prompt(std::slice::from_ref(&result));
+
+        assert!(out.contains("\"résumé\""));
+        assert!(!out.contains("contenu complet"));
+    }
+
+    #[test]
+    fn test_format_for_prompt_does_not_panic_on_accented_content() {
+        // 201 bytes where byte 200 lands inside a two-byte character: the
+        // naive `&s[..200]` of `truncate` panicked on exactly this input.
+        let content = format!("a{}", "é".repeat(100));
+        assert_eq!(content.len(), 201);
+
+        let result = ScoredMemoryResult {
+            document: MessageDocument::new("m1", "conv-1", "user", content, 0, 1_700_000_000),
+            score: RelevanceScore::zero(),
+        };
+
+        let out = ContextFormatter::format_for_prompt(std::slice::from_ref(&result));
+
+        // 199 bytes kept (the last whole character before the cut), then "...".
+        assert!(out.contains(&format!("\"a{}...\"", "é".repeat(99))));
+    }
+
+    #[test]
+    fn test_truncate_moves_the_cut_back_to_a_char_boundary() {
+        // "ééé" is 6 bytes; byte 5 is the middle of the third character.
+        assert_eq!(ContextFormatter::truncate("ééé", 5), "éé...");
+        // A budget that lands exactly on a boundary is used as is.
+        assert_eq!(ContextFormatter::truncate("ééé", 4), "éé...");
+        // No boundary at all below the budget: everything is dropped.
+        assert_eq!(ContextFormatter::truncate("é", 1), "...");
+    }
+
+    #[test]
+    fn test_format_age_never_reports_zero_minutes() {
+        let now = Utc::now().timestamp();
+
+        assert_eq!(ContextFormatter::format_age(now), "Il y a 1 min");
+        assert_eq!(ContextFormatter::format_age(now - 59), "Il y a 1 min");
+        assert_eq!(ContextFormatter::format_age(now - 3599), "Il y a 59 min");
+        assert_eq!(ContextFormatter::format_age(now - 3600), "Il y a 1 h");
+        assert_eq!(ContextFormatter::format_age(now - 86_399), "Il y a 23 h");
+        assert_eq!(
+            ContextFormatter::format_age(now - 172_800),
+            "Il y a 2 jours"
+        );
+    }
+
+    #[test]
+    fn test_format_age_clamps_future_timestamps() {
+        let now = Utc::now().timestamp();
+
+        // A message dated in the future is reported as one minute old rather
+        // than producing a negative duration.
+        assert_eq!(ContextFormatter::format_age(now + 86_400), "Il y a 1 min");
+    }
+
+    #[tokio::test]
+    async fn test_provider_new_refuses_a_disabled_config() {
+        let config = MemoryConfig::default()
+            .with_url("http://127.0.0.1:1")
+            .with_enabled(false);
+
+        // `MeilisearchMemoryProvider` is not `Debug`, hence `matches!` rather
+        // than `expect_err`.
+        let result = MeilisearchMemoryProvider::new(config).await;
+
+        assert!(
+            matches!(result, Err(MemoryError::Disabled)),
+            "a disabled config must not build a provider"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_builder_build_refuses_a_disabled_config() {
+        let result = MemoryProviderBuilder::new()
+            .url("http://127.0.0.1:1")
+            .enabled(false)
+            .build()
+            .await;
+
+        assert!(
+            matches!(result, Err(MemoryError::Disabled)),
+            "the builder must relay the Disabled error"
+        );
+    }
+
+    #[test]
+    fn test_builder_summary_threshold_is_carried_into_the_config() {
+        let config = MemoryProviderBuilder::default()
+            .summary_threshold(1234)
+            .build_config();
+
+        assert_eq!(config.summary_threshold, 1234);
     }
 }

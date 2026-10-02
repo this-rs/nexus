@@ -1,0 +1,134 @@
+%% name: nexus-sdk-interactive
+%% covers: claude-code-sdk-rs/src/interactive.rs
+%% verified: 2026-10-01
+flowchart TD
+    subgraph legend["Légende"]
+        direction LR
+        L1["✅ vérifié par un test"]
+        L2["🟠 décidé, non écrit"]
+        L3["🔴 bug / non branché"]
+        L4["⚪ hors dépôt"]
+    end
+
+    caller["⚪ appelant : backend PO stream_response, examples/"]
+
+    %% ------------------------------------------------------------------
+    subgraph vie["Construction et cycle de vie"]
+        direction TB
+        new["✅ new()<br/>pose CLAUDE_CODE_ENTRYPOINT=sdk-rust via set_var,<br/>recopie options.hooks, construit SubprocessTransport<br/><i>vérifié : cli_path bidon, test sérialisé</i>"]
+        from_tr["✅ from_transport() / from_transport_with_hooks()<br/>mêmes champs, transport fourni par l'appelant<br/><i>vérifié : transport factice et MockTransport</i>"]
+        connect["✅ connect()<br/>si self.connected déjà vrai : return Ok sans toucher au transport<br/><i>vérifié : compteur de connect() du transport factice</i>"]
+        guard{"✅ if !self.connected<br/>garde partagée par 7 méthodes"}
+        refus["✅ Err SdkError::InvalidState « Not connected »<br/>les NEUF méthodes de tour : send_and_receive, send_message,<br/>send_control_response, send_and_receive_stream, receive_response,<br/>receive_messages_stream, receive_response_stream,<br/>set_permission_mode, interrupt<br/><i>vérifié : every_turn_operation_is_refused_before_connect, les neuf appels avant connect()</i>"]
+        disco["✅ disconnect()<br/>idempotent : si déjà déconnecté, Ok sans appel transport<br/><i>vérifié : double disconnect + fake CLI</i>"]
+        nogu["✅ receive_messages_stream() et receive_response_stream()<br/>portent la garde depuis le correctif : elles rendent un Result,<br/>plus un flux VIDE indiscernable d'un tour terminé<br/>RUPTURE : .await devient .await? chez l'appelant<br/><i>vérifié : test rejoué en retirant la seule garde, fake CLI jamais lancé</i>"]
+        stdin_cache["✅ connect() clone le stdin_tx du transport et le garde ;<br/>disconnect() le remet à None, un connect() suivant le rearme<br/><i>vérifié : transport factice avec canal stdin, ligne absente après disconnect</i>"]
+    end
+
+    caller --> new
+    caller --> from_tr
+    new --> connect
+    from_tr --> connect
+    connect --> guard
+    guard -->|"non connecté"| refus
+    guard -->|"connecté"| tour
+    connect --> disco
+    guard -->|"portée aussi par"| nogu
+    connect --> stdin_cache
+    disco --> stdin_cache
+
+    %% ------------------------------------------------------------------
+    subgraph tour["Un tour de parole"]
+        direction TB
+        sr["✅ send_and_receive()<br/>souscrit ET envoie sous le MÊME lock, puis consomme CETTE<br/>souscription jusqu'au bout du tour — une seule par tour<br/><i>vérifié : rafale de deux messages dos à dos, test rejoué avec le code de HEAD → Elapsed</i>"]
+        sr_perte["✅ plus de fenêtre : la souscription couvre tout le tour<br/>ce qui précède l'APPEL reste perdu (un broadcast tokio ne rejoue rien) :<br/>pour cet historique, tenir un subscribe_messages() entre les tours<br/><i>vérifié : rafale reçue entière ; messages d'avant l'appel toujours perdus</i>"]
+        sr_boucle["✅ flux épuisé sans Message::Result → Err SdkError::TransportError<br/>l'ancienne branche else sleep 10 ms tournait indéfiniment,<br/>sans compteur ni détection de fin de processus : un CLI mort faisait<br/>attendre pour toujours<br/><i>vérifié : script d'un seul message, test rejoué sans le correctif → Elapsed à 5 s</i>"]
+        sr_ok["✅ s'arrête sur Message::Result, laisse la suite dans le flux<br/><i>vérifié : transport factice scripté, puis fake CLI imprimant son tour en une rafale sans sleep</i>"]
+        srs["✅ send_and_receive_stream()<br/>souscrit ET envoie sous le MÊME lock, puis tâche de relais<br/>seul chemin sans course<br/><i>vérifié : fake CLI, 3 messages sans sleep</i>"]
+        srs_drop["✅ relais rompu quand l'appelant lâche le flux<br/>tx.send échoue → break ; détecté au message SUIVANT<br/><i>vérifié : compte d'abonnés du broadcast</i>"]
+        rr["✅ receive_response()<br/>une souscription unique, comme send_and_receive, sans envoi<br/>même Err TransportError si le flux s'épuise avant le Result<br/><i>vérifié : s'arrête sur Result ; test rejoué sans le correctif → Elapsed</i>"]
+        rms["✅ receive_messages_stream()<br/>souscrit AVANT le spawn, sous un garde relâché aussitôt :<br/>la tâche ne possède plus que son flux, le mutex reste libre<br/><i>vérifié : send_message immédiat alors que le relais vit ; rejoué avec l'ancien corps → Elapsed</i>"]
+        rms_fin["✅ le relais ne sort QUE sur échec de tx.send<br/>lâcher le flux ne suffit pas : il faut un message de plus<br/><i>vérifié : le lock se libère après un message supplémentaire</i>"]
+        rrs["✅ receive_response_stream()<br/>enveloppe receive_messages_stream, hérite sa garde par ?, coupe sur Result<br/><i>vérifié : message émis après le Result jamais rendu ; refus avant connect()</i>"]
+        errarm["🔴 bras Err(e) des quatre boucles de réception<br/>toujours inatteignable avec les transports livrés, le correctif n'y change rien :<br/>SubprocessTransport diffuse un broadcast::Sender&lt;Message&gt;<br/>et MockTransport filtre les BroadcastStreamRecvError<br/>le canal d'erreur UTILISABLE que le correctif ouvre est la fin de flux (TransportError)<br/><i>vérifié : seul un transport écrit pour ça les déclenche</i>"]
+    end
+
+    sr --> sr_perte
+    sr --> sr_boucle
+    sr --> sr_ok
+    srs --> srs_drop
+    rms --> rms_fin
+    rrs --> rms
+    sr --> errarm
+    rr --> errarm
+    srs --> errarm
+    rrs --> errarm
+    tour --> transport["⚪ Transport::send_message / receive_messages<br/>voir nexus-sdk-transport"]
+
+    %% ------------------------------------------------------------------
+    subgraph ctrl["Protocole de contrôle"]
+        direction TB
+        spm{"✅ set_permission_mode(mode)<br/>VALID_MODES = default, acceptEdits, bypassPermissions, plan"}
+        spm_ko["✅ mode hors liste → Err InvalidState citant les modes valides<br/><i>vérifié : tests/interactive_set_permission_mode.rs</i>"]
+        spm_ok["✅ control_request { subtype: set_permission_mode, mode }<br/>request_id = uuid v4 ; aucune attente de réponse<br/><i>vérifié : MockTransport, forme du JSON</i>"]
+        intr["✅ interrupt()<br/>ControlRequest::Interrupt { request_id: uuid }<br/><i>vérifié : tests/e2e_interrupt.rs</i>"]
+        bij["✅ build_interrupt_json()<br/>même format que le transport, mais sans lock : pour un stdin_tx cloné<br/><i>vérifié : jeu de clés exact comparé au transport</i>"]
+        scr["✅ send_control_response(payload)<br/>le transport enveloppe dans { type: control_response, response }<br/><i>vérifié : MockTransport, allow/deny + reason</i>"]
+        pass["✅ take_sdk_control_receiver / clone_stdin_sender / child_pid / subscribe_messages<br/>délégations nues : None tant que le sous-processus n'existe pas<br/><i>vérifié : fake CLI, avant / pendant / après connect()</i>"]
+    end
+
+    guard --> spm
+    spm -->|"mode refusé"| spm_ko
+    spm -->|"mode accepté"| spm_ok
+    guard --> intr
+    caller --> bij
+    guard --> scr
+    caller --> pass
+
+    %% ------------------------------------------------------------------
+    subgraph hooks["Hooks : enregistrement, dispatch, réponse"]
+        direction TB
+        init{"✅ initialize_hooks()"}
+        init_noop["✅ hooks absents ou HashMap vide → Ok sans rien envoyer<br/><i>vérifié : aucun message sur le canal sortant</i>"]
+        init_send["✅ un callback_id « hook_&lt;n&gt;_&lt;uuid simple&gt; » par HookCallback,<br/>rangé dans hook_callbacks, publié en hookCallbackIds<br/><i>vérifié : fake CLI, ligne lue sur le stdin réel</i>"]
+        init_fail["✅ envoi en échec, par exemple avant connect : Err InvalidState « Not connected »<br/>et les callback_id minés sont RETIRÉS de hook_callbacks<br/>l'enregistrement reste avant l'envoi, pour qu'un hook_callback immédiat trouve son entrée<br/><i>vérifié : fake CLI jamais lancé, registre vide même après deux tentatives ; rejoué sans le retrait → l'id reste</i>"]
+        isck["✅ is_hook_callback()<br/>lit subtype à la racine OU sous request<br/><i>vérifié : les deux formes, subtype absent, subtype non-chaîne</i>"]
+        disp{"✅ dispatch_hook_callback() / dispatch_hook_from_registry()<br/>deux copies de la même logique, la seconde sans lock"}
+        disp_other["✅ subtype ≠ hook_callback → None<br/><i>vérifié : can_use_tool ignoré</i>"]
+        disp_struct["✅ chemin nominal : SDKHookCallbackRequest désérialisé<br/>callback_id, input, tool_use_id<br/><i>vérifié : hook exécuté, tool_use_id transmis</i>"]
+        disp_manual["✅ repli manuel si la désérialisation échoue<br/>callback_id ou callbackId, input par défaut {}<br/><i>vérifié : toolUseId numérique → repli emprunté</i>"]
+        disp_tuid["✅ tool_use_id mal typé REFUSÉ par manual_tool_use_id()<br/>Some(Err(MessageParseError)) → control_response de sous-type error :<br/>le CLI a une réponse ferme et aucun hook ne tranche sur un outil inconnu<br/>rendre None aurait laissé la requête de contrôle sans réponse<br/><i>vérifié : toolUseId = 42 → Err, callback jamais appelé ; rejoué avec and_then(as_str) → il tournait</i>"]
+        disp_noid["✅ aucun callback_id exploitable → None via l'opérateur ?<br/><i>vérifié : requête sans id, callback jamais appelé</i>"]
+        disp_unknown["✅ callback_id inconnu → warn + None<br/><i>vérifié : id bidon venu du fake CLI sur le canal réel</i>"]
+        disp_parse["✅ input non convertible en HookInput → Err MessageParseError { raw }<br/>le callback n'est pas appelé<br/><i>vérifié : input {} et hook_event_name inconnu</i>"]
+        shr{"✅ send_hook_response(request_id, output)"}
+        shr_stdin["✅ stdin_tx mémorisé à connect() → une ligne JSON écrite sans mutex du tout<br/>Err du hook → subtype error + e.to_string, sans payload<br/><i>vérifié : canal stdin du transport factice, puis fake CLI</i>"]
+        shr_lock["✅ ne prend plus le mutex : le clone est pris une fois, à connect()<br/>un mutex tenu par un autre appelant ne retarde plus la réponse de hook<br/>disconnect() invalide le clone, sinon le correctif serait pire que le défaut<br/><i>vérifié : mutex tenu explicitement, test ignoré réactivé ; rejoué avec l'ancien corps → Elapsed</i>"]
+        shr_closed["✅ canal fermé → Err ConnectionError « Failed to send hook response: … »<br/><i>vérifié : récepteur stdin lâché</i>"]
+        shr_fb["✅ pas de stdin_tx → repli send_sdk_control_response sous lock bref<br/><i>vérifié : MockTransport, formes success et error</i>"]
+        bhrj["✅ build_hook_response_json()<br/>troisième copie du même format, pour un appelant sans client<br/><i>vérifié : test croisé Sync et Async contre send_hook_response</i>"]
+        ser["🔴 unwrap_or_else sur serde_json::to_value(hook_output)<br/>dans send_hook_response ET build_hook_response_json :<br/>HookJSONOutput ne peut pas échouer à sérialiser → bras mort<br/><i>non vérifiable : 5 lignes assumées non couvertes</i>"]
+    end
+
+    caller --> init
+    init -->|"aucun hook"| init_noop
+    init -->|"des hooks"| init_send
+    init_send -->|"transport muet"| init_fail
+    cli["⚪ sous-processus claude : control_request subtype hook_callback"] --> isck
+    isck --> disp
+    disp -->|"autre subtype"| disp_other
+    disp -->|"forme attendue"| disp_struct
+    disp -->|"forme inattendue"| disp_manual
+    disp_manual --> disp_tuid
+    disp_manual --> disp_noid
+    disp_struct --> disp_unknown
+    disp_struct --> disp_parse
+    disp_struct --> shr
+    shr --> shr_lock
+    shr -->|"stdin cloné"| shr_stdin
+    shr_stdin --> shr_closed
+    shr -->|"transport sans stdin"| shr_fb
+    caller --> bhrj
+    shr_stdin --> ser
+    bhrj --> ser
+    init_send -.->|"ids attendus par"| disp_struct

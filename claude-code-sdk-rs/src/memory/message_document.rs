@@ -402,4 +402,119 @@ mod tests {
         assert!(!config.enabled);
         assert_eq!(config.max_context_items, 10);
     }
+
+    #[test]
+    fn test_memory_config_key_budget_and_relevance_setters() {
+        let config = MemoryConfig::default()
+            .with_key("cle-factice")
+            .with_token_budget(7)
+            .with_min_relevance_score(0.9);
+
+        assert_eq!(config.meilisearch_key.as_deref(), Some("cle-factice"));
+        assert_eq!(config.token_budget, 7);
+        assert_eq!(config.min_relevance_score, 0.9);
+    }
+
+    #[test]
+    fn test_update_from_message_keeps_the_first_cwd_and_dedupes_files() {
+        let mut conv =
+            ConversationDocument::new("conv-1", "Aperçu", "claude-opus-5", 1_700_000_000);
+        conv.cwd = Some("/projets/premier".to_string());
+
+        let msg = MessageDocument::new("msg-1", "conv-1", "user", "test", 0, 1_700_000_100)
+            .with_cwd("/projets/second")
+            .with_files_touched(vec!["/a.rs".to_string()]);
+
+        conv.update_from_message(&msg);
+        conv.update_from_message(&msg);
+
+        assert_eq!(
+            conv.cwd.as_deref(),
+            Some("/projets/premier"),
+            "an already known cwd is never overwritten by a later message"
+        );
+        assert_eq!(conv.files_summary, vec!["/a.rs".to_string()]);
+    }
+
+    #[test]
+    fn test_message_count_follows_the_turn_index_and_can_go_backwards() {
+        let mut conv =
+            ConversationDocument::new("conv-1", "Aperçu", "claude-opus-5", 1_700_000_000);
+
+        conv.update_from_message(&MessageDocument::new(
+            "m-6",
+            "conv-1",
+            "assistant",
+            "A",
+            5,
+            1_700_000_500,
+        ));
+        assert_eq!(conv.message_count, 6);
+
+        // `message_count = turn_index + 1` counts *turns*, not messages — a
+        // turn holds both a user and an assistant message — and an
+        // out-of-order update rewrites the count and the timestamp downwards.
+        conv.update_from_message(&MessageDocument::new(
+            "m-3",
+            "conv-1",
+            "user",
+            "Q",
+            2,
+            1_700_000_200,
+        ));
+
+        assert_eq!(
+            conv.message_count, 3,
+            "documents the disagreement with the doc-comment"
+        );
+        assert_eq!(conv.updated_at, 1_700_000_200);
+    }
+
+    #[test]
+    fn test_needs_summary_counts_bytes_not_characters() {
+        let msg = MessageDocument::new("m", "c", "assistant", "é".repeat(251), 0, 1_700_000_000);
+
+        assert_eq!(msg.content.chars().count(), 251);
+        assert!(
+            msg.needs_summary(500),
+            "the threshold is compared against str::len(), i.e. 502 bytes"
+        );
+    }
+
+    #[test]
+    fn test_message_document_deserializes_without_its_optional_fields() {
+        let json = r#"{
+            "id": "m-1",
+            "conversation_id": "c-1",
+            "role": "user",
+            "content": "bonjour",
+            "turn_index": 0,
+            "created_at": 1700000000
+        }"#;
+
+        let msg: MessageDocument = serde_json::from_str(json).expect("the fields are optional");
+
+        assert_eq!(msg.cwd, None);
+        assert_eq!(msg.summary, None);
+        assert!(msg.files_touched.is_empty());
+        assert_eq!(msg.display_content(), "bonjour");
+    }
+
+    #[test]
+    fn test_conversation_document_deserializes_without_its_optional_fields() {
+        let json = r#"{
+            "id": "c-1",
+            "content_preview": "aperçu",
+            "model": "claude-opus-5",
+            "created_at": 1700000000,
+            "updated_at": 1700000000,
+            "message_count": 0
+        }"#;
+
+        let conv: ConversationDocument =
+            serde_json::from_str(json).expect("the fields are optional");
+
+        assert_eq!(conv.cwd, None);
+        assert!(conv.files_summary.is_empty());
+    }
 }

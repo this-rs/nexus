@@ -1,0 +1,17 @@
+%% name: _TEMPLATE
+%% covers: chemin/vers/*.rs
+%% verified: 1970-01-01
+flowchart TD
+    subgraph legend["Légende"]
+        direction LR
+        L1["✅ vérifié par un test"]
+        L2["🟠 décidé, non écrit"]
+        L3["🔴 bug / non branché"]
+        L4["⚪ hors dépôt"]
+    end
+
+    caller["⚪ appelant"] --> entry
+
+    entry["✅ nom_de_la_fonction()<br/>ce qu'elle décide<br/><i>vérifié : transport factice</i>"]
+    entry -->|"cas nominal"| ok["✅ suite_nominale()"]
+    entry -->|"cas refusé"| ko["🔴 cas_non_gere()<br/><i>bug #000</i>"]

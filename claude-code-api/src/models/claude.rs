@@ -162,6 +162,141 @@ mod tests {
         assert!(!output.is_sidechain());
         assert!(output.parent_tool_use_id().is_none());
     }
+
+    /// A non-string `parent_tool_use_id` is not a sidechain either: the accessor
+    /// goes through `as_str()`, so a number or an object is read as "absent"
+    /// rather than stringified or rejected.
+    #[test]
+    fn test_non_string_parent_tool_use_id_is_read_as_absent() {
+        for bogus in [json!(42), json!(true), json!({"id": "toolu_1"}), json!([])] {
+            let output = ClaudeCodeOutput {
+                r#type: "assistant".to_string(),
+                subtype: None,
+                data: json!({"parent_tool_use_id": bogus}),
+            };
+            assert!(
+                !output.is_sidechain(),
+                "parent_tool_use_id = {bogus} must not count as a sidechain"
+            );
+            assert_eq!(output.parent_tool_use_id(), None);
+        }
+    }
+
+    /// `data` is `#[serde(flatten)]`, so a `type` key inside it collides with the
+    /// struct's own `type` field.
+    ///
+    /// Serializing emits the key twice — `{"type":"assistant","type":"nested"}` —
+    /// and deserializing that output fails with `duplicate field \`type\``. The
+    /// type therefore does **not** round-trip through itself.
+    ///
+    /// This is latent rather than live: the `claude --output-format stream-json`
+    /// transcript carries exactly one top-level `type` per line, so the gateway's
+    /// read path never builds such a value. It bites any code that re-serializes
+    /// a `ClaudeCodeOutput` whose `data` it did not author.
+    #[test]
+    fn test_flattened_data_colliding_with_type_breaks_the_round_trip() {
+        let output = ClaudeCodeOutput {
+            r#type: "assistant".to_string(),
+            subtype: None,
+            data: json!({"type": "nested", "x": 1}),
+        };
+
+        let encoded = serde_json::to_string(&output).expect("serializing never fails");
+        assert_eq!(encoded, r#"{"type":"assistant","type":"nested","x":1}"#);
+
+        let decoded = serde_json::from_str::<ClaudeCodeOutput>(&encoded);
+        let error = decoded
+            .expect_err("the duplicated key must not deserialize")
+            .to_string();
+        assert!(
+            error.contains("duplicate field `type`"),
+            "expected a duplicate-field error, got {error:?}"
+        );
+    }
+
+    /// Without a colliding key the round trip is exact, including the
+    /// `skip_serializing_if` on `subtype`.
+    #[test]
+    fn test_round_trip_is_exact_without_a_colliding_key() {
+        let output = ClaudeCodeOutput {
+            r#type: "result".to_string(),
+            subtype: Some("success".to_string()),
+            data: json!({"session_id": "s-1", "is_error": false}),
+        };
+
+        let encoded = serde_json::to_string(&output).unwrap();
+        let decoded: ClaudeCodeOutput = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded.r#type, "result");
+        assert_eq!(decoded.subtype.as_deref(), Some("success"));
+        assert_eq!(
+            decoded.data,
+            json!({"session_id": "s-1", "is_error": false})
+        );
+
+        // `subtype: None` disappears from the wire rather than becoming `null`.
+        let without = ClaudeCodeOutput {
+            r#type: "assistant".to_string(),
+            subtype: None,
+            data: json!({}),
+        };
+        assert_eq!(
+            serde_json::to_string(&without).unwrap(),
+            r#"{"type":"assistant"}"#
+        );
+    }
+
+    /// `ContentBlock` has a single variant, `Text`. Every other block kind the
+    /// Anthropic API emits — `tool_use`, `tool_result`, `thinking`, `image` — is
+    /// refused, so `ClaudeMessage`, and with it the whole `ClaudeStreamEvent`
+    /// model, cannot deserialize a message that uses a tool.
+    ///
+    /// Nothing in production deserializes these types (see `utils/parser.rs`,
+    /// which is the only consumer and is itself unreachable), which is why the
+    /// gap has never shown up as a parse failure at run time.
+    #[test]
+    fn test_content_block_refuses_every_kind_but_text() {
+        let text: ContentBlock = serde_json::from_value(json!({"type": "text", "text": "bonjour"}))
+            .expect("a text block must parse");
+        let ContentBlock::Text { text } = text;
+        assert_eq!(text, "bonjour");
+
+        for block in [
+            json!({"type": "tool_use", "id": "toolu_1", "name": "Read", "input": {}}),
+            json!({"type": "tool_result", "tool_use_id": "toolu_1", "content": "ok"}),
+            json!({"type": "thinking", "thinking": "hmm"}),
+        ] {
+            let kind = block["type"].as_str().unwrap().to_string();
+            assert!(
+                serde_json::from_value::<ContentBlock>(block).is_err(),
+                "ContentBlock must not pretend to understand a {kind} block"
+            );
+        }
+    }
+
+    /// The stream-event tags are the snake_case names the Anthropic SSE wire
+    /// format uses, and an unknown event name is refused rather than defaulted.
+    #[test]
+    fn test_stream_event_tags_match_the_wire_names() {
+        let stop: ClaudeStreamEvent = serde_json::from_value(json!({"type": "message_stop"}))
+            .expect("message_stop must parse");
+        assert!(matches!(stop, ClaudeStreamEvent::MessageStop));
+
+        let delta: ClaudeStreamEvent = serde_json::from_value(json!({
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "text_delta", "text": "hi"}
+        }))
+        .expect("content_block_delta must parse");
+        assert!(matches!(
+            delta,
+            ClaudeStreamEvent::ContentBlockDelta { index: 0, .. }
+        ));
+
+        assert!(
+            serde_json::from_value::<ClaudeStreamEvent>(json!({"type": "ping"})).is_err(),
+            "an unknown event tag must be refused, not silently ignored"
+        );
+    }
 }
 
 #[derive(Debug, Clone)]

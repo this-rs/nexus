@@ -563,6 +563,333 @@ mod tests {
         assert!(stats.enabled);
     }
 
+    // ========================================================================
+    // Trimming, expiry and eviction — the paths that *remove* data
+    // ========================================================================
+
+    fn message(text: &str) -> ChatMessage {
+        ChatMessage {
+            role: "user".to_string(),
+            content: Some(crate::models::openai::MessageContent::Text(
+                text.to_string(),
+            )),
+            name: None,
+            tool_calls: None,
+        }
+    }
+
+    fn response(id: &str) -> ChatCompletionResponse {
+        ChatCompletionResponse {
+            id: id.to_string(),
+            object: "chat.completion".to_string(),
+            created: 0,
+            model: "test-model".to_string(),
+            choices: vec![],
+            usage: crate::models::openai::Usage {
+                prompt_tokens: 0,
+                completion_tokens: 0,
+                total_tokens: 0,
+            },
+            conversation_id: None,
+        }
+    }
+
+    /// Trimming drops the *oldest* messages and keeps the newest ones, but
+    /// `turn_count` keeps counting every message ever added — a caller that
+    /// derives an index from `turn_count` must not expect `messages[turn_count]`
+    /// to exist.
+    #[tokio::test]
+    async fn add_message_trims_the_oldest_messages_but_not_the_turn_count() {
+        let store = InMemoryConversationStore::new(InMemoryConversationConfig {
+            max_history_messages: 2,
+        });
+        let id = store.create(None).await.unwrap();
+
+        for text in ["un", "deux", "trois"] {
+            store.add_message(&id, message(text)).await.unwrap();
+        }
+
+        let conv = store.get(&id).await.unwrap().unwrap();
+        let texts: Vec<String> = conv
+            .messages
+            .iter()
+            .map(|m| match &m.content {
+                Some(crate::models::openai::MessageContent::Text(t)) => t.clone(),
+                other => panic!("unexpected content {other:?}"),
+            })
+            .collect();
+        assert_eq!(texts, vec!["deux".to_string(), "trois".to_string()]);
+        assert_eq!(
+            conv.metadata.turn_count, 3,
+            "turn_count counts additions, not stored messages"
+        );
+    }
+
+    /// `update_metadata` replaces the whole metadata value, so a field the
+    /// caller leaves at its default silently overwrites what was stored.
+    #[tokio::test]
+    async fn update_metadata_replaces_rather_than_merges() {
+        let store = InMemoryConversationStore::default();
+        let id = store.create(Some("claude-3".to_string())).await.unwrap();
+        store.add_message(&id, message("bonjour")).await.unwrap();
+        assert_eq!(
+            store.get(&id).await.unwrap().unwrap().metadata.turn_count,
+            1
+        );
+
+        store
+            .update_metadata(
+                &id,
+                ConversationMetadata {
+                    total_tokens: 42,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        let meta = store.get(&id).await.unwrap().unwrap().metadata;
+        assert_eq!(meta.total_tokens, 42);
+        assert_eq!(meta.model, None, "the model stored at create is gone");
+        assert_eq!(meta.turn_count, 0, "the turn count is reset to zero");
+    }
+
+    /// A fresh conversation is not expired, and the no-op path returns `0`
+    /// without taking the write lock.
+    #[tokio::test]
+    async fn cleanup_expired_keeps_fresh_conversations_and_reports_zero() {
+        let store = InMemoryConversationStore::default();
+        let id = store.create(None).await.unwrap();
+
+        assert_eq!(store.cleanup_expired(60).await.unwrap(), 0);
+        assert!(store.get(&id).await.unwrap().is_some());
+    }
+
+    /// `timeout_minutes` is not validated. A negative value makes the
+    /// comparison `now - updated_at > Duration::minutes(-1)` true for every
+    /// conversation, including one created microseconds ago, so a timeout
+    /// computed from configuration can wipe the whole store.
+    #[tokio::test]
+    async fn cleanup_expired_with_a_negative_timeout_removes_every_conversation() {
+        let store = InMemoryConversationStore::default();
+        let kept_alive = store.create(None).await.unwrap();
+        store.create(None).await.unwrap();
+
+        assert_eq!(store.cleanup_expired(-1).await.unwrap(), 2);
+        assert!(store.get(&kept_alive).await.unwrap().is_none());
+        assert!(store.list_active().await.unwrap().is_empty());
+    }
+
+    /// Only the conversations past the timeout go; the others stay. The count
+    /// returned is the number of ids selected under the *read* lock, which is
+    /// also the number removed as long as nothing else writes meanwhile.
+    #[tokio::test]
+    async fn cleanup_expired_removes_only_what_is_past_the_timeout() {
+        let store = InMemoryConversationStore::default();
+        let stale = store.create(None).await.unwrap();
+        let fresh = store.create(None).await.unwrap();
+
+        // Age one conversation by hand: `updated_at` is the only expiry input.
+        store
+            .conversations
+            .write()
+            .get_mut(&stale)
+            .unwrap()
+            .updated_at = Utc::now() - chrono::Duration::hours(3);
+
+        assert_eq!(store.cleanup_expired(60).await.unwrap(), 1);
+        assert!(store.get(&stale).await.unwrap().is_none());
+        assert!(store.get(&fresh).await.unwrap().is_some());
+    }
+
+    /// `update` moves `updated_at` forward and leaves `created_at` alone.
+    #[tokio::test]
+    async fn session_update_moves_updated_at_forward_only() {
+        let store = InMemorySessionStore::default();
+        let id = store.create(Some("/projet".to_string())).await.unwrap();
+        let before = store.get(&id).await.unwrap().unwrap();
+
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        store.update(&id).await.unwrap();
+
+        let after = store.get(&id).await.unwrap().unwrap();
+        assert!(
+            after.updated_at > before.updated_at,
+            "updated_at must advance: {} -> {}",
+            before.updated_at,
+            after.updated_at
+        );
+        assert_eq!(after.created_at, before.created_at);
+        assert_eq!(after.project_path, Some("/projet".to_string()));
+    }
+
+    /// Touching a session that was never created is an error, not a silent
+    /// insert.
+    #[tokio::test]
+    async fn session_update_on_an_unknown_id_is_an_error() {
+        let store = InMemorySessionStore::default();
+
+        let err = store.update("jamais-cree").await.unwrap_err();
+        assert_eq!(err.to_string(), "Session not found: jamais-cree");
+        assert!(store.list().await.unwrap().is_empty());
+    }
+
+    /// Removing an unknown session is `Ok(None)`, not an error — the caller
+    /// cannot tell "removed nothing" from "removed something" without the
+    /// return value.
+    #[tokio::test]
+    async fn session_remove_of_an_unknown_id_is_ok_none() {
+        let store = InMemorySessionStore::default();
+        assert!(store.remove("jamais-cree").await.unwrap().is_none());
+    }
+
+    /// At capacity, `put` evicts the entry with the oldest `created_at` and
+    /// keeps the newer ones.
+    #[tokio::test]
+    async fn cache_put_evicts_the_oldest_entry_when_full() {
+        let store = InMemoryCacheStore::new(InMemoryCacheConfig {
+            max_entries: 2,
+            ..Default::default()
+        });
+
+        store.put("un".to_string(), response("un")).await;
+        tokio::time::sleep(Duration::from_millis(2)).await;
+        store.put("deux".to_string(), response("deux")).await;
+        tokio::time::sleep(Duration::from_millis(2)).await;
+        store.put("trois".to_string(), response("trois")).await;
+
+        assert!(store.get("un").await.is_none(), "the oldest was evicted");
+        assert_eq!(store.get("deux").await.unwrap().id, "deux");
+        assert_eq!(store.get("trois").await.unwrap().id, "trois");
+        assert_eq!(store.stats().await.total_entries, 2);
+    }
+
+    /// The eviction scan keeps the smallest `created_at` whichever order
+    /// `DashMap` hands the entries over in — the order is seeded at random per
+    /// map, so the result must not depend on it. Twenty entries, only the first
+    /// of which is separated from the rest in time, pin both halves: the victim
+    /// is always that first entry, and a scan of twenty entries necessarily
+    /// compares at least one that is *not* older than the running minimum.
+    #[tokio::test]
+    async fn cache_eviction_picks_the_oldest_entry_whatever_the_scan_order() {
+        let store = InMemoryCacheStore::new(InMemoryCacheConfig {
+            max_entries: 20,
+            ..Default::default()
+        });
+
+        store.put("victime".to_string(), response("victime")).await;
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        for n in 0..19 {
+            store.put(format!("k{n}"), response("garnissage")).await;
+        }
+        assert_eq!(store.stats().await.total_entries, 20);
+
+        store
+            .put("derniere".to_string(), response("derniere"))
+            .await;
+
+        assert!(
+            store.get("victime").await.is_none(),
+            "the entry with the smallest created_at is the one that goes"
+        );
+        assert_eq!(store.get("derniere").await.unwrap().id, "derniere");
+        for n in 0..19 {
+            assert!(
+                store.get(&format!("k{n}")).await.is_some(),
+                "k{n} was newer than the victim and must survive"
+            );
+        }
+        assert_eq!(store.stats().await.total_entries, 20);
+    }
+
+    /// `max_entries: 0` does not disable the cache: `put` runs `evict_oldest`
+    /// on an empty map and then inserts anyway, so the store keeps exactly one
+    /// entry. Only `enabled: false` really turns it off.
+    #[tokio::test]
+    async fn cache_with_max_entries_zero_still_stores_one_entry() {
+        let store = InMemoryCacheStore::new(InMemoryCacheConfig {
+            max_entries: 0,
+            ..Default::default()
+        });
+
+        store.put("un".to_string(), response("un")).await;
+        assert_eq!(store.stats().await.total_entries, 1);
+
+        store.put("deux".to_string(), response("deux")).await;
+        assert_eq!(store.stats().await.total_entries, 1);
+        assert!(store.get("un").await.is_none());
+        assert_eq!(store.get("deux").await.unwrap().id, "deux");
+    }
+
+    /// A hit increments `hit_count`, which is what `stats()` sums.
+    #[tokio::test]
+    async fn cache_stats_count_every_hit_not_every_entry() {
+        let store = InMemoryCacheStore::default();
+        store.put("cle".to_string(), response("r")).await;
+
+        store.get("cle").await.unwrap();
+        store.get("cle").await.unwrap();
+        assert!(store.get("absente").await.is_none());
+
+        let stats = store.stats().await;
+        assert_eq!(stats.total_entries, 1);
+        assert_eq!(stats.total_hits, 2);
+    }
+
+    /// An expired entry is not merely hidden by `get`: it is dropped from the
+    /// map on the way out.
+    #[tokio::test]
+    async fn cache_get_evicts_the_entry_it_finds_expired() {
+        let store = InMemoryCacheStore::new(InMemoryCacheConfig {
+            ttl_seconds: 0,
+            ..Default::default()
+        });
+        store.put("cle".to_string(), response("r")).await;
+        assert_eq!(store.stats().await.total_entries, 1);
+
+        assert!(store.get("cle").await.is_none());
+        assert_eq!(
+            store.stats().await.total_entries,
+            0,
+            "the expired entry must be removed, not just skipped"
+        );
+    }
+
+    /// `cleanup` reports how many entries it removed and leaves the live ones.
+    #[tokio::test]
+    async fn cache_cleanup_removes_only_expired_entries() {
+        let live = InMemoryCacheStore::default();
+        live.put("cle".to_string(), response("r")).await;
+        assert_eq!(live.cleanup().await.unwrap(), 0);
+        assert_eq!(live.stats().await.total_entries, 1);
+
+        let stale = InMemoryCacheStore::new(InMemoryCacheConfig {
+            ttl_seconds: 0,
+            ..Default::default()
+        });
+        stale.put("un".to_string(), response("un")).await;
+        stale.put("deux".to_string(), response("deux")).await;
+
+        assert_eq!(stale.cleanup().await.unwrap(), 2);
+        assert_eq!(stale.stats().await.total_entries, 0);
+    }
+
+    /// A disabled cache refuses to read *and* to write, so `cleanup` and
+    /// `stats` see an empty map rather than entries nobody can reach.
+    #[tokio::test]
+    async fn a_disabled_cache_stores_nothing_at_all() {
+        let store = InMemoryCacheStore::new(InMemoryCacheConfig {
+            enabled: false,
+            ..Default::default()
+        });
+        store.put("cle".to_string(), response("r")).await;
+
+        let stats = store.stats().await;
+        assert_eq!(stats.total_entries, 0);
+        assert!(!stats.enabled);
+        assert_eq!(store.cleanup().await.unwrap(), 0);
+    }
+
     #[tokio::test]
     async fn test_cache_disabled() {
         let config = InMemoryCacheConfig {

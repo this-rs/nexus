@@ -28,7 +28,7 @@ mod unified;
 #[allow(unused_imports)]
 pub use long_term::LongTermMemory;
 #[allow(unused_imports)]
-pub use medium_term::MediumTermMemory;
+pub use medium_term::{McpConfig, MediumTermMemory};
 #[allow(unused_imports)]
 pub use short_term::ShortTermMemory;
 #[allow(unused_imports)]

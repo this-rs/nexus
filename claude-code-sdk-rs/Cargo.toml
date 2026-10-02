@@ -53,6 +53,10 @@ auto-download = ["reqwest"]
 memory = ["meilisearch-sdk", "chrono"]
 
 [dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+serial_test = "3"
+mockall = "0.13"
+wiremock = "0.6"
 tokio-test = "0.4"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tempfile = "3"

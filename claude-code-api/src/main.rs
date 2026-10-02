@@ -1,26 +1,39 @@
 use anyhow::Result;
-use axum::{
-    Router,
-    routing::{get, post},
-};
-use std::net::SocketAddr;
-use tower_http::cors::CorsLayer;
-use tracing::info;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use tracing::{info, warn};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
-mod api;
-mod core;
-mod middleware;
-mod models;
-mod utils;
-
-use crate::api::chat::ChatState;
-use crate::core::{
-    claude_manager::ClaudeManager,
-    config::Settings,
-    process_pool::{PoolConfig, ProcessPool},
+use claude_code_api::{
+    core::config::{ServerConfig, Settings},
+    create_app,
 };
-use std::sync::Arc;
+
+/// The address the gateway binds, from the `[server]` section.
+///
+/// `server.host` is parsed as an IP literal. Anything that is not one — a DNS
+/// name, an empty string — falls back to `0.0.0.0` with a warning, because
+/// resolving a name here would mean a DNS lookup during start-up and the
+/// previous behaviour was to listen on every interface regardless.
+///
+/// That previous behaviour was the bug: the address was hardcoded to
+/// `0.0.0.0` while the start-up log printed `settings.server.host`, so a
+/// deployment that set `host = "127.0.0.1"` was told it was bound to loopback
+/// and was in fact reachable from every interface. Every `config/*.toml` in the
+/// repository already says `0.0.0.0`, so honouring the field changes nothing
+/// for the shipped configurations and only starts obeying an operator who asked
+/// for something narrower.
+fn listen_addr(server: &ServerConfig) -> SocketAddr {
+    match server.host.parse::<IpAddr>() {
+        Ok(ip) => SocketAddr::new(ip, server.port),
+        Err(_) => {
+            warn!(
+                "server.host = {:?} is not an IP address; binding every interface (0.0.0.0)",
+                server.host
+            );
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), server.port)
+        },
+    }
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -42,7 +55,7 @@ async fn main() -> Result<()> {
 
     let app = create_app(settings.clone()).await?;
 
-    let addr = SocketAddr::from(([0, 0, 0, 0], settings.server.port));
+    let addr = listen_addr(&settings.server);
     let listener = tokio::net::TcpListener::bind(addr).await?;
 
     info!("Server running on http://{}", addr);
@@ -52,127 +65,69 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-async fn create_app(settings: Settings) -> Result<Router> {
-    use crate::core::{
-        cache::{CacheConfig, ResponseCache},
-        conversation::{ConversationConfig, ConversationManager},
-        interactive_session::InteractiveSessionManager,
-        storage::{InMemoryConversationConfig, InMemoryConversationStore},
-    };
-    use crate::middleware::{error_handler, request_id};
-    use axum::middleware;
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    let cors = CorsLayer::permissive();
-
-    let claude_manager = Arc::new(ClaudeManager::new(
-        settings.claude.command.clone(),
-        settings.file_access.clone(),
-        settings.mcp.clone(),
-    ));
-
-    // 创建进程池配置
-    let pool_config = PoolConfig {
-        min_idle: settings.process_pool.min_idle,
-        max_idle: settings.process_pool.max_idle,
-        max_active: settings.process_pool.size,
-        idle_timeout_secs: 300,
-        default_model: "claude-sonnet-5".to_string(),
-    };
-
-    // 初始化进程池
-    info!(
-        "Initializing process pool with {} min idle processes",
-        pool_config.min_idle
-    );
-    let process_pool = Arc::new(ProcessPool::new(claude_manager.clone(), pool_config));
-
-    // 初始化交互式会话管理器
-    info!("Initializing interactive session manager");
-    let interactive_session_manager = Arc::new(InteractiveSessionManager::new(
-        claude_manager.clone(),
-        settings.claude.command.clone(),
-    ));
-
-    // 如果启用了交互式会话，预热一个默认进程
-    if settings.claude.use_interactive_sessions
-        && let Err(e) = interactive_session_manager.prewarm_default_session().await
-    {
-        tracing::error!("Failed to pre-warm Claude process: {}", e);
+    fn server(host: &str, port: u16) -> ServerConfig {
+        ServerConfig {
+            host: host.to_string(),
+            port,
+        }
     }
 
-    let conversation_store = InMemoryConversationStore::new(InMemoryConversationConfig::default());
-    let conversation_manager = Arc::new(ConversationManager::new(
-        conversation_store,
-        ConversationConfig::default(),
-    ));
-    let cache = Arc::new(ResponseCache::new(CacheConfig::default()));
+    /// The shipped default (`config.rs` and every `config/*.toml`): unchanged.
+    #[test]
+    fn wildcard_host_binds_every_interface() {
+        assert_eq!(
+            listen_addr(&server("0.0.0.0", 8080)),
+            SocketAddr::from(([0, 0, 0, 0], 8080))
+        );
+    }
 
-    let chat_state = ChatState::new(
-        claude_manager.clone(),
-        process_pool.clone(),
-        interactive_session_manager.clone(),
-        conversation_manager.clone(),
-        cache.clone(),
-        settings.claude.use_interactive_sessions,
-        Arc::new(settings.clone()),
-    );
+    /// The regression this function exists for: before `listen_addr`, `main`
+    /// built `SocketAddr::from(([0, 0, 0, 0], port))` and a configured host was
+    /// silently discarded, so this asserted `0.0.0.0` and the operator's
+    /// loopback-only intent was ignored.
+    #[test]
+    fn a_configured_host_is_honoured_instead_of_being_discarded() {
+        let addr = listen_addr(&server("127.0.0.1", 9000));
+        assert_eq!(addr, SocketAddr::from(([127, 0, 0, 1], 9000)));
+        assert!(
+            addr.ip().is_loopback(),
+            "host = 127.0.0.1 must not reach beyond loopback, got {addr}"
+        );
+    }
 
-    let conversation_state = api::conversations::ConversationState {
-        manager: conversation_manager.clone(),
-    };
+    #[test]
+    fn an_ipv6_host_is_honoured() {
+        let addr = listen_addr(&server("::1", 7000));
+        assert!(addr.is_ipv6(), "::1 must bind an IPv6 socket, got {addr}");
+        assert_eq!(addr.port(), 7000);
+    }
 
-    let stats_state = api::stats::StatsState {
-        cache: cache.clone(),
-    };
+    /// A DNS name is not resolved at start-up; the gateway keeps the old
+    /// behaviour rather than failing to boot.
+    #[test]
+    fn a_dns_name_falls_back_to_the_wildcard_address() {
+        assert_eq!(
+            listen_addr(&server("localhost", 8080)),
+            SocketAddr::from(([0, 0, 0, 0], 8080))
+        );
+    }
 
-    let api_routes = Router::new()
-        .route("/v1/chat/completions", post(api::chat::chat_completions))
-        .route(
-            "/v1/sessions/:conversation_id/interrupt",
-            post(api::chat::interrupt_session),
-        )
-        .with_state(chat_state);
+    #[test]
+    fn an_empty_host_falls_back_to_the_wildcard_address() {
+        assert_eq!(
+            listen_addr(&server("", 1)),
+            SocketAddr::from(([0, 0, 0, 0], 1))
+        );
+    }
 
-    let conversation_routes = Router::new()
-        .route(
-            "/v1/conversations",
-            post(api::conversations::create_conversation),
-        )
-        .route(
-            "/v1/conversations",
-            get(api::conversations::list_conversations),
-        )
-        .route(
-            "/v1/conversations/:id",
-            get(api::conversations::get_conversation),
-        )
-        .with_state(conversation_state);
-
-    let stats_routes = Router::new()
-        .route("/stats", get(api::stats::get_stats))
-        .with_state(stats_state);
-
-    // 模型注册表（动态模型列表，带 TTL 缓存）
-    let model_registry = std::sync::Arc::new(crate::core::model_registry::ModelRegistry::new());
-    let model_routes = Router::new()
-        .route("/v1/models", get(api::models::list_models))
-        .route("/v1/models/refresh", post(api::models::refresh_models))
-        .with_state(model_registry);
-
-    // 组合所有路由
-    let app = Router::new()
-        .route("/health", get(health_check))
-        .merge(model_routes)
-        .merge(api_routes)
-        .merge(conversation_routes)
-        .merge(stats_routes)
-        .layer(middleware::from_fn(request_id::add_request_id))
-        .layer(middleware::from_fn(error_handler::handle_errors))
-        .layer(cors);
-
-    Ok(app)
-}
-
-async fn health_check() -> &'static str {
-    "OK"
+    /// `port = 0` means "any free port" to the OS; `listen_addr` passes it
+    /// through rather than substituting a default.
+    #[test]
+    fn port_zero_is_passed_through_unchanged() {
+        assert_eq!(listen_addr(&server("127.0.0.1", 0)).port(), 0);
+    }
 }

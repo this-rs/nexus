@@ -3995,4 +3995,1303 @@ mod tests {
             assert!(debug.contains(name), "name must stay visible: {debug}");
         }
     }
+
+    // ====================================================================
+    // Hook wiring on the builder — hooks() replaces, add_hook() appends
+    // ====================================================================
+
+    /// A hook whose only job is to be identifiable: it echoes its tag back
+    /// through `system_message`, so a test can tell *which* callback it got
+    /// out of the builder rather than just counting them.
+    struct TaggedHook(&'static str);
+
+    #[async_trait]
+    impl HookCallback for TaggedHook {
+        async fn execute(
+            &self,
+            _input: &HookInput,
+            _tool_use_id: Option<&str>,
+            _context: &HookContext,
+        ) -> std::result::Result<HookJSONOutput, crate::errors::SdkError> {
+            Ok(HookJSONOutput::Sync(SyncHookJSONOutput {
+                system_message: Some(self.0.to_string()),
+                ..Default::default()
+            }))
+        }
+    }
+
+    fn tagged_matcher(tag: &'static str) -> HookMatcher {
+        HookMatcher {
+            matcher: Some(serde_json::json!({"tag": tag})),
+            hooks: vec![Arc::new(TaggedHook(tag))],
+        }
+    }
+
+    fn matcher_tags(matchers: &[HookMatcher]) -> Vec<String> {
+        matchers
+            .iter()
+            .map(|m| {
+                m.matcher.as_ref().unwrap()["tag"]
+                    .as_str()
+                    .unwrap()
+                    .to_string()
+            })
+            .collect()
+    }
+
+    /// `hooks()` is documented as "replaces any existing hooks" — asserted by
+    /// calling it twice and checking the first map is gone entirely, not merged.
+    #[test]
+    fn test_builder_hooks_replaces_the_whole_map() {
+        let first = HashMap::from([
+            ("PreToolUse".to_string(), vec![tagged_matcher("pre-1")]),
+            ("Stop".to_string(), vec![tagged_matcher("stop-1")]),
+        ]);
+        let second = HashMap::from([("PostToolUse".to_string(), vec![tagged_matcher("post-1")])]);
+
+        let options = ClaudeCodeOptions::builder()
+            .hooks(first)
+            .hooks(second)
+            .build();
+
+        let hooks = options.hooks.expect("hooks must be Some once set");
+        assert_eq!(hooks.keys().collect::<Vec<_>>(), vec!["PostToolUse"]);
+        assert_eq!(matcher_tags(&hooks["PostToolUse"]), vec!["post-1"]);
+    }
+
+    /// `add_hook()` on a fresh builder has to create the `Option` map as well
+    /// as the per-event entry: `get_or_insert_with` + `entry().or_default()`.
+    #[test]
+    fn test_builder_add_hook_creates_map_and_entry_from_none() {
+        let options = ClaudeCodeOptions::builder()
+            .add_hook("PreCompact", tagged_matcher("pc-1"))
+            .build();
+
+        let hooks = options.hooks.expect("add_hook must create the map");
+        assert_eq!(hooks.len(), 1);
+        assert_eq!(matcher_tags(&hooks["PreCompact"]), vec!["pc-1"]);
+    }
+
+    /// Appends, in call order, and keeps other events untouched. The ordering
+    /// matters: the CLI runs matchers in the order they were declared.
+    #[test]
+    fn test_builder_add_hook_appends_in_order_and_isolates_events() {
+        let options = ClaudeCodeOptions::builder()
+            .add_hook("PreToolUse", tagged_matcher("pre-1"))
+            .add_hook("Stop", tagged_matcher("stop-1"))
+            .add_hook("PreToolUse", tagged_matcher("pre-2"))
+            .build();
+
+        let hooks = options.hooks.expect("hooks must be Some");
+        assert_eq!(matcher_tags(&hooks["PreToolUse"]), vec!["pre-1", "pre-2"]);
+        assert_eq!(matcher_tags(&hooks["Stop"]), vec!["stop-1"]);
+    }
+
+    /// `add_hook()` after `hooks()` extends the map set by `hooks()` instead of
+    /// discarding it — the two builders compose in that direction only.
+    #[test]
+    fn test_builder_add_hook_extends_a_map_set_by_hooks() {
+        let options = ClaudeCodeOptions::builder()
+            .hooks(HashMap::from([(
+                "PreToolUse".to_string(),
+                vec![tagged_matcher("pre-1")],
+            )]))
+            .add_hook("PreToolUse", tagged_matcher("pre-2"))
+            .add_hook("SubagentStop", tagged_matcher("sub-1"))
+            .build();
+
+        let hooks = options.hooks.expect("hooks must be Some");
+        assert_eq!(matcher_tags(&hooks["PreToolUse"]), vec!["pre-1", "pre-2"]);
+        assert_eq!(matcher_tags(&hooks["SubagentStop"]), vec!["sub-1"]);
+    }
+
+    /// The callbacks are not just counted: the `Arc<dyn HookCallback>` that
+    /// came out of the builder is actually invoked and its answer checked, so
+    /// the builder is proven to carry the behaviour and not a placeholder.
+    #[tokio::test]
+    async fn test_builder_preserves_the_callable_hook_callback() {
+        let options = ClaudeCodeOptions::builder()
+            .add_hook("Stop", tagged_matcher("stop-cb"))
+            .build();
+
+        let callback = options.hooks.as_ref().unwrap()["Stop"][0].hooks[0].clone();
+        let input = HookInput::Stop(StopHookInput {
+            session_id: "s1".into(),
+            transcript_path: "t".into(),
+            cwd: "/tmp".into(),
+            permission_mode: None,
+            stop_hook_active: true,
+        });
+        let output = callback
+            .execute(&input, None, &HookContext { signal: None })
+            .await
+            .expect("hook must succeed");
+
+        match output {
+            HookJSONOutput::Sync(sync) => {
+                assert_eq!(sync.system_message.as_deref(), Some("stop-cb"));
+            },
+            other => panic!("expected Sync output, got {other:?}"),
+        }
+    }
+
+    /// `Debug` for the options reports hooks as a bare boolean (callbacks are
+    /// not printable), so it says *whether* hooks exist and nothing more.
+    #[test]
+    fn test_options_debug_reports_hooks_as_a_boolean_only() {
+        let without = format!("{:?}", ClaudeCodeOptions::default());
+        assert!(without.contains("hooks: false"), "{without}");
+
+        let with = format!(
+            "{:?}",
+            ClaudeCodeOptions::builder()
+                .add_hook("Stop", tagged_matcher("x"))
+                .build()
+        );
+        assert!(with.contains("hooks: true"), "{with}");
+        assert!(
+            !with.contains("Stop"),
+            "event names are not in the Debug output: {with}"
+        );
+    }
+
+    // ====================================================================
+    // stderr_callback — stored as behaviour, invisible to Debug
+    // ====================================================================
+
+    /// The stored callback has to be the live closure: the test drives it and
+    /// checks the lines arrive in order, rather than asserting `is_some()`.
+    #[test]
+    fn test_builder_stderr_callback_is_stored_and_callable() {
+        let captured = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let sink = Arc::clone(&captured);
+
+        let options = ClaudeCodeOptions::builder()
+            .stderr_callback(Arc::new(move |line: &str| {
+                sink.lock().expect("sink mutex").push(line.to_string());
+            }))
+            .build();
+
+        let callback = options
+            .stderr_callback
+            .as_ref()
+            .expect("stderr_callback must be Some");
+        callback("first line");
+        callback("second line");
+
+        assert_eq!(
+            *captured.lock().expect("sink mutex"),
+            vec!["first line".to_string(), "second line".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_stderr_callback_default_is_none() {
+        assert!(ClaudeCodeOptions::default().stderr_callback.is_none());
+    }
+
+    /// `stderr_callback` and `debug_stderr` are two independent sinks; setting
+    /// the callback leaves `debug_stderr` unset, and the `Debug` impl reports
+    /// only the latter — so a configured stderr callback is invisible in logs.
+    #[test]
+    fn test_stderr_callback_is_absent_from_debug_output() {
+        let options = ClaudeCodeOptions::builder()
+            .stderr_callback(Arc::new(|_line: &str| {}))
+            .build();
+        assert!(options.debug_stderr.is_none());
+
+        let dbg = format!("{options:?}");
+        assert!(dbg.contains("debug_stderr: false"), "{dbg}");
+        assert!(
+            !dbg.contains("stderr_callback"),
+            "the field is not reported at all: {dbg}"
+        );
+    }
+
+    // ====================================================================
+    // McpServerConfig — Serialize and Deserialize do not agree
+    // ====================================================================
+
+    /// `Sdk` is serialisable but *not* deserialisable: the hand-written
+    /// `Serialize` emits `{"type":"sdk", ...}` while the `Deserialize` helper
+    /// enum only knows stdio/sse/http. Writing a config out and reading it
+    /// back therefore fails for in-process SDK servers — expected, since the
+    /// server instance is an `Arc<dyn Any>` that cannot be reconstructed, but
+    /// the failure is a plain serde error rather than anything explanatory.
+    #[test]
+    fn test_mcp_server_config_sdk_serialises_to_a_shape_it_cannot_read_back() {
+        let cfg = McpServerConfig::Sdk {
+            name: "in-process".into(),
+            instance: Arc::new(7_u8),
+        };
+        let json = serde_json::to_value(&cfg).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({"type": "sdk", "name": "in-process"})
+        );
+
+        let err = serde_json::from_value::<McpServerConfig>(json).unwrap_err();
+        assert!(
+            err.to_string().contains("unknown variant `sdk`"),
+            "unexpected error: {err}"
+        );
+    }
+
+    /// The three transport variants do round-trip, values included.
+    #[test]
+    fn test_mcp_server_config_roundtrips_for_stdio_sse_http() {
+        let configs = vec![
+            McpServerConfig::Stdio {
+                command: "npx".into(),
+                args: Some(vec!["-y".into()]),
+                env: Some(HashMap::from([("K".to_string(), "V".to_string())])),
+            },
+            McpServerConfig::Sse {
+                url: "https://example.test/sse".into(),
+                headers: Some(HashMap::from([("X-A".to_string(), "1".to_string())])),
+            },
+            McpServerConfig::Http {
+                url: "https://example.test/http".into(),
+                headers: None,
+            },
+        ];
+
+        for cfg in configs {
+            let json = serde_json::to_value(&cfg).unwrap();
+            let back: McpServerConfig = serde_json::from_value(json.clone()).unwrap();
+            assert_eq!(
+                serde_json::to_value(&back).unwrap(),
+                json,
+                "round trip changed the config"
+            );
+            match (&cfg, &back) {
+                (
+                    McpServerConfig::Stdio {
+                        command: a,
+                        args: b,
+                        env: c,
+                    },
+                    McpServerConfig::Stdio {
+                        command: x,
+                        args: y,
+                        env: z,
+                    },
+                ) => {
+                    assert_eq!(a, x);
+                    assert_eq!(b, y);
+                    assert_eq!(c, z);
+                },
+                (
+                    McpServerConfig::Sse { url: a, headers: b },
+                    McpServerConfig::Sse { url: x, headers: y },
+                )
+                | (
+                    McpServerConfig::Http { url: a, headers: b },
+                    McpServerConfig::Http { url: x, headers: y },
+                ) => {
+                    assert_eq!(a, x);
+                    assert_eq!(b, y);
+                },
+                (other, back) => panic!("variant changed: {other:?} -> {back:?}"),
+            }
+        }
+    }
+
+    /// An unknown `type` is refused rather than silently falling back to one
+    /// of the known transports.
+    #[test]
+    fn test_mcp_server_config_rejects_unknown_transport_type() {
+        let err = serde_json::from_value::<McpServerConfig>(
+            serde_json::json!({"type": "websocket", "url": "ws://x"}),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("unknown variant"), "{err}");
+    }
+
+    /// `RedactedValues` is the mechanism behind the redaction tests; its own
+    /// edge cases: an empty map prints `{}`, and the keys come out sorted so
+    /// the log line is stable across runs (HashMap iteration order is not).
+    #[test]
+    fn test_redacted_values_is_empty_and_sorted() {
+        let empty = HashMap::new();
+        assert_eq!(format!("{:?}", RedactedValues(&empty)), "{}");
+
+        let map = HashMap::from([
+            ("ZEBRA".to_string(), "z".to_string()),
+            ("ALPHA".to_string(), "a".to_string()),
+            ("MIDDLE".to_string(), "m".to_string()),
+        ]);
+        assert_eq!(
+            format!("{:?}", RedactedValues(&map)),
+            r#"{"ALPHA": "<redacted>", "MIDDLE": "<redacted>", "ZEBRA": "<redacted>"}"#
+        );
+    }
+
+    // ====================================================================
+    // Untagged enums — what the shape-guessing costs
+    // ====================================================================
+
+    /// `HookJSONOutput` is untagged with `Async` first. An output carrying both
+    /// `async` and sync fields matches `Async`, and every sync field is
+    /// silently discarded: a hook that tries to both defer and block ends up
+    /// only deferring, with no error.
+    #[test]
+    fn test_hook_json_output_async_wins_and_drops_sync_fields() {
+        let value = serde_json::json!({
+            "async": true,
+            "asyncTimeout": 5000,
+            "continue": false,
+            "stopReason": "blocked by policy",
+            "decision": "block"
+        });
+        let parsed: HookJSONOutput = serde_json::from_value(value).unwrap();
+        match parsed {
+            HookJSONOutput::Async(a) => {
+                assert!(a.async_);
+                assert_eq!(a.async_timeout, Some(5000));
+                // Re-serialising proves the sync half is gone, not merely unread.
+                assert_eq!(
+                    serde_json::to_value(HookJSONOutput::Async(a)).unwrap(),
+                    serde_json::json!({"async": true, "asyncTimeout": 5000})
+                );
+            },
+            HookJSONOutput::Sync(s) => panic!("expected Async, got {s:?}"),
+        }
+    }
+
+    /// `{"async": false}` still matches the `Async` variant — the discriminator
+    /// is the *presence* of the key, not its value. So an output that says
+    /// "I am not async" is nonetheless read as a deferred hook.
+    #[test]
+    fn test_hook_json_output_async_false_still_selects_the_async_variant() {
+        let parsed: HookJSONOutput =
+            serde_json::from_value(serde_json::json!({"async": false})).unwrap();
+        match parsed {
+            HookJSONOutput::Async(a) => assert!(!a.async_),
+            HookJSONOutput::Sync(s) => panic!("expected Async, got {s:?}"),
+        }
+    }
+
+    /// Without the `async` key the Sync arm takes over, and an empty object is
+    /// a valid "do nothing" output because every sync field is optional.
+    #[test]
+    fn test_hook_json_output_empty_object_is_an_all_default_sync_output() {
+        let parsed: HookJSONOutput = serde_json::from_value(serde_json::json!({})).unwrap();
+        match parsed {
+            HookJSONOutput::Sync(s) => {
+                assert_eq!(s.continue_, None);
+                assert_eq!(s.decision, None);
+                assert!(s.hook_specific_output.is_none());
+                assert_eq!(serde_json::to_value(&s).unwrap(), serde_json::json!({}));
+            },
+            HookJSONOutput::Async(a) => panic!("expected Sync, got {a:?}"),
+        }
+    }
+
+    /// `ContentBlock` is untagged, so serialisation drops the `type` field the
+    /// CLI uses. Each variant still round-trips because its field set is
+    /// unique — this test is what makes that claim checkable per variant.
+    #[test]
+    fn test_content_block_roundtrips_without_a_type_field() {
+        let cases = vec![
+            (
+                ContentBlock::Text(TextContent { text: "hi".into() }),
+                serde_json::json!({"text": "hi"}),
+            ),
+            (
+                ContentBlock::Thinking(ThinkingContent {
+                    thinking: "hmm".into(),
+                    signature: "sig".into(),
+                }),
+                serde_json::json!({"thinking": "hmm", "signature": "sig"}),
+            ),
+            (
+                ContentBlock::ToolUse(ToolUseContent {
+                    id: "toolu_1".into(),
+                    name: "Read".into(),
+                    input: serde_json::json!({"path": "/a"}),
+                }),
+                serde_json::json!({"id": "toolu_1", "name": "Read", "input": {"path": "/a"}}),
+            ),
+            (
+                ContentBlock::ToolResult(ToolResultContent {
+                    tool_use_id: "toolu_1".into(),
+                    content: Some(ContentValue::Text("out".into())),
+                    is_error: Some(false),
+                }),
+                serde_json::json!({"tool_use_id": "toolu_1", "content": "out", "is_error": false}),
+            ),
+            (
+                ContentBlock::ToolResult(ToolResultContent {
+                    tool_use_id: "toolu_2".into(),
+                    content: None,
+                    is_error: None,
+                }),
+                serde_json::json!({"tool_use_id": "toolu_2"}),
+            ),
+        ];
+
+        for (block, expected) in cases {
+            let json = serde_json::to_value(&block).unwrap();
+            assert_eq!(json, expected, "serialisation of {block:?}");
+            assert!(
+                json.get("type").is_none(),
+                "untagged enum must not emit a discriminator"
+            );
+            assert_eq!(
+                serde_json::from_value::<ContentBlock>(json).unwrap(),
+                block,
+                "round trip of {block:?}"
+            );
+        }
+    }
+
+    /// The untagged guess is positional: a `tool_result` whose structured
+    /// content happens to be read first still lands on `ToolResult` because no
+    /// earlier variant accepts a `tool_use_id`-shaped object. A block carrying
+    /// BOTH `text` and `tool_use_id`, however, is read as plain `Text` — the
+    /// first matching arm wins and the tool linkage is lost.
+    #[test]
+    fn test_content_block_untagged_first_match_wins_on_ambiguous_shapes() {
+        let ambiguous = serde_json::json!({"text": "hi", "tool_use_id": "toolu_1"});
+        assert_eq!(
+            serde_json::from_value::<ContentBlock>(ambiguous).unwrap(),
+            ContentBlock::Text(TextContent { text: "hi".into() }),
+            "Text is declared first, so it shadows ToolResult"
+        );
+    }
+
+    /// `ContentValue` is untagged too: a JSON string becomes `Text`, a JSON
+    /// array becomes `Structured`, and anything else is refused.
+    #[test]
+    fn test_content_value_text_vs_structured_and_refusals() {
+        assert_eq!(
+            serde_json::from_value::<ContentValue>(serde_json::json!("out")).unwrap(),
+            ContentValue::Text("out".into())
+        );
+        assert_eq!(
+            serde_json::from_value::<ContentValue>(serde_json::json!([{"type": "text"}])).unwrap(),
+            ContentValue::Structured(vec![serde_json::json!({"type": "text"})])
+        );
+        for refused in [
+            serde_json::json!(42),
+            serde_json::json!({"a": 1}),
+            serde_json::json!(null),
+        ] {
+            assert!(
+                serde_json::from_value::<ContentValue>(refused.clone()).is_err(),
+                "{refused} should not be a ContentValue"
+            );
+        }
+    }
+
+    /// `ToolsConfig` is untagged with `List` first; a malformed preset object
+    /// matches neither arm and is refused rather than becoming an empty list.
+    #[test]
+    fn test_tools_config_rejects_a_malformed_preset() {
+        let err = serde_json::from_value::<ToolsConfig>(serde_json::json!({"type": "preset"}))
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("did not match any variant"),
+            "{err}"
+        );
+    }
+
+    /// `SystemPrompt` is untagged with `String` first: a bare JSON string is
+    /// the string arm, an object is the preset arm, and a number is refused.
+    #[test]
+    fn test_system_prompt_untagged_discrimination() {
+        assert!(matches!(
+            serde_json::from_value::<SystemPrompt>(serde_json::json!("be terse")).unwrap(),
+            SystemPrompt::String(s) if s == "be terse"
+        ));
+        assert!(matches!(
+            serde_json::from_value::<SystemPrompt>(
+                serde_json::json!({"type": "preset", "preset": "claude_code"})
+            )
+            .unwrap(),
+            SystemPrompt::Preset { preset, append: None, .. } if preset == "claude_code"
+        ));
+        assert!(serde_json::from_value::<SystemPrompt>(serde_json::json!(1)).is_err());
+    }
+
+    // ====================================================================
+    // Control protocol wire format — the camelCase aliases the CLI sends
+    // ====================================================================
+
+    /// `can_use_tool` requests arrive from the CLI and are deserialised in
+    /// `internal_query.rs`. Both the snake_case and the camelCase spellings
+    /// must be accepted and must produce the same value, because a failed
+    /// deserialisation there is swallowed silently and the turn stalls.
+    #[test]
+    fn test_permission_request_accepts_snake_case_and_camel_case() {
+        let snake = serde_json::json!({
+            "subtype": "can_use_tool",
+            "tool_name": "Bash",
+            "input": {"command": "ls"},
+            "permission_suggestions": [{"type": "setMode", "mode": "acceptEdits"}],
+            "blocked_path": "/etc/passwd"
+        });
+        let camel = serde_json::json!({
+            "subtype": "can_use_tool",
+            "toolName": "Bash",
+            "input": {"command": "ls"},
+            "permissionSuggestions": [{"type": "setMode", "mode": "acceptEdits"}],
+            "blockedPath": "/etc/passwd"
+        });
+
+        for value in [snake, camel] {
+            let req: SDKControlPermissionRequest = serde_json::from_value(value.clone())
+                .unwrap_or_else(|e| panic!("{value} must deserialise: {e}"));
+            assert_eq!(req.subtype, "can_use_tool");
+            assert_eq!(req.tool_name, "Bash");
+            assert_eq!(req.input, serde_json::json!({"command": "ls"}));
+            assert_eq!(req.blocked_path.as_deref(), Some("/etc/passwd"));
+            let suggestions = req.permission_suggestions.expect("suggestions");
+            assert_eq!(suggestions.len(), 1);
+            assert_eq!(suggestions[0].update_type, PermissionUpdateType::SetMode);
+            assert_eq!(suggestions[0].mode, Some(PermissionMode::AcceptEdits));
+        }
+    }
+
+    /// The optional halves really are optional: a minimal request parses with
+    /// `None`s, and serialising it back omits them entirely (so the CLI never
+    /// sees `"blocked_path": null`).
+    #[test]
+    fn test_permission_request_minimal_omits_optionals_on_the_way_out() {
+        let req: SDKControlPermissionRequest = serde_json::from_value(serde_json::json!({
+            "subtype": "can_use_tool",
+            "tool_name": "Read",
+            "input": {}
+        }))
+        .unwrap();
+        assert!(req.permission_suggestions.is_none());
+        assert!(req.blocked_path.is_none());
+        assert_eq!(
+            serde_json::to_value(&req).unwrap(),
+            serde_json::json!({"subtype": "can_use_tool", "tool_name": "Read", "input": {}})
+        );
+    }
+
+    /// Same contract for hook callbacks: `callbackId` / `toolUseId` are what
+    /// the CLI sends, `callback_id` / `tool_use_id` are what the struct is
+    /// named, and both must land on the same callback id — the id is used as a
+    /// map key, so a mismatch silently finds no callback.
+    #[test]
+    fn test_hook_callback_request_accepts_both_spellings() {
+        for value in [
+            serde_json::json!({
+                "subtype": "hook_callback",
+                "callback_id": "cb_1",
+                "input": {"hook_event_name": "Stop"},
+                "tool_use_id": "toolu_9"
+            }),
+            serde_json::json!({
+                "subtype": "hook_callback",
+                "callbackId": "cb_1",
+                "input": {"hook_event_name": "Stop"},
+                "toolUseId": "toolu_9"
+            }),
+        ] {
+            let req: SDKHookCallbackRequest = serde_json::from_value(value.clone())
+                .unwrap_or_else(|e| panic!("{value} must deserialise: {e}"));
+            assert_eq!(req.callback_id, "cb_1");
+            assert_eq!(req.tool_use_id.as_deref(), Some("toolu_9"));
+        }
+    }
+
+    /// The MCP message request is the odd one out: the field is *renamed* to
+    /// `server_name` on the way out while accepting `mcpServerName` and
+    /// `mcp_server_name` on the way in. Asserted in both directions because
+    /// the rename means the shape written is not one of the two aliases'
+    /// spellings.
+    #[test]
+    fn test_mcp_message_request_serialises_as_server_name_and_accepts_three_spellings() {
+        for key in ["server_name", "mcpServerName", "mcp_server_name"] {
+            let value = serde_json::json!({
+                "subtype": "mcp_message",
+                key: "memory",
+                "message": {"jsonrpc": "2.0", "method": "tools/list"}
+            });
+            let req: SDKControlMcpMessageRequest = serde_json::from_value(value)
+                .unwrap_or_else(|e| panic!("{key} must be accepted: {e}"));
+            assert_eq!(req.mcp_server_name, "memory");
+        }
+
+        let req = SDKControlMcpMessageRequest {
+            subtype: "mcp_message".into(),
+            mcp_server_name: "memory".into(),
+            message: serde_json::json!({"jsonrpc": "2.0"}),
+        };
+        let out = serde_json::to_value(&req).unwrap();
+        assert_eq!(out.get("server_name"), Some(&serde_json::json!("memory")));
+        assert!(out.get("mcpServerName").is_none());
+    }
+
+    /// `rewind_files` carries one id, under either spelling, and the
+    /// constructor fills the subtype so callers cannot get it wrong.
+    #[test]
+    fn test_rewind_files_request_accepts_both_spellings_and_pins_its_subtype() {
+        for key in ["user_message_id", "userMessageId"] {
+            let req: SDKControlRewindFilesRequest = serde_json::from_value(
+                serde_json::json!({"subtype": "rewind_files", key: "msg_1"}),
+            )
+            .unwrap_or_else(|e| panic!("{key} must be accepted: {e}"));
+            assert_eq!(req.user_message_id, "msg_1");
+        }
+        assert_eq!(
+            serde_json::to_value(SDKControlRewindFilesRequest::new("msg_2")).unwrap(),
+            serde_json::json!({"subtype": "rewind_files", "user_message_id": "msg_2"})
+        );
+    }
+
+    /// Every `SDKControlRequest` variant, with the exact `type` tag it goes on
+    /// the wire with. Note each payload repeats the discriminator as its own
+    /// `subtype` field — the CLI reads `subtype`, so a `type`/`subtype`
+    /// mismatch would be invisible here and fatal there; this table is what
+    /// keeps them aligned.
+    #[test]
+    fn test_sdk_control_request_tags_and_subtypes_agree_for_every_variant() {
+        let requests = [
+            SDKControlRequest::Interrupt(SDKControlInterruptRequest {
+                subtype: "interrupt".into(),
+            }),
+            SDKControlRequest::CanUseTool(SDKControlPermissionRequest {
+                subtype: "can_use_tool".into(),
+                tool_name: "Bash".into(),
+                input: serde_json::json!({}),
+                permission_suggestions: None,
+                blocked_path: None,
+            }),
+            SDKControlRequest::Initialize(SDKControlInitializeRequest {
+                subtype: "initialize".into(),
+                hooks: None,
+            }),
+            SDKControlRequest::SetPermissionMode(SDKControlSetPermissionModeRequest {
+                subtype: "set_permission_mode".into(),
+                mode: "plan".into(),
+            }),
+            SDKControlRequest::SetModel(SDKControlSetModelRequest {
+                subtype: "set_model".into(),
+                model: None,
+            }),
+            SDKControlRequest::HookCallback(SDKHookCallbackRequest {
+                subtype: "hook_callback".into(),
+                callback_id: "cb".into(),
+                input: serde_json::json!({}),
+                tool_use_id: None,
+            }),
+            SDKControlRequest::McpMessage(SDKControlMcpMessageRequest {
+                subtype: "mcp_message".into(),
+                mcp_server_name: "memory".into(),
+                message: serde_json::json!({}),
+            }),
+            SDKControlRequest::RewindFiles(SDKControlRewindFilesRequest::new("msg_1")),
+        ];
+
+        let expected_tags = [
+            "interrupt",
+            "can_use_tool",
+            "initialize",
+            "set_permission_mode",
+            "set_model",
+            "hook_callback",
+            "mcp_message",
+            "rewind_files",
+        ];
+        assert_eq!(requests.len(), expected_tags.len());
+
+        for (req, tag) in requests.iter().zip(expected_tags) {
+            let value = serde_json::to_value(req).unwrap();
+            assert_eq!(
+                value.get("type").and_then(|v| v.as_str()),
+                Some(tag),
+                "wrong `type` tag for {req:?}"
+            );
+            assert_eq!(
+                value.get("subtype").and_then(|v| v.as_str()),
+                Some(tag),
+                "`subtype` must repeat the `type` tag for {req:?}"
+            );
+        }
+    }
+
+    /// `set_model` with `model: None` means "clear the model override": the
+    /// key is omitted rather than sent as null, which is the difference between
+    /// clearing and setting the model to nothing.
+    #[test]
+    fn test_set_model_request_omits_a_cleared_model() {
+        let cleared =
+            serde_json::to_value(SDKControlRequest::SetModel(SDKControlSetModelRequest {
+                subtype: "set_model".into(),
+                model: None,
+            }))
+            .unwrap();
+        assert_eq!(
+            cleared,
+            serde_json::json!({"type": "set_model", "subtype": "set_model"})
+        );
+
+        let set = serde_json::to_value(SDKControlRequest::SetModel(SDKControlSetModelRequest {
+            subtype: "set_model".into(),
+            model: Some("claude-opus-5".into()),
+        }))
+        .unwrap();
+        assert_eq!(
+            set,
+            serde_json::json!({
+                "type": "set_model", "subtype": "set_model", "model": "claude-opus-5"
+            })
+        );
+    }
+
+    /// `initialize` carries the hook registration map; an empty map is still
+    /// sent (it is `Some`), which is how the CLI learns there are no hooks as
+    /// opposed to learning nothing.
+    #[test]
+    fn test_initialize_request_distinguishes_no_hooks_from_empty_hooks() {
+        let none = serde_json::to_value(SDKControlInitializeRequest {
+            subtype: "initialize".into(),
+            hooks: None,
+        })
+        .unwrap();
+        assert_eq!(none, serde_json::json!({"subtype": "initialize"}));
+
+        let empty = serde_json::to_value(SDKControlInitializeRequest {
+            subtype: "initialize".into(),
+            hooks: Some(HashMap::new()),
+        })
+        .unwrap();
+        assert_eq!(
+            empty,
+            serde_json::json!({"subtype": "initialize", "hooks": {}})
+        );
+    }
+
+    /// The legacy `ControlRequest` / `ControlResponse` pair is still what the
+    /// transport trait exchanges (`receive_control_response`), so its wire
+    /// shape is pinned here: lowercase tags, request id echoed back.
+    #[test]
+    fn test_legacy_control_request_and_response_wire_shape() {
+        let request = ControlRequest::Interrupt {
+            request_id: "req_1".into(),
+        };
+        let request_json = serde_json::to_value(&request).unwrap();
+        assert_eq!(
+            request_json,
+            serde_json::json!({"type": "interrupt", "request_id": "req_1"})
+        );
+        assert!(matches!(
+            serde_json::from_value::<ControlRequest>(request_json).unwrap(),
+            ControlRequest::Interrupt { request_id } if request_id == "req_1"
+        ));
+
+        let response = ControlResponse::InterruptAck {
+            request_id: "req_1".into(),
+            success: false,
+        };
+        let response_json = serde_json::to_value(&response).unwrap();
+        assert_eq!(
+            response_json,
+            serde_json::json!({"type": "interruptack", "request_id": "req_1", "success": false})
+        );
+        assert!(matches!(
+            serde_json::from_value::<ControlResponse>(response_json).unwrap(),
+            ControlResponse::InterruptAck { success: false, .. }
+        ));
+    }
+
+    /// `rename_all = "lowercase"` turns `InterruptAck` into `interruptack`,
+    /// not `interrupt_ack`. Pinned explicitly because it is the kind of tag a
+    /// reader guesses wrong.
+    #[test]
+    fn test_legacy_control_response_tag_is_lowercased_not_snake_cased() {
+        let json = serde_json::to_value(ControlResponse::InterruptAck {
+            request_id: "r".into(),
+            success: true,
+        })
+        .unwrap();
+        assert_eq!(json["type"], serde_json::json!("interruptack"));
+        assert!(
+            serde_json::from_value::<ControlResponse>(
+                serde_json::json!({"type": "interrupt_ack", "request_id": "r", "success": true})
+            )
+            .is_err(),
+            "snake_case spelling must not be accepted"
+        );
+    }
+
+    // ====================================================================
+    // Result message: which fields are mandatory on the wire
+    // ====================================================================
+
+    /// `Message::Result` needs its six non-optional fields and nothing more:
+    /// the four `Option`s are absent-tolerant (serde's `missing_field` path),
+    /// which is exactly why `parse_result_message`'s serde arm succeeds on a
+    /// minimal CLI result.
+    #[test]
+    fn test_message_result_requires_six_fields_and_defaults_the_options() {
+        let minimal = serde_json::json!({
+            "type": "result",
+            "subtype": "success",
+            "duration_ms": 10,
+            "duration_api_ms": 8,
+            "is_error": false,
+            "num_turns": 1,
+            "session_id": "s1"
+        });
+        let parsed: Message = serde_json::from_value(minimal.clone()).unwrap();
+        assert_eq!(
+            parsed,
+            Message::Result {
+                subtype: "success".into(),
+                duration_ms: 10,
+                duration_api_ms: 8,
+                is_error: false,
+                num_turns: 1,
+                session_id: "s1".into(),
+                total_cost_usd: None,
+                usage: None,
+                result: None,
+                structured_output: None,
+            }
+        );
+        // Serialising back omits every absent Option, reproducing the input.
+        assert_eq!(serde_json::to_value(&parsed).unwrap(), minimal);
+
+        for required in [
+            "subtype",
+            "duration_ms",
+            "duration_api_ms",
+            "is_error",
+            "num_turns",
+            "session_id",
+        ] {
+            let mut incomplete = minimal.clone();
+            incomplete.as_object_mut().unwrap().remove(required);
+            assert!(
+                serde_json::from_value::<Message>(incomplete).is_err(),
+                "`{required}` must be mandatory"
+            );
+        }
+    }
+
+    /// `ResultMessage` / `SystemMessage` are re-exported *variants*, not
+    /// separate types: constructing through the alias yields the same value as
+    /// the variant, so downstream code can use either name.
+    #[test]
+    fn test_result_and_system_message_aliases_are_the_same_variants() {
+        let via_alias = ResultMessage {
+            subtype: "success".into(),
+            duration_ms: 1,
+            duration_api_ms: 1,
+            is_error: false,
+            num_turns: 1,
+            session_id: "s".into(),
+            total_cost_usd: None,
+            usage: None,
+            result: None,
+            structured_output: None,
+        };
+        assert!(matches!(via_alias, Message::Result { .. }));
+        assert_eq!(via_alias.parent_tool_use_id(), None);
+
+        let system = SystemMessage {
+            subtype: "init".into(),
+            data: serde_json::json!({}),
+        };
+        assert!(matches!(system, Message::System { .. }));
+    }
+
+    // ====================================================================
+    // StreamEventData / StreamDelta — every variant, both directions
+    // ====================================================================
+
+    /// All six stream event shapes, with the exact JSON each produces. The
+    /// `usage` field of `message_delta` is the only optional one, so it is
+    /// covered present and absent.
+    #[test]
+    fn test_stream_event_data_every_variant_roundtrips() {
+        let cases = vec![
+            (
+                StreamEventData::MessageStart {
+                    message: serde_json::json!({"id": "msg_1"}),
+                },
+                serde_json::json!({"type": "message_start", "message": {"id": "msg_1"}}),
+            ),
+            (
+                StreamEventData::ContentBlockStart {
+                    index: 3,
+                    content_block: serde_json::json!({"type": "text"}),
+                },
+                serde_json::json!({
+                    "type": "content_block_start", "index": 3,
+                    "content_block": {"type": "text"}
+                }),
+            ),
+            (
+                StreamEventData::ContentBlockDelta {
+                    index: 0,
+                    delta: StreamDelta::TextDelta { text: "tok".into() },
+                },
+                serde_json::json!({
+                    "type": "content_block_delta", "index": 0,
+                    "delta": {"type": "text_delta", "text": "tok"}
+                }),
+            ),
+            (
+                StreamEventData::ContentBlockStop { index: 2 },
+                serde_json::json!({"type": "content_block_stop", "index": 2}),
+            ),
+            (
+                StreamEventData::MessageDelta {
+                    delta: serde_json::json!({"stop_reason": "end_turn"}),
+                    usage: Some(serde_json::json!({"output_tokens": 5})),
+                },
+                serde_json::json!({
+                    "type": "message_delta", "delta": {"stop_reason": "end_turn"},
+                    "usage": {"output_tokens": 5}
+                }),
+            ),
+            (
+                StreamEventData::MessageDelta {
+                    delta: serde_json::json!(null),
+                    usage: None,
+                },
+                serde_json::json!({"type": "message_delta", "delta": null}),
+            ),
+            (
+                StreamEventData::MessageStop,
+                serde_json::json!({"type": "message_stop"}),
+            ),
+        ];
+
+        for (data, expected) in cases {
+            assert_eq!(serde_json::to_value(&data).unwrap(), expected);
+            assert_eq!(
+                serde_json::from_value::<StreamEventData>(expected).unwrap(),
+                data
+            );
+        }
+    }
+
+    /// An unknown stream event tag is refused at the serde level (unlike
+    /// `parse_stream_event`, which drops it with `Ok(None)`). The two layers
+    /// treat the same input differently, which is worth having written down.
+    #[test]
+    fn test_stream_event_data_serde_refuses_what_the_parser_merely_drops() {
+        assert!(
+            serde_json::from_value::<StreamEventData>(serde_json::json!({"type": "message_pause"}))
+                .is_err()
+        );
+        assert!(
+            serde_json::from_value::<StreamDelta>(
+                serde_json::json!({"type": "citations_delta", "citations": []})
+            )
+            .is_err()
+        );
+    }
+
+    // ====================================================================
+    // Small internal structs that nothing exercised
+    // ====================================================================
+
+    /// `BaseHookInput` is exported but never built by the SDK itself; it is the
+    /// documented shape of the fields every hook event shares. Pinned so the
+    /// shared prefix cannot drift away from the per-event structs.
+    #[test]
+    fn test_base_hook_input_is_the_shared_prefix_of_the_event_inputs() {
+        let json = serde_json::json!({
+            "session_id": "s1",
+            "transcript_path": "/t/x.jsonl",
+            "cwd": "/w",
+            "permission_mode": "plan"
+        });
+        let base: BaseHookInput = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(base.session_id, "s1");
+        assert_eq!(base.permission_mode.as_deref(), Some("plan"));
+        assert_eq!(serde_json::to_value(&base).unwrap(), json);
+
+        // The same four keys plus one event-specific field is a valid Stop input.
+        let mut stop_json = json.clone();
+        stop_json
+            .as_object_mut()
+            .unwrap()
+            .insert("stop_hook_active".into(), serde_json::json!(true));
+        let stop: StopHookInput = serde_json::from_value(stop_json).unwrap();
+        assert_eq!(stop.cwd, base.cwd);
+        assert_eq!(stop.transcript_path, base.transcript_path);
+
+        // `permission_mode` is the only optional one, and it is omitted when absent.
+        let mut no_mode = json;
+        no_mode.as_object_mut().unwrap().remove("permission_mode");
+        let base_no_mode: BaseHookInput = serde_json::from_value(no_mode.clone()).unwrap();
+        assert_eq!(base_no_mode.permission_mode, None);
+        assert_eq!(serde_json::to_value(&base_no_mode).unwrap(), no_mode);
+    }
+
+    /// `UserContent` / `AssistantContent` are the role-tagged shapes used for
+    /// internal conversation bookkeeping. Both roles are plain strings with no
+    /// validation: `role: "banana"` is accepted, so the "always user"/"always
+    /// assistant" promise in their docs is a convention, not a constraint.
+    #[test]
+    fn test_user_and_assistant_content_roles_are_unvalidated_strings() {
+        let user: UserContent =
+            serde_json::from_value(serde_json::json!({"role": "banana", "content": "hi"})).unwrap();
+        assert_eq!(user.role, "banana");
+        assert_eq!(user.content, "hi");
+
+        let assistant: AssistantContent = serde_json::from_value(serde_json::json!({
+            "role": "assistant",
+            "content": [{"text": "out"}]
+        }))
+        .unwrap();
+        assert_eq!(assistant.role, "assistant");
+        assert_eq!(
+            assistant.content,
+            vec![ContentBlock::Text(TextContent { text: "out".into() })]
+        );
+        assert_eq!(
+            serde_json::to_value(&assistant).unwrap(),
+            serde_json::json!({"role": "assistant", "content": [{"text": "out"}]})
+        );
+    }
+
+    /// `PermissionResult` and its two payloads carry no serde impls — they
+    /// cross the `CanUseTool` trait boundary in memory only. What a caller can
+    /// rely on is `Clone` + `Debug`, and that a deny keeps its interrupt flag.
+    #[test]
+    fn test_permission_result_payloads_survive_a_clone() {
+        let allow = PermissionResult::Allow(PermissionResultAllow {
+            updated_input: Some(serde_json::json!({"command": "ls -la"})),
+            updated_permissions: Some(vec![PermissionUpdate {
+                update_type: PermissionUpdateType::SetMode,
+                rules: None,
+                behavior: None,
+                mode: Some(PermissionMode::BypassPermissions),
+                directories: None,
+                destination: Some(PermissionUpdateDestination::Session),
+            }]),
+        });
+        match allow.clone() {
+            PermissionResult::Allow(a) => {
+                assert_eq!(
+                    a.updated_input,
+                    Some(serde_json::json!({"command": "ls -la"}))
+                );
+                let updates = a.updated_permissions.expect("permissions");
+                assert_eq!(updates[0].mode, Some(PermissionMode::BypassPermissions));
+                assert_eq!(
+                    updates[0].destination,
+                    Some(PermissionUpdateDestination::Session)
+                );
+            },
+            other => panic!("clone changed the variant: {other:?}"),
+        }
+
+        let deny = PermissionResult::Deny(PermissionResultDeny {
+            message: "not allowed".into(),
+            interrupt: true,
+        });
+        match deny.clone() {
+            PermissionResult::Deny(d) => {
+                assert_eq!(d.message, "not allowed");
+                assert!(d.interrupt);
+            },
+            other => panic!("clone changed the variant: {other:?}"),
+        }
+    }
+
+    /// `ToolPermissionContext` is what a `CanUseTool` implementation reads;
+    /// `signal` is a declared-but-unused abort hook (`Option<Arc<dyn Any>>`),
+    /// so the only live field is `suggestions`.
+    #[test]
+    fn test_tool_permission_context_exposes_suggestions_and_an_inert_signal() {
+        let context = ToolPermissionContext {
+            signal: None,
+            suggestions: vec![PermissionUpdate {
+                update_type: PermissionUpdateType::AddRules,
+                rules: Some(vec![PermissionRuleValue {
+                    tool_name: "Bash".into(),
+                    rule_content: Some("git:*".into()),
+                }]),
+                behavior: Some(PermissionBehavior::Allow),
+                mode: None,
+                directories: None,
+                destination: Some(PermissionUpdateDestination::LocalSettings),
+            }],
+        };
+        assert!(context.signal.is_none());
+        assert_eq!(context.suggestions.len(), 1);
+        let rules = context.suggestions[0].rules.as_ref().expect("rules");
+        assert_eq!(rules[0].tool_name, "Bash");
+        assert_eq!(rules[0].rule_content.as_deref(), Some("git:*"));
+        assert_eq!(
+            context.suggestions[0].behavior,
+            Some(PermissionBehavior::Allow)
+        );
+    }
+
+    // ====================================================================
+    // Clamps that do not clamp everything
+    // ====================================================================
+
+    /// `memory_threshold` clamps into 0.0..=1.0, but `f64::clamp` returns NaN
+    /// unchanged: a NaN threshold is stored as-is and every later comparison
+    /// against it is false, so no context would ever be injected. A refusal (or
+    /// a substitution) would be the expected behaviour for an out-of-domain
+    /// value.
+    #[test]
+    fn test_memory_threshold_clamps_the_bounds_but_lets_nan_through() {
+        assert_eq!(
+            ClaudeCodeOptions::builder()
+                .memory_threshold(-5.0)
+                .build()
+                .memory_threshold,
+            Some(0.0)
+        );
+        assert_eq!(
+            ClaudeCodeOptions::builder()
+                .memory_threshold(42.0)
+                .build()
+                .memory_threshold,
+            Some(1.0)
+        );
+        assert_eq!(
+            ClaudeCodeOptions::builder()
+                .memory_threshold(f64::INFINITY)
+                .build()
+                .memory_threshold,
+            Some(1.0)
+        );
+
+        let nan = ClaudeCodeOptions::builder()
+            .memory_threshold(f64::NAN)
+            .build()
+            .memory_threshold
+            .expect("still Some");
+        assert!(nan.is_nan(), "NaN passes the clamp untouched");
+        assert_eq!(
+            0.5_f64.partial_cmp(&nan),
+            None,
+            "a NaN threshold is incomparable, so every relevance filter silently rejects"
+        );
+    }
+
+    /// `max_output_tokens` clamps to 1..=32000, so 0 becomes 1 rather than
+    /// being refused: asking for "no output" silently asks for one token.
+    #[test]
+    fn test_max_output_tokens_clamp_turns_zero_into_one() {
+        assert_eq!(
+            ClaudeCodeOptions::builder()
+                .max_output_tokens(0)
+                .build()
+                .max_output_tokens,
+            Some(1)
+        );
+        assert_eq!(
+            ClaudeCodeOptions::builder()
+                .max_output_tokens(u32::MAX)
+                .build()
+                .max_output_tokens,
+            Some(32_000)
+        );
+    }
+
+    /// `max_budget_usd` and `max_turns` take whatever they are given: negative
+    /// budgets and zero turn limits are not refused at the type level. Pinned
+    /// because, unlike the two fields above, these have no clamp at all.
+    #[test]
+    fn test_budget_and_turn_limits_are_not_validated() {
+        let options = ClaudeCodeOptions::builder()
+            .max_budget_usd(-1.0)
+            .max_turns(0)
+            .build();
+        assert_eq!(options.max_budget_usd, Some(-1.0));
+        assert_eq!(options.max_turns, Some(0));
+    }
+
+    /// `max_thinking_tokens` has no builder default: a fresh options struct
+    /// carries 0, which `build_command` reads as "do not pass the flag".
+    #[test]
+    fn test_max_thinking_tokens_defaults_to_zero_meaning_unset() {
+        assert_eq!(ClaudeCodeOptions::default().max_thinking_tokens, 0);
+        assert_eq!(
+            ClaudeCodeOptions::builder().build().max_thinking_tokens,
+            0,
+            "the builder adds no default of its own"
+        );
+    }
+
+    /// `ControlProtocolFormat` is dead configuration. The builder stores all
+    /// three variants, `Debug` prints them, and **nothing reads the field**:
+    /// `internal_query::send_control_request` hardcodes its envelope to
+    /// `{"type":"control_request","request_id":…,"request":…}`, which is
+    /// neither of the two shapes the variants' doc-comments describe
+    /// (`sdk_control_request` for `Legacy`, `control` for `Control`), and
+    /// `Auto` detects nothing.
+    ///
+    /// So the three variants are indistinguishable on the wire. This test
+    /// pins what is actually observable — storage and `Debug` — so the gap
+    /// between the documented promise and the behaviour is written down rather
+    /// than inferred. Wiring or removing the field touches the transport and
+    /// control layers, outside this file.
+    #[test]
+    fn test_control_protocol_format_is_stored_but_never_acted_upon() {
+        for variant in [
+            ControlProtocolFormat::Legacy,
+            ControlProtocolFormat::Control,
+            ControlProtocolFormat::Auto,
+        ] {
+            let options = ClaudeCodeOptions::builder()
+                .control_protocol_format(variant)
+                .build();
+            assert_eq!(options.control_protocol_format, variant);
+            assert!(
+                format!("{options:?}").contains(&format!("control_protocol_format: {variant:?}")),
+                "the chosen format only ever surfaces in Debug"
+            );
+        }
+        assert_eq!(
+            ClaudeCodeOptions::default().control_protocol_format,
+            ControlProtocolFormat::Legacy,
+            "the default is Legacy, but Legacy's documented envelope is not what is sent"
+        );
+    }
+
+    // ====================================================================
+    // Enum tags that must refuse what they do not know
+    // ====================================================================
+
+    /// Unknown strings are refused for every externally-tagged config enum, so
+    /// a typo in a settings file fails loudly instead of defaulting.
+    #[test]
+    fn test_config_enums_refuse_unknown_strings() {
+        assert!(serde_json::from_value::<PermissionMode>(serde_json::json!("yolo")).is_err());
+        assert!(
+            serde_json::from_value::<PermissionMode>(serde_json::json!("accept_edits")).is_err()
+        );
+        assert!(serde_json::from_value::<SettingSource>(serde_json::json!("Global")).is_err());
+        assert!(serde_json::from_value::<SdkBeta>(serde_json::json!("context-2m")).is_err());
+        assert!(serde_json::from_value::<PermissionBehavior>(serde_json::json!("maybe")).is_err());
+        assert!(
+            serde_json::from_value::<PermissionUpdateType>(serde_json::json!("add_rules")).is_err(),
+            "the wire spelling is camelCase addRules"
+        );
+    }
+
+    /// `SdkBeta`'s `Display` and its serde name are two separate declarations
+    /// of the same beta header; they must stay equal or the header sent would
+    /// differ from the one serialised into options.
+    #[test]
+    fn test_sdk_beta_display_equals_its_serde_name() {
+        let beta = SdkBeta::Context1M;
+        let serialised = serde_json::to_value(&beta).unwrap();
+        assert_eq!(
+            serde_json::json!(beta.to_string()),
+            serialised,
+            "Display and serde must agree on the beta header"
+        );
+        assert_eq!(beta.to_string(), "context-1m-2025-08-07");
+    }
 }

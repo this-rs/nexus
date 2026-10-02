@@ -567,4 +567,355 @@ mod tests {
         manager.update_usage(999999, 999999, 999.0).await;
         assert!(!manager.is_exceeded().await);
     }
+
+    // ---------------------------------------------------------------------
+    // Log capture: the two `warn!` call sites in `update_usage` only format
+    // their arguments when a subscriber is actually listening, so asserting on
+    // the emitted text is the only way to prove what they report.
+    // ---------------------------------------------------------------------
+
+    #[derive(Clone)]
+    struct VecWriter(Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for VecWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for VecWriter {
+        type Writer = VecWriter;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    /// Run `body` on a current-thread runtime with a thread-local WARN
+    /// subscriber, and return everything it logged.
+    fn capture_warnings<F>(body: F) -> String
+    where
+        F: std::future::Future<Output = ()>,
+    {
+        let buffer = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::WARN)
+            .with_ansi(false)
+            .with_writer(VecWriter(buffer.clone()))
+            .finish();
+
+        tracing::subscriber::with_default(subscriber, || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("current-thread runtime")
+                .block_on(body);
+        });
+
+        String::from_utf8(buffer.lock().unwrap().clone()).expect("utf-8 log output")
+    }
+
+    #[test]
+    fn test_update_usage_logs_the_warning_message_once() {
+        let logs = capture_warnings(async {
+            let manager = BudgetManager::new();
+            manager
+                .set_limit(BudgetLimit::with_cost(1.0).with_warning_threshold(0.8))
+                .await;
+            manager.update_usage(10, 10, 0.85).await;
+            // Second update stays in the warning band: nothing more is logged.
+            manager.update_usage(10, 10, 0.01).await;
+        });
+
+        assert_eq!(
+            logs.matches("Budget warning").count(),
+            1,
+            "the warning must be logged exactly once, got: {logs}"
+        );
+        assert!(
+            logs.contains("Cost usage at 85.0% ($0.85/$1.00)"),
+            "warning should quote the ratio and both amounts, got: {logs}"
+        );
+    }
+
+    #[test]
+    fn test_update_usage_logs_token_count_and_cost_when_exceeded() {
+        let logs = capture_warnings(async {
+            let manager = BudgetManager::new();
+            manager.set_limit(BudgetLimit::with_cost(1.0)).await;
+            manager.update_usage(120, 80, 2.5).await;
+        });
+
+        assert!(
+            logs.contains("Budget exceeded!"),
+            "exceeding the budget must be logged, got: {logs}"
+        );
+        assert!(
+            logs.contains("200 tokens"),
+            "the log should carry the cumulative token count, got: {logs}"
+        );
+        assert!(
+            logs.contains("$2.50"),
+            "the log should carry the cumulative cost, got: {logs}"
+        );
+    }
+
+    /// Unlike the warning, the "exceeded" branch has no `warning_fired` guard:
+    /// the callback is invoked on **every** subsequent update.
+    #[tokio::test]
+    async fn test_exceeded_callback_fires_on_every_update() {
+        let manager = BudgetManager::new();
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let calls_clone = calls.clone();
+
+        manager.set_limit(BudgetLimit::with_tokens(100)).await;
+        manager
+            .set_warning_callback(Arc::new(move |_| {
+                calls_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }))
+            .await;
+
+        manager.update_usage(100, 50, 0.0).await;
+        manager.update_usage(1, 1, 0.0).await;
+        manager.update_usage(1, 1, 0.0).await;
+
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            3,
+            "the exceeded branch is not de-duplicated like the warning branch"
+        );
+    }
+
+    /// `reset_usage()` clears `warning_fired`, so the warning callback is armed
+    /// again for the next budget cycle.
+    #[tokio::test]
+    async fn test_reset_usage_rearms_the_warning_callback() {
+        let manager = BudgetManager::new();
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let calls_clone = calls.clone();
+
+        manager
+            .set_limit(BudgetLimit::with_cost(1.0).with_warning_threshold(0.8))
+            .await;
+        manager
+            .set_warning_callback(Arc::new(move |_| {
+                calls_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }))
+            .await;
+
+        manager.update_usage(1, 1, 0.85).await;
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        manager.reset_usage().await;
+        manager.update_usage(1, 1, 0.85).await;
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "after a reset the warning must be able to fire again"
+        );
+    }
+
+    /// `set_limit()` also disarms a previously fired warning.
+    #[tokio::test]
+    async fn test_set_limit_rearms_the_warning_callback() {
+        let manager = BudgetManager::new();
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let calls_clone = calls.clone();
+
+        manager
+            .set_limit(BudgetLimit::with_cost(1.0).with_warning_threshold(0.8))
+            .await;
+        manager
+            .set_warning_callback(Arc::new(move |_| {
+                calls_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }))
+            .await;
+        manager.update_usage(1, 1, 0.85).await;
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        // A fresh, larger budget: 0.85/2.0 = 42.5% is back under the threshold,
+        // and the flag is cleared, so crossing 80% again warns again.
+        manager.set_limit(BudgetLimit::with_cost(2.0)).await;
+        manager.update_usage(1, 1, 0.80).await;
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "set_limit must re-arm the warning"
+        );
+    }
+
+    /// Updating with no limit configured must never invoke the callback.
+    #[tokio::test]
+    async fn test_no_limit_means_no_callback() {
+        let manager = BudgetManager::new();
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let calls_clone = calls.clone();
+        manager
+            .set_warning_callback(Arc::new(move |_| {
+                calls_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }))
+            .await;
+
+        manager.update_usage(10_000, 10_000, 1_000.0).await;
+
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(manager.get_usage().await.session_count, 1);
+    }
+
+    #[tokio::test]
+    async fn test_budget_manager_default_has_no_limit_and_no_usage() {
+        let manager = BudgetManager::default();
+        let usage = manager.get_usage().await;
+        assert_eq!(usage.total_tokens(), 0);
+        assert_eq!(usage.session_count, 0);
+        assert!(!manager.is_exceeded().await);
+    }
+
+    // ---------------------------------------------------------------------
+    // Limit arithmetic at the edges.
+    // ---------------------------------------------------------------------
+
+    /// A zero cost cap divides by zero: `0.0 / 0.0` is NaN and every NaN
+    /// comparison is false, so a *brand new* tracker is reported `Ok` even
+    /// though no spending at all is allowed. The first cent flips it straight
+    /// to `Exceeded` (`0.01 / 0.0` is `+inf`).
+    #[test]
+    fn test_zero_cost_cap_reports_ok_until_the_first_cent() {
+        let limit = BudgetLimit::with_cost(0.0);
+
+        let empty = TokenUsageTracker::new();
+        assert_eq!(limit.check_limits(&empty), BudgetStatus::Ok);
+
+        let mut spent = TokenUsageTracker::new();
+        spent.update(1, 1, 0.01);
+        assert_eq!(limit.check_limits(&spent), BudgetStatus::Exceeded);
+    }
+
+    /// Same NaN hole on the token cap.
+    #[test]
+    fn test_zero_token_cap_reports_ok_while_nothing_was_consumed() {
+        let limit = BudgetLimit::with_tokens(0);
+
+        let empty = TokenUsageTracker::new();
+        assert_eq!(limit.check_limits(&empty), BudgetStatus::Ok);
+
+        let mut used = TokenUsageTracker::new();
+        used.update(1, 0, 0.0);
+        assert_eq!(limit.check_limits(&used), BudgetStatus::Exceeded);
+    }
+
+    /// `with_cost` performs no validation: a negative cap yields a negative
+    /// ratio, which is below every threshold, so the budget never triggers.
+    /// A negative cap is silently an *unlimited* budget.
+    #[test]
+    fn test_negative_cost_cap_is_silently_unlimited() {
+        let limit = BudgetLimit::with_cost(-10.0);
+        let mut tracker = TokenUsageTracker::new();
+        tracker.update(1_000_000, 1_000_000, 9_999.0);
+
+        assert_eq!(limit.check_limits(&tracker), BudgetStatus::Ok);
+    }
+
+    /// The threshold is clamped, not rejected.
+    #[test]
+    fn test_warning_threshold_is_clamped_to_zero_and_one() {
+        assert_eq!(
+            BudgetLimit::with_cost(1.0)
+                .with_warning_threshold(5.0)
+                .warning_threshold,
+            1.0
+        );
+        assert_eq!(
+            BudgetLimit::with_cost(1.0)
+                .with_warning_threshold(-5.0)
+                .warning_threshold,
+            0.0
+        );
+        assert!(
+            BudgetLimit::with_cost(1.0)
+                .with_warning_threshold(f64::NAN)
+                .warning_threshold
+                .is_nan(),
+            "f64::clamp propagates NaN"
+        );
+    }
+
+    /// A threshold clamped to 0.0 warns before a single token is spent: the
+    /// comparison is `>=`, and `0.0 >= 0.0` holds.
+    #[test]
+    fn test_threshold_clamped_to_zero_warns_immediately() {
+        let limit = BudgetLimit::with_tokens(1000).with_warning_threshold(-1.0);
+        let tracker = TokenUsageTracker::new();
+        match limit.check_limits(&tracker) {
+            BudgetStatus::Warning { current_ratio, .. } => assert_eq!(current_ratio, 0.0),
+            other => panic!("expected an immediate Warning, got {other:?}"),
+        }
+    }
+
+    /// Exactly at the cap: `>= 1.0` makes the boundary `Exceeded`, not `Warning`.
+    #[test]
+    fn test_usage_exactly_at_the_cap_is_exceeded() {
+        let limit = BudgetLimit::with_tokens(500);
+        let mut tracker = TokenUsageTracker::new();
+        tracker.update(250, 250, 0.0);
+        assert_eq!(limit.check_limits(&tracker), BudgetStatus::Exceeded);
+    }
+
+    /// A NaN threshold (see above) disables both the warning *and* keeps the
+    /// hard cap working — the cap uses its own `>= 1.0` test.
+    #[test]
+    fn test_nan_threshold_disables_warnings_but_not_the_cap() {
+        let limit = BudgetLimit::with_tokens(100).with_warning_threshold(f64::NAN);
+
+        let mut warning_band = TokenUsageTracker::new();
+        warning_band.update(90, 0, 0.0);
+        assert_eq!(limit.check_limits(&warning_band), BudgetStatus::Ok);
+
+        let mut over = TokenUsageTracker::new();
+        over.update(100, 0, 0.0);
+        assert_eq!(limit.check_limits(&over), BudgetStatus::Exceeded);
+    }
+
+    /// The token cap must not downgrade an `Exceeded` cost verdict to
+    /// `Warning` — the explicit `matches!` guard in `check_limits`.
+    #[test]
+    fn test_token_warning_never_downgrades_an_exceeded_cost() {
+        let limit = BudgetLimit::with_both(1.0, 1000).with_warning_threshold(0.8);
+        let mut tracker = TokenUsageTracker::new();
+        tracker.update(450, 400, 1.0); // cost exactly at cap, tokens at 85%
+        assert_eq!(limit.check_limits(&tracker), BudgetStatus::Exceeded);
+    }
+
+    /// With both caps in the warning band, the *token* message wins because the
+    /// token check runs last and overwrites the cost warning.
+    #[test]
+    fn test_token_warning_overwrites_the_cost_warning_message() {
+        let limit = BudgetLimit::with_both(1.0, 1000).with_warning_threshold(0.8);
+        let mut tracker = TokenUsageTracker::new();
+        tracker.update(500, 400, 0.90); // 90% of cost, 90% of tokens
+        match limit.check_limits(&tracker) {
+            BudgetStatus::Warning { message, .. } => {
+                assert!(
+                    message.contains("Token usage"),
+                    "token warning should replace the cost warning, got: {message}"
+                );
+            },
+            other => panic!("expected Warning, got {other:?}"),
+        }
+    }
+
+    /// `Default` for `BudgetLimit` caps nothing: it can only ever answer `Ok`.
+    #[test]
+    fn test_default_budget_limit_never_triggers() {
+        let limit = BudgetLimit::default();
+        assert_eq!(limit.warning_threshold, 0.8);
+        let mut tracker = TokenUsageTracker::new();
+        tracker.update(u32::MAX as u64, u32::MAX as u64, 1e9);
+        assert_eq!(limit.check_limits(&tracker), BudgetStatus::Ok);
+    }
 }

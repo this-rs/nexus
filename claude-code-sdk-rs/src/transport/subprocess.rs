@@ -12,13 +12,24 @@ use futures::stream::{Stream, StreamExt};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::process::Stdio;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
-use tokio::sync::mpsc;
+use tokio::sync::{broadcast, mpsc};
 use tracing::{debug, error, info, warn};
 
 /// Default buffer size for channels
 const CHANNEL_BUFFER_SIZE: usize = 100;
+
+/// Refusal returned by every write path once `end_input` has closed stdin.
+///
+/// `end_input` drops the stdin sender but leaves the state `Connected`, so a
+/// later write passes the state check and lands here. The message used to be
+/// "Stdin channel not available", which told the caller what was missing but
+/// not why — and the only way to get there is `end_input`.
+const INPUT_CLOSED: &str =
+    "Input closed: end_input() was called, no further message can be sent on this session";
 
 /// Minimum required CLI version.
 ///
@@ -133,6 +144,29 @@ pub async fn get_cli_version(cli_path: &std::path::Path) -> Option<SemVer> {
     SemVer::parse(version_str.trim())
 }
 
+/// Wrap a broadcast subscription in the stream the `Transport` trait hands out.
+///
+/// A subscriber that stops polling falls behind the channel's ring buffer; the
+/// overwritten messages are gone, which the stream reports once as `Lagged`.
+/// That is logged and skipped so the stream stays usable: ending it there would
+/// turn a slow consumer into a lost session. The stream *does* end once every
+/// sender is dropped, which is how a consumer learns the CLI is gone.
+fn message_stream(
+    rx: broadcast::Receiver<Message>,
+) -> Pin<Box<dyn Stream<Item = Result<Message>> + Send + 'static>> {
+    Box::pin(
+        tokio_stream::wrappers::BroadcastStream::new(rx).filter_map(|result| async move {
+            match result {
+                Ok(msg) => Some(Ok(msg)),
+                Err(tokio_stream::wrappers::errors::BroadcastStreamRecvError::Lagged(n)) => {
+                    warn!("Receiver lagged by {} messages", n);
+                    None
+                },
+            }
+        }),
+    )
+}
+
 /// Subprocess-based transport for Claude CLI
 pub struct SubprocessTransport {
     /// Configuration options
@@ -143,8 +177,20 @@ pub struct SubprocessTransport {
     child: Option<Child>,
     /// Sender for stdin
     stdin_tx: Option<mpsc::Sender<String>>,
-    /// Sender for broadcasting messages to multiple receivers
-    message_broadcast_tx: Option<tokio::sync::broadcast::Sender<Message>>,
+    /// Long-lived handle on the message broadcast, used to hand out new
+    /// subscriptions.
+    ///
+    /// This is deliberately a *receiver* and not the `Sender`. A broadcast
+    /// channel only reports "closed" to its receivers once every sender is
+    /// gone; keeping a `Sender` here would mean the channel could never close,
+    /// and a consumer looping on `receive_messages()` would block for ever
+    /// after the CLI died. The senders therefore live only inside the stdout
+    /// and stderr reader tasks, which end when the child's pipes reach EOF.
+    message_broadcast_rx: Option<broadcast::Receiver<Message>>,
+    /// Cleared by the stdout reader when the CLI's stdout reaches EOF, i.e. when
+    /// the child is gone. `is_connected()` consults it so a dead CLI is not
+    /// reported as a live session for ever.
+    stdout_alive: Option<Arc<AtomicBool>>,
     /// Receiver for control responses
     control_rx: Option<mpsc::Receiver<ControlResponse>>,
     /// Receiver for SDK control requests
@@ -172,7 +218,8 @@ impl SubprocessTransport {
             cli_path,
             child: None,
             stdin_tx: None,
-            message_broadcast_tx: None,
+            message_broadcast_rx: None,
+            stdout_alive: None,
             control_rx: None,
             sdk_control_rx: None,
             state: TransportState::Disconnected,
@@ -205,7 +252,8 @@ impl SubprocessTransport {
             cli_path,
             child: None,
             stdin_tx: None,
-            message_broadcast_tx: None,
+            message_broadcast_rx: None,
+            stdout_alive: None,
             control_rx: None,
             sdk_control_rx: None,
             state: TransportState::Disconnected,
@@ -310,22 +358,9 @@ impl SubprocessTransport {
     pub fn subscribe_messages(
         &self,
     ) -> Option<Pin<Box<dyn Stream<Item = Result<Message>> + Send + 'static>>> {
-        self.message_broadcast_tx.as_ref().map(|tx| {
-            let rx = tx.subscribe();
-            Box::pin(tokio_stream::wrappers::BroadcastStream::new(rx).filter_map(
-                |result| async move {
-                    match result {
-                        Ok(msg) => Some(Ok(msg)),
-                        Err(tokio_stream::wrappers::errors::BroadcastStreamRecvError::Lagged(
-                            n,
-                        )) => {
-                            warn!("Receiver lagged by {} messages", n);
-                            None
-                        },
-                    }
-                },
-            )) as Pin<Box<dyn Stream<Item = Result<Message>> + Send + 'static>>
-        })
+        self.message_broadcast_rx
+            .as_ref()
+            .map(|rx| message_stream(rx.resubscribe()))
     }
 
     /// Receive SDK control requests
@@ -350,7 +385,8 @@ impl SubprocessTransport {
             cli_path: cli_path.into(),
             child: None,
             stdin_tx: None,
-            message_broadcast_tx: None,
+            message_broadcast_rx: None,
+            stdout_alive: None,
             control_rx: None,
             sdk_control_rx: None,
             state: TransportState::Disconnected,
@@ -366,15 +402,27 @@ impl SubprocessTransport {
     }
 
     /// Create transport for simple print mode (one-shot query)
+    ///
+    /// `options.cli_path` is honoured exactly as [`SubprocessTransport::new`]
+    /// honours it; it used to call [`find_claude_cli`] unconditionally, so an
+    /// explicit path (a test double, a non-standard install) was silently
+    /// ignored and the call failed on a host with no CLI in the usual places.
+    ///
+    /// `_prompt` is accepted and dropped: print mode still writes the prompt
+    /// through `send_message` like every other mode.
     #[allow(dead_code)]
     pub fn for_print_mode(options: ClaudeCodeOptions, _prompt: String) -> Result<Self> {
-        let cli_path = find_claude_cli()?;
+        let cli_path = match options.cli_path {
+            Some(ref explicit_path) => explicit_path.clone(),
+            None => find_claude_cli()?,
+        };
         Ok(Self {
             options,
             cli_path,
             child: None,
             stdin_tx: None,
-            message_broadcast_tx: None,
+            message_broadcast_rx: None,
+            stdout_alive: None,
             control_rx: None,
             sdk_control_rx: None,
             state: TransportState::Disconnected,
@@ -662,12 +710,18 @@ impl SubprocessTransport {
         // Create a new process group so we can kill the entire tree
         // (CLI + its child processes like bash, find, sleep, etc.)
         // Using setpgid(0, 0) makes the child the leader of a new group.
+        //
+        // The return value is NOT ignored: `disconnect` and `Drop` both signal
+        // `-pid` assuming that group exists. If it could not be created, `-pid`
+        // would address the group the SDK itself runs in — the orchestrator's
+        // own process tree — so refuse the launch instead of risking that.
         #[cfg(unix)]
-        // SAFETY: setpgid is async-signal-safe (POSIX.1-2017)
+        // SAFETY: setpgid and Error::last_os_error are async-signal-safe
+        // (POSIX.1-2017); no allocation happens between fork and exec.
         unsafe {
-            cmd.pre_exec(|| {
-                libc::setpgid(0, 0);
-                Ok(())
+            cmd.pre_exec(|| match libc::setpgid(0, 0) {
+                0 => Ok(()),
+                _ => Err(std::io::Error::last_os_error()),
             });
         }
 
@@ -675,11 +729,13 @@ impl SubprocessTransport {
         cmd.env("CLAUDE_CODE_ENTRYPOINT", "sdk-rust");
         cmd.env("CLAUDE_AGENT_SDK_VERSION", env!("CARGO_PKG_VERSION"));
 
-        // Debug log the full command being executed
+        // Debug log the command being executed. Through the same redaction as
+        // the spawn log: printing `get_args()` raw put the whole `--mcp-config`
+        // JSON — every MCP server's `env`, i.e. the database password and the
+        // session token — into the log as soon as debug logging was on.
         debug!(
-            "Executing Claude CLI command: {} {:?}",
-            self.cli_path.display(),
-            cmd.as_std().get_args().collect::<Vec<_>>()
+            "Executing Claude CLI command: {}",
+            describe_command_redacted(cmd.as_std())
         );
 
         cmd
@@ -756,9 +812,16 @@ impl SubprocessTransport {
 
         // Create channels
         let (stdin_tx, mut stdin_rx) = mpsc::channel::<String>(buffer_size);
-        // Use broadcast channel for messages to support multiple receivers
-        let (message_broadcast_tx, _) = tokio::sync::broadcast::channel::<Message>(buffer_size);
+        // Use broadcast channel for messages to support multiple receivers.
+        // Only the two reader tasks below hold a `Sender`: when the child's
+        // pipes reach EOF they end, both senders drop, and every subscriber's
+        // stream *ends* instead of waiting for a message that cannot come.
+        let (message_broadcast_tx, message_broadcast_rx) =
+            broadcast::channel::<Message>(buffer_size);
         let (control_tx, control_rx) = mpsc::channel::<ControlResponse>(buffer_size);
+        // Flipped by the stdout reader when stdout reaches EOF, so
+        // `is_connected()` can stop claiming a session the CLI has left.
+        let stdout_alive = Arc::new(AtomicBool::new(true));
 
         // Spawn stdin handler
         tokio::spawn(async move {
@@ -790,6 +853,7 @@ impl SubprocessTransport {
         let message_broadcast_tx_clone = message_broadcast_tx.clone();
         let control_tx_clone = control_tx.clone();
         let sdk_control_tx_clone = sdk_control_tx.clone();
+        let stdout_alive_flag = Arc::clone(&stdout_alive);
         tokio::spawn(async move {
             debug!("Stdout handler started");
             let reader = BufReader::new(stdout);
@@ -894,6 +958,10 @@ impl SubprocessTransport {
                     },
                 }
             }
+            // stdout is at EOF: the CLI will never speak again. Say so, then let
+            // `message_broadcast_tx_clone` drop — that is what ends every
+            // subscriber's stream.
+            stdout_alive_flag.store(false, Ordering::SeqCst);
             info!("Stdout reader ended");
         });
 
@@ -988,10 +1056,15 @@ impl SubprocessTransport {
             }
         });
 
+        // Both reader tasks now own a `Sender` clone; this one must go, or the
+        // channel could never close and `receive_messages()` would never end.
+        drop(message_broadcast_tx);
+
         // Store handles
         self.child = Some(child);
         self.stdin_tx = Some(stdin_tx);
-        self.message_broadcast_tx = Some(message_broadcast_tx);
+        self.message_broadcast_rx = Some(message_broadcast_rx);
+        self.stdout_alive = Some(stdout_alive);
         self.control_rx = Some(control_rx);
         self.sdk_control_rx = Some(sdk_control_rx);
         self.state = TransportState::Connected;
@@ -1038,7 +1111,7 @@ impl Transport for SubprocessTransport {
             Ok(())
         } else {
             Err(SdkError::InvalidState {
-                message: "Stdin channel not available".into(),
+                message: INPUT_CLOSED.into(),
             })
         }
     }
@@ -1046,24 +1119,11 @@ impl Transport for SubprocessTransport {
     fn receive_messages(
         &mut self,
     ) -> Pin<Box<dyn Stream<Item = Result<Message>> + Send + 'static>> {
-        if let Some(ref tx) = self.message_broadcast_tx {
-            // Create a new receiver from the broadcast sender
-            let rx = tx.subscribe();
-            // Convert broadcast receiver to stream
-            Box::pin(tokio_stream::wrappers::BroadcastStream::new(rx).filter_map(
-                |result| async move {
-                    match result {
-                        Ok(msg) => Some(Ok(msg)),
-                        Err(tokio_stream::wrappers::errors::BroadcastStreamRecvError::Lagged(
-                            n,
-                        )) => {
-                            warn!("Receiver lagged by {} messages", n);
-                            None
-                        },
-                    }
-                },
-            ))
+        if let Some(ref rx) = self.message_broadcast_rx {
+            message_stream(rx.resubscribe())
         } else {
+            // Not connected: nothing will ever be broadcast, so hand back a
+            // stream that is already finished rather than one that hangs.
             Box::pin(futures::stream::empty())
         }
     }
@@ -1104,7 +1164,7 @@ impl Transport for SubprocessTransport {
             Ok(())
         } else {
             Err(SdkError::InvalidState {
-                message: "Stdin channel not available".into(),
+                message: INPUT_CLOSED.into(),
             })
         }
     }
@@ -1118,6 +1178,15 @@ impl Transport for SubprocessTransport {
     }
 
     async fn send_sdk_control_request(&mut self, request: serde_json::Value) -> Result<()> {
+        // Gated on the same state as `send_message`: without this check, calling
+        // it before `connect` reported the internal "stdin channel" problem
+        // instead of plainly refusing a transport that is not connected.
+        if self.state != TransportState::Connected {
+            return Err(SdkError::InvalidState {
+                message: "Not connected".into(),
+            });
+        }
+
         // The request is already properly formatted as {"type": "control_request", ...}
         // Just send it directly without wrapping
         let json = serde_json::to_string(&request)?;
@@ -1127,12 +1196,19 @@ impl Transport for SubprocessTransport {
             Ok(())
         } else {
             Err(SdkError::InvalidState {
-                message: "Stdin channel not available".into(),
+                message: INPUT_CLOSED.into(),
             })
         }
     }
 
     async fn send_sdk_control_response(&mut self, response: serde_json::Value) -> Result<()> {
+        // Same state guard as `send_sdk_control_request`.
+        if self.state != TransportState::Connected {
+            return Err(SdkError::InvalidState {
+                message: "Not connected".into(),
+            });
+        }
+
         // Wrap the response in control_response format expected by CLI
         // The response should have: {"type": "control_response", "response": {...}}
         let control_response = serde_json::json!({
@@ -1147,7 +1223,7 @@ impl Transport for SubprocessTransport {
             Ok(())
         } else {
             Err(SdkError::InvalidState {
-                message: "Stdin channel not available".into(),
+                message: INPUT_CLOSED.into(),
             })
         }
     }
@@ -1156,8 +1232,20 @@ impl Transport for SubprocessTransport {
         self.child.as_ref().and_then(|c| c.id())
     }
 
+    /// Whether this transport still has a live CLI behind it.
+    ///
+    /// Not just the declared state: `connect()` only verifies that `spawn()`
+    /// worked, so a CLI that dies immediately (a bad `--settings`, a missing
+    /// entitlement, an outright crash) used to leave the transport reporting
+    /// `true` for ever, with an empty message stream. The stdout reader clears
+    /// `stdout_alive` on EOF, which is this answer's second half — and what
+    /// stops `ConnectionPool` from handing a dead child to the next caller.
     fn is_connected(&self) -> bool {
         self.state == TransportState::Connected
+            && self
+                .stdout_alive
+                .as_ref()
+                .is_none_or(|alive| alive.load(Ordering::SeqCst))
     }
 
     async fn disconnect(&mut self) -> Result<()> {
@@ -1285,6 +1373,14 @@ impl Transport for SubprocessTransport {
         self.stdin_tx.clone()
     }
 
+    /// Signal end of input by closing the child's stdin.
+    ///
+    /// The session stays readable: the CLI goes on printing until it exits, and
+    /// `receive_messages` keeps delivering. Known limitation: the state stays
+    /// `Connected`, so `is_connected()` still reports a two-way session.
+    /// Expressing "open for reading, closed for writing" needs a
+    /// `TransportState` variant; until then, every write path refuses with
+    /// the internal `INPUT_CLOSED` message, which at least names the cause.
     async fn end_input(&mut self) -> Result<()> {
         // Close stdin channel to signal end of input
         self.stdin_tx.take();
@@ -1453,7 +1549,10 @@ pub fn find_claude_cli() -> Result<PathBuf> {
 /// `--mcp-config` is a JSON document holding each MCP server's `env` and
 /// headers — in practice the orchestrator's database password, search key and
 /// session token.
-const SECRET_BEARING_ARGS: [&str; 1] = ["--mcp-config"];
+/// Flags whose following argument carries a secret and must never be logged.
+/// Exported so the gateway crate redacts the same set, instead of keeping its
+/// own list that would drift.
+pub const SECRET_BEARING_ARGS: [&str; 1] = ["--mcp-config"];
 
 /// A loggable description of the command about to be spawned.
 ///
@@ -1461,7 +1560,7 @@ const SECRET_BEARING_ARGS: [&str; 1] = ["--mcp-config"];
 /// directory, every argument, and the NAMES of the environment variables set —
 /// and replaces what can hold credentials: the value after a secret-bearing
 /// argument, and every environment value.
-pub(crate) fn describe_command_redacted(cmd: &std::process::Command) -> String {
+pub fn describe_command_redacted(cmd: &std::process::Command) -> String {
     let mut args: Vec<String> = Vec::new();
     let mut redact_next = false;
     for arg in cmd.get_args() {
@@ -1804,5 +1903,1005 @@ mod tests {
             "the argument after the value is kept"
         );
         assert!(described.contains("<redacted 2 bytes>"));
+    }
+
+    // =====================================================================
+    // `build_command` — the command line the SDK hands the CLI
+    //
+    // `build_command` only *describes* a launch, so these tests never spawn a
+    // process: they read back the argv and the environment the `Command` was
+    // configured with. `tests/transport_subprocess_runtime.rs` covers what
+    // happens once it really runs.
+    // =====================================================================
+
+    fn described(options: ClaudeCodeOptions) -> SubprocessTransport {
+        SubprocessTransport::with_cli_path(options, PathBuf::from("/nonexistent/claude"))
+    }
+
+    fn args_for(options: ClaudeCodeOptions) -> Vec<String> {
+        described(options)
+            .build_command()
+            .as_std()
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    fn envs_for(options: ClaudeCodeOptions) -> std::collections::HashMap<String, String> {
+        described(options)
+            .build_command()
+            .as_std()
+            .get_envs()
+            .filter_map(|(key, value)| {
+                value.map(|value| {
+                    (
+                        key.to_string_lossy().into_owned(),
+                        value.to_string_lossy().into_owned(),
+                    )
+                })
+            })
+            .collect()
+    }
+
+    fn value_after<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
+        let index = args.iter().position(|arg| arg == flag)?;
+        args.get(index + 1).map(String::as_str)
+    }
+
+    fn occurrences(args: &[String], flag: &str) -> usize {
+        args.iter().filter(|arg| arg.as_str() == flag).count()
+    }
+
+    /// Protocol flags the SDK must always pass, plus the two Python-parity
+    /// oddities: an empty `--system-prompt` when none is configured, and
+    /// `--setting-sources` with an empty value when no source is selected.
+    #[test]
+    fn build_command_always_sets_the_streaming_protocol() {
+        let args = args_for(ClaudeCodeOptions::default());
+
+        assert_eq!(value_after(&args, "--output-format"), Some("stream-json"));
+        assert_eq!(value_after(&args, "--input-format"), Some("stream-json"));
+        assert!(args.iter().any(|a| a == "--verbose"));
+        assert_eq!(value_after(&args, "--system-prompt"), Some(""));
+        assert_eq!(value_after(&args, "--setting-sources"), Some(""));
+        assert_eq!(value_after(&args, "--permission-mode"), Some("default"));
+
+        // Nothing optional is invented out of thin air.
+        for absent in [
+            "--include-partial-messages",
+            "--debug-to-stderr",
+            "--model",
+            "--allowedTools",
+            "--disallowedTools",
+            "--max-turns",
+            "--max-thinking-tokens",
+            "--mcp-config",
+            "--continue",
+            "--resume",
+            "--settings",
+            "--fork-session",
+            "--tools",
+            "--betas",
+            "--max-budget-usd",
+            "--fallback-model",
+            "--json-schema",
+            "--agents",
+            "--permission-prompt-tool",
+            "--add-dir",
+            "--plugin-dir",
+            "--append-system-prompt",
+        ] {
+            assert!(
+                !args.iter().any(|a| a == absent),
+                "default options must not pass {absent}, got {args:?}"
+            );
+        }
+
+        let envs = envs_for(ClaudeCodeOptions::default());
+        assert_eq!(
+            envs.get("CLAUDE_CODE_ENTRYPOINT").map(String::as_str),
+            Some("sdk-rust")
+        );
+        assert_eq!(
+            envs.get("CLAUDE_AGENT_SDK_VERSION").map(String::as_str),
+            Some(env!("CARGO_PKG_VERSION"))
+        );
+        assert!(!envs.contains_key("CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING"));
+    }
+
+    #[test]
+    fn build_command_renders_every_permission_mode() {
+        for (mode, expected) in [
+            (PermissionMode::Default, "default"),
+            (PermissionMode::AcceptEdits, "acceptEdits"),
+            (PermissionMode::Plan, "plan"),
+            (PermissionMode::BypassPermissions, "bypassPermissions"),
+        ] {
+            let args = args_for(ClaudeCodeOptions::builder().permission_mode(mode).build());
+            assert_eq!(
+                value_after(&args, "--permission-mode"),
+                Some(expected),
+                "{mode:?} must reach the CLI as {expected:?}"
+            );
+        }
+    }
+
+    /// `system_prompt_v2` replaces the deprecated pair outright: when it is set
+    /// the old fields are not consulted at all, and a `Preset` with nothing to
+    /// append passes **no** system-prompt flag — not even the empty one the
+    /// fallback would send.
+    #[test]
+    fn build_command_system_prompt_v2_supersedes_the_deprecated_fields() {
+        let mut options = ClaudeCodeOptions::builder()
+            .system_prompt("ignored")
+            .append_system_prompt("also ignored")
+            .build();
+        options.system_prompt_v2 = Some(crate::types::SystemPrompt::String("from v2".into()));
+        let args = args_for(options.clone());
+        assert_eq!(value_after(&args, "--system-prompt"), Some("from v2"));
+        assert_eq!(occurrences(&args, "--system-prompt"), 1);
+        assert_eq!(occurrences(&args, "--append-system-prompt"), 0);
+
+        options.system_prompt_v2 = Some(crate::types::SystemPrompt::Preset {
+            preset_type: "preset".into(),
+            preset: "claude_code".into(),
+            append: Some("extra rules".into()),
+        });
+        let args = args_for(options.clone());
+        assert_eq!(
+            value_after(&args, "--append-system-prompt"),
+            Some("extra rules")
+        );
+        assert_eq!(
+            occurrences(&args, "--system-prompt"),
+            0,
+            "a preset is never passed as a selector flag, got {args:?}"
+        );
+        assert!(
+            !args.iter().any(|a| a == "claude_code"),
+            "the preset name is deliberately dropped, got {args:?}"
+        );
+
+        options.system_prompt_v2 = Some(crate::types::SystemPrompt::Preset {
+            preset_type: "preset".into(),
+            preset: "claude_code".into(),
+            append: None,
+        });
+        let args = args_for(options);
+        assert_eq!(occurrences(&args, "--system-prompt"), 0);
+        assert_eq!(occurrences(&args, "--append-system-prompt"), 0);
+    }
+
+    #[test]
+    fn build_command_falls_back_to_the_deprecated_prompt_fields() {
+        let args = args_for(
+            ClaudeCodeOptions::builder()
+                .system_prompt("be terse")
+                .append_system_prompt("and polite")
+                .build(),
+        );
+        assert_eq!(value_after(&args, "--system-prompt"), Some("be terse"));
+        assert_eq!(
+            value_after(&args, "--append-system-prompt"),
+            Some("and polite")
+        );
+    }
+
+    #[test]
+    fn build_command_tool_lists_are_joined_with_commas() {
+        let args = args_for(
+            ClaudeCodeOptions::builder()
+                .allowed_tools(vec!["Bash(git:*)".into(), "Read".into()])
+                .disallowed_tools(vec!["WebFetch".into()])
+                .build(),
+        );
+        assert_eq!(
+            value_after(&args, "--allowedTools"),
+            Some("Bash(git:*),Read")
+        );
+        assert_eq!(value_after(&args, "--disallowedTools"), Some("WebFetch"));
+    }
+
+    /// The three `ToolsConfig` shapes, including the empty list — which has to
+    /// pass an explicit empty value, since dropping the flag would mean "keep
+    /// the defaults" rather than "no tools at all".
+    #[test]
+    fn build_command_renders_the_three_tools_configurations() {
+        let args = args_for(
+            ClaudeCodeOptions::builder()
+                .tools(crate::types::ToolsConfig::list(vec![
+                    "Read".into(),
+                    "Edit".into(),
+                ]))
+                .build(),
+        );
+        assert_eq!(value_after(&args, "--tools"), Some("Read,Edit"));
+
+        let args = args_for(
+            ClaudeCodeOptions::builder()
+                .tools(crate::types::ToolsConfig::none())
+                .build(),
+        );
+        assert_eq!(
+            value_after(&args, "--tools"),
+            Some(""),
+            "an empty list must be passed explicitly, got {args:?}"
+        );
+
+        let args = args_for(
+            ClaudeCodeOptions::builder()
+                .tools(crate::types::ToolsConfig::claude_code_preset())
+                .build(),
+        );
+        assert_eq!(
+            value_after(&args, "--tools"),
+            Some("default"),
+            "every preset collapses to `default`, got {args:?}"
+        );
+    }
+
+    #[test]
+    fn build_command_passes_the_optional_scalars_through() {
+        let args = args_for(
+            ClaudeCodeOptions::builder()
+                .model("fake-opus")
+                .fallback_model("fake-haiku")
+                .permission_prompt_tool_name("mcp__po__ask")
+                .max_turns(7)
+                .max_thinking_tokens(1234)
+                .max_budget_usd(2.5)
+                .resume("sess-abc")
+                .continue_conversation(true)
+                .fork_session(true)
+                .include_partial_messages(true)
+                .add_dir(PathBuf::from("/tmp/one"))
+                .add_dir(PathBuf::from("/tmp/two"))
+                .add_plugin(crate::types::SdkPluginConfig::Local {
+                    path: "/tmp/plug".into(),
+                })
+                .betas(vec![crate::types::SdkBeta::Context1M])
+                .build(),
+        );
+
+        assert_eq!(value_after(&args, "--model"), Some("fake-opus"));
+        assert_eq!(value_after(&args, "--fallback-model"), Some("fake-haiku"));
+        assert_eq!(
+            value_after(&args, "--permission-prompt-tool"),
+            Some("mcp__po__ask")
+        );
+        assert_eq!(value_after(&args, "--max-turns"), Some("7"));
+        assert_eq!(value_after(&args, "--max-thinking-tokens"), Some("1234"));
+        assert_eq!(value_after(&args, "--max-budget-usd"), Some("2.5"));
+        assert_eq!(value_after(&args, "--resume"), Some("sess-abc"));
+        assert_eq!(value_after(&args, "--betas"), Some("context-1m-2025-08-07"));
+        assert_eq!(value_after(&args, "--plugin-dir"), Some("/tmp/plug"));
+        assert!(args.iter().any(|a| a == "--continue"));
+        assert!(args.iter().any(|a| a == "--fork-session"));
+        assert!(args.iter().any(|a| a == "--include-partial-messages"));
+        assert_eq!(
+            occurrences(&args, "--add-dir"),
+            2,
+            "every additional directory gets its own flag, got {args:?}"
+        );
+    }
+
+    /// Zero is the documented "no extended-thinking budget" value and must not
+    /// be forwarded: `--max-thinking-tokens 0` is not the same thing to the CLI.
+    #[test]
+    fn build_command_omits_a_zero_thinking_budget() {
+        let args = args_for(ClaudeCodeOptions::builder().max_thinking_tokens(0).build());
+        assert_eq!(occurrences(&args, "--max-thinking-tokens"), 0);
+    }
+
+    #[test]
+    fn build_command_mcp_servers_become_a_single_json_flag() {
+        let mut servers = std::collections::HashMap::new();
+        servers.insert(
+            "po".to_string(),
+            crate::types::McpServerConfig::Http {
+                url: "http://localhost:7777/mcp".into(),
+                headers: None,
+            },
+        );
+        let args = args_for(ClaudeCodeOptions::builder().mcp_servers(servers).build());
+        let config = value_after(&args, "--mcp-config").expect("one --mcp-config flag");
+        let parsed: serde_json::Value = serde_json::from_str(config).expect("valid JSON");
+        assert_eq!(
+            parsed["mcpServers"]["po"]["url"],
+            "http://localhost:7777/mcp"
+        );
+        assert_eq!(occurrences(&args, "--mcp-config"), 1);
+    }
+
+    /// `--json-schema` is only emitted for a structured-output format that is
+    /// both `json_schema` *and* carries a schema. Anything else is dropped
+    /// silently — which this pins, because a typo in `type` then means no
+    /// structured output and no complaint.
+    #[test]
+    fn build_command_only_forwards_a_json_schema_output_format() {
+        let args = args_for(
+            ClaudeCodeOptions::builder()
+                .output_format(serde_json::json!({
+                    "type": "json_schema",
+                    "schema": {"type": "object"},
+                }))
+                .build(),
+        );
+        assert_eq!(
+            value_after(&args, "--json-schema"),
+            Some(r#"{"type":"object"}"#)
+        );
+
+        for ignored in [
+            serde_json::json!({"type": "text"}),
+            serde_json::json!({"type": "json_schema"}),
+            serde_json::json!({"schema": {"type": "object"}}),
+            serde_json::json!("json_schema"),
+        ] {
+            let args = args_for(
+                ClaudeCodeOptions::builder()
+                    .output_format(ignored.clone())
+                    .build(),
+            );
+            assert_eq!(
+                occurrences(&args, "--json-schema"),
+                0,
+                "{ignored} must be ignored, got {args:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn build_command_skips_an_empty_agent_map() {
+        let args = args_for(
+            ClaudeCodeOptions::builder()
+                .agents(std::collections::HashMap::new())
+                .build(),
+        );
+        assert_eq!(occurrences(&args, "--agents"), 0);
+
+        let mut agents = std::collections::HashMap::new();
+        agents.insert(
+            "reviewer".to_string(),
+            crate::types::AgentDefinition {
+                description: "reviews".into(),
+                prompt: "review this".into(),
+                tools: Some(vec!["Read".into()]),
+                model: None,
+            },
+        );
+        let args = args_for(ClaudeCodeOptions::builder().agents(agents).build());
+        let json = value_after(&args, "--agents").expect("--agents");
+        let parsed: serde_json::Value = serde_json::from_str(json).expect("valid JSON");
+        assert_eq!(parsed["reviewer"]["description"], "reviews");
+    }
+
+    #[test]
+    fn build_command_setting_sources_always_carry_a_value() {
+        use crate::types::SettingSource;
+
+        let args = args_for(
+            ClaudeCodeOptions::builder()
+                .setting_sources(vec![
+                    SettingSource::User,
+                    SettingSource::Project,
+                    SettingSource::Local,
+                ])
+                .build(),
+        );
+        assert_eq!(
+            value_after(&args, "--setting-sources"),
+            Some("user,project,local")
+        );
+
+        let args = args_for(ClaudeCodeOptions::builder().setting_sources(vec![]).build());
+        assert_eq!(
+            value_after(&args, "--setting-sources"),
+            Some(""),
+            "an explicitly empty selection is still passed, got {args:?}"
+        );
+    }
+
+    /// `extra_args` is the escape hatch for flags the SDK does not model. A key
+    /// already carrying a dash is passed verbatim; anything else is prefixed.
+    #[test]
+    fn build_command_extra_args_are_prefixed_only_when_needed() {
+        for (key, expected) in [
+            ("session-note", "--session-note"),
+            ("--already-long", "--already-long"),
+            ("-s", "-s"),
+        ] {
+            let args = args_for(
+                ClaudeCodeOptions::builder()
+                    .add_extra_arg(key, Some("value".into()))
+                    .build(),
+            );
+            assert_eq!(
+                value_after(&args, expected),
+                Some("value"),
+                "{key:?} must become {expected:?}, got {args:?}"
+            );
+        }
+
+        // A valueless key adds the flag and nothing after it.
+        let args = args_for(
+            ClaudeCodeOptions::builder()
+                .add_extra_arg("dangerously-skip-permissions", None)
+                .build(),
+        );
+        assert_eq!(
+            args.last().map(String::as_str),
+            Some("--dangerously-skip-permissions"),
+            "a bare flag is the last argument, with no value after it: {args:?}"
+        );
+    }
+
+    #[test]
+    fn build_command_cwd_is_applied_to_the_process_not_the_command_line() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let transport = described(ClaudeCodeOptions::builder().cwd(dir.path()).build());
+        let cmd = transport.build_command();
+        assert_eq!(cmd.as_std().get_current_dir(), Some(dir.path()));
+
+        let cwd_text = dir.path().display().to_string();
+        let args: Vec<String> = cmd
+            .as_std()
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            !args.contains(&cwd_text),
+            "cwd must not also leak onto the command line: {args:?}"
+        );
+    }
+
+    #[test]
+    fn build_command_env_entries_and_checkpointing_reach_the_child() {
+        let envs = envs_for(
+            ClaudeCodeOptions::builder()
+                .env("PO_PROJECT", "nexus")
+                .enable_file_checkpointing(true)
+                .build(),
+        );
+        assert_eq!(envs.get("PO_PROJECT").map(String::as_str), Some("nexus"));
+        assert_eq!(
+            envs.get("CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING")
+                .map(String::as_str),
+            Some("true")
+        );
+    }
+
+    #[test]
+    fn build_command_debug_stderr_switches_the_cli_flag_on() {
+        let options = ClaudeCodeOptions {
+            debug_stderr: Some(std::sync::Arc::new(tokio::sync::Mutex::new(
+                Vec::<u8>::new(),
+            ))),
+            ..ClaudeCodeOptions::default()
+        };
+        let args = args_for(options);
+        assert!(args.iter().any(|a| a == "--debug-to-stderr"));
+    }
+
+    /// `max_output_tokens` travels through the environment, not the command
+    /// line, and is clamped into the range the CLI accepts — including upwards:
+    /// `Some(0)` is not a way to ask for no output at all.
+    #[test]
+    fn build_command_clamps_max_output_tokens_into_the_safe_range() {
+        for (asked, expected) in [(999_999u32, "32000"), (0, "1"), (5_000, "5000")] {
+            let options = ClaudeCodeOptions::builder()
+                .max_output_tokens(asked)
+                .build();
+            let args = args_for(options.clone());
+            assert_eq!(
+                occurrences(&args, "--max-output-tokens"),
+                0,
+                "the limit is an environment variable, not a flag"
+            );
+            assert_eq!(
+                envs_for(options)
+                    .get("CLAUDE_CODE_MAX_OUTPUT_TOKENS")
+                    .map(String::as_str),
+                Some(expected),
+                "{asked} must be clamped to {expected}"
+            );
+        }
+    }
+
+    /// Restores an environment variable to the value it had, whatever the test
+    /// did to it — including when the test panics.
+    struct EnvVarGuard {
+        name: &'static str,
+        previous: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        fn new(name: &'static str) -> Self {
+            Self {
+                name,
+                previous: std::env::var(name).ok(),
+            }
+        }
+
+        fn set(&self, value: &str) {
+            // SAFETY: the only test that holds this guard is `#[serial]`, and
+            // the variable it touches is read by `build_command` alone.
+            unsafe { std::env::set_var(self.name, value) };
+        }
+
+        fn unset(&self) {
+            // SAFETY: as in `set`.
+            unsafe { std::env::remove_var(self.name) };
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match self.previous.take() {
+                // SAFETY: as in `set`.
+                Some(value) => unsafe { std::env::set_var(self.name, value) },
+                None => unsafe { std::env::remove_var(self.name) },
+            }
+        }
+    }
+
+    /// Without `max_output_tokens`, an ambient `CLAUDE_CODE_MAX_OUTPUT_TOKENS`
+    /// is policed rather than trusted: too large is capped, unparseable falls
+    /// back to a safe default, and a sane value is left alone — the command then
+    /// overrides nothing and the child simply inherits it.
+    #[test]
+    #[serial_test::serial]
+    fn build_command_polices_an_ambient_output_token_limit() {
+        let guard = EnvVarGuard::new("CLAUDE_CODE_MAX_OUTPUT_TOKENS");
+
+        guard.set("99999");
+        assert_eq!(
+            envs_for(ClaudeCodeOptions::default())
+                .get("CLAUDE_CODE_MAX_OUTPUT_TOKENS")
+                .map(String::as_str),
+            Some("32000"),
+            "an oversized ambient limit is capped"
+        );
+
+        guard.set("not-a-number");
+        assert_eq!(
+            envs_for(ClaudeCodeOptions::default())
+                .get("CLAUDE_CODE_MAX_OUTPUT_TOKENS")
+                .map(String::as_str),
+            Some("8192"),
+            "an unparseable ambient limit falls back to a safe default"
+        );
+
+        guard.set("16000");
+        assert!(
+            !envs_for(ClaudeCodeOptions::default()).contains_key("CLAUDE_CODE_MAX_OUTPUT_TOKENS"),
+            "a sane ambient limit is left alone: the command overrides nothing"
+        );
+
+        guard.unset();
+        assert!(
+            !envs_for(ClaudeCodeOptions::default()).contains_key("CLAUDE_CODE_MAX_OUTPUT_TOKENS")
+        );
+    }
+
+    // The redaction of `build_command`'s own `debug!` line is asserted in
+    // `tests/transport_subprocess_runtime.rs`
+    // (`no_log_line_of_a_spawn_carries_an_mcp_credential`), not here: capturing a
+    // log line needs a *global* subscriber. A thread-local one
+    // (`tracing::subscriber::with_default`) cannot do it reliably, because any
+    // other test thread that reaches the same callsite first registers it against
+    // the absent global subscriber and caches its interest as "never" for the
+    // whole process — making such a test pass or fail on execution order.
+
+    // =====================================================================
+    // `build_settings_value` — merging `--settings` with the sandbox config
+    // =====================================================================
+
+    fn settings_value(options: ClaudeCodeOptions) -> Option<String> {
+        described(options).build_settings_value()
+    }
+
+    fn sandbox_enabled() -> crate::types::SandboxSettings {
+        crate::types::SandboxSettings {
+            enabled: Some(true),
+            auto_allow_bash_if_sandboxed: None,
+            excluded_commands: None,
+            allow_unsandboxed_commands: None,
+            network: None,
+            ignore_violations: None,
+            enable_weaker_nested_sandbox: None,
+        }
+    }
+
+    /// No settings and no sandbox means no `--settings` flag at all; a settings
+    /// value with no sandbox is passed through untouched, whatever it is — the
+    /// CLI, not the SDK, decides whether that path exists.
+    #[test]
+    fn build_settings_value_passes_a_lone_settings_value_through() {
+        assert_eq!(settings_value(ClaudeCodeOptions::default()), None);
+
+        assert_eq!(
+            settings_value(
+                ClaudeCodeOptions::builder()
+                    .settings("/etc/claude/settings.json")
+                    .build()
+            )
+            .as_deref(),
+            Some("/etc/claude/settings.json")
+        );
+        assert_eq!(
+            settings_value(ClaudeCodeOptions::builder().settings(r#"{"a":1}"#).build()).as_deref(),
+            Some(r#"{"a":1}"#),
+            "with no sandbox there is nothing to merge, so nothing is reparsed"
+        );
+    }
+
+    #[test]
+    fn build_settings_value_merges_the_sandbox_into_inline_json() {
+        let merged = settings_value(
+            ClaudeCodeOptions::builder()
+                .settings(r#"{"model":"fake","sandbox":{"enabled":false}}"#)
+                .sandbox(sandbox_enabled())
+                .build(),
+        )
+        .expect("a sandbox always produces a settings document");
+        let parsed: serde_json::Value = serde_json::from_str(&merged).expect("valid JSON");
+        assert_eq!(parsed["model"], "fake");
+        assert_eq!(
+            parsed["sandbox"]["enabled"],
+            serde_json::json!(true),
+            "options.sandbox wins over a `sandbox` key already in the settings: {merged}"
+        );
+    }
+
+    #[test]
+    fn build_settings_value_merges_the_sandbox_into_a_settings_file() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("settings.json");
+        std::fs::write(&path, r#"{"model":"from-file"}"#).expect("write settings");
+
+        let merged = settings_value(
+            ClaudeCodeOptions::builder()
+                .settings(path.display().to_string())
+                .sandbox(sandbox_enabled())
+                .build(),
+        )
+        .expect("settings value");
+        let parsed: serde_json::Value = serde_json::from_str(&merged).expect("valid JSON");
+        assert_eq!(parsed["model"], "from-file");
+        assert_eq!(parsed["sandbox"]["enabled"], serde_json::json!(true));
+    }
+
+    /// Whatever `build_settings_value` produced is what `--settings` carries;
+    /// when it produced nothing, the flag is absent altogether.
+    #[test]
+    fn build_command_passes_the_settings_document_it_built() {
+        let args = args_for(
+            ClaudeCodeOptions::builder()
+                .settings("/etc/claude/settings.json")
+                .build(),
+        );
+        assert_eq!(
+            value_after(&args, "--settings"),
+            Some("/etc/claude/settings.json")
+        );
+
+        let args = args_for(
+            ClaudeCodeOptions::builder()
+                .sandbox(sandbox_enabled())
+                .build(),
+        );
+        let document = value_after(&args, "--settings").expect("a sandbox produces a document");
+        let parsed: serde_json::Value = serde_json::from_str(document).expect("valid JSON");
+        assert_eq!(parsed["sandbox"]["enabled"], serde_json::json!(true));
+    }
+
+    /// Text that *looks* like JSON but does not parse is retried as a file path,
+    /// and a relative path really can look like that — so the retry is not dead
+    /// code. It takes the current directory to show, hence `#[serial]`.
+    #[test]
+    #[serial_test::serial]
+    fn build_settings_value_retries_json_looking_text_as_a_file_path() {
+        /// Restores the working directory even if the test panics.
+        struct CwdGuard(PathBuf);
+
+        impl Drop for CwdGuard {
+            fn drop(&mut self) {
+                let _ = std::env::set_current_dir(&self.0);
+            }
+        }
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        std::fs::write(dir.path().join("{settings}"), r#"{"model":"from-braces"}"#)
+            .expect("write a file whose name looks like JSON");
+
+        let _guard = CwdGuard(std::env::current_dir().expect("cwd"));
+        std::env::set_current_dir(dir.path()).expect("enter the temp dir");
+
+        let merged = settings_value(
+            ClaudeCodeOptions::builder()
+                .settings("{settings}")
+                .sandbox(sandbox_enabled())
+                .build(),
+        )
+        .expect("settings value");
+
+        let parsed: serde_json::Value = serde_json::from_str(&merged).expect("valid JSON");
+        assert_eq!(
+            parsed["model"], "from-braces",
+            "the file won after the JSON parse failed: {merged}"
+        );
+        assert_eq!(parsed["sandbox"]["enabled"], serde_json::json!(true));
+    }
+
+    /// A sandbox with no settings at all still produces a document, so the CLI
+    /// gets the sandbox configuration and nothing else.
+    #[test]
+    fn build_settings_value_from_the_sandbox_alone() {
+        let merged = settings_value(
+            ClaudeCodeOptions::builder()
+                .sandbox(sandbox_enabled())
+                .build(),
+        )
+        .expect("settings value");
+        let parsed: serde_json::Value = serde_json::from_str(&merged).expect("valid JSON");
+        assert_eq!(parsed.as_object().map(|o| o.len()), Some(1));
+        assert_eq!(parsed["sandbox"]["enabled"], serde_json::json!(true));
+    }
+
+    /// Every way the settings side can fail ends the same way: a warning in the
+    /// log, and a document carrying only the sandbox. None of them is an error
+    /// the caller can see — which is the finding, not the design.
+    #[test]
+    fn build_settings_value_swallows_every_settings_failure() {
+        let dir = tempfile::tempdir().expect("temp dir");
+
+        let not_an_object = dir.path().join("list.json");
+        std::fs::write(&not_an_object, "[1,2,3]").expect("write");
+        let broken = dir.path().join("broken.json");
+        std::fs::write(&broken, "{not json").expect("write");
+        let missing = dir.path().join("nope.json");
+
+        for (label, settings) in [
+            (
+                "a file holding a JSON array",
+                not_an_object.display().to_string(),
+            ),
+            ("a file holding invalid JSON", broken.display().to_string()),
+            ("a path that does not exist", missing.display().to_string()),
+            (
+                "JSON-looking text that does not parse",
+                "{not json}".to_string(),
+            ),
+        ] {
+            let merged = settings_value(
+                ClaudeCodeOptions::builder()
+                    .settings(settings)
+                    .sandbox(sandbox_enabled())
+                    .build(),
+            )
+            .expect("the sandbox still produces a document");
+            let parsed: serde_json::Value = serde_json::from_str(&merged).expect("valid JSON");
+            assert_eq!(
+                parsed.as_object().map(|o| o.len()),
+                Some(1),
+                "{label} must be dropped, leaving only the sandbox: {merged}"
+            );
+            assert_eq!(parsed["sandbox"]["enabled"], serde_json::json!(true));
+        }
+    }
+
+    // =====================================================================
+    // Construction
+    // =====================================================================
+
+    /// An explicit `cli_path` short-circuits the search entirely: no PATH
+    /// lookup, no filesystem probing, nothing that depends on the host.
+    #[tokio::test]
+    async fn an_explicit_cli_path_is_used_without_searching() {
+        let path = PathBuf::from("/nonexistent/double/claude");
+        let options = ClaudeCodeOptions::builder().cli_path(&path).build();
+
+        let transport = SubprocessTransport::new(options.clone()).expect("no search needed");
+        assert_eq!(transport.cli_path, path);
+        assert_eq!(transport.state, TransportState::Disconnected);
+        assert!(transport.child.is_none());
+        assert!(!transport.close_stdin_after_prompt);
+
+        let transport = SubprocessTransport::new_async(options)
+            .await
+            .expect("no search needed, and no download attempted");
+        assert_eq!(transport.cli_path, path);
+        assert_eq!(transport.state, TransportState::Disconnected);
+    }
+
+    /// Regression: `for_print_mode` called `find_claude_cli()` unconditionally,
+    /// so `options.cli_path` was ignored — no way to point a one-shot query at a
+    /// test double, and a hard failure on any host without a CLI in one of the
+    /// usual places.
+    #[test]
+    fn for_print_mode_honours_an_explicit_cli_path() {
+        let path = PathBuf::from("/nonexistent/double/claude");
+        let options = ClaudeCodeOptions::builder().cli_path(&path).build();
+        let transport =
+            SubprocessTransport::for_print_mode(options, "the prompt".into()).expect("no search");
+        assert_eq!(
+            transport.cli_path, path,
+            "for_print_mode must honour options.cli_path like new() does"
+        );
+        assert!(
+            transport.close_stdin_after_prompt,
+            "print mode is the one constructor that sets this flag"
+        );
+    }
+
+    #[test]
+    fn set_close_stdin_after_prompt_toggles_the_flag() {
+        let mut transport = described(ClaudeCodeOptions::default());
+        assert!(!transport.close_stdin_after_prompt);
+        transport.set_close_stdin_after_prompt(true);
+        assert!(transport.close_stdin_after_prompt);
+        transport.set_close_stdin_after_prompt(false);
+        assert!(!transport.close_stdin_after_prompt);
+    }
+
+    // =====================================================================
+    // `SemVer::parse` — the edges the version probe has to survive
+    // =====================================================================
+
+    /// Anything that is not two parseable numeric components is `None`, never a
+    /// silent `0.0.0`: that would look like a catastrophically old CLI and emit
+    /// a misleading upgrade warning.
+    #[test]
+    fn semver_parse_refuses_what_it_cannot_read() {
+        for rejected in [
+            "", "2", "v2", "nightly", "x.y.z", "2.x", "latest.1", "-1.2.3",
+        ] {
+            assert!(
+                SemVer::parse(rejected).is_none(),
+                "{rejected:?} must not parse"
+            );
+        }
+        // A trailing component is tolerated; nothing missing is invented.
+        assert_eq!(SemVer::parse("2.1").unwrap(), SemVer::new(2, 1, 0));
+        assert_eq!(SemVer::parse("2.1.3.4").unwrap(), SemVer::new(2, 1, 3));
+        assert_eq!(
+            SemVer::parse("@anthropic-ai/claude-code/2.1.280").unwrap(),
+            SemVer::new(2, 1, 280)
+        );
+        assert_eq!(
+            SemVer::parse("  v2.1.280 (Claude Code)  ").unwrap(),
+            SemVer::new(2, 1, 280),
+            "leading whitespace and the trailing product name are both tolerated"
+        );
+    }
+
+    // =====================================================================
+    // `apply_process_user` — resolving `options.user` before the spawn
+    // =====================================================================
+
+    #[test]
+    fn apply_process_user_refuses_a_blank_name() {
+        let mut cmd = Command::new("/nonexistent/claude");
+        for blank in ["", "   ", "\t\n"] {
+            match apply_process_user(&mut cmd, blank) {
+                Err(SdkError::ConfigError(message)) => {
+                    assert!(message.contains("non-empty"), "{blank:?} gave {message:?}")
+                },
+                other => panic!("{blank:?} must be a ConfigError, got {other:?}"),
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn apply_process_user_refuses_a_nul_bearing_name() {
+        let mut cmd = Command::new("/nonexistent/claude");
+        match apply_process_user(&mut cmd, "ro\0ot") {
+            Err(SdkError::ConfigError(message)) => {
+                assert!(message.contains("NUL"), "got {message:?}")
+            },
+            other => panic!("a NUL byte must be a ConfigError, got {other:?}"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn apply_process_user_resolves_a_name_and_a_uid() {
+        let mut cmd = Command::new("/nonexistent/claude");
+        // `root`/uid 0 is the one account every Unix has. Nothing is spawned, so
+        // no privilege is needed: only the lookup runs.
+        apply_process_user(&mut cmd, "root").expect("root must resolve by name");
+        apply_process_user(&mut cmd, "0").expect("uid 0 must resolve numerically");
+    }
+
+    /// A uid no account on this host owns.
+    ///
+    /// Not a hard-coded large number: macOS maps `4294967294` (uid -2) to
+    /// `nobody`, so "obviously too big" is not the same thing as "unused".
+    #[cfg(unix)]
+    fn an_unused_uid() -> u32 {
+        (900_000u32..900_100)
+            .chain(31_415_926..31_416_026)
+            // SAFETY: getpwuid only reads the passwd database; the pointer is
+            // tested for null and never dereferenced.
+            .find(|uid| unsafe { libc::getpwuid(*uid as libc::uid_t) }.is_null())
+            .expect("some uid in those two ranges is unused")
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn apply_process_user_reports_an_unknown_name_and_an_unknown_uid() {
+        let mut cmd = Command::new("/nonexistent/claude");
+
+        match apply_process_user(&mut cmd, "no-such-user-on-this-host") {
+            Err(SdkError::ConfigError(message)) => assert!(
+                message.contains("no-such-user-on-this-host"),
+                "the refusal must name what it looked for, got {message:?}"
+            ),
+            other => panic!("expected ConfigError, got {other:?}"),
+        }
+
+        let unused = an_unused_uid();
+        match apply_process_user(&mut cmd, &unused.to_string()) {
+            Err(SdkError::ConfigError(message)) => assert!(
+                message.contains(&unused.to_string()),
+                "the refusal must name the uid, got {message:?}"
+            ),
+            other => panic!("expected ConfigError for uid {unused}, got {other:?}"),
+        }
+    }
+
+    #[cfg(not(unix))]
+    #[test]
+    fn apply_process_user_is_unsupported_off_unix() {
+        let mut cmd = Command::new("/nonexistent/claude");
+        match apply_process_user(&mut cmd, "someone") {
+            Err(SdkError::NotSupported { feature }) => assert!(feature.contains("Unix")),
+            other => panic!("expected NotSupported, got {other:?}"),
+        }
+    }
+
+    // =====================================================================
+    // `describe_command_redacted` — edges the tests above do not cover
+    // =====================================================================
+
+    /// A secret-bearing flag passed as the very last argument has no value to
+    /// redact; the function must not look past the end of the list.
+    #[test]
+    fn a_trailing_secret_bearing_flag_is_not_a_panic() {
+        let mut cmd = std::process::Command::new("claude");
+        cmd.arg("--mcp-config");
+        let described = describe_command_redacted(&cmd);
+        assert!(described.contains("--mcp-config"));
+        assert!(!described.contains("<redacted"));
+        assert!(
+            described.contains("cwd=<inherited>"),
+            "an unset working directory is reported as inherited, got {described}"
+        );
+    }
+
+    /// Several MCP configurations on one command line: each value is redacted,
+    /// and the byte count reported is that value's own length.
+    #[test]
+    fn each_secret_bearing_value_is_redacted_in_turn() {
+        let mut cmd = std::process::Command::new("claude");
+        cmd.arg("--mcp-config")
+            .arg(r#"{"a":1}"#)
+            .arg("--mcp-config")
+            .arg(r#"{"token":"abc"}"#)
+            .arg("--verbose");
+        let described = describe_command_redacted(&cmd);
+        assert!(
+            !described.contains("abc") && !described.contains(r#"{"a":1}"#),
+            "no MCP document may survive: {described}"
+        );
+        assert_eq!(described.matches("<redacted").count(), 2);
+        assert!(described.contains("<redacted 7 bytes>"));
+        assert!(described.contains("<redacted 15 bytes>"));
+        assert!(
+            described.contains("--verbose"),
+            "the argument after a redacted value is kept: {described}"
+        );
     }
 }

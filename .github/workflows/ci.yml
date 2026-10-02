@@ -41,6 +41,14 @@ jobs:
     name: Test (${{ matrix.os }} / ${{ matrix.toolchain }})
     runs-on: ${{ matrix.os }}
     needs: fmt
+    # A healthy job takes ~3 min on Unix and 3.5-4.5 min on Windows (measured on
+    # PR #43 and #44), build and doc tests included. 30 minutes is roughly six
+    # times the worst of that, so a cold dependency cache or a slow runner will
+    # never trip it, while a hung test is cut off after 30 minutes instead of
+    # holding a runner for GitHub's 6-hour default. PR #45 did exactly that:
+    # two `start_paused` tests deadlocked on Windows and the job sat silent for
+    # 49 minutes before being cancelled by hand.
+    timeout-minutes: 30
     # Nightly is advisory only: rustc nightly is prone to ICEs (internal compiler
     # errors) unrelated to our code — don't let a toolchain regression block CI.
     continue-on-error: ${{ matrix.toolchain == 'nightly' }}

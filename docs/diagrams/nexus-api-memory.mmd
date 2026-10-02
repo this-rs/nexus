@@ -1,0 +1,188 @@
+%% name: nexus-api-memory
+%% covers: claude-code-api/src/core/memory/*.rs
+%% verified: 2026-10-01
+flowchart TD
+    subgraph legend["Légende"]
+        direction LR
+        L1["✅ écrit et vérifié par un test"]
+        L2["🟠 décidé, non écrit"]
+        L3["🔴 bug, ou code écrit non branché"]
+        L4["⚪ hors dépôt"]
+    end
+
+    root["🔴 personne n'appelle cette mémoire<br/>un grep de UnifiedMemoryProvider, LongTermMemory,<br/>MediumTermMemory, ShortTermMemory et ContextualMemoryProvider<br/>dans claude-code-api/src ne sort que core/memory/ :<br/>ni build_router, ni build_components, ni un handler n'en construit un.<br/>Tout le sous-arbre est donc du code écrit non branché ;<br/>les ✅ ci-dessous sont vérifiés par des tests, les 🔴 par rien.<br/><i>vérifié : grep sur src, les tests sont les seuls appelants</i>"]
+    caller["⚪ project-orchestrator REST et Meilisearch<br/>les deux services amont, jamais joints par un test"]
+
+    subgraph traits_box["traits.rs — le contrat et le barème"]
+        direction TB
+        t_level["✅ MemorySource::level()<br/>Conversation 1, ProjectOrchestrator 2,<br/>CrossConversation et KnowledgeNote 3<br/><i>vérifié : traits::tests::test_memory_source_level</i>"]
+        t_new["✅ RelevanceScore::new()<br/>combined = 0,5 semantic + 0,3 recency + 0,2 scope<br/><i>vérifié : traits::tests::test_relevance_score</i>"]
+        t_weights["🔴 RelevanceScore::with_weights()<br/>poids explicites, aucun appelant dans le dépôt"]
+        t_contract["✅ ContextualMemoryProvider<br/>query, search_context, get_relevant_decisions,<br/>current_scope, set_scope<br/>limit y est documenté comme un maximum<br/><i>vérifié : les trois implémentations sont exercées</i>"]
+    end
+
+    subgraph unified_box["unified.rs — UnifiedMemoryProvider"]
+        direction TB
+        u_query["✅ UnifiedMemoryProvider::query()<br/>per_level_limit = limit.max(5)<br/>interroge les trois étages en séquence, pas en parallèle,<br/>et propage la première erreur avec l'opérateur point d'interrogation<br/><i>vérifié : unified::tests::test_unified_memory_query, étages factices</i>"]
+        u_weight["✅ apply_weight()<br/>multiplie combined selon source.level() :<br/>niveau 1 par 1,2, niveau 2 par 1,0, niveau 3 par 0,8<br/><i>vérifié : même test</i>"]
+        u_thresh{"✅ retain : combined au moins min_score_threshold, défaut 0,1<br/><i>vérifié : les deux résultats du test passent le seuil</i>"}
+        u_drop["🔴 résultat écarté, sans journal ni compteur<br/>aucun test n'amène un résultat sous le seuil"]
+        u_dedup["✅ deduplicate()<br/>clé = 20 premiers mots alphanumériques en minuscules<br/>le premier arrivé gagne, donc le mieux noté<br/><i>vérifié : unified::tests::test_unified_memory_deduplication</i>"]
+        u_take["🔴 take(limit) après tri décroissant<br/>exécuté par les tests, mais aucune troncature n'est affirmée"]
+        u_ctx{"🔴 search_context() — match source_filter<br/>aucun test n'emprunte ce routage"}
+        u_short["🔴 vers short_term.search_context"]
+        u_medium["🔴 vers medium_term.search_context"]
+        u_long["🔴 vers long_term.search_context"]
+        u_dec["🔴 get_relevant_decisions()<br/>étage médian, plus une requête decision topic au long terme<br/>avec limit/2, sans seuil de score<br/>aucun test ne l'exécute"]
+        u_scope["🔴 set_scope()<br/>mémorise la portée et ne la propage à aucun étage<br/>le commentaire du code assume le trou :<br/>impossible sans référence mutable sur les objets de trait"]
+
+        u_query --> u_weight
+        u_weight --> u_thresh
+        u_thresh -->|"sous le seuil"| u_drop
+        u_thresh -->|"au-dessus"| u_dedup
+        u_dedup --> u_take
+        u_ctx -->|"Some conversation"| u_short
+        u_ctx -->|"Some plan, task, decision ou note"| u_medium
+        u_ctx -->|"Some cross_conversation"| u_long
+        u_ctx -->|"None ou filtre inconnu"| u_query
+    end
+
+    subgraph short_box["short_term.rs — ShortTermMemory, la conversation courante"]
+        direction TB
+        s_query["✅ ShortTermMemory::query()<br/><i>vérifié : short_term::tests, magasin en mémoire</i>"]
+        s_noconv{"✅ conversation_id posé ?<br/><i>vérifié : les deux branches ont un test</i>"}
+        s_empty["✅ Ok liste vide, sans erreur<br/><i>vérifié : test_short_term_no_conversation</i>"]
+        s_get{"✅ store.get(conv_id) — la seule source d'erreur du fichier<br/>aucun test ne demande une conversation inconnue ni ne fait échouer le magasin"}
+        s_content{"✅ msg.content"}
+        s_text["✅ Text : repris tel quel<br/><i>vérifié : test_short_term_query</i>"]
+        s_array["🔴 Array : concatène les ContentPart::Text avec un espace<br/>et ignore toute autre variante, image comprise<br/>aucun test ne passe un contenu en tableau"]
+        s_none["🔴 message sans contenu : sauté par filter_map<br/>aucun test ne passe un message sans contenu"]
+        s_rel{"✅ semantic sous 0,1 ?"}
+        s_dropped["🔴 message écarté : l'étage court terme est le seul<br/>à filtrer sur la pertinence<br/>les deux messages du test passent le filtre : la branche reste nue"]
+        s_score["✅ keyword_match_score() et recency_score()<br/>mots trouvés sur mots demandés, et rang du message<br/>sur le nombre de messages ; scope figé à 1,0<br/>recency_score renvoie 0,0 si le total est nul"]
+        s_ctx["🔴 search_context()<br/>tout filtre autre que conversation renvoie une liste vide<br/>sans interroger le magasin ; aucun test ne l'appelle"]
+        s_dec["🔴 get_relevant_decisions() renvoie une liste vide en dur<br/>le commentaire renvoie vers l'étage médian"]
+
+        s_query --> s_noconv
+        s_noconv -->|"non"| s_empty
+        s_noconv -->|"oui"| s_get
+        s_get -->|"None, conversation inconnue"| s_empty
+        s_get -->|"Some"| s_content
+        s_content -->|"Text"| s_text
+        s_content -->|"Array"| s_array
+        s_content -->|"None"| s_none
+        s_text --> s_rel
+        s_array --> s_rel
+        s_rel -->|"oui"| s_dropped
+        s_rel -->|"non"| s_score
+    end
+
+    subgraph medium_box["medium_term.rs — MediumTermMemory, project-orchestrator"]
+        direction TB
+        m_cfg["✅ McpConfig::default()<br/>PROJECT_ORCHESTRATOR_URL sinon http://localhost:8080,<br/>PROJECT_ORCHESTRATOR_KEY en option<br/><i>vérifié : test_config_default, seule la branche de repli localhost</i>"]
+        m_query["✅ MediumTermMemory::query()<br/>per_type_limit = (limit / 4).max(2), donc limit 1 demande 2<br/>fan-out séquentiel sur les quatre étages,<br/>puis tri décroissant et truncate(limit) : limit 0 jette tout<br/><i>vérifié : orchestrateur wiremock, limites relues sur le fil</i>"]
+        m_plans["✅ search_plans()<br/>GET /plans, paramètres search, limit, project_id<br/>seule requête des quatre à porter Authorization Bearer<br/><i>vérifié : en-têtes et paramètres relus sur wiremock</i>"]
+        m_tasks["✅ search_tasks()<br/>GET /tasks, paramètres search et limit<br/>ni clé d'API ni project_id<br/><i>vérifié : wiremock</i>"]
+        m_decs["✅ search_decisions()<br/>GET /decisions/search, paramètres query et limit<br/>ni clé d'API ni project_id<br/><i>vérifié : wiremock</i>"]
+        m_notes["✅ search_notes()<br/>GET /notes/search, paramètres query, limit, project_id<br/>pas de clé d'API<br/><i>vérifié : wiremock</i>"]
+        m_send{"✅ request.send()<br/><i>vérifié : les deux branches ont un test</i>"}
+        m_transport["✅ Err : warn puis Ok liste vide<br/>indistinguable d'un amont vide<br/><i>vérifié : URL sans schéma, aucune socket ouverte</i>"]
+        m_status{"✅ response.status().is_success() ?<br/><i>vérifié : 200 et 500 sur wiremock</i>"}
+        m_silent["✅ Ok liste vide, sans journal<br/>un 401 ou un 500 ressemble à un amont vide<br/><i>vérifié : orchestrateur wiremock en 500</i>"]
+        m_json{"✅ response.json() suivi de l'opérateur point d'interrogation<br/><i>vérifié : corps JSON, puis corps HTML</i>"}
+        m_decode["🔴 un corps 200 inanalysable remonte en Err<br/>seule panne amont qui ne dégrade pas : elle casse tout query(),<br/>donc tout UnifiedMemoryProvider, et le fan-out s'arrête<br/>avant les tâches, les décisions et les notes<br/><i>vérifié : 200 text/html sur /plans, attente en test ignoré</i>"]
+        m_env{"✅ data.get(plans, tasks, decisions ou notes) est un tableau ?<br/><i>vérifié : enveloppe correcte, tableau nu, clé items</i>"}
+        m_wrong["✅ non : Ok liste vide<br/>un tableau nu ou une mauvaise clé d'enveloppe<br/>passe pour une absence de résultat<br/><i>vérifié : corps en tableau nu, puis corps sous la clé items</i>"]
+        m_map["✅ filter_map(from_value ok)<br/>un élément incomplet est jeté, ses voisins passent,<br/>et la perte n'est signalée nulle part<br/><i>vérifié : un plan sans title disparaît</i>"]
+        m_score["✅ calculate_score()<br/>semantic = mots trouvés sur mots demandés, 0,0 si requête vide<br/>recency figée à 0,5, jamais calculée<br/>scope : decision 0,9, task 0,8, plan 0,7, note 0,6<br/>aucun seuil : une entité qui ne correspond à rien est renvoyée<br/><i>vérifié : scores exacts relus étage par étage</i>"]
+        m_default["✅ bras par défaut du match, scope 0,5<br/>inatteignable depuis les quatre appelants, qui passent<br/>toujours un des quatre libellés<br/><i>vérifié : appel direct depuis le module de test interne</i>"]
+        m_date{"✅ DateTime::parse_from_rfc3339(plan.created_at)<br/><i>vérifié : date valide, décalage horaire, date illisible</i>"}
+        m_date_ok["✅ décalage horaire ramené en UTC"]
+        m_date_ko["✅ date illisible remplacée par Utc::now(), en silence<br/>une entité périmée passe pour une entité du jour<br/><i>vérifié : created_at volontairement illisible</i>"]
+        m_note_src["✅ une note devient MemorySource::KnowledgeNote,<br/>documentée comme du long terme dans traits.rs<br/>donc level() 3, donc apply_weight lui applique le poids<br/>long terme 0,8 au lieu du poids médian 1,0 de son étage<br/><i>vérifié : source et level() relus sur le résultat</i>"]
+        m_ctx{"✅ search_context() — match source_filter<br/><i>vérifié : les quatre bras, routes relues sur wiremock</i>"}
+        m_ctx_plan["✅ Some plan : search_plans puis map<br/>titre conservé, métadonnées status perdues,<br/>limit transmis sans division puis take(limit)<br/><i>vérifié : seule /plans est appelée</i>"]
+        m_ctx_task["✅ Some task : search_tasks puis map<br/>titre conservé, status et plan_id perdus,<br/>horodatage = instant de l'appel<br/><i>vérifié : seule /tasks est appelée</i>"]
+        m_ctx_fallback["🔴 bras par défaut : relance query()<br/>Some note tombe ici alors que UnifiedMemoryProvider<br/>y route explicitement le filtre note : qui demande des notes<br/>reçoit aussi plans, tâches et décisions<br/><i>vérifié : wiremock, attente en test ignoré</i>"]
+        m_grd["✅ get_relevant_decisions()<br/>Chosen: N/A quand chosen_option est None<br/>aucun tri : l'ordre amont est conservé, même si la première<br/>décision ne correspond pas à la requête<br/>take(limit) ajouté ici et sur les deux filtres :<br/>la limite documentée n'était pas appliquée<br/><i>vérifié : test rejoué sans le correctif</i>"]
+        m_project["✅ with_project() et set_project()<br/>project_id n'atteint que /plans et /notes/search<br/>set_project(None) retire le filtre de la requête suivante<br/><i>vérifié : paramètres relus sur les quatre requêtes</i>"]
+        m_scope["✅ set_scope() et current_scope()<br/>le champ scope est mémorisé et jamais relu :<br/>aucune requête ne le porte<br/><i>vérifié : URL relues sur wiremock</i>"]
+
+        m_query --> m_plans
+        m_query --> m_tasks
+        m_query --> m_decs
+        m_query --> m_notes
+        m_plans --> m_send
+        m_tasks --> m_send
+        m_decs --> m_send
+        m_notes --> m_send
+        m_send -->|"Err de transport"| m_transport
+        m_send -->|"Ok"| m_status
+        m_status -->|"non"| m_silent
+        m_status -->|"oui"| m_json
+        m_json -->|"corps non JSON"| m_decode
+        m_json -->|"JSON"| m_env
+        m_env -->|"non"| m_wrong
+        m_env -->|"oui"| m_map
+        m_map --> m_score
+        m_score -->|"libellé hors des quatre"| m_default
+        m_map --> m_date
+        m_date -->|"Ok"| m_date_ok
+        m_date -->|"Err"| m_date_ko
+        m_notes --> m_note_src
+        m_ctx -->|"Some plan"| m_ctx_plan
+        m_ctx -->|"Some task"| m_ctx_task
+        m_ctx -->|"Some decision"| m_grd
+        m_ctx -->|"Some note, None, inconnu"| m_ctx_fallback
+        m_ctx_fallback --> m_query
+        m_ctx_plan --> m_plans
+        m_ctx_task --> m_tasks
+        m_grd --> m_decs
+        m_project -.->|"pose project_id"| m_plans
+        m_project -.->|"pose project_id"| m_notes
+        m_cfg -.->|"pose url et api_key"| m_plans
+    end
+
+    subgraph long_box["long_term.rs — LongTermMemory, Meilisearch"]
+        direction TB
+        l_ctx{"🔴 search_context() — match source_filter<br/>aucun test ne l'appelle"}
+        l_query["🔴 LongTermMemory::query()<br/>search_messages(query, None, limit fois 2), puis écarte<br/>la conversation courante, semantic figé à 0,8, scope à 0,5<br/>aucun test n'exécute cette fonction"]
+        l_ts["🔴 Utc.timestamp_opt(msg.created_at, 0).single()<br/>un horodatage hors bornes retombe sur Utc::now()"]
+        l_rec["🔴 recency_score()<br/>1 sur (1 plus heures sur 24), borné entre 0 et 1<br/>le seul test du fichier recalcule la formule à la main<br/>sans jamais appeler la fonction : la ligne reste nue"]
+        l_notes["🔴 Some note ou knowledge_note renvoie une liste vide<br/>le commentaire renvoie les notes à l'étage médian,<br/>qui ne sait pas les filtrer non plus : le filtre note<br/>n'est honoré par aucun étage"]
+        l_dec["🔴 get_relevant_decisions() renvoie une liste vide en dur"]
+        l_err["🔴 la seule erreur propagée vient de search_messages :<br/>aucune dégradation, une Meilisearch en panne fait<br/>échouer tout UnifiedMemoryProvider::query"]
+
+        l_ctx -->|"Some conversation ou cross_conversation"| l_query
+        l_ctx -->|"Some note ou knowledge_note"| l_notes
+        l_ctx -->|"None ou inconnu"| l_query
+        l_query --> l_ts
+        l_ts --> l_rec
+        l_query --> l_err
+    end
+
+    root --> t_contract
+    root --> u_query
+    root --> u_ctx
+    root --> u_dec
+    u_query --> s_query
+    u_query --> m_query
+    u_query --> l_query
+    u_dec --> m_grd
+    u_short --> s_ctx
+    u_medium --> m_ctx
+    u_long --> l_ctx
+    u_weight -.->|"lit"| t_level
+    m_score -.->|"appelle"| t_new
+    m_note_src -.->|"lit"| t_level
+    m_plans -.-> caller
+    m_tasks -.-> caller
+    m_decs -.-> caller
+    m_notes -.-> caller
+    l_query -.-> caller
+    u_dec --> l_query
+    t_new -.->|"variante sans appelant"| t_weights
+    t_contract -.->|"set_scope et current_scope par étage"| m_scope
+    t_contract -.->|"set_scope, sans propagation"| u_scope
+    t_contract -.->|"get_relevant_decisions, vide en dur"| s_dec
+    t_contract -.->|"get_relevant_decisions, vide en dur"| l_dec

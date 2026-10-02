@@ -58,7 +58,11 @@ struct L1Entry {
 
 /// Tiered cache with L1 (DashMap) and L2 (Neo4j)
 pub struct TieredCache {
-    l1: DashMap<String, L1Entry>,
+    /// Shared with the background sweep task. This **must** stay behind an `Arc`:
+    /// `DashMap::clone` deep-copies every shard into an independent map, so
+    /// handing the task a bare `DashMap` gave it a detached snapshot and the
+    /// sweep silently never touched the live cache.
+    l1: Arc<DashMap<String, L1Entry>>,
     l2: Option<Arc<Graph>>,
     config: TieredCacheConfig,
     l1_hits: std::sync::atomic::AtomicUsize,
@@ -70,7 +74,7 @@ impl TieredCache {
     /// Create a new tiered cache with optional Neo4j L2
     pub fn new(config: TieredCacheConfig, neo4j_graph: Option<Arc<Graph>>) -> Self {
         let cache = Self {
-            l1: DashMap::new(),
+            l1: Arc::new(DashMap::new()),
             l2: neo4j_graph,
             config,
             l1_hits: std::sync::atomic::AtomicUsize::new(0),
@@ -78,8 +82,8 @@ impl TieredCache {
             misses: std::sync::atomic::AtomicUsize::new(0),
         };
 
-        // Start L1 cleanup task
-        let l1_clone = cache.l1.clone();
+        // Start L1 cleanup task, on a *shared* handle to the live map
+        let l1_clone = Arc::clone(&cache.l1);
         let ttl = cache.config.l1_ttl_seconds;
         tokio::spawn(async move {
             Self::l1_cleanup_loop(l1_clone, ttl).await;
@@ -94,7 +98,7 @@ impl TieredCache {
     }
 
     /// L1 cleanup background task
-    async fn l1_cleanup_loop(cache: DashMap<String, L1Entry>, ttl_seconds: u64) {
+    async fn l1_cleanup_loop(cache: Arc<DashMap<String, L1Entry>>, ttl_seconds: u64) {
         let ttl = Duration::from_secs(ttl_seconds);
 
         loop {
@@ -373,42 +377,298 @@ pub struct TieredCacheStats {
 
 #[cfg(test)]
 mod tests {
+    //! L1-only behaviour. Everything here goes through `TieredCache::memory_only`,
+    //! so no `Graph` is involved and the tests are pure in-process logic.
+    //!
+    //! The L2 half (`get_l2`, `write_l2`, the Neo4j branch of `cleanup`,
+    //! `init_l2_schema`) needs a `neo4rs::Graph`, which cannot be faked with a
+    //! trait; it is covered in `tests/storage_tiered_cache_l2_s05.rs` against a
+    //! loopback Bolt server.
+
     use super::*;
     use crate::models::openai::Usage;
 
-    #[tokio::test]
-    async fn test_l1_cache_only() {
-        let cache = TieredCache::memory_only(TieredCacheConfig::default());
-
-        let response = ChatCompletionResponse {
-            id: "test".to_string(),
+    fn response(id: &str) -> ChatCompletionResponse {
+        ChatCompletionResponse {
+            id: id.to_string(),
             object: "chat.completion".to_string(),
-            created: 0,
-            model: "test".to_string(),
+            created: 1_790_000_000,
+            model: "claude-opus-5".to_string(),
             choices: vec![],
             usage: Usage {
-                prompt_tokens: 0,
-                completion_tokens: 0,
-                total_tokens: 0,
+                prompt_tokens: 11,
+                completion_tokens: 22,
+                total_tokens: 33,
             },
             conversation_id: None,
-        };
+        }
+    }
 
-        cache.put("test-key".to_string(), response.clone()).await;
+    /// Entries inserted with this config are already expired by the time they are
+    /// read back: any non-zero elapsed time is `> Duration::from_secs(0)`.
+    fn already_expired() -> TieredCacheConfig {
+        TieredCacheConfig {
+            l1_ttl_seconds: 0,
+            ..TieredCacheConfig::default()
+        }
+    }
 
-        let cached = cache.get("test-key").await;
-        assert!(cached.is_some());
-        assert_eq!(cached.unwrap().id, "test");
+    #[test]
+    fn default_config_is_an_hour_in_l1_and_a_day_in_l2() {
+        let config = TieredCacheConfig::default();
+
+        assert_eq!(config.l1_max_entries, 1000);
+        assert_eq!(config.l1_ttl_seconds, 3600);
+        assert_eq!(config.l2_ttl_seconds, 86400);
+        assert!(
+            config.l2_enabled,
+            "L2 is opt-out in the config, and only the absent Graph disables it"
+        );
     }
 
     #[tokio::test]
-    async fn test_cache_miss() {
+    async fn a_put_entry_comes_back_from_l1_and_is_counted_as_an_l1_hit() {
         let cache = TieredCache::memory_only(TieredCacheConfig::default());
 
-        let cached = cache.get("nonexistent").await;
-        assert!(cached.is_none());
+        cache.put("k".to_string(), response("r-1")).await;
+        let cached = cache.get("k").await.expect("just written");
+
+        assert_eq!(cached.id, "r-1");
+        assert_eq!(cached.usage.total_tokens, 33, "the whole value round-trips");
+        let stats = cache.extended_stats();
+        assert_eq!(stats.l1_entries, 1);
+        assert_eq!(stats.l1_hits, 1);
+        assert_eq!(stats.l2_hits, 0);
+        assert_eq!(stats.misses, 0);
+        assert!((stats.hit_rate - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[tokio::test]
+    async fn an_unknown_key_is_a_miss_and_nothing_else() {
+        let cache = TieredCache::memory_only(TieredCacheConfig::default());
+
+        assert!(cache.get("nonexistent").await.is_none());
 
         let stats = cache.extended_stats();
         assert_eq!(stats.misses, 1);
+        assert_eq!(stats.l1_hits, 0);
+        assert_eq!(stats.l1_entries, 0);
+        assert!(
+            stats.hit_rate.abs() < f64::EPSILON,
+            "a miss-only cache has a 0.0 hit rate, not a division by zero"
+        );
+    }
+
+    /// `memory_only` keeps `config.l2_enabled` at its default `true`, and
+    /// `extended_stats` reports `l2_enabled: false` anyway because there is no
+    /// `Graph`. The reported flag is the effective one, which is the useful one.
+    #[tokio::test]
+    async fn extended_stats_reports_l2_as_disabled_when_there_is_no_graph() {
+        let cache = TieredCache::memory_only(TieredCacheConfig::default());
+
+        assert!(!cache.extended_stats().l2_enabled);
+    }
+
+    #[tokio::test]
+    async fn the_hit_rate_mixes_hits_and_misses() {
+        let cache = TieredCache::memory_only(TieredCacheConfig::default());
+
+        cache.put("k".to_string(), response("r-1")).await;
+        cache.get("k").await.expect("hit");
+        assert!(cache.get("absent").await.is_none());
+
+        let stats = cache.extended_stats();
+        assert_eq!((stats.l1_hits, stats.misses), (1, 1));
+        assert!((stats.hit_rate - 0.5).abs() < f64::EPSILON);
+    }
+
+    /// `get_l1` checks the TTL before answering, and removes the entry it just
+    /// refused, so an expired key costs one lookup and then behaves as absent.
+    #[tokio::test]
+    async fn an_expired_l1_entry_is_dropped_on_read_rather_than_served() {
+        let cache = TieredCache::memory_only(already_expired());
+        cache.put("k".to_string(), response("r-1")).await;
+        assert_eq!(cache.extended_stats().l1_entries, 1, "written, then stale");
+
+        assert!(cache.get("k").await.is_none(), "the TTL has passed");
+
+        let stats = cache.extended_stats();
+        assert_eq!(stats.l1_entries, 0, "the stale entry is evicted on read");
+        assert_eq!(stats.l1_hits, 0, "an expired read is not a hit");
+        assert_eq!(stats.misses, 1);
+    }
+
+    /// Two reads of the same key count twice. `L1Entry::hit_count` is bumped on
+    /// each one but is never read anywhere in the crate: eviction is purely by
+    /// age (`evict_oldest_l1`), so the per-entry counter buys nothing.
+    #[tokio::test]
+    async fn repeated_reads_each_count_as_a_hit() {
+        let cache = TieredCache::memory_only(TieredCacheConfig::default());
+        cache.put("k".to_string(), response("r-1")).await;
+
+        for _ in 0..3 {
+            cache.get("k").await.expect("hit");
+        }
+
+        assert_eq!(cache.extended_stats().l1_hits, 3);
+    }
+
+    #[tokio::test]
+    async fn put_evicts_the_oldest_entry_once_l1_is_full() {
+        let cache = TieredCache::memory_only(TieredCacheConfig {
+            l1_max_entries: 2,
+            ..TieredCacheConfig::default()
+        });
+
+        cache.put("first".to_string(), response("r-1")).await;
+        tokio::time::sleep(Duration::from_millis(2)).await;
+        cache.put("second".to_string(), response("r-2")).await;
+        tokio::time::sleep(Duration::from_millis(2)).await;
+        cache.put("third".to_string(), response("r-3")).await;
+
+        assert_eq!(cache.extended_stats().l1_entries, 2, "the cap is honoured");
+        assert!(
+            cache.get("first").await.is_none(),
+            "the oldest key is the one that goes"
+        );
+        assert_eq!(cache.get("second").await.expect("kept").id, "r-2");
+        assert_eq!(cache.get("third").await.expect("kept").id, "r-3");
+    }
+
+    /// Re-putting the same key evicts *another* entry before overwriting it, so a
+    /// full cache loses one unrelated entry on every refresh of a key it already
+    /// holds. `put` checks the length before knowing whether the insert will add
+    /// an entry or replace one.
+    #[tokio::test]
+    async fn refreshing_a_key_in_a_full_l1_still_evicts_a_different_key() {
+        let cache = TieredCache::memory_only(TieredCacheConfig {
+            l1_max_entries: 2,
+            ..TieredCacheConfig::default()
+        });
+        cache.put("a".to_string(), response("r-a")).await;
+        tokio::time::sleep(Duration::from_millis(2)).await;
+        cache.put("b".to_string(), response("r-b")).await;
+
+        cache.put("b".to_string(), response("r-b-again")).await;
+
+        assert_eq!(
+            cache.extended_stats().l1_entries,
+            1,
+            "`a` was evicted to make room for a key that was already there"
+        );
+        assert_eq!(cache.get("b").await.expect("kept").id, "r-b-again");
+    }
+
+    /// `l1_max_entries: 0` does not disable L1: `evict_oldest_l1` finds nothing
+    /// to evict on the first `put` and the insert happens anyway, so the cache
+    /// holds one entry above its stated maximum. A cap of zero should either
+    /// refuse to store or be rejected by the config.
+    #[tokio::test]
+    async fn a_zero_sized_l1_still_stores_one_entry() {
+        let cache = TieredCache::memory_only(TieredCacheConfig {
+            l1_max_entries: 0,
+            ..TieredCacheConfig::default()
+        });
+
+        cache.put("k".to_string(), response("r-1")).await;
+
+        assert_eq!(cache.extended_stats().l1_entries, 1);
+        assert_eq!(cache.get("k").await.expect("served anyway").id, "r-1");
+    }
+
+    #[tokio::test]
+    async fn cleanup_removes_only_the_expired_l1_entries_and_counts_them() {
+        let cache = TieredCache::memory_only(already_expired());
+        cache.put("a".to_string(), response("r-a")).await;
+        cache.put("b".to_string(), response("r-b")).await;
+
+        assert_eq!(cache.cleanup().await.expect("cleanup"), 2);
+
+        assert_eq!(cache.extended_stats().l1_entries, 0);
+    }
+
+    #[tokio::test]
+    async fn cleanup_keeps_fresh_entries_and_reports_zero() {
+        let cache = TieredCache::memory_only(TieredCacheConfig::default());
+        cache.put("a".to_string(), response("r-a")).await;
+
+        assert_eq!(cache.cleanup().await.expect("cleanup"), 0);
+
+        assert_eq!(cache.extended_stats().l1_entries, 1);
+    }
+
+    /// `CacheStats` is the shape the `/health`-style endpoints report. It folds
+    /// L1 and L2 hits into one number, counts only L1 entries as `total_entries`
+    /// — an L2-only key is invisible — and hard-codes `enabled: true`, so it says
+    /// "enabled" for a cache whose L2 is off and whose L1 cap is zero.
+    #[tokio::test]
+    async fn stats_flattens_both_tiers_into_the_shared_shape() {
+        let cache = TieredCache::memory_only(TieredCacheConfig::default());
+        cache.put("k".to_string(), response("r-1")).await;
+        cache.get("k").await.expect("hit");
+        assert!(cache.get("absent").await.is_none());
+
+        let stats = cache.stats().await;
+
+        assert_eq!(stats.total_entries, 1);
+        assert_eq!(stats.total_hits, 1, "l1_hits + l2_hits");
+        assert!(stats.enabled, "hard-coded, never derived from the config");
+    }
+
+    /// Without a `Graph`, `init_l2_schema` is a no-op that still returns `Ok`.
+    #[tokio::test]
+    async fn init_l2_schema_is_a_no_op_without_a_graph() {
+        let cache = TieredCache::memory_only(TieredCacheConfig::default());
+
+        cache.init_l2_schema().await.expect("no-op");
+    }
+
+    /// The background task `TieredCache::new` spawns. It wakes every 300 s and
+    /// drops expired entries, which is the only way an untouched key ever leaves
+    /// L1 — `get` only evicts the key it was asked for. Driven here on a paused
+    /// clock so nothing actually waits.
+    #[tokio::test(start_paused = true)]
+    async fn the_background_task_sweeps_expired_entries_without_a_read() {
+        let cache = TieredCache::new(already_expired(), None);
+        cache.put("a".to_string(), response("r-a")).await;
+        cache.put("b".to_string(), response("r-b")).await;
+        assert_eq!(cache.extended_stats().l1_entries, 2);
+
+        // On a paused clock tokio auto-advances to the next deadline, so this
+        // sleep lets the task register its 300 s timer, fires it, and comes back
+        // without any wall-clock wait.
+        tokio::time::sleep(Duration::from_secs(301)).await;
+        for _ in 0..50 {
+            if cache.extended_stats().l1_entries == 0 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+
+        assert_eq!(
+            cache.extended_stats().l1_entries,
+            0,
+            "the sweep ran on its own, with no get() in between"
+        );
+        assert_eq!(
+            cache.extended_stats().misses,
+            0,
+            "and it is not accounted as a miss"
+        );
+    }
+
+    /// The same task must leave fresh entries alone when it wakes up.
+    #[tokio::test(start_paused = true)]
+    async fn the_background_task_leaves_unexpired_entries_in_place() {
+        let cache = TieredCache::new(TieredCacheConfig::default(), None);
+        cache.put("a".to_string(), response("r-a")).await;
+
+        tokio::time::sleep(Duration::from_secs(301)).await;
+        for _ in 0..50 {
+            tokio::task::yield_now().await;
+        }
+
+        assert_eq!(cache.extended_stats().l1_entries, 1);
+        assert_eq!(cache.get("a").await.expect("still there").id, "r-a");
     }
 }

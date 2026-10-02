@@ -598,4 +598,381 @@ mod tests {
         let err = server.handle_message(msg).await.unwrap_err();
         assert!(matches!(err, SdkError::InvalidState { .. }));
     }
+
+    // =====================================================================
+    // Protocol shape: what the CLI actually receives.
+    // =====================================================================
+
+    /// The JSON-RPC `id` is echoed verbatim, whatever its type.
+    #[tokio::test]
+    async fn test_request_id_is_echoed_with_its_original_type() {
+        let server = make_server_with_echo();
+
+        let numeric = server
+            .handle_message(json!({"jsonrpc": "2.0", "id": 7, "method": "initialize"}))
+            .await
+            .unwrap();
+        assert_eq!(numeric["id"], json!(7));
+
+        let textual = server
+            .handle_message(json!({"jsonrpc": "2.0", "id": "abc", "method": "tools/list"}))
+            .await
+            .unwrap();
+        assert_eq!(textual["id"], json!("abc"));
+    }
+
+    /// A request without an `id` still produces a response carrying `"id": null`
+    /// instead of omitting the field.
+    #[tokio::test]
+    async fn test_missing_id_is_serialised_as_null() {
+        let server = make_server_with_echo();
+        let response = server
+            .handle_message(json!({"jsonrpc": "2.0", "method": "tools/list"}))
+            .await
+            .unwrap();
+
+        assert_eq!(response["id"], Value::Null);
+        assert!(response.get("id").is_some(), "the key is present and null");
+    }
+
+    /// `initialize` advertises a fixed protocol version and the tools capability.
+    #[tokio::test]
+    async fn test_initialize_advertises_protocol_version_and_tool_capability() {
+        let server = SdkMcpServerBuilder::new("caps").version("9.9.9").build();
+        let response = server
+            .handle_message(json!({"jsonrpc": "2.0", "id": 1, "method": "initialize"}))
+            .await
+            .unwrap();
+
+        assert_eq!(response["result"]["protocolVersion"], "2024-11-05");
+        assert_eq!(response["result"]["capabilities"]["tools"], json!({}));
+        assert_eq!(response["result"]["serverInfo"]["version"], "9.9.9");
+    }
+
+    /// A server with no tools answers `tools/list` with an empty array, never
+    /// `null` — the CLI would reject the latter.
+    #[tokio::test]
+    async fn test_tools_list_on_an_empty_server_is_an_empty_array() {
+        let server = SdkMcpServer::new("empty", "1.0.0");
+        let response = server
+            .handle_message(json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}))
+            .await
+            .unwrap();
+
+        assert_eq!(response["result"]["tools"], json!([]));
+    }
+
+    /// `tools/list` republishes the declared input schema, including `required`.
+    #[tokio::test]
+    async fn test_tools_list_publishes_the_declared_input_schema() {
+        let mut server = SdkMcpServer::new("schema", "1.0.0");
+        let mut properties = HashMap::new();
+        properties.insert("name".to_string(), json!({"type": "string"}));
+        server.add_tool(ToolDefinition {
+            name: "greet".to_string(),
+            description: "Greet someone".to_string(),
+            input_schema: ToolInputSchema {
+                schema_type: "object".to_string(),
+                properties,
+                required: Some(vec!["name".to_string()]),
+            },
+            handler: Arc::new(EchoHandler),
+        });
+
+        let response = server
+            .handle_message(json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}))
+            .await
+            .unwrap();
+        let schema = &response["result"]["tools"][0]["inputSchema"];
+        assert_eq!(schema["type"], "object");
+        assert_eq!(schema["required"], json!(["name"]));
+        assert_eq!(schema["properties"]["name"]["type"], "string");
+    }
+
+    /// The schema is advertised but **never enforced**: a tool declaring
+    /// `required: ["name"]` is still invoked with `{}`.
+    #[tokio::test]
+    async fn test_required_arguments_are_not_validated_before_dispatch() {
+        let mut server = SdkMcpServer::new("schema", "1.0.0");
+        let mut properties = HashMap::new();
+        properties.insert("name".to_string(), json!({"type": "string"}));
+        server.add_tool(ToolDefinition {
+            name: "greet".to_string(),
+            description: "Greet someone".to_string(),
+            input_schema: ToolInputSchema {
+                schema_type: "object".to_string(),
+                properties,
+                required: Some(vec!["name".to_string()]),
+            },
+            handler: Arc::new(EchoHandler),
+        });
+
+        let response = server
+            .handle_message(json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {"name": "greet", "arguments": {}}
+            }))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            response["result"]["content"][0]["text"], "{}",
+            "the handler is reached with empty arguments; validation is its job"
+        );
+    }
+
+    /// Non-object `arguments` are forwarded untouched instead of being refused.
+    #[tokio::test]
+    async fn test_non_object_arguments_are_forwarded_verbatim() {
+        let server = make_server_with_echo();
+        let response = server
+            .handle_message(json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {"name": "echo", "arguments": "a bare string"}
+            }))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            response["result"]["content"][0]["text"],
+            "\"a bare string\""
+        );
+    }
+
+    /// Two tools may share a name: `add_tool` does not reject the duplicate and
+    /// dispatch silently picks the first one registered.
+    #[tokio::test]
+    async fn test_duplicate_tool_names_are_accepted_and_the_first_one_wins() {
+        struct Marker(&'static str);
+
+        #[async_trait]
+        impl ToolHandler for Marker {
+            async fn execute(&self, _args: Value) -> Result<ToolResult> {
+                Ok(ToolResult {
+                    content: vec![ToolResultContent::Text {
+                        text: self.0.to_string(),
+                    }],
+                    is_error: None,
+                })
+            }
+        }
+
+        let mut server = SdkMcpServer::new("dup", "1.0.0");
+        for marker in ["first", "second"] {
+            server.add_tool(ToolDefinition {
+                name: "dup".to_string(),
+                description: marker.to_string(),
+                input_schema: ToolInputSchema {
+                    schema_type: "object".to_string(),
+                    properties: HashMap::new(),
+                    required: None,
+                },
+                handler: Arc::new(Marker(marker)),
+            });
+        }
+
+        assert_eq!(server.tools.len(), 2, "both registrations are kept");
+        let response = server
+            .handle_message(json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {"name": "dup"}
+            }))
+            .await
+            .unwrap();
+        assert_eq!(response["result"]["content"][0]["text"], "first");
+    }
+
+    /// A successful `tools/call` emits `isError: null` when the tool did not set
+    /// the flag (the key is present, not omitted).
+    #[tokio::test]
+    async fn test_tools_call_success_reports_is_error_as_null() {
+        let server = make_server_with_echo();
+        let response = server
+            .handle_message(json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {"name": "echo"}
+            }))
+            .await
+            .unwrap();
+
+        assert_eq!(response["result"]["isError"], Value::Null);
+    }
+
+    /// A tool reporting a *business* error returns `isError: true` inside a
+    /// successful JSON-RPC response — it is not a protocol error.
+    #[tokio::test]
+    async fn test_tool_reported_error_travels_as_is_error_true() {
+        struct Failing;
+
+        #[async_trait]
+        impl ToolHandler for Failing {
+            async fn execute(&self, _args: Value) -> Result<ToolResult> {
+                Ok(ToolResult {
+                    content: vec![ToolResultContent::Text {
+                        text: "disk on fire".to_string(),
+                    }],
+                    is_error: Some(true),
+                })
+            }
+        }
+
+        let mut server = SdkMcpServer::new("failing", "1.0.0");
+        server.add_tool(ToolDefinition {
+            name: "boom".to_string(),
+            description: "always reports an error".to_string(),
+            input_schema: ToolInputSchema {
+                schema_type: "object".to_string(),
+                properties: HashMap::new(),
+                required: None,
+            },
+            handler: Arc::new(Failing),
+        });
+
+        let response = server
+            .handle_message(json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {"name": "boom"}
+            }))
+            .await
+            .unwrap();
+
+        assert_eq!(response["result"]["isError"], json!(true));
+        assert_eq!(response["result"]["content"][0]["text"], "disk on fire");
+        assert!(response.get("error").is_none());
+    }
+
+    /// `notifications/initialized` is answered although JSON-RPC notifications
+    /// take no reply: the SDK transport wraps every MCP message in a *control
+    /// request* that must be answered, so the reply carries no `id`.
+    #[tokio::test]
+    async fn test_initialized_notification_is_answered_without_an_id() {
+        let server = make_server_with_echo();
+        let response = server
+            .handle_message(json!({"jsonrpc": "2.0", "method": "notifications/initialized"}))
+            .await
+            .unwrap();
+
+        assert_eq!(response, json!({"jsonrpc": "2.0", "result": {}}));
+        assert!(response.get("id").is_none());
+    }
+
+    /// An unknown method is reported in-band (`-32601`), while a malformed
+    /// envelope is reported out-of-band as a Rust error. Both are exercised
+    /// here to pin the asymmetry.
+    #[tokio::test]
+    async fn test_unknown_method_is_in_band_but_a_missing_method_is_not() {
+        let server = make_server_with_echo();
+
+        let unknown = server
+            .handle_message(json!({"jsonrpc": "2.0", "id": 4, "method": "resources/list"}))
+            .await
+            .unwrap();
+        assert_eq!(unknown["error"]["code"], -32601);
+        assert_eq!(unknown["id"], json!(4));
+
+        let malformed = server
+            .handle_message(json!({"jsonrpc": "2.0", "id": 4, "method": 42}))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&malformed, SdkError::InvalidState { message } if message.contains("Missing method")),
+            "got {malformed:?}"
+        );
+    }
+
+    /// The exact path `internal_query` uses: the config stores the server as
+    /// `Arc<dyn Any>` and downcasts it back before dispatching.
+    #[tokio::test]
+    async fn test_config_instance_downcasts_back_to_a_working_server() {
+        let mut server = SdkMcpServer::new("downcast", "1.2.3");
+        server.add_tool(make_echo_tool("echo"));
+
+        let config = server.to_config();
+        let crate::types::McpServerConfig::Sdk { name, instance } = &config else {
+            panic!("expected the Sdk variant, got {config:?}");
+        };
+        assert_eq!(name, "downcast");
+
+        let recovered = instance
+            .downcast_ref::<SdkMcpServer>()
+            .expect("internal_query downcasts to SdkMcpServer");
+        let response = recovered
+            .handle_message(json!({"jsonrpc": "2.0", "id": 1, "method": "initialize"}))
+            .await
+            .unwrap();
+        assert_eq!(response["result"]["serverInfo"]["version"], "1.2.3");
+    }
+
+    /// The `tool!` macro is just sugar over `create_simple_tool`.
+    #[tokio::test]
+    async fn test_tool_macro_builds_a_working_definition() {
+        let tool = crate::tool!(
+            "shout",
+            "Uppercase its input",
+            ToolInputSchema {
+                schema_type: "object".to_string(),
+                properties: HashMap::new(),
+                required: None,
+            },
+            |args: Value| async move { Ok(args["text"].as_str().unwrap_or_default().to_uppercase()) }
+        );
+        assert_eq!(tool.name, "shout");
+
+        let mut server = SdkMcpServer::new("macro", "1.0.0");
+        server.add_tool(tool);
+        let response = server
+            .handle_message(json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {"name": "shout", "arguments": {"text": "hey"}}
+            }))
+            .await
+            .unwrap();
+        assert_eq!(response["result"]["content"][0]["text"], "HEY");
+    }
+
+    /// `ToolResult` serialises its flag as `is_error`, while the wire format
+    /// built by `handle_message` uses the MCP spelling `isError`. Both are
+    /// pinned here so a future refactor cannot silently swap one for the other.
+    #[test]
+    fn test_tool_result_field_name_differs_from_the_wire_field_name() {
+        let result = ToolResult {
+            content: vec![],
+            is_error: Some(false),
+        };
+        let serialised = serde_json::to_value(&result).unwrap();
+        assert!(serialised.get("is_error").is_some());
+        assert!(
+            serialised.get("isError").is_none(),
+            "the struct itself is not MCP-shaped; handle_message does the mapping"
+        );
+    }
+
+    /// `ToolInputSchema` round-trips, and `required: None` disappears from the
+    /// JSON instead of becoming `null`.
+    #[test]
+    fn test_tool_input_schema_roundtrip_omits_absent_required() {
+        let schema = ToolInputSchema {
+            schema_type: "object".to_string(),
+            properties: HashMap::new(),
+            required: None,
+        };
+        let serialised = serde_json::to_value(&schema).unwrap();
+        assert_eq!(serialised, json!({"type": "object", "properties": {}}));
+
+        let back: ToolInputSchema = serde_json::from_value(serialised).unwrap();
+        assert_eq!(back.schema_type, "object");
+        assert!(back.required.is_none());
+    }
 }

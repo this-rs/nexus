@@ -64,6 +64,21 @@ pub struct ConversationDocument {
     pub content_preview: String,
 }
 
+/// Escape a value so it can be embedded in a double-quoted Meilisearch filter.
+///
+/// Filter values reach this module straight from the HTTP layer (a
+/// `conversation_id` chosen by the caller). Interpolating one raw into
+/// `conversation_id = "..."` lets a `"` close the string literal and the rest of
+/// the value be parsed as filter syntax — which `delete_conversation_messages`
+/// would then turn into deletions of other conversations' messages.
+///
+/// Meilisearch's filter parser accepts `\\` and `\"` inside a quoted value, so
+/// escaping both keeps the expression a plain equality test. Values without a
+/// backslash or a double quote — every id this crate generates — are unchanged.
+fn escape_filter_value(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
 /// Meilisearch client wrapper for Nexus
 #[derive(Clone)]
 pub struct MeilisearchClient {
@@ -162,6 +177,9 @@ impl MeilisearchClient {
     }
 
     /// Search messages by content
+    ///
+    /// `conversation_id` is escaped before it enters the filter expression, so a
+    /// caller-supplied id cannot widen the filter (see `escape_filter_value`).
     pub async fn search_messages(
         &self,
         query: &str,
@@ -170,7 +188,8 @@ impl MeilisearchClient {
     ) -> Result<Vec<MessageDocument>> {
         let index = self.messages_index();
 
-        let filter = conversation_id.map(|id| format!("conversation_id = \"{}\"", id));
+        let filter =
+            conversation_id.map(|id| format!("conversation_id = \"{}\"", escape_filter_value(id)));
 
         let mut search = index.search();
         search.with_query(query).with_limit(limit);
@@ -260,6 +279,34 @@ pub struct MeilisearchStats {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An id that cannot close the quoted literal passes through untouched: the
+    /// escaping must not change the filter for any id this crate produces.
+    #[test]
+    fn escape_filter_value_leaves_ordinary_ids_alone() {
+        for id in [
+            "conv-1",
+            "550e8400-e29b-41d4-a716-446655440000",
+            "conv with spaces",
+            "conv'avec-apostrophe",
+        ] {
+            assert_eq!(escape_filter_value(id), id, "id {id:?} must be unchanged");
+        }
+    }
+
+    /// Both characters that can escape out of a double-quoted value are doubled,
+    /// and the backslash is handled first so an escape is never re-escaped.
+    #[test]
+    fn escape_filter_value_neutralises_quotes_and_backslashes() {
+        assert_eq!(
+            escape_filter_value(r#"x" OR role = "user"#),
+            r#"x\" OR role = \"user"#
+        );
+        assert_eq!(escape_filter_value(r"conv\"), r"conv\\");
+        // A value that already looks escaped must come out double-escaped, not
+        // collapsed: `\"` is two characters, both of which need escaping.
+        assert_eq!(escape_filter_value(r#"\""#), r#"\\\""#);
+    }
 
     #[tokio::test]
     #[ignore]

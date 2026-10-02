@@ -1,0 +1,138 @@
+%% name: nexus-sdk-types
+%% covers: claude-code-sdk-rs/src/types.rs, claude-code-sdk-rs/src/message_parser.rs, claude-code-sdk-rs/src/errors.rs
+%% verified: 2026-10-01
+flowchart TD
+    subgraph legend["Légende"]
+        direction LR
+        L1["✅ vérifié par un test"]
+        L2["🟠 décidé, non écrit"]
+        L3["🔴 bug / non branché"]
+        L4["⚪ hors dépôt"]
+    end
+
+    cli["⚪ claude --output-format stream-json<br/>une ligne JSON par message"]
+    cli --> entry
+
+    subgraph parser["message_parser.rs — l'entrée de tout ce que le CLI envoie"]
+        direction TB
+
+        entry["✅ parse_message<br/>aiguille sur le champ type, lu comme chaîne<br/><i>vérifié : JSON forgé en mémoire, aucun CLI</i>"]
+
+        entry -->|"type absent ou non-chaîne"| e_type["✅ SdkError::parse_error — Missing type field<br/><i>vérifié : objet vide, type numérique, tableau</i>"]
+        entry -->|"type inconnu, ex. compact_boundary"| drop_msg["✅ Ok de None — message jeté sans erreur<br/><i>compatibilité avant : vérifié</i>"]
+
+        entry -->|"user"| p_user["✅ parse_user_message"]
+        entry -->|"assistant"| p_asst["✅ parse_assistant_message"]
+        entry -->|"system"| p_sys["✅ parse_system_message"]
+        entry -->|"result"| p_res["✅ parse_result_message"]
+        entry -->|"stream_event"| p_stream["✅ parse_stream_event"]
+
+        p_user -->|"champ message absent"| e_type
+        p_user -->|"content est une chaîne"| u_text["✅ UserMessage — content rempli, content_blocks à None<br/><i>vérifié : prompt simple</i>"]
+        p_user -->|"content est un tableau"| u_blocks["✅ boucle sur parse_content_block<br/>content devient la chaîne vide"]
+        p_user -->|"content ni chaîne ni tableau<br/>— nombre, null, absent"| e_content["✅ SdkError::parse_error — Missing or invalid content field"]
+
+        u_blocks -->|"tous les blocs inconnus, ou tableau vide"| u_none["✅ content_blocks à None<br/>tour utilisateur vide, aucune erreur<br/><i>vérifié : blocs image et server_tool_use</i>"]
+        u_blocks -->|"un bloc connu mal formé"| u_abort["✅ le point d'interrogation avorte TOUT le message<br/>les blocs frères valides sont perdus<br/><i>vérifié : tool_result valide suivi d'un text sans texte</i>"]
+        u_blocks -->|"au moins un bloc gardé"| u_ok["✅ Some des blocs<br/>la ligne debug annonce le nombre GARDÉ, pas reçu<br/><i>vérifié : souscripteur tracing en mémoire, log relu</i>"]
+
+        p_asst -->|"champ message absent"| e_type
+        p_asst -->|"content n'est pas un tableau"| e_arr["✅ SdkError::parse_error — Missing or invalid content array"]
+        p_asst -->|"content est un tableau"| a_loop["✅ boucle sur parse_content_block<br/>blocs inconnus sautés, ordre des survivants gardé<br/><i>vérifié : text, redacted_thinking, text</i>"]
+
+        u_blocks --> blocks
+        a_loop --> blocks
+        blocks["✅ parse_content_block<br/>aiguille sur le champ type du bloc"]
+        blocks -->|"text"| b_text["✅ ContentBlock::Text — champ text obligatoire"]
+        blocks -->|"thinking"| b_think["✅ ContentBlock::Thinking<br/>thinking ET signature obligatoires"]
+        blocks -->|"tool_use"| b_use["✅ ContentBlock::ToolUse<br/>input absent devient un objet vide, aucune erreur"]
+        blocks -->|"tool_result"| b_res["✅ ContentBlock::ToolResult<br/>content chaîne vers Text, tableau vers Structured,<br/>autre scalaire vers None silencieux"]
+        blocks -->|"type de bloc inconnu"| b_drop["✅ Ok de None — bloc jeté, ligne debug"]
+        blocks -->|"pas de type mais un champ text"| b_compat["✅ ContentBlock::Text — compatibilité arrière"]
+        blocks -->|"ni type ni text"| b_skip["✅ Ok de None — ligne trace seulement"]
+
+        p_sys -->|"subtype absent"| s_unknown["✅ subtype vaut unknown"]
+        p_sys -->|"data est un objet"| s_data["✅ data pris tel quel"]
+        p_sys -->|"data est un scalaire"| s_scalar["✅ data pris tel quel<br/>le nom du champ promet un objet, le code n'exige rien"]
+        p_sys -->|"pas de clé data — forme plate du CLI"| s_flat["✅ data agrège les champs frères<br/>moins type et subtype<br/><i>vérifié : task_progress avec workflow_progress</i>"]
+        p_sys -->|"data vaut null"| s_null["✅ retombe sur la forme plate<br/>la clé nulle n'est pas réinjectée<br/><i>correctif : test rejoué sans lui, payload perdu</i>"]
+        p_sys -->|"json n'est pas un objet"| s_empty["✅ data devient un objet vide — branche défensive<br/>inatteignable via parse_message<br/><i>vérifié : appel direct de la fonction privée</i>"]
+
+        p_res -->|"serde_json::from_value vers Message réussit"| r_ok["✅ Message::Result complet<br/>6 champs obligatoires, 4 Option tolérées absentes"]
+        p_res -->|"serde échoue — erreur avalée, aucun log"| r_fb["✅ repli à valeurs par défaut silencieuses<br/>subtype unknown, durées à 0, is_error à false<br/><i>vérifié : duration_ms en chaîne devient 0</i>"]
+        r_fb --> r_wrap["🔴 num_turns lu en i64 puis converti en i32<br/>2 147 483 648 devient i32::MIN, aucun refus<br/><i>test rouge documentant l'enroulement</i>"]
+        r_fb --> r_struct["✅ structured_output et structuredOutput<br/>null normalisé en None"]
+
+        p_stream -->|"champ event absent"| e_event["✅ SdkError::parse_error — Missing event field"]
+        p_stream -->|"type de l'event absent"| e_evtype["✅ SdkError::parse_error — Missing type in event"]
+        p_stream -->|"6 types connus"| st_ok["✅ StreamEventData<br/>message_start, content_block_start,<br/>content_block_delta, content_block_stop,<br/>message_delta, message_stop"]
+        p_stream -->|"type inconnu, ex. message_pause"| st_drop["✅ Ok de None — événement jeté"]
+        st_ok -->|"type de delta inconnu"| st_text["✅ repli sur StreamDelta::TextDelta<br/>texte vide si absent"]
+        st_ok -->|"index négatif, flottant ou chaîne"| st_idx["🔴 as_u64 renvoie None donc index vaut 0<br/>or 0 est un index VALIDE : les blocs fusionnent<br/><i>test rouge documentant la collision</i>"]
+    end
+
+    subgraph types["types.rs — la forme des données, et ce que serde devine"]
+        direction TB
+
+        t_msg["✅ Message — tag type, noms en minuscules<br/>user, assistant, system, result, stream_event<br/><i>vérifié : aller-retour parse puis serde</i>"]
+        t_msg --> t_sidechain["✅ parent_tool_use_id, is_sidechain, is_top_level<br/>System et Result renvoient toujours None"]
+
+        t_msg --> t_block
+        t_block["🔴 ContentBlock — serde untagged<br/>la sérialisation N'ÉMET PAS de champ type<br/>donc la sortie du SDK n'est pas la forme du CLI<br/><i>vérifié : 4 variantes, aucun type émis</i>"]
+        t_block --> t_first["🔴 première variante qui matche gagne<br/>un bloc portant text ET tool_use_id devient Text<br/>le lien vers l'outil est perdu"]
+        t_block --> t_reparse["🔴 parse_message ne sait pas relire sa propre sortie<br/>thinking et tool_use disparaissent sans erreur<br/><i>test épinglant la perte, plus un test ignore<br/>décrivant le comportement attendu</i>"]
+
+        t_hookout["🔴 HookJSONOutput — untagged, Async en premier<br/>la PRÉSENCE de la clé async décide, pas sa valeur<br/>async à false choisit quand même Async<br/>async avec continue jette continue et stopReason"]
+        t_hookout --> t_hooksync["✅ SyncHookJSONOutput — tous champs Option<br/>un objet vide est une sortie valide ne rien faire"]
+
+        t_mcp["✅ McpServerConfig — Serialize et Deserialize écrits à la main"]
+        t_mcp -->|"Stdio, Sse, Http"| t_mcp_ok["✅ aller-retour fidèle, valeurs comparées"]
+        t_mcp -->|"Sdk — serveur en processus"| t_mcp_sdk["🔴 sérialise une forme type sdk<br/>que son propre Deserialize refuse<br/>erreur unknown variant sdk<br/><i>vérifié : aller-retour en échec</i>"]
+        t_mcp -->|"type inconnu, ex. websocket"| t_mcp_no["✅ refusé, aucun repli silencieux"]
+
+        t_redact["✅ RedactedValues — Debug qui montre les noms<br/>jamais les valeurs, clés triées pour un log stable<br/><i>vérifié : map vide, ordre imposé, secret absent</i>"]
+        t_dbg["✅ Debug de ClaudeCodeOptions<br/>env via RedactedValues ; hooks, can_use_tool et<br/>debug_stderr réduits à un booléen<br/>stderr_callback N'APPARAÎT PAS du tout"]
+        t_dbg --> t_redact
+
+        t_builder["✅ ClaudeCodeOptionsBuilder — 52 méthodes publiques<br/>51 setters consommants plus build"]
+        t_builder --> t_hooks["✅ hooks REMPLACE la map entière<br/>add_hook crée la map puis empile dans l'ordre<br/><i>vérifié : le callback sorti du builder est appelé</i>"]
+        t_builder --> t_stderr["✅ stderr_callback stocke la closure vivante<br/><i>vérifié : lignes capturées dans l'ordre</i>"]
+        t_builder --> t_clamp["✅ max_output_tokens borné de 1 à 32000<br/>0 devient 1 : demander aucune sortie en demande une"]
+        t_clamp --> t_nan["🔴 memory_threshold : f64::clamp laisse passer NaN<br/>toute comparaison de pertinence devient fausse<br/><i>test rouge documentant le NaN stocké</i>"]
+        t_builder --> t_noclamp["✅ aucune validation sur max_budget_usd — -1.0 accepté<br/>ni sur max_turns — 0 accepté"]
+
+        t_ctrl["✅ SDKControlRequest — tag type, plus un subtype répété<br/>8 variantes, table de tags vérifiée"]
+        t_ctrl --> t_alias["✅ alias camelCase pour ce que le CLI envoie<br/>toolName, permissionSuggestions, blockedPath,<br/>callbackId, toolUseId, mcpServerName, userMessageId<br/><i>vérifié : les deux graphies, même valeur</i>"]
+        t_ctrl --> t_setmodel["✅ set_model avec model à None omet la clé<br/>jamais un null : effacer n'est pas régler sur rien"]
+        t_fmt["🔴 ControlProtocolFormat — configuration morte<br/>stockée par le builder, affichée par Debug, lue par PERSONNE<br/>send_control_request code en dur l'enveloppe control_request<br/>ni sdk_control_request de Legacy ni control de Control<br/>et Auto ne détecte rien<br/><i>test épinglant le seul effet observable : le stockage</i>"]
+        t_ctrl --> t_fmt
+        t_ctrl --> t_legacy
+        t_legacy["✅ ControlRequest et ControlResponse hérités<br/>InterruptAck donne le tag interruptack<br/>et non interrupt_ack"]
+    end
+
+    subgraph errs["errors.rs — ce qu'un appelant peut encore apprendre"]
+        direction TB
+
+        err_enum["✅ SdkError — 19 variantes, Display via thiserror<br/><i>vérifié : table exhaustive des 19, aucun Display vide</i>"]
+        err_enum --> err_src["✅ chaîne source : ProcessError, JsonError et<br/>CliJsonDecodeError la conservent<br/>les variantes de pure donnée n'en ont aucune"]
+        err_enum --> err_rec["✅ is_recoverable : Timeout, ChannelClosed,<br/>UnexpectedStreamEnd, ProcessExited — rien d'autre<br/>ConnectionError et TransportError NE le sont PAS"]
+        err_enum --> err_cfg["✅ is_config_error : CliNotFound, ConfigError,<br/>NotSupported — les deux classes restent disjointes"]
+        err_enum --> err_code["🔴 le code de CliError n'est jamais rendu par Display<br/>avec ou sans code, le message est identique"]
+        err_enum --> err_lag["🔴 From de broadcast RecvError : Lagged n devient<br/>ChannelClosed, le nombre n de messages perdus est jeté<br/><i>vérifié : Lagged de 7, le 7 est absent du message</i>"]
+        err_enum --> err_send["✅ From de mpsc SendError donne ChannelSendError<br/>le payload non délivré n'est pas rapporté"]
+    end
+
+    e_type --> err_enum
+    e_content --> err_enum
+    e_arr --> err_enum
+    e_event --> err_enum
+    e_evtype --> err_enum
+
+    u_ok --> t_msg
+    u_text --> t_msg
+    a_loop --> t_msg
+    s_flat --> t_msg
+    r_ok --> t_msg
+    st_ok --> t_msg
+
+    t_alias --> consumer["🔴 internal_query.rs — if let Ok de from_value<br/>un échec de désérialisation est avalé sans log<br/>la requête de contrôle est perdue et le tour se bloque<br/>domaine sdk-control, hors de ce diagramme"]

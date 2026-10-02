@@ -562,4 +562,68 @@ mod tests {
         let result = detect_and_convert_tool_call(content, &Some(vec![]));
         assert!(result.is_none());
     }
+
+    // ═══════════════════════════════════════════════════════════════
+    //  Branches reached by no other test
+    // ═══════════════════════════════════════════════════════════════
+
+    /// A ```` ```json ```` fence whose body is not JSON does not abort the
+    /// search: `extract_json_from_content` falls through to the brace scan, and
+    /// with no brace anywhere in the content the answer is `None` rather than a
+    /// partially-parsed value.
+    #[test]
+    fn test_extract_json_markdown_block_with_unparsable_body() {
+        let content = "```json\nnot json at all\n```";
+        assert!(extract_json_from_content(content).is_none());
+    }
+
+    /// Same fence, but a real object sits *after* it: the invalid fence is
+    /// skipped and the brace scan wins. This pins which of the two extraction
+    /// strategies has the last word.
+    #[test]
+    fn test_extract_json_unparsable_fence_then_a_real_object() {
+        let content = "```json\noops\n```\nhere it is: {\"query\": \"nexus\"}";
+        let extracted =
+            extract_json_from_content(content).expect("the brace scan must find the object");
+        assert_eq!(extracted["query"], "nexus");
+    }
+
+    /// `detect_tool_name` is also reachable with no tool list at all (it is a
+    /// free function, not only an arm of `detect_and_convert_tool_call`). With
+    /// `None` it still honours an explicit `action`/`function`/`tool`/`name`
+    /// field, and otherwise has nothing to match against.
+    #[test]
+    fn test_detect_tool_name_without_any_requested_tools() {
+        assert_eq!(
+            detect_tool_name(&json!({"tool": "fetch_url"}), &None),
+            Some("fetch_url".to_string())
+        );
+        // No name field and no tool list: the schema loop is skipped entirely.
+        assert_eq!(detect_tool_name(&json!({"url": "https://x"}), &None), None);
+    }
+
+    /// A JSON **array** in the response is never converted, even with tools
+    /// requested: `detect_tool_name` cannot match a schema against a non-object
+    /// and the "use the first tool" fallback is guarded by `is_object()`. So the
+    /// array is dropped and the caller keeps the text answer.
+    #[test]
+    fn test_detect_and_convert_json_array_is_not_a_tool_call() {
+        let tools = vec![make_tool(
+            "search",
+            json!({"type": "object", "properties": {"query": {}}}),
+        )];
+        assert!(detect_and_convert_tool_call("[1, 2, 3]", &Some(tools.clone())).is_none());
+        // Even when the array *contains* a well-formed call, the top level
+        // decides: an array of calls is not supported.
+        let batched = r#"[{"action": "search", "query": "nexus"}]"#;
+        assert!(detect_and_convert_tool_call(batched, &Some(tools)).is_none());
+    }
+
+    /// A non-object scalar at top level takes the same path: `"42"` parses as
+    /// JSON, matches no schema, and is not an object, so no call is emitted.
+    #[test]
+    fn test_detect_and_convert_scalar_json_is_not_a_tool_call() {
+        let tools = vec![make_tool("noop", json!({"type": "object"}))];
+        assert!(detect_and_convert_tool_call("42", &Some(tools)).is_none());
+    }
 }

@@ -34,6 +34,36 @@ impl From<&str> for QueryInput {
     }
 }
 
+/// What [`query`] hands back: the message stream, plus the guard whose drop tells
+/// the cleanup task that the caller has stopped reading.
+///
+/// That guard used to be a `Sender` clone of the very channel the stream drains,
+/// and it deadlocked the end of the stream. A `tokio::sync::mpsc` receiver only
+/// reports end-of-stream once *every* sender is gone, while
+/// `Sender::closed()` only completes once the receiver is gone: the cleanup task
+/// held a sender waiting for the receiver, the receiver waited for that sender,
+/// and neither ever moved. A caller looping
+/// `while let Some(m) = stream.next().await` — the loop this module's own
+/// examples show — therefore hung for ever after the final `result` message, with
+/// the CLI's child process still around. A oneshot sender carries the same
+/// "the caller is gone" signal without keeping the message channel alive.
+struct QueryStream {
+    inner: ReceiverStream<Result<Message>>,
+    /// Never sent through; only its `Drop` matters.
+    _caller_alive: tokio::sync::oneshot::Sender<()>,
+}
+
+impl Stream for QueryStream {
+    type Item = Result<Message>;
+
+    fn poll_next(
+        self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        Pin::new(&mut self.get_mut().inner).poll_next(cx)
+    }
+}
+
 /// Query Claude Code for one-shot or unidirectional streaming interactions.
 ///
 /// This function is ideal for simple, stateless queries where you don't need
@@ -150,7 +180,18 @@ async fn query_print_mode(
     use tokio::process::Command;
     use tokio::sync::Mutex;
 
-    let cli_path = crate::transport::subprocess::find_claude_cli()?;
+    // `options.cli_path` used to be ignored here: print mode always searched the
+    // PATH and the usual install locations, so an explicit path — a non-standard
+    // install, or a test double — was silently dropped and the call failed on a
+    // host with no `claude` anywhere. `SubprocessTransport::new` and
+    // `SubprocessTransport::for_print_mode` both honour it; this now matches them.
+    let cli_path = match options.cli_path {
+        Some(ref explicit_path) => {
+            debug!("Using explicit CLI path: {:?}", explicit_path);
+            explicit_path.clone()
+        },
+        None => crate::transport::subprocess::find_claude_cli()?,
+    };
     let mut cmd = Command::new(&cli_path);
 
     // Build command with --print mode
@@ -295,8 +336,25 @@ async fn query_print_mode(
         }
     }
 
+    // Working directory and caller-supplied environment, in the same order as
+    // `SubprocessTransport::build_command`: `options.env` is applied last, so a
+    // caller can deliberately override `CLAUDE_CODE_MAX_OUTPUT_TOKENS`. Print mode
+    // used to drop both on the floor, which made `options.env` a no-op for
+    // `query()` while it worked for every other entry point.
+    if let Some(ref cwd) = options.cwd {
+        cmd.current_dir(cwd);
+    }
+    for (key, value) in &options.env {
+        cmd.env(key, value);
+    }
+
     info!("Starting Claude CLI with --print mode");
-    debug!("Command: {:?}", cmd);
+    // Never `{:?}` a Command: its Debug prints every argument and every
+    // environment value, including whatever follows --mcp-config.
+    debug!(
+        "Command: {}",
+        crate::transport::subprocess::describe_command_redacted(cmd.as_std())
+    );
 
     if let Some(user) = options.user.as_deref() {
         crate::transport::subprocess::apply_process_user(&mut cmd, user)?;
@@ -331,8 +389,9 @@ async fn query_print_mode(
         }
     });
 
-    // Clone tx for cleanup task
-    let tx_cleanup = tx.clone();
+    // Signal channel for "the caller dropped the stream". Deliberately *not* a
+    // clone of `tx`: see `QueryStream`.
+    let (caller_alive_tx, caller_alive_rx) = tokio::sync::oneshot::channel::<()>();
 
     // Spawn stdout handler
     tokio::spawn(async move {
@@ -391,8 +450,9 @@ async fn query_print_mode(
 
     // Spawn cleanup task that will ensure process is killed when stream is dropped
     tokio::spawn(async move {
-        // Wait for the channel to be closed (all receivers dropped)
-        tx_cleanup.closed().await;
+        // Resolves as `Err(RecvError)` as soon as `QueryStream` — and with it the
+        // sender — is dropped. Nothing is ever sent through it.
+        let _ = caller_alive_rx.await;
 
         // Kill the process if it's still running
         let mut child = child.lock().await;
@@ -418,17 +478,22 @@ async fn query_print_mode(
         }
     });
 
-    // Return receiver as stream
-    Ok(ReceiverStream::new(rx))
+    // Return receiver as stream, with the drop guard attached to it.
+    Ok(QueryStream {
+        inner: ReceiverStream::new(rx),
+        _caller_alive: caller_alive_tx,
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// Goes through `From<String>`; `test_query_input_from_str` covers the
+    /// `&str` impl. The two used to be the same test twice over.
     #[test]
     fn test_query_input_from_string() {
-        let input: QueryInput = "Hello".into();
+        let input: QueryInput = String::from("Hello").into();
         match input {
             QueryInput::Text(s) => assert_eq!(s, "Hello"),
             _ => panic!("Expected Text variant"),
@@ -464,5 +529,49 @@ mod tests {
         assert!(options.extra_args.contains_key("custom-flag"));
         assert!(options.extra_args.contains_key("--already-dashed"));
         assert!(options.extra_args.contains_key("-s"));
+    }
+
+    /// `QueryInput::Stream` is public, documented as "continuous interaction",
+    /// and refused: the mode was never implemented. Pinned so the refusal stays
+    /// an explicit `NotSupported` instead of drifting into a panic or a silent
+    /// fall-back to one-shot mode.
+    ///
+    /// This test is also the only possible caller of that branch. `lib.rs`
+    /// re-exports `query` but **not** `QueryInput`, so outside the crate the
+    /// only way into `query()` is `From<String>`/`From<&str>`, i.e. the `Text`
+    /// variant: the `Stream` variant and this error are unreachable public API.
+    #[tokio::test]
+    async fn a_stream_input_is_refused_as_not_supported() {
+        let input = QueryInput::Stream(Box::pin(futures::stream::empty::<InputMessage>()));
+
+        let error = query(input, None)
+            .await
+            .err()
+            .expect("streaming input is not implemented");
+
+        match error {
+            crate::SdkError::NotSupported { feature } => assert!(
+                feature.contains("Streaming input mode"),
+                "unhelpful feature name: {feature}"
+            ),
+            other => panic!("expected NotSupported, got {other:?}"),
+        }
+    }
+
+    /// `query()` advertises the SDK entrypoint to the CLI — but it does so by
+    /// mutating the **calling process's** environment and letting the child
+    /// inherit it, where `SubprocessTransport::build_command` sets it on the
+    /// `Command` alone. Pinned as the documented side effect it is: a library
+    /// call that permanently edits its caller's environment.
+    #[tokio::test]
+    async fn query_marks_the_entrypoint_on_the_calling_process() {
+        let input = QueryInput::Stream(Box::pin(futures::stream::empty::<InputMessage>()));
+        assert!(query(input, None).await.is_err());
+
+        assert_eq!(
+            std::env::var("CLAUDE_CODE_ENTRYPOINT").as_deref(),
+            Ok("sdk-rust"),
+            "query() leaves the entrypoint marker behind in its caller"
+        );
     }
 }

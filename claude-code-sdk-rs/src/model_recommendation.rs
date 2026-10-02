@@ -378,4 +378,123 @@ mod tests {
             Some("claude-sonnet-4-5-20250929")
         );
     }
+
+    /// `remove()` hands back the mapping it deleted, then `None`.
+    #[test]
+    fn test_remove_returns_the_previous_mapping_then_none() {
+        let mut recommender = ModelRecommendation::with_defaults();
+
+        assert_eq!(
+            recommender.remove("simple"),
+            Some("claude-3-5-haiku-20241022".to_string())
+        );
+        assert_eq!(recommender.remove("simple"), None);
+        assert_eq!(recommender.suggest("simple"), None);
+    }
+
+    /// `add()` overwrites an existing mapping silently.
+    #[test]
+    fn test_add_overwrites_an_existing_task_type() {
+        let mut recommender = ModelRecommendation::with_defaults();
+        recommender.add("simple", "claude-opus-4-7");
+        assert_eq!(recommender.suggest("simple"), Some("claude-opus-4-7"));
+        assert_eq!(recommender.all_recommendations().len(), 14);
+    }
+
+    /// Lookups are case-sensitive and not trimmed: a near-miss returns `None`
+    /// rather than the obvious match.
+    #[test]
+    fn test_suggest_is_case_sensitive_and_untrimmed() {
+        let recommender = ModelRecommendation::with_defaults();
+        assert_eq!(recommender.suggest("Simple"), None);
+        assert_eq!(recommender.suggest(" simple"), None);
+        assert_eq!(recommender.suggest(""), None);
+    }
+
+    /// `custom()` performs no validation at all: an empty table, an empty task
+    /// type and an empty model name are all accepted.
+    #[test]
+    fn test_custom_accepts_an_empty_and_nonsensical_table() {
+        let empty = ModelRecommendation::custom(HashMap::new());
+        assert_eq!(empty.suggest("anything"), None);
+        assert!(empty.task_types().is_empty());
+
+        let mut map = HashMap::new();
+        map.insert(String::new(), String::new());
+        let nonsense = ModelRecommendation::custom(map);
+        assert_eq!(nonsense.suggest(""), Some(""));
+    }
+
+    /// `estimate_cost_multiplier` matches exact strings only, so an unexpected
+    /// casing silently falls back to the Sonnet price.
+    #[test]
+    fn test_cost_multiplier_matching_is_exact_and_falls_back_silently() {
+        assert_eq!(estimate_cost_multiplier("HAIKU"), 5.0);
+        assert_eq!(estimate_cost_multiplier("claude-3-5-haiku"), 5.0);
+        assert_eq!(estimate_cost_multiplier(""), 5.0);
+    }
+
+    /// The price table predates the current model lineup: the models the API
+    /// crate advertises today (`claude-haiku-4-5`, `claude-opus-4-5`, …) are
+    /// unknown here and therefore priced as Sonnet. For Haiku 4.5 that is a 5x
+    /// overestimate — see `claude-code-api/src/models/claude.rs` for the list
+    /// this table should track.
+    #[test]
+    fn test_current_lineup_is_missing_from_the_cost_table() {
+        assert_eq!(
+            estimate_cost_multiplier("claude-haiku-4-5"),
+            5.0,
+            "a Haiku-class model is priced as Sonnet because it is unknown"
+        );
+        assert_eq!(estimate_cost_multiplier("claude-opus-4-5"), 5.0);
+        // Opus 4.6 and 4.7 *are* known, so the gap is specific to the newer
+        // Haiku/Opus ids rather than systematic.
+        assert_eq!(estimate_cost_multiplier("claude-opus-4-6"), 15.0);
+        assert_eq!(estimate_cost_multiplier("claude-opus-4-7"), 15.0);
+    }
+
+    /// Consistency between the two halves of this module: every model the
+    /// default table recommends must have an explicit price, never the unknown
+    /// fallback that happens to be 5.0.
+    #[test]
+    fn test_every_default_recommendation_has_an_explicit_price() {
+        let recommender = ModelRecommendation::with_defaults();
+        let expected: HashMap<&str, f64> = HashMap::from([
+            ("claude-3-5-haiku-20241022", 1.0),
+            ("claude-sonnet-4-5-20250929", 5.0),
+            ("claude-opus-4-7", 15.0),
+        ]);
+
+        for (task_type, model) in recommender.all_recommendations() {
+            let price = expected.get(model.as_str()).copied().unwrap_or_else(|| {
+                panic!("task type {task_type:?} recommends unpriced model {model:?}")
+            });
+            assert_eq!(
+                estimate_cost_multiplier(model),
+                price,
+                "price drift for {model}"
+            );
+        }
+    }
+
+    /// The three quick helpers must stay ordered by price, cheapest first.
+    #[test]
+    fn test_quick_helpers_are_ordered_by_cost() {
+        assert!(
+            estimate_cost_multiplier(cheapest_model()) < estimate_cost_multiplier(balanced_model())
+        );
+        assert!(
+            estimate_cost_multiplier(balanced_model()) < estimate_cost_multiplier(best_model())
+        );
+        assert_eq!(balanced_model(), latest_sonnet());
+    }
+
+    /// The helpers and the default table must not disagree.
+    #[test]
+    fn test_quick_helpers_match_the_default_table() {
+        let recommender = ModelRecommendation::with_defaults();
+        assert_eq!(recommender.suggest("cheap"), Some(cheapest_model()));
+        assert_eq!(recommender.suggest("balanced"), Some(balanced_model()));
+        assert_eq!(recommender.suggest("best"), Some(best_model()));
+    }
 }
