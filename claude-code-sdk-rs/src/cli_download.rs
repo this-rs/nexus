@@ -52,6 +52,15 @@ const NPM_REGISTRY_LATEST_URL: &str = "https://registry.npmjs.org/@anthropic-ai/
 
 /// Environment variables honoured **only in test builds** (see [`test_override`]).
 const ENV_CACHE_DIR: &str = "CC_SDK_TEST_CACHE_DIR";
+/// Value of [`ENV_CACHE_DIR`] that makes [`get_cache_dir`] answer `None`, as it
+/// would on a platform where neither a home nor a cache directory resolves.
+///
+/// Compiled **only in test builds**. There is no other way to reach that branch:
+/// `dirs::home_dir()` falls back to `getpwuid_r`, so it cannot fail for a real
+/// process — yet the `ConfigError` it produces is part of [`download_cli`]'s
+/// documented contract, so it has to be assertable.
+#[cfg(test)]
+const ENV_CACHE_DIR_UNRESOLVABLE: &str = "<unresolvable>";
 #[cfg(feature = "auto-download")]
 const ENV_INSTALL_SCRIPT_URL: &str = "CC_SDK_TEST_INSTALL_SCRIPT_URL";
 #[cfg(feature = "auto-download")]
@@ -104,6 +113,10 @@ fn npm_binary() -> String {
 /// Get the cache directory for the SDK
 pub fn get_cache_dir() -> Option<PathBuf> {
     if let Some(dir) = test_override(ENV_CACHE_DIR) {
+        #[cfg(test)]
+        if dir == ENV_CACHE_DIR_UNRESOLVABLE {
+            return None;
+        }
         return Some(PathBuf::from(dir));
     }
     #[cfg(target_os = "macos")]
@@ -123,11 +136,13 @@ pub fn get_cache_dir() -> Option<PathBuf> {
 /// Get the path to the cached CLI binary
 pub fn get_cached_cli_path() -> Option<PathBuf> {
     let cache_dir = get_cache_dir()?;
-    let cli_name = if cfg!(windows) {
-        "claude.exe"
-    } else {
-        "claude"
-    };
+    // `#[cfg]`, not `cfg!()`: with the runtime form both arms are compiled on
+    // every target, so whichever one the platform cannot take is reported as a
+    // permanently uncovered line — on Windows it was `"claude"` that never ran.
+    #[cfg(windows)]
+    let cli_name = "claude.exe";
+    #[cfg(not(windows))]
+    let cli_name = "claude";
     Some(cache_dir.join(cli_name))
 }
 
@@ -141,9 +156,12 @@ pub fn is_cli_cached() -> bool {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            if let Ok(metadata) = path.metadata() {
-                return metadata.permissions().mode() & 0o111 != 0;
-            }
+            // `is_ok_and`, not `if let Ok(..)`: the metadata call cannot fail
+            // here (`exists()` and `is_file()` above just stat'ed the same path),
+            // so the former `if let` left an unreachable fall-through branch.
+            return path
+                .metadata()
+                .is_ok_and(|metadata| metadata.permissions().mode() & 0o111 != 0);
         }
         #[cfg(not(unix))]
         {
@@ -410,12 +428,13 @@ async fn install_cli_unix(
                 #[cfg(unix)]
                 {
                     use std::os::unix::fs::PermissionsExt;
-                    let mut perms = std::fs::metadata(target_path)
-                        .map_err(|e| {
-                            SdkError::ConfigError(format!("Failed to get file permissions: {}", e))
-                        })?
-                        .permissions();
-                    perms.set_mode(0o755);
+                    // The previous mode is irrelevant: `set_mode(0o755)` replaced
+                    // it wholesale. Reading the metadata back only added a stat
+                    // and an error branch no test could ever provoke.
+                    let perms = std::fs::Permissions::from_mode(0o755);
+                    // NOTE: the error arm below stays uncovered. `chmod` on a
+                    // regular file this process just created, in a directory it
+                    // just wrote to, does not fail.
                     std::fs::set_permissions(target_path, perms).map_err(|e| {
                         SdkError::ConfigError(format!("Failed to set file permissions: {}", e))
                     })?;
@@ -637,6 +656,13 @@ pub async fn ensure_cli(auto_download: bool) -> Result<PathBuf> {
     // Check cached CLI. `is_file()` matters: without it a *directory* named
     // `claude` in the cache directory was returned as if it were the binary,
     // and the caller only found out when the spawn failed.
+    //
+    // NOTE: unreachable today, and deliberately kept as a safety net.
+    // `find_claude_cli()` above probes `get_cached_cli_path()` itself, with the
+    // same `exists() && is_file()` test and *before* it can fail (see
+    // `transport::subprocess::find_claude_cli`), so it already returned `Ok`
+    // whenever this condition would hold. This block only comes back to life if
+    // that probe is ever dropped from `find_claude_cli`.
     if let Some(cached_path) = get_cached_cli_path()
         && cached_path.exists()
         && cached_path.is_file()
@@ -670,6 +696,8 @@ mod tests {
     use super::*;
     use serial_test::serial;
     use std::path::Path;
+    // Only the `auto-download` helpers need shared mutable state.
+    #[cfg(feature = "auto-download")]
     use std::sync::{Arc, Mutex};
     use tempfile::TempDir;
 
@@ -682,6 +710,30 @@ mod tests {
     // `npm`. Nothing here touches the network, the user's cache, or a real
     // Claude CLI. All of these tests mutate process environment variables and
     // are therefore `#[serial]`.
+    //
+    // What stays uncovered in this module, and why — so the next person does not
+    // spend the afternoon re-deriving it:
+    //
+    // * The `find_cli_in_known_locations()` safety net inside the install-script
+    //   branch. Unreachable by construction; the comment at that call site says
+    //   why. The *condition* is exercised (see
+    //   `test_script_success_with_no_cli_anywhere_reports_both_methods_failed`),
+    //   only its `Some` arm is not.
+    // * The cached-CLI branch of `ensure_cli`. Same story: `find_claude_cli()`
+    //   runs the identical probe first. Documented at the call site.
+    // * `set_permissions` failing on the file the npm fallback has just copied.
+    //   `chmod` on a regular file the process owns, in a directory it just wrote
+    //   to, does not fail; provoking it needs another owner, a file flag or a
+    //   read-only mount, i.e. privileges a unit test does not have.
+    // * The argument line of every *multi-line* `tracing` macro call — e.g.
+    //   `target_path.display()` under `info!(`. `llvm-cov` reports a zero count
+    //   for those lines even though the code runs: the argument tokens appear
+    //   more than once in the macro expansion, and the counter it maps to the
+    //   source line belongs to an expansion branch that is never taken. The
+    //   proof is right here — `test_successful_install_is_logged_with_the_target_path`
+    //   asserts the formatted path reaches a subscriber, and writing the same
+    //   call on one line makes the line leave the report instead of flipping to
+    //   covered. Do not chase these with more tests.
     // =====================================================================
 
     /// Sets environment variables and restores the previous values on drop,
@@ -722,6 +774,14 @@ mod tests {
         guard
     }
 
+    /// Make `get_cache_dir()` answer `None` — what a platform with neither a
+    /// home nor a cache directory would do, and what no real platform does.
+    fn with_unresolvable_cache_dir() -> EnvGuard {
+        let mut guard = EnvGuard::new();
+        guard.set(ENV_CACHE_DIR, ENV_CACHE_DIR_UNRESOLVABLE);
+        guard
+    }
+
     /// Records every `(downloaded, total)` pair the production code reports.
     #[cfg(feature = "auto-download")]
     type ProgressLog = Arc<Mutex<Vec<(u64, Option<u64>)>>>;
@@ -737,9 +797,14 @@ mod tests {
     }
 
     /// Collects everything a thread-local subscriber is handed.
+    ///
+    /// Only the `auto-download` code paths log anything worth asserting on, so
+    /// this and `capture_logs` below would be dead code without that feature.
+    #[cfg(feature = "auto-download")]
     #[derive(Clone)]
     struct VecWriter(Arc<Mutex<Vec<u8>>>);
 
+    #[cfg(feature = "auto-download")]
     impl std::io::Write for VecWriter {
         fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
             self.0.lock().unwrap().extend_from_slice(buf);
@@ -751,6 +816,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "auto-download")]
     impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for VecWriter {
         type Writer = VecWriter;
 
@@ -765,6 +831,7 @@ mod tests {
     /// The `tracing` macros do not format their arguments unless a subscriber is
     /// listening, so this is the only way to assert on what the download code
     /// actually reports.
+    #[cfg(feature = "auto-download")]
     fn capture_logs<T>(
         level: tracing::Level,
         body: impl std::future::Future<Output = T>,
@@ -792,6 +859,7 @@ mod tests {
 
     /// A path that cannot possibly resolve, used to prove that a code path
     /// never shells out to the real `npm`.
+    #[cfg(feature = "auto-download")]
     fn unusable_npm(dir: &Path) -> std::path::PathBuf {
         dir.join("no-such-npm")
     }
@@ -897,6 +965,44 @@ mod tests {
             "claude"
         });
         assert_eq!(get_cached_cli_path(), Some(expected));
+    }
+
+    /// Nothing downstream may invent a path when the platform resolves no cache
+    /// directory at all.
+    #[test]
+    #[serial]
+    fn test_an_unresolvable_cache_dir_yields_no_cached_cli_path() {
+        let _guard = with_unresolvable_cache_dir();
+
+        assert_eq!(get_cache_dir(), None);
+        assert_eq!(get_cached_cli_path(), None);
+        assert!(!is_cli_cached());
+    }
+
+    /// `download_cli` cannot invent one either: its documented answer is a
+    /// `ConfigError` naming the cache directory, and it is produced before any
+    /// endpoint is contacted.
+    #[cfg(feature = "auto-download")]
+    #[tokio::test]
+    #[serial]
+    async fn test_download_cli_reports_a_config_error_when_the_cache_dir_is_unresolvable() {
+        let tmp = TempDir::new().unwrap();
+        let mut guard = with_unresolvable_cache_dir();
+        // Belt and braces: the error is raised before any installer runs, but a
+        // regression there must still not reach the real endpoints. Nothing
+        // listens on port 1, and the npm path cannot resolve.
+        guard
+            .set(ENV_INSTALL_SCRIPT_URL, "http://127.0.0.1:1/install.sh")
+            .set(ENV_NPM_REGISTRY_URL, "http://127.0.0.1:1/latest")
+            .set(ENV_NPM_BIN, unusable_npm(tmp.path()));
+
+        match download_cli(None, None).await.unwrap_err() {
+            SdkError::ConfigError(message) => assert_eq!(
+                message, "Cannot determine cache directory for CLI download",
+                "the error must name what could not be determined"
+            ),
+            other => panic!("expected ConfigError, got {other:?}"),
+        }
     }
 
     // =====================================================================
@@ -1200,6 +1306,25 @@ mod tests {
             std::env::temp_dir().join("cc-sdk-npm-install")
         }
 
+        /// The smallest `PATH` that still resolves `bash` — the install script
+        /// branch shells out to it — while containing no `claude` of its own.
+        const BASH_ONLY_PATH: &str = "/usr/bin:/bin";
+
+        /// `find_claude_cli()` and `find_cli_in_known_locations()` both probe a
+        /// few absolute paths that no environment variable can hide. A machine
+        /// with a CLI sitting there cannot run the "nothing is installed"
+        /// scenarios at all.
+        fn a_cli_sits_at_a_hard_coded_absolute_path() -> bool {
+            [
+                "/usr/local/bin/claude",
+                "/usr/local/bin/claude-code",
+                "/opt/homebrew/bin/claude",
+                "/opt/homebrew/bin/claude-code",
+            ]
+            .iter()
+            .any(|candidate| Path::new(candidate).is_file())
+        }
+
         #[tokio::test]
         #[serial]
         async fn test_official_script_installing_into_the_cache_is_accepted() {
@@ -1306,6 +1431,89 @@ mod tests {
                     panic!("lookup said {preexisting:?} but install_cli_unix returned {result:?}")
                 },
             }
+        }
+
+        /// Same situation, but with `PATH`, `HOME` and the cache directory all
+        /// pinned, so the outcome no longer depends on what the machine happens
+        /// to have installed: a CLI reachable through `PATH` is accepted, and the
+        /// log says where it came from.
+        ///
+        /// The test above can only assert "whatever the lookup would have found";
+        /// on a runner with no CLI at all it never exercises this branch.
+        #[test]
+        #[serial]
+        fn test_script_success_without_installing_accepts_the_cli_on_path() {
+            let tmp = TempDir::new().unwrap();
+            let bin = tmp.path().join("bin");
+            std::fs::create_dir_all(&bin).unwrap();
+            write_executable(&bin.join("claude"), "#!/bin/sh\nexit 1\n");
+            let cache = tmp.path().join("cache");
+            let target = cache.join("claude");
+
+            let (found, logs) = capture_logs(tracing::Level::INFO, async {
+                // `exit 0`: the script claims success and installs nothing.
+                let server = script_server(200, "exit 0\n").await;
+                let mut guard = point_at(&server, &unusable_npm(tmp.path()));
+                guard
+                    .set("PATH", format!("{}:{}", bin.display(), BASH_ONLY_PATH))
+                    .set("HOME", tmp.path())
+                    .set(ENV_CACHE_DIR, &cache);
+                install_cli_unix("latest", &target, None).await
+            });
+
+            let found = found.expect("the CLI reachable through PATH must be accepted");
+            assert_eq!(
+                std::fs::canonicalize(&found).unwrap(),
+                std::fs::canonicalize(bin.join("claude")).unwrap(),
+                "the CLI found on PATH must be the one returned"
+            );
+            assert!(
+                !target.exists(),
+                "the script installed nothing at the target path"
+            );
+            assert!(
+                logs.contains("Official install script succeeded → found CLI at"),
+                "the fallback must say the CLI was found, not installed, got: {logs}"
+            );
+        }
+
+        /// The script claims success, installs nothing, and no CLI is reachable
+        /// anywhere: the whole lookup chain runs to its end —
+        /// `find_claude_cli()`, then `find_cli_in_known_locations()` — and the
+        /// caller gets the manual instructions.
+        #[tokio::test]
+        #[serial]
+        async fn test_script_success_with_no_cli_anywhere_reports_both_methods_failed() {
+            if a_cli_sits_at_a_hard_coded_absolute_path() {
+                eprintln!(
+                    "skipped: a Claude CLI is installed at an absolute path hard-coded \
+                     in the lookup chain, which no test can hide"
+                );
+                return;
+            }
+
+            let tmp = TempDir::new().unwrap();
+            let home = tmp.path().join("home");
+            std::fs::create_dir_all(&home).unwrap();
+            let cache = tmp.path().join("cache");
+            let target = cache.join("claude");
+
+            let server = script_server(200, "exit 0\n").await;
+            let mut guard = point_at(&server, &unusable_npm(tmp.path()));
+            guard
+                .set("PATH", BASH_ONLY_PATH)
+                .set("HOME", &home)
+                .set(ENV_CACHE_DIR, &cache);
+
+            let err = install_cli_unix("latest", &target, None).await.unwrap_err();
+            match err {
+                SdkError::CliNotFound { searched_paths } => assert!(
+                    searched_paths.contains("install script and npm both failed"),
+                    "got: {searched_paths}"
+                ),
+                other => panic!("expected CliNotFound, got {other:?}"),
+            }
+            assert!(!target.exists(), "nothing must be written on failure");
         }
 
         #[tokio::test]
