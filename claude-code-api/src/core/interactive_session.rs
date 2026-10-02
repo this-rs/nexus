@@ -829,7 +829,6 @@ impl Drop for InteractiveSessionManager {
 mod tests {
     use super::*;
     use serde_json::json;
-    use std::io::Write as _;
     use std::path::PathBuf;
     use std::time::Duration;
     use tempfile::TempDir;
@@ -867,9 +866,6 @@ mod tests {
             let payload = dir.path().join("payload.ndjson");
             std::fs::write(&payload, stdout).expect("write the fake CLI payload");
             let argv = dir.path().join("argv.txt");
-            let script = dir
-                .path()
-                .join(if cfg!(windows) { "fake.cmd" } else { "fake.sh" });
 
             let body = if cfg!(windows) {
                 let mut body = String::from("@echo off\r\n");
@@ -901,17 +897,7 @@ mod tests {
                 body
             };
 
-            let mut file = std::fs::File::create(&script).expect("create the fake CLI script");
-            file.write_all(body.as_bytes())
-                .expect("write the fake CLI script");
-            drop(file);
-
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
-                    .expect("chmod the fake CLI script");
-            }
+            let script = crate::fake_exec::plant_fake_cli(dir.path(), &body);
 
             Self {
                 _dir: dir,
@@ -1704,6 +1690,28 @@ mod tests {
         );
     }
 
+    /// DO NOT add a read of this child's stdout or stderr. It would hang on
+    /// Windows, and the hang would be silent.
+    ///
+    /// This test combines a **paused clock** with a **real child process**, and
+    /// it only survives that combination because nothing ever reads the child's
+    /// pipes. On Windows a child's stdio is `Blocking<ArcFile>`, so a pending
+    /// read is handed to `spawn_blocking`, whose `BlockingSchedule` calls
+    /// `clock.inhibit_auto_advance()`. The virtual clock then stops advancing
+    /// while a real `park_timeout` waits for a timer that can never fire:
+    /// a genuine deadlock, not a slow test. Unix takes a different path
+    /// (`PollEvented` on a pipe) and never shows it.
+    ///
+    /// Two tests in this crate already cost a 49-minute Windows job that wrote
+    /// no `test result:` line at all — a hang is an *absence of verdict*, so it
+    /// also hid two further Windows defects behind it. They were fixed by
+    /// extracting the timing logic so it is tested without a live child
+    /// (`collect_initial_response`, `sweep_expired_idle`). This test is the last
+    /// one still holding the dangerous pair, and it is only safe by omission.
+    ///
+    /// If you need the child's output here, drop `start_paused` and use a real
+    /// short timeout instead, or extract the logic under test the way the other
+    /// two were.
     #[tokio::test(start_paused = true)]
     async fn test_safety_timeout_ends_an_unanswered_turn() {
         // No `result` ever arrives: the 30-second net is the only way out.
@@ -2310,10 +2318,7 @@ mod tests {
         // together — and that an empty initial message is written nowhere.
         // Unix only: cmd.exe has no portable `cat`.
         let dir = tempfile::tempdir().expect("tempdir");
-        let script = dir.path().join("echo.sh");
-        std::fs::write(&script, "#!/bin/sh\nexec cat\n").expect("write the echo script");
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let script = crate::fake_exec::plant_fake_cli(dir.path(), "#!/bin/sh\nexec cat\n");
 
         let manager = manager_with(
             script.to_string_lossy().into_owned(),
