@@ -173,6 +173,26 @@ async fn collect_initial_response(
     }
 }
 
+/// Drains a CLI's stderr, logging every non-empty line at WARN, and returns on
+/// EOF.
+///
+/// Extracted from [`InteractiveSessionManager::create_session`] so that a test can
+/// `await` it to completion. That await is a **real** barrier: it returns only once
+/// the child has closed its stderr, which means the child has run.
+/// `tokio::task::yield_now()` cannot stand in for it — yielding re-polls Rust tasks
+/// that are already runnable, it does not make a forked `sh` execute its next
+/// command — which is how
+/// `test_stderr_is_logged_and_never_mixed_into_the_response` came to depend on a
+/// race. See that test for the measurements.
+async fn log_stderr_lines(stderr: tokio::process::ChildStderr) {
+    let reader = BufReader::new(stderr);
+    let mut lines = reader.lines();
+
+    while let Ok(Some(line)) = lines.next_line().await {
+        warn!("Claude stderr: {}", line);
+    }
+}
+
 /// Arguments whose VALUE (the next argument) must never reach a log.
 ///
 /// `--mcp-config` is either a path or a whole JSON document describing each MCP
@@ -628,14 +648,7 @@ impl InteractiveSessionManager {
         });
 
         // Handle stderr
-        tokio::spawn(async move {
-            let reader = BufReader::new(stderr);
-            let mut lines = reader.lines();
-
-            while let Ok(Some(line)) = lines.next_line().await {
-                warn!("Claude stderr: {}", line);
-            }
-        });
+        tokio::spawn(log_stderr_lines(stderr));
 
         // Send initial message (if not empty)
         if !initial_message.is_empty() {
@@ -1138,6 +1151,13 @@ mod tests {
     /// Waits until the response collector of `send_to_existing_session` has
     /// subscribed to the broadcast channel, so a test can inject messages
     /// without racing it.
+    ///
+    /// Yielding is a sound barrier *here*, and the reason is worth keeping: the
+    /// event waited for is a Rust task being polled, and that is exactly what a
+    /// yield hands it. It is **not** a sound barrier for anything that needs an
+    /// OS process to run — the whole budget below is microseconds of wall clock,
+    /// and no number of yields will make a child write to a pipe. Wait for the
+    /// side effect itself in that case; see [`log_stderr_lines`].
     async fn await_subscriber(output_tx: &broadcast::Sender<ClaudeCodeOutput>) {
         for _ in 0..1_000 {
             if output_tx.receiver_count() > 0 {
@@ -2132,43 +2152,64 @@ mod tests {
         );
     }
 
+    /// Two facts about stderr, each behind its own barrier.
+    ///
+    /// The logging half used to go through `create_session` and then spin
+    /// `tokio::task::yield_now()` up to 200 times waiting for the warning to show
+    /// up in the capture. That was never a barrier. `collect_all` returns as soon
+    /// as the *stdout* `result` line has been read, and the fake CLI writes its
+    /// stderr line only afterwards — with a `cat` process exiting in between — so
+    /// what the loop had to wait for was **a separate OS process running its next
+    /// command**. Yielding cannot make that happen: it re-polls Rust tasks that are
+    /// already runnable, and the whole 200-yield budget is a few tens of
+    /// microseconds of wall clock. Instrumented over 200 samples the line was
+    /// already there after 3 yields at the median (max 13) on an idle machine, and
+    /// after 5 (max 19) at load average 180 — a margin that looks wide in yields
+    /// and is paper-thin in time. On `ubuntu-latest / beta` it ran out and the
+    /// capture came back empty.
+    ///
+    /// Awaiting [`log_stderr_lines`] to EOF replaces it: the reader returns only
+    /// once the child has closed its stderr, so the write has provably happened,
+    /// in real time, with no budget to exhaust. It also runs first, while no other
+    /// stderr reader exists, so the capture can only hold what this reader wrote.
     #[tokio::test]
     async fn test_stderr_is_logged_and_never_mixed_into_the_response() {
         let cli = FakeCli::noisy_on_stderr(&result_line());
-        let manager = manager(&cli);
 
-        let (tx, rx) = mpsc::channel(8);
-        let (logs, outputs) = {
+        // Logged verbatim — the production reader, driven to EOF.
+        let mut child = spawn_fake(&cli);
+        let stderr = child.stderr.take().expect("stderr is piped");
+        let logs = {
             let (sink, _guard) = capture_logs(tracing::Level::WARN);
-            manager
-                .create_session(
-                    "c".to_string(),
-                    "opus".to_string(),
-                    String::new(),
-                    tx,
-                    false,
-                )
+            tokio::time::timeout(Duration::from_secs(30), log_stderr_lines(stderr))
                 .await
-                .unwrap();
-            let outputs = collect_all(rx).await;
-            // The stderr reader is a task of its own; give it its turn.
-            for _ in 0..200 {
-                if sink.contents().contains("Claude stderr") {
-                    break;
-                }
-                tokio::task::yield_now().await;
-            }
-            (sink.contents(), outputs)
+                .expect("the reader must reach EOF once the CLI exits");
+            sink.contents()
         };
+        child.wait().await.expect("reap the fake CLI");
 
-        assert_eq!(
-            types_of(&outputs),
-            vec!["result"],
-            "stderr is logged, never mixed into the output stream"
-        );
         assert!(
             logs.contains(&format!("Claude stderr: {STDERR_LINE}")),
             "the stderr line must reach the log verbatim: {logs}"
+        );
+
+        // Never mixed in — through a whole session, the caller sees `result` only.
+        let manager = manager(&cli);
+        let (tx, rx) = mpsc::channel(8);
+        manager
+            .create_session(
+                "c".to_string(),
+                "opus".to_string(),
+                String::new(),
+                tx,
+                false,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            types_of(&collect_all(rx).await),
+            vec!["result"],
+            "stderr is logged, never mixed into the output stream"
         );
     }
 
@@ -2568,8 +2609,10 @@ mod tests {
     #[tokio::test]
     async fn test_an_empty_message_fails_on_the_newline_alone() {
         // `write_all(b"")` is a no-op that cannot fail, so an empty message sent
-        // to a dead process fails on the newline that follows it. Nothing
-        // prevents an empty message here: only `create_session` filters those.
+        // to a dead process fails on the newline that follows it — never on the
+        // body. Nothing prevents an empty message here: only `create_session`
+        // filters those. Which *operation* first notices the dead pipe is
+        // platform-dependent; see the assertions at the bottom.
         let cli = FakeCli::exiting();
         let manager = manager(&cli);
 
@@ -2605,9 +2648,33 @@ mod tests {
             sink.contents()
         };
 
+        // The dead pipe is reported one step apart on the two platforms, so both
+        // shapes are named here rather than loosening the pattern:
+        //
+        // * Unix — `ChildStdin` is a `PollEvented` pipe, so the one-byte write
+        //   gets `EPIPE` on the spot: "Failed to write newline".
+        // * Windows — `ChildStdin` is a `tokio::io::blocking::Blocking` handle.
+        //   The byte is copied into its buffer and handed to the blocking pool,
+        //   so `write_all` reports success and the closed pipe is only observed
+        //   by the next operation: "Failed to flush stdin: The pipe is being
+        //   closed. (os error 232)".
+        //
+        // Either way the proven fact is the same one: the newline that follows an
+        // empty message could not be delivered, and the writer said so before
+        // giving up. The negative assertion is what keeps this from degenerating
+        // into "any error will do" — the empty body itself must never be the
+        // failure, because `write_all(b"")` does not call `poll_write` at all.
+        let failed_at_the_newline = logs.contains("Failed to write newline:");
+        let failed_at_the_flush = logs.contains("Failed to flush stdin:");
         assert!(
-            logs.contains("Failed to write newline:"),
-            "the newline is the write that fails for an empty message: {logs}"
+            failed_at_the_newline || failed_at_the_flush,
+            "the newline after an empty message must fail and be logged — at the \
+             write on Unix, at the flush on Windows: {logs}"
+        );
+        assert!(
+            !logs.contains("Failed to write to stdin:"),
+            "an empty payload is a no-op write and must never be the failure \
+             itself: {logs}"
         );
     }
 
