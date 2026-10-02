@@ -27,7 +27,11 @@
 //! the *call sites in `core/claude_manager.rs`*, which is the part a no-op
 //! helper or a forgotten site would get wrong.
 
-use std::io::Write as _;
+// Only `fake_exec` is needed here, not the whole harness: `mod support;` would
+// pull in the axum/wiremock scaffolding this file never touches.
+#[path = "support/fake_exec.rs"]
+mod fake_exec;
+
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -157,10 +161,6 @@ impl FakeCli {
         let dir = tempfile::tempdir().expect("tempdir for the fake CLI");
         let payload = dir.path().join("payload.ndjson");
         std::fs::write(&payload, stdout).expect("write the fake CLI payload");
-        let script = dir
-            .path()
-            .join(if cfg!(windows) { "fake.cmd" } else { "fake.sh" });
-
         let body = if cfg!(windows) {
             let mut body = String::from("@echo off\r\n");
             if stdin_first {
@@ -199,17 +199,7 @@ impl FakeCli {
             body
         };
 
-        let mut file = std::fs::File::create(&script).expect("create the fake CLI script");
-        file.write_all(body.as_bytes())
-            .expect("write the fake CLI script");
-        drop(file);
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
-                .expect("chmod the fake CLI script");
-        }
+        let script = fake_exec::plant_fake_cli(dir.path(), &body);
 
         Self { _dir: dir, script }
     }

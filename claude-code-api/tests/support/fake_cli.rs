@@ -24,7 +24,6 @@
 //! Keep the [`FakeClaudeCli`] alive for as long as the server: dropping it
 //! deletes the temporary directory holding the script.
 
-use std::io::Write;
 use std::path::PathBuf;
 
 use claude_code_api::models::claude::ClaudeCodeOutput;
@@ -87,18 +86,8 @@ impl FakeClaudeCli {
         let payload = dir.path().join("payload.ndjson");
         std::fs::write(&payload, stdout).expect("write fake claude payload");
 
-        let script = dir.path().join(script_name());
-        let mut file = std::fs::File::create(&script).expect("create fake claude script");
-        file.write_all(script_body(&payload, exit_code).as_bytes())
-            .expect("write fake claude script");
-        drop(file);
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
-                .expect("chmod fake claude script");
-        }
+        let script =
+            super::fake_exec::plant_fake_cli(dir.path(), &script_body(&payload, exit_code));
 
         Self { dir, script }
     }
@@ -111,14 +100,6 @@ impl FakeClaudeCli {
     /// The temporary directory holding the script and its payload.
     pub fn dir(&self) -> &std::path::Path {
         self.dir.path()
-    }
-}
-
-fn script_name() -> &'static str {
-    if cfg!(windows) {
-        "fake_claude.cmd"
-    } else {
-        "fake_claude.sh"
     }
 }
 
