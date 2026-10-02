@@ -12,3 +12,7 @@ pub mod process_pool;
 pub mod retry;
 pub mod session_manager;
 pub mod storage;
+
+/// Installing an executable without racing our own `fork`s. See the module docs.
+#[cfg(test)]
+pub(crate) mod test_exec;

@@ -865,7 +865,6 @@ impl Drop for InteractiveSessionManager {
 mod tests {
     use super::*;
     use serde_json::json;
-    use std::io::Write as _;
     use std::path::PathBuf;
     use std::time::Duration;
     use tempfile::TempDir;
@@ -937,17 +936,10 @@ mod tests {
                 body
             };
 
-            let mut file = std::fs::File::create(&script).expect("create the fake CLI script");
-            file.write_all(body.as_bytes())
-                .expect("write the fake CLI script");
-            drop(file);
-
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
-                    .expect("chmod the fake CLI script");
-            }
+            // NOT `File::create` + `write_all`: a writable descriptor held here is
+            // inherited by any concurrent `fork`, and the `execve` below then
+            // fails with `ETXTBSY`. See `core::test_exec`.
+            crate::core::test_exec::write_executable(&script, &body);
 
             Self {
                 _dir: dir,
@@ -2369,9 +2361,7 @@ mod tests {
         // Unix only: cmd.exe has no portable `cat`.
         let dir = tempfile::tempdir().expect("tempdir");
         let script = dir.path().join("echo.sh");
-        std::fs::write(&script, "#!/bin/sh\nexec cat\n").expect("write the echo script");
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        crate::core::test_exec::write_executable(&script, "#!/bin/sh\nexec cat\n");
 
         let manager = manager_with(
             script.to_string_lossy().into_owned(),

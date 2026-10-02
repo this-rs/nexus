@@ -319,7 +319,6 @@ impl ProcessPool {
 mod tests {
     use super::*;
     use crate::core::config::{FileAccessConfig, MCPConfig};
-    use std::io::Write as _;
     use std::path::PathBuf;
     use std::time::Duration;
     use tempfile::TempDir;
@@ -367,17 +366,9 @@ mod tests {
                 body
             };
 
-            let mut file = std::fs::File::create(&script).expect("create the fake CLI script");
-            file.write_all(body.as_bytes())
-                .expect("write the fake CLI script");
-            drop(file);
-
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
-                    .expect("chmod the fake CLI script");
-            }
+            // See `core::test_exec`: a writable descriptor held here is inherited by a
+            // concurrent `fork` and the `execve` then fails with `ETXTBSY`.
+            crate::core::test_exec::write_executable(&script, &body);
 
             Self { _dir: dir, script }
         }
