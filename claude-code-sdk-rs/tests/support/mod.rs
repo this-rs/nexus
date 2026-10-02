@@ -432,6 +432,30 @@ impl FakeCli {
         // Bounded by default: a mis-scripted transcript must fail a test, not hang CI.
         wire.insert("FAKE_CLAUDE_STDIN_TIMEOUT_MS".into(), "5000".into());
         wire.insert("FAKE_CLAUDE_MAX_RUNTIME_MS".into(), "15000".into());
+        // Keep the fake's coverage profile out of the workspace profile set.
+        //
+        // Under `cargo llvm-cov`, `fake_claude` is an instrumented workspace
+        // binary and inherits `LLVM_PROFILE_FILE`, so every one of the ~160
+        // spawns a suite makes writes a `.profraw` next to the test binaries'.
+        // Meanwhile the disconnect path exists to kill an uncooperative child
+        // (SIGINT → SIGTERM → SIGKILL), and a process killed while its atexit
+        // handler is flushing the profile leaves a *short* `.profraw`. One short
+        // file makes `llvm-profdata merge` reject the entire set — "invalid
+        // instrumentation profile data (file header is corrupt)" followed by
+        // "no profile can be merged" — so the Coverage job fails after every
+        // test has passed, intermittently and for reasons no test can show.
+        // Pointing the fake at its own temp dir means a damaged profile lands
+        // where nothing merges it. The fake is a test double, so its own
+        // coverage was never the measurement anyone wanted.
+        if std::env::var_os("LLVM_PROFILE_FILE").is_some() {
+            wire.insert(
+                "LLVM_PROFILE_FILE".into(),
+                self.dir()
+                    .join("fake-claude-%p-%16m.profraw")
+                    .display()
+                    .to_string(),
+            );
+        }
         for (key, value) in wire {
             options.env.entry(key).or_insert(value);
         }
