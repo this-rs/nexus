@@ -8,7 +8,7 @@
 # than implicit; binaries, `mod.rs` and re-exporting `lib.rs`
 # files legitimately live there.
 #
-# 13 diagrams, 75/79 source files claimed, 6 unclaimed.
+# 14 diagrams, 77/79 source files claimed, 4 unclaimed.
 
 diagrams:
   - name: nexus-api-core
@@ -80,6 +80,12 @@ diagrams:
     verified: 2026-10-01
     covers:
       - claude-code-sdk-rs/src/memory/*.rs
+  - name: nexus-sdk-provider-boundary
+    file: nexus-sdk-provider-boundary.mmd
+    verified: 2026-10-02
+    covers:
+      - claude-code-sdk-rs/src/lib.rs
+      - claude-code-sdk-rs/src/bin/fake_claude.rs
   - name: nexus-sdk-transport
     file: nexus-sdk-transport.mmd
     verified: 2026-10-01
@@ -106,6 +112,4 @@ orphans:
   - claude-code-api/src/bin/ccapi.rs
   - claude-code-api/src/core/mod.rs
   - claude-code-api/src/core/session_process.rs
-  - claude-code-sdk-rs/src/bin/fake_claude.rs
   - claude-code-sdk-rs/src/bin/test_interactive.rs
-  - claude-code-sdk-rs/src/lib.rs
