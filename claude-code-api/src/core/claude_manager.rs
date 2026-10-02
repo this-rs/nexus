@@ -425,7 +425,6 @@ mod tests {
     use super::*;
     use crate::core::config::{FileAccessConfig, MCPConfig};
     use serde_json::json;
-    use std::io::Write as _;
     use std::time::Duration;
     use tempfile::TempDir;
 
@@ -483,10 +482,6 @@ mod tests {
             let argv = dir.path().join("argv.txt");
             let stdin = dir.path().join("stdin.txt");
             let marker = dir.path().join("marker.txt");
-            let script = dir
-                .path()
-                .join(if cfg!(windows) { "fake.cmd" } else { "fake.sh" });
-
             let body = if cfg!(windows) {
                 let mut body = String::from("@echo off\r\n");
                 // Redirection first: an argument ending in a digit would
@@ -531,17 +526,7 @@ mod tests {
                 body
             };
 
-            let mut file = std::fs::File::create(&script).expect("create the fake CLI script");
-            file.write_all(body.as_bytes())
-                .expect("write the fake CLI script");
-            drop(file);
-
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
-                    .expect("chmod the fake CLI script");
-            }
+            let script = crate::fake_exec::plant_fake_cli(dir.path(), &body);
 
             Self {
                 _dir: dir,

@@ -11,11 +11,13 @@ coverage:
       default:
         target: auto
         threshold: 2%
-        informational: true  # Don't fail CI on coverage decrease
+        # Informational until the baseline is raised (sdk ~69%, api ~39%):
+        # the project-wide status never fails; only the patch gate blocks.
+        informational: true
     patch:
       default:
         target: 80%
-        informational: true
+        # Blocking: lines changed by a PR must be >=80% covered.
 
 parsers:
   gcov:

@@ -1,3 +1,105 @@
-# Diagramme -> code couvert. Voir README.md pour la charte.
-# Un fichier source sans diagramme propriétaire est un trou connu.
-diagrams: []
+# Diagram -> the code it owns. See README.md for the charter.
+#
+# GENERATED from the .mmd headers — do not edit by hand:
+#   python3 scripts/derive_diagram_index.py --write
+#
+# A diagram owns a source file exclusively. A file no diagram
+# claims is listed under `orphans` so the gap is visible rather
+# than implicit; binaries, `mod.rs` and re-exporting `lib.rs`
+# files legitimately live there.
+#
+# 12 diagrams, 73/79 source files claimed, 6 unclaimed.
+
+diagrams:
+  - name: nexus-api-core
+    file: nexus-api-core.mmd
+    verified: 2026-10-01
+    covers:
+      - claude-code-api/src/core/auth.rs
+      - claude-code-api/src/core/cache.rs
+      - claude-code-api/src/core/claude_manager.rs
+      - claude-code-api/src/core/config.rs
+      - claude-code-api/src/core/conversation.rs
+      - claude-code-api/src/core/interactive_session.rs
+      - claude-code-api/src/core/model_registry.rs
+      - claude-code-api/src/core/objective_tracker.rs
+      - claude-code-api/src/core/process_pool.rs
+      - claude-code-api/src/core/retry.rs
+      - claude-code-api/src/core/session_manager.rs
+  - name: nexus-api-hooks
+    file: nexus-api-hooks.mmd
+    verified: 2026-10-01
+    covers:
+      - claude-code-api/src/core/hooks/*.rs
+  - name: nexus-api-http
+    file: nexus-api-http.mmd
+    verified: 2026-10-01
+    covers:
+      - claude-code-api/src/api/*.rs
+  - name: nexus-api-memory
+    file: nexus-api-memory.mmd
+    verified: 2026-10-01
+    covers:
+      - claude-code-api/src/core/memory/*.rs
+  - name: nexus-api-misc
+    file: nexus-api-misc.mmd
+    verified: 2026-10-01
+    covers:
+      - claude-code-api/src/lib.rs
+      - claude-code-api/src/main.rs
+      - claude-code-api/src/middleware/*.rs
+      - claude-code-api/src/models/*.rs
+      - claude-code-api/src/utils/*.rs
+  - name: nexus-api-storage
+    file: nexus-api-storage.mmd
+    verified: 2026-10-01
+    covers:
+      - claude-code-api/src/core/storage/*.rs
+  - name: nexus-sdk-client
+    file: nexus-sdk-client.mmd
+    verified: 2026-10-01
+    covers:
+      - claude-code-sdk-rs/src/client.rs
+      - claude-code-sdk-rs/src/client_working.rs
+      - claude-code-sdk-rs/src/internal_query.rs
+      - claude-code-sdk-rs/src/optimized_client.rs
+      - claude-code-sdk-rs/src/query.rs
+  - name: nexus-sdk-interactive
+    file: nexus-sdk-interactive.mmd
+    verified: 2026-10-01
+    covers:
+      - claude-code-sdk-rs/src/interactive.rs
+  - name: nexus-sdk-memory
+    file: nexus-sdk-memory.mmd
+    verified: 2026-10-01
+    covers:
+      - claude-code-sdk-rs/src/memory/*.rs
+  - name: nexus-sdk-transport
+    file: nexus-sdk-transport.mmd
+    verified: 2026-10-01
+    covers:
+      - claude-code-sdk-rs/src/transport/*.rs
+  - name: nexus-sdk-types
+    file: nexus-sdk-types.mmd
+    verified: 2026-10-01
+    covers:
+      - claude-code-sdk-rs/src/types.rs
+      - claude-code-sdk-rs/src/message_parser.rs
+      - claude-code-sdk-rs/src/errors.rs
+  - name: nexus-sdk-util
+    file: nexus-sdk-util.mmd
+    verified: 2026-10-01
+    covers:
+      - claude-code-sdk-rs/src/cli_download.rs
+      - claude-code-sdk-rs/src/model_recommendation.rs
+      - claude-code-sdk-rs/src/perf_utils.rs
+      - claude-code-sdk-rs/src/sdk_mcp.rs
+      - claude-code-sdk-rs/src/token_tracker.rs
+
+orphans:
+  - claude-code-api/src/bin/ccapi.rs
+  - claude-code-api/src/core/mod.rs
+  - claude-code-api/src/core/session_process.rs
+  - claude-code-sdk-rs/src/bin/fake_claude.rs
+  - claude-code-sdk-rs/src/bin/test_interactive.rs
+  - claude-code-sdk-rs/src/lib.rs

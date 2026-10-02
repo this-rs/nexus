@@ -543,26 +543,68 @@ impl Invocation {
     /// Value of an environment variable, for the names the fake is allowed to
     /// record (see `fake_claude`'s allowlist). Credential-shaped names come back
     /// as `<redacted N bytes>` on purpose.
+    ///
+    /// Matches the name with [`env_names_match`], so that asking for `PATH` finds
+    /// the `Path` a Windows recording holds. Without that this returned `None`
+    /// there even for an allowlisted variable, and any `is_none()` assertion about
+    /// an inherited name passed for the wrong reason.
     pub fn env(&self, name: &str) -> Option<String> {
         self.0
             .get("env")
-            .and_then(|e| e.get(name))
-            .and_then(Value::as_str)
+            .and_then(Value::as_object)
+            .and_then(|env| {
+                env.iter()
+                    .find(|(recorded, _)| env_names_match(recorded, name))
+                    .and_then(|(_, value)| value.as_str())
+            })
             .map(str::to_string)
     }
 
     /// Whether the variable was present in the child's environment at all.
+    ///
+    /// Matches the name with [`env_names_match`].
     pub fn has_env(&self, name: &str) -> bool {
         self.0
             .get("env_names")
             .and_then(Value::as_array)
-            .is_some_and(|names| names.iter().any(|n| n.as_str() == Some(name)))
+            .is_some_and(|names| {
+                names
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .any(|recorded| env_names_match(recorded, name))
+            })
     }
 
     /// The raw record, for assertions the helpers do not cover.
     pub fn raw(&self) -> &Value {
         &self.0
     }
+}
+
+/// Compares two environment-variable names the way the host platform does.
+///
+/// Windows environment names are case-insensitive, and the inherited search path
+/// is spelled `Path` there, not `PATH`. An ASCII-case-insensitive comparison is
+/// therefore the *correct* comparison on Windows, not a loosened one: a helper
+/// that answers "was this variable handed to the child?" has to answer the
+/// question the operating system would. Exact matching answered "no" about a
+/// variable the child demonstrably inherited.
+///
+/// Deliberately **not** relaxed on Unix, where names are case-sensitive. A test
+/// double more permissive than the system it stands in for would one day
+/// green-light a test asking for `path`, and prove nothing.
+///
+/// ASCII-only: these tests use ASCII names, and `eq_ignore_ascii_case` avoids
+/// pretending to reproduce Windows' full locale-independent uppercase mapping.
+#[cfg(windows)]
+fn env_names_match(recorded: &str, wanted: &str) -> bool {
+    recorded.eq_ignore_ascii_case(wanted)
+}
+
+/// See the `cfg(windows)` twin above: on Unix the names are case-sensitive.
+#[cfg(not(windows))]
+fn env_names_match(recorded: &str, wanted: &str) -> bool {
+    recorded == wanted
 }
 
 // ---------------------------------------------------------------------------
