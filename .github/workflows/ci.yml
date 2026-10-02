@@ -23,6 +23,24 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
 
+      # The diagram index is DERIVED from the .mmd headers, so it can go stale
+      # the moment a file moves. This re-derives it and fails if the committed
+      # INDEX.yml differs, or if a header is malformed, a `covers` glob matches
+      # nothing, or two diagrams claim the same source file.
+      #
+      # Python 3 is already on ubuntu runners: no setup step, no new toolchain
+      # in a Rust repository, and no network.
+      #
+      # It does NOT check that a diagram still describes what its files do —
+      # only that the ownership map is well formed and current. Do not cite a
+      # green run here as proof that the diagrams are accurate.
+      - name: Check the diagram index is derived and current
+        run: |
+          python3 scripts/derive_diagram_index.py
+          python3 scripts/derive_diagram_index.py --write
+          git diff --exit-code -- docs/diagrams/INDEX.yml \
+            || { echo "::error::INDEX.yml is stale — run python3 scripts/derive_diagram_index.py --write"; exit 1; }
+
   # Clippy lints
   clippy:
     name: Clippy
