@@ -451,9 +451,22 @@ async fn the_invocation_recording_never_carries_a_credential_value() {
         invocation.env("HARMLESS_SETTING").as_deref(),
         Some("visible")
     );
-    // Not allowlisted at all: no value recorded, even though the child inherits it.
-    assert!(invocation.env("PATH").is_none());
-    assert!(invocation.has_env("PATH"));
+    // Not allowlisted at all: the NAME is recorded, the value is not, even though
+    // the child inherits the variable. `PATH` is the interesting one because it is
+    // the only name here the OS supplies rather than the test: Windows spells it
+    // `Path`, and `Invocation`'s lookups compare names with the platform's own case
+    // rules, so both halves below mean the same thing on Unix and on Windows.
+    assert!(
+        invocation.env("PATH").is_none(),
+        "a variable outside the allowlist must have no value recorded, got {:?}",
+        invocation.env("PATH")
+    );
+    assert!(
+        invocation.has_env("PATH"),
+        "its name is still recorded, so a test can assert the child inherited it; \
+         recorded names were {:?}",
+        invocation.raw().get("env_names")
+    );
 }
 
 // ===========================================================================
