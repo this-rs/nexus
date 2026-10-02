@@ -1263,9 +1263,45 @@ mod tests {
             "chmod +x \"$CLAUDE_INSTALL_DIR/claude\"\n",
         );
 
+        /// Lay down an executable file the tests only ever *look at* — the
+        /// `claude` stubs the discovery tests plant in `$HOME` and in the cache.
+        /// Nothing spawns these, so writing the inode directly is safe.
         pub(super) fn write_executable(path: &Path, body: &str) {
             std::fs::write(path, body).unwrap();
             std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        /// Lay down an executable **production code is going to spawn**.
+        ///
+        /// Not the same job as [`write_executable`], and it may not be done the
+        /// same way. `cargo test` runs this binary's tests as threads of one
+        /// process; `Command::spawn` forks that process and the child inherits
+        /// every descriptor open at that instant. `O_CLOEXEC` closes the
+        /// inherited copy at `execve`, not at `fork`, and a file's write count
+        /// lives on the inode — so a sibling test spawning anything at all, even
+        /// a path that does not exist, can hold a write descriptor on *this*
+        /// script long enough for our own `execve` to be refused with
+        /// `ETXTBSY`. Closing the handle first does not help; it is already
+        /// closed. Renaming does not help; the race is on the inode.
+        ///
+        /// So the executed inode is `tests/support/exec_shim.sh`, checked in and
+        /// therefore written by git. We plant a symlink to it — creating a
+        /// symlink opens nothing — and write the script as a plain data file
+        /// beside it, which the shim `exec`s through `/bin/sh`. `ETXTBSY` is
+        /// raised when opening a file *for execution*, so a script that is only
+        /// read is immune.
+        fn plant_spawnable(path: &Path, body: &str) {
+            let mut spec = path.as_os_str().to_owned();
+            spec.push(".spec.sh");
+            std::fs::write(std::path::PathBuf::from(spec), body).unwrap();
+            std::os::unix::fs::symlink(exec_shim(), path).unwrap();
+        }
+
+        fn exec_shim() -> &'static Path {
+            Path::new(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/support/exec_shim.sh"
+            ))
         }
 
         /// A fake `npm` that logs its argv, optionally lays down
@@ -1297,7 +1333,7 @@ mod tests {
                 exit_code = exit_code,
             );
             let npm = dir.join("npm");
-            write_executable(&npm, &script);
+            plant_spawnable(&npm, &script);
             npm
         }
 
