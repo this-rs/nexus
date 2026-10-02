@@ -13,6 +13,20 @@ use crate::core::claude_manager::ClaudeManager;
 use crate::core::config::{FileAccessConfig, MCPConfig};
 use crate::models::claude::ClaudeCodeOutput;
 
+/// `describe_command_redacted` is shared with the SDK rather than copied.
+///
+/// `Debug for Command` prints every argument verbatim, so logging `{:?}` on the
+/// command leaked the `--mcp-config` payload at `info` level on every session
+/// creation — in practice the orchestrator's database password, search key and
+/// session token, since `--mcp-config` carries each MCP server's `env` block and
+/// HTTP headers.
+///
+/// This crate used to carry a byte-for-byte copy of that function and of the
+/// `SECRET_BEARING_ARGS` list it reads, because the SDK's were `pub(crate)`.
+/// They are `pub` and re-exported now, so the copy is gone: a list of
+/// secret-bearing flags that exists twice is a list that gets extended once.
+use nexus_claude::describe_command_redacted;
+
 /// Interactive session manager — reuses one Claude CLI process per session.
 ///
 /// ## Message queueing and concurrency
@@ -191,56 +205,6 @@ async fn log_stderr_lines(stderr: tokio::process::ChildStderr) {
     while let Ok(Some(line)) = lines.next_line().await {
         warn!("Claude stderr: {}", line);
     }
-}
-
-/// Arguments whose VALUE (the next argument) must never reach a log.
-///
-/// `--mcp-config` is either a path or a whole JSON document describing each MCP
-/// server, `env` block and HTTP headers included — in practice the
-/// orchestrator's database password, search key and session token.
-const SECRET_BEARING_ARGS: [&str; 1] = ["--mcp-config"];
-
-/// A loggable description of the command about to be spawned.
-///
-/// `Debug for Command` prints every argument verbatim, so logging `{:?}` on the
-/// command leaked the `--mcp-config` payload at `info` level on every session
-/// creation. This keeps what a person debugging a launch needs — the program,
-/// the working directory, every argument, and the NAMES of the environment
-/// variables set — and replaces the value that follows a secret-bearing
-/// argument, plus every environment value.
-///
-/// Same discipline as `describe_command_redacted` in
-/// `claude-code-sdk-rs/src/transport/subprocess.rs`; duplicated rather than
-/// shared because that one is `pub(crate)` to the SDK crate.
-fn describe_command_redacted(cmd: &std::process::Command) -> String {
-    let mut args: Vec<String> = Vec::new();
-    let mut redact_next = false;
-    for arg in cmd.get_args() {
-        let arg = arg.to_string_lossy();
-        if redact_next {
-            args.push(format!("<redacted {} bytes>", arg.len()));
-            redact_next = false;
-            continue;
-        }
-        redact_next = SECRET_BEARING_ARGS.contains(&arg.as_ref());
-        args.push(arg.into_owned());
-    }
-
-    let mut env_keys: Vec<String> = cmd
-        .get_envs()
-        .map(|(k, _)| k.to_string_lossy().into_owned())
-        .collect();
-    env_keys.sort();
-
-    format!(
-        "program={} cwd={} args={:?} env_keys={:?}",
-        cmd.get_program().to_string_lossy(),
-        cmd.get_current_dir()
-            .map(|d| d.display().to_string())
-            .unwrap_or_else(|| "<inherited>".to_string()),
-        args,
-        env_keys,
-    )
 }
 
 impl InteractiveSessionManager {
