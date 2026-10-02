@@ -8,7 +8,7 @@
 # than implicit; binaries, `mod.rs` and re-exporting `lib.rs`
 # files legitimately live there.
 #
-# 12 diagrams, 73/79 source files claimed, 6 unclaimed.
+# 13 diagrams, 75/79 source files claimed, 6 unclaimed.
 
 diagrams:
   - name: nexus-api-core
@@ -55,6 +55,12 @@ diagrams:
     verified: 2026-10-01
     covers:
       - claude-code-api/src/core/storage/*.rs
+  - name: nexus-ci-pipeline
+    file: nexus-ci-pipeline.mmd
+    verified: 2026-10-02
+    covers:
+      - .github/workflows/ci.yml
+      - .github/workflows/release.yml
   - name: nexus-sdk-client
     file: nexus-sdk-client.mmd
     verified: 2026-10-01

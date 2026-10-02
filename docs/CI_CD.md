@@ -4,48 +4,51 @@ This document describes the continuous integration and deployment pipeline for N
 
 ## Overview
 
+> **Source of truth**: [`docs/diagrams/nexus-ci-pipeline.mmd`](diagrams/nexus-ci-pipeline.mmd)
+> — owned by the diagram index, verified on 2026-10-02.
+> The inline copy below is rendered by GitHub for quick reference.
+
 ```mermaid
 flowchart TD
-    subgraph "Pull Request"
-        PR[PR Created] --> CI[CI Workflow]
-        CI --> FMT[Format Check]
-        CI --> CLIP[Clippy Lints]
-        CI --> TEST[Test Matrix]
-        CI --> DOC[Doc Build]
-        CI --> SEC[Security Audit]
-        CI --> MSRV[MSRV Check]
+    subgraph PR["Pull Request"]
+        direction TB
+        push[Push / PR] --> fmt
 
-        FMT --> PASS{All Pass?}
-        CLIP --> PASS
-        TEST --> PASS
-        DOC --> PASS
-        SEC --> PASS
-        MSRV --> PASS
+        fmt["fmt\n✅ rustfmt --check\n✅ diagram index derived & current"]
+        fmt --> clippy["clippy\n✅ -D warnings"]
+        fmt --> test["test matrix\nubuntu / macos / windows\nstable + beta + nightly"]
+        fmt --> docs["docs\ncargo doc"]
+        fmt --> msrv["MSRV 1.88\ncargo build"]
 
-        PASS -->|Yes| COV[Coverage Report]
-        COV --> CODECOV[Upload to Codecov]
+        clippy --> ok{CI Success}
+        test --> ok
+        docs --> ok
+        msrv --> ok
+
+        test --> cov["coverage\ncargo llvm-cov\n+ logic-only report"]
+        cov --> cc["Codecov\n🟠 project: informational\n✅ patch: blocking ≥80 %"]
     end
 
-    subgraph "Release"
-        TAG[Tag Push v*] --> REL[Release Workflow]
-        REL --> CHANGELOG[Generate Changelog]
-        REL --> BUILD[Build Artifacts]
-        REL --> GHREL[Create GitHub Release]
+    subgraph REL["Release (tag v*)"]
+        direction TB
+        tag[Tag push v*] --> changelog[Generate changelog]
+        changelog --> ghrel[Create GitHub Release]
+        ghrel --> build[Build artifacts]
 
-        BUILD --> LINUX[Linux x64/ARM64]
-        BUILD --> MACOS[macOS x64/ARM64]
-        BUILD --> WIN[Windows x64]
+        build --> linux["Linux\nx64 / ARM64\ntar.gz"]
+        build --> macos["macOS\nx64 / ARM64\ntar.gz"]
+        build --> win["Windows\nx64\nzip"]
 
-        LINUX --> UPLOAD[Upload to Release]
-        MACOS --> UPLOAD
-        WIN --> UPLOAD
+        linux & macos & win --> upload[Upload to Release]
 
-        GHREL --> PUB[Publish to crates.io]
-        PUB --> SDK[nexus-claude]
-        PUB --> API[claude-code-api]
+        ghrel --> pub[Publish to crates.io]
+        pub --> sdk[nexus-claude]
+        pub --> api[claude-code-api]
+        sdk & api --> vbranch[Update version branch]
+    end
 
-        SDK --> BRANCH[Update Version Branch]
-        API --> BRANCH
+    subgraph ADV["Advisory (non-blocking)"]
+        security["security\ncargo-deny audit"]
     end
 ```
 
@@ -152,7 +155,9 @@ Reusable action for Rust toolchain setup with caching.
 
 ### Advisory Checks
 
-1. **Coverage** - Report uploaded to Codecov (informational)
+1. **Coverage** - Patch gate blocks at ≥ 80 % (lines changed by a PR must be covered);
+   project-wide gate is informational until baselines are raised
+   (sdk ≈ 69 %, api ≈ 39 % measured with `--ignore-filename-regex` on tests/examples).
 2. **Security** - cargo-deny audit (advisory only)
 
 ## Local Development
