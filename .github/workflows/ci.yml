@@ -126,6 +126,38 @@ jobs:
       - name: Generate coverage report
         run: cargo llvm-cov --all-features --lcov --output-path lcov.info
 
+      # The repo's reference figure, produced here and nowhere else. It used to
+      # exist only as a usage line in the script's docstring, with no caller at
+      # all: `--ignore-filename-regex` appeared exactly once in the tree, in that
+      # comment. A measurement convention that lives in prose is not a convention,
+      # and two people quoted two different "96.7 %" an hour apart because of it.
+      #
+      # `report` re-reads the profdata the step above already merged, so this
+      # costs seconds rather than a second run of the suite. Not a gate yet: a
+      # threshold and a new producer in one change would leave nobody able to say
+      # which of the two broke.
+      - name: Measure and publish logic coverage
+        run: |
+          set -euo pipefail
+          cargo llvm-cov report --json \
+            --ignore-filename-regex '(examples/|/tests/|src/bin/)' \
+            --output-path cov-logic.json
+          # No pipe here on purpose: a shell reports the LAST command of a
+          # pipeline, so `… | tee` would hide the script refusing the export.
+          python3 scripts/coverage_logic_only.py cov-logic.json \
+            --strip-prefix "${GITHUB_WORKSPACE}/" > logic-coverage.txt
+          cat logic-coverage.txt
+          {
+            echo '### Logic coverage'
+            echo
+            echo 'Excludes `examples/`, `/tests/` and `src/bin/`: scaffolding and'
+            echo 'entry points are not the logic under measurement.'
+            echo
+            echo '```'
+            tail -n 3 logic-coverage.txt
+            echo '```'
+          } >> "${GITHUB_STEP_SUMMARY}"
+
       - name: Upload to Codecov
         uses: codecov/codecov-action@v4
         with:
