@@ -11,11 +11,12 @@ Test functions are identified from the v0-mangled symbol names in the llvm
 export (a `tests` path segment is encoded as `5tests`), so no demangler is
 required.
 
-Usage:
-    cargo llvm-cov --workspace --all-features \
-        --ignore-filename-regex '(examples/|/tests/|src/bin/)' \
-        --json --output-path cov.json
-    python3 scripts/coverage_logic_only.py cov.json [--fail-under PCT] [--json out.json]
+The figure this prints is the repo's reference number, and the `Coverage` job in
+`.github/workflows/ci.yml` is the one place that produces it. Read the exact
+invocation there rather than here: a usage line in a docstring is copied by hand
+and drifts, which is how two people once quoted two different "96.7 %" an hour
+apart. The exclusion that makes the figure comparable is no longer advice — it is
+enforced below, by `check_exclusions`.
 """
 
 from __future__ import annotations
@@ -23,8 +24,22 @@ from __future__ import annotations
 import argparse
 import collections
 import json
+import os
 import re
 import sys
+
+# Paths that must not reach the logic denominator. Scaffolding and entry points
+# are not the logic under measurement, and counting them makes a figure that
+# cannot be compared with any other.
+EXCLUDED_FRAGMENTS = ("examples/", "/tests/", "src/bin/")
+
+# Printed verbatim when the guard refuses, so the fix is in the error, not in a
+# doc somebody has to find. Kept in sync with the `Coverage` job.
+CANONICAL_INVOCATION = """\
+    cargo llvm-cov report --json \\
+        --ignore-filename-regex '(examples/|/tests/|src/bin/)' \\
+        --output-path cov-logic.json
+    python3 scripts/coverage_logic_only.py cov-logic.json"""
 
 # A v0-mangled symbol encodes each path segment as <len><name>; `tests`/`test`
 # modules therefore appear as `5tests` / `4test`. Legacy mangling and already
@@ -47,9 +62,51 @@ def test_lines_by_file(functions):
     return out
 
 
+def check_exclusions(files):
+    """Refuse a report that kept paths the logic figure has to exclude.
+
+    Two things this deliberately does NOT do.
+
+    It does not scan the export textually. `data["functions"]` names excluded
+    files even in a perfectly filtered report — a correct run of the canonical
+    invocation still mentions `src/bin/fake_claude.rs` there — so a `grep` over
+    the JSON would refuse valid input. A guard that rejects a valid report is
+    worse than no guard, so only `data["files"]`, the set this script actually
+    sums, is inspected.
+
+    It does not match on absolute paths either. The fragments are matched against
+    each path *relative to the common root of every reported file*, so a checkout
+    that happens to live under a directory called `examples/` is not refused for
+    its parent's name.
+    """
+    names = [entry["filename"] for entry in files]
+    if not names:
+        return
+    root = os.path.commonpath(names) if len(names) > 1 else os.path.dirname(names[0])
+    offenders = sorted(
+        rel
+        for rel in (os.path.relpath(name, root) for name in names)
+        if any(fragment in rel for fragment in EXCLUDED_FRAGMENTS)
+    )
+    if not offenders:
+        return
+    listed = "\n".join(f"      {rel}" for rel in offenders)
+    sys.exit(
+        f"error: this export is not a logic report — {len(offenders)} of "
+        f"{len(names)} files are paths the logic figure must exclude:\n"
+        f"{listed}\n\n"
+        "Any number computed from it is not comparable with the repo's reference\n"
+        "figure. Regenerate the export with the exclusion:\n\n"
+        f"{CANONICAL_INVOCATION}\n\n"
+        "The `Coverage` job in .github/workflows/ci.yml does exactly this and is\n"
+        "the producer of record."
+    )
+
+
 def analyze(path, strip_prefix=""):
     export = json.load(open(path))
     data = export["data"][0]
+    check_exclusions(data["files"])
     test_lines = test_lines_by_file(data.get("functions", []))
 
     rows = []
