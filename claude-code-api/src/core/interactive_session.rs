@@ -1740,6 +1740,28 @@ mod tests {
         );
     }
 
+    /// DO NOT add a read of this child's stdout or stderr. It would hang on
+    /// Windows, and the hang would be silent.
+    ///
+    /// This test combines a **paused clock** with a **real child process**, and
+    /// it only survives that combination because nothing ever reads the child's
+    /// pipes. On Windows a child's stdio is `Blocking<ArcFile>`, so a pending
+    /// read is handed to `spawn_blocking`, whose `BlockingSchedule` calls
+    /// `clock.inhibit_auto_advance()`. The virtual clock then stops advancing
+    /// while a real `park_timeout` waits for a timer that can never fire:
+    /// a genuine deadlock, not a slow test. Unix takes a different path
+    /// (`PollEvented` on a pipe) and never shows it.
+    ///
+    /// Two tests in this crate already cost a 49-minute Windows job that wrote
+    /// no `test result:` line at all — a hang is an *absence of verdict*, so it
+    /// also hid two further Windows defects behind it. They were fixed by
+    /// extracting the timing logic so it is tested without a live child
+    /// (`collect_initial_response`, `sweep_expired_idle`). This test is the last
+    /// one still holding the dangerous pair, and it is only safe by omission.
+    ///
+    /// If you need the child's output here, drop `start_paused` and use a real
+    /// short timeout instead, or extract the logic under test the way the other
+    /// two were.
     #[tokio::test(start_paused = true)]
     async fn test_safety_timeout_ends_an_unanswered_turn() {
         // No `result` ever arrives: the 30-second net is the only way out.
