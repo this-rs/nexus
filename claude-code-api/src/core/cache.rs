@@ -105,7 +105,7 @@ impl ResponseCache {
 
     /// The cache key for a `(model, messages)` pair.
     ///
-    /// Every field is tagged and length-prefixed (see [`tag`]), so two calls
+    /// Every field is tagged and length-prefixed (see `hash_field`), so two calls
     /// share a key only when the model and the whole message list are equal.
     ///
     /// Known gap: the key covers the conversation, not the rest of the request.
