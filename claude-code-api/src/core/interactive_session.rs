@@ -104,6 +104,75 @@ fn build_process_died_event(reason: &str) -> ClaudeCodeOutput {
     }
 }
 
+/// How long the initial-response collector waits for *any* message from a freshly
+/// spawned CLI before giving up on the turn.
+///
+/// A safety net, not the normal exit: a `result` message is. Thirty seconds of
+/// total silence from the CLI means something is wrong, and the caller gets an
+/// empty, closed channel rather than hanging.
+const INITIAL_RESPONSE_SAFETY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// The body of the initial-response collector that [`InteractiveSessionManager::create_session`]
+/// spawns: forward everything the CLI says about its first turn to `caller_tx`,
+/// stop on `result`/`error`, and give up after `safety_timeout` of silence.
+///
+/// Sidechain messages (from Task tool subagents) are filtered out; they do not
+/// end a turn.
+///
+/// `safety_timeout` is a parameter rather than a constant read in place so that
+/// the giving-up arm can be exercised in real time, with no child process and no
+/// paused clock. The test that used to do it the other way round — `create_session`
+/// under `#[tokio::test(start_paused = true)]` plus a 31-second jump — hung
+/// forever on Windows; see
+/// `test_initial_collector_gives_up_after_the_safety_timeout`.
+async fn collect_initial_response(
+    mut cli_rx: mpsc::Receiver<ClaudeCodeOutput>,
+    caller_tx: mpsc::Sender<ClaudeCodeOutput>,
+    safety_timeout: std::time::Duration,
+) {
+    let start_time = std::time::Instant::now();
+
+    loop {
+        match tokio::time::timeout(safety_timeout, cli_rx.recv()).await {
+            Ok(Some(output)) => {
+                // Skip sidechain messages (from Task tool subagents)
+                if output.is_sidechain() {
+                    debug!(
+                        "Initial: skipping sidechain message (parent_tool_use_id: {:?})",
+                        output.parent_tool_use_id()
+                    );
+                    continue;
+                }
+
+                // Detect end-of-response via Result message
+                let is_result = output.r#type == "result";
+                let is_error = output.r#type == "error";
+
+                if caller_tx.send(output).await.is_err() {
+                    break;
+                }
+
+                if is_result {
+                    info!("Initial response complete (received result message)");
+                    break;
+                }
+                if is_error {
+                    break;
+                }
+            },
+            Ok(None) => break, // Channel closed
+            Err(_) => {
+                // Safety timeout (30s with no messages at all)
+                error!(
+                    "Safety timeout waiting for initial response after {:?}",
+                    start_time.elapsed()
+                );
+                break;
+            },
+        }
+    }
+}
+
 /// Arguments whose VALUE (the next argument) must never reach a log.
 ///
 /// `--mcp-config` is either a path or a whole JSON document describing each MCP
@@ -455,57 +524,16 @@ impl InteractiveSessionManager {
         let (output_tx, _) = broadcast::channel(100);
 
         // Dedicated channel for initial request
-        let (initial_tx, mut initial_rx) = mpsc::channel::<ClaudeCodeOutput>(100);
+        let (initial_tx, initial_rx) = mpsc::channel::<ClaudeCodeOutput>(100);
 
         // Initial response collector task
         // Uses Result message detection instead of timeout heuristic.
         // Sidechain messages (from Task tool subagents) are filtered out.
-        let initial_response_tx_clone = initial_response_tx.clone();
-        tokio::spawn(async move {
-            let start_time = std::time::Instant::now();
-
-            loop {
-                match tokio::time::timeout(std::time::Duration::from_secs(30), initial_rx.recv())
-                    .await
-                {
-                    Ok(Some(output)) => {
-                        // Skip sidechain messages (from Task tool subagents)
-                        if output.is_sidechain() {
-                            debug!(
-                                "Initial: skipping sidechain message (parent_tool_use_id: {:?})",
-                                output.parent_tool_use_id()
-                            );
-                            continue;
-                        }
-
-                        // Detect end-of-response via Result message
-                        let is_result = output.r#type == "result";
-                        let is_error = output.r#type == "error";
-
-                        if initial_response_tx_clone.send(output).await.is_err() {
-                            break;
-                        }
-
-                        if is_result {
-                            info!("Initial response complete (received result message)");
-                            break;
-                        }
-                        if is_error {
-                            break;
-                        }
-                    },
-                    Ok(None) => break, // Channel closed
-                    Err(_) => {
-                        // Safety timeout (30s with no messages at all)
-                        error!(
-                            "Safety timeout waiting for initial response after {:?}",
-                            start_time.elapsed()
-                        );
-                        break;
-                    },
-                }
-            }
-        });
+        tokio::spawn(collect_initial_response(
+            initial_rx,
+            initial_response_tx,
+            INITIAL_RESPONSE_SAFETY_TIMEOUT,
+        ));
 
         // Handle stdin
         tokio::spawn(async move {
@@ -2198,32 +2226,68 @@ mod tests {
         );
     }
 
-    #[tokio::test(start_paused = true)]
+    /// A CLI that says nothing at all: the collector gives up, closes the
+    /// caller's channel empty, and says so in the log.
+    ///
+    /// Deliberately **not** `start_paused`, and deliberately without a child
+    /// process. This test used to run `create_session` against
+    /// `FakeCli::blocking()` under a paused clock and jump the clock by 31
+    /// seconds. It hung forever on Windows, for two compounding reasons:
+    ///
+    /// * `create_session` spawns the collector and returns without ever
+    ///   yielding (an empty initial message writes nothing), so the 31-second
+    ///   jump landed *before* the collector had been polled even once. The
+    ///   collector then registered its 30-second timer against the clock as
+    ///   already advanced, and the jump was wasted — only auto-advance could
+    ///   still reach the deadline.
+    /// * Auto-advance was unavailable. On Windows a child's stdout/stderr are
+    ///   `tokio::io::blocking::Blocking` handles, so each pending read is a task
+    ///   on the blocking pool, and `BlockingSchedule::new` calls
+    ///   `Clock::inhibit_auto_advance()` for the lifetime of that task. The fake
+    ///   CLI never writes and never exits, so the read never completes, the
+    ///   inhibition never lifts, and `park_thread_timeout` parks for the *real*
+    ///   duration left on a clock that will never move. On Unix those pipes are
+    ///   `PollEvented`, no blocking task exists, and auto-advance works — which
+    ///   is why the same test passed on macOS and Linux.
+    ///
+    /// So the collector is called directly, in real time, with a short timeout.
+    /// The production value is asserted on its own below, and the collector
+    /// being wired into `create_session` is covered by
+    /// `test_initial_collector_filters_sidechain_output`,
+    /// `test_initial_collector_stops_on_an_error_line`,
+    /// `test_only_the_first_response_is_forwarded_and_eof_closes_it` and
+    /// `test_a_dropped_caller_stops_the_initial_collector`.
+    #[tokio::test]
     async fn test_initial_collector_gives_up_after_the_safety_timeout() {
-        let cli = FakeCli::blocking();
-        let manager = manager(&cli);
+        assert_eq!(
+            INITIAL_RESPONSE_SAFETY_TIMEOUT,
+            Duration::from_secs(30),
+            "production still gives a fresh CLI 30 s of silence before giving up"
+        );
 
+        // `_cli_tx` is the CLI side of the collector's input. A named binding, so
+        // that it stays alive and silent for the whole call: dropping it early
+        // would close the channel and send the collector down its `Ok(None)` arm
+        // instead of the timeout arm. The log assertion below is what tells the
+        // two arms apart — only the timeout arm writes anything.
+        let (_cli_tx, cli_rx) = mpsc::channel::<ClaudeCodeOutput>(8);
         let (tx, mut rx) = mpsc::channel(8);
-        manager
-            .create_session(
-                "c".to_string(),
-                "opus".to_string(),
-                String::new(),
-                tx,
-                false,
-            )
-            .await
-            .unwrap();
 
         let (sink, _guard) = capture_logs(tracing::Level::ERROR);
-        tokio::time::advance(Duration::from_secs(31)).await;
+        // A real-time bound two orders of magnitude over the timeout under test,
+        // so that a regression fails the job instead of holding a runner for
+        // GitHub's six-hour limit.
+        tokio::time::timeout(
+            Duration::from_secs(30),
+            collect_initial_response(cli_rx, tx, Duration::from_millis(100)),
+        )
+        .await
+        .expect("the collector must give up on its own");
 
         assert!(
-            tokio::time::timeout(Duration::from_secs(600), rx.recv())
-                .await
-                .expect("the collector must give up")
-                .is_none(),
-            "a CLI that says nothing for 30 s closes the caller's channel empty"
+            rx.recv().await.is_none(),
+            "a CLI that says nothing for the safety timeout closes the caller's \
+             channel empty"
         );
         assert!(
             sink.contents()

@@ -273,33 +273,44 @@ impl ProcessPool {
     }
 
     async fn cleanup_loop(&self) {
-        let timeout = std::time::Duration::from_secs(self.inner.config.idle_timeout_secs);
-
         loop {
             tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
+            self.sweep_expired_idle().await;
+        }
+    }
 
-            let expired = {
-                let mut pool = self.inner.pool.lock();
-                let mut expired = Vec::new();
+    /// One sweep of the idle queue: drop every entry older than
+    /// `idle_timeout_secs` and close the CLI child behind it.
+    ///
+    /// Split out of [`Self::cleanup_loop`] so that a test can run exactly one
+    /// sweep, in real time, instead of reaching it through the loop's 60-second
+    /// tick under tokio's paused clock. That combination deadlocked on Windows:
+    /// see the comment on
+    /// `cleanup_loop_kills_idle_processes_past_the_timeout` below.
+    async fn sweep_expired_idle(&self) {
+        let timeout = std::time::Duration::from_secs(self.inner.config.idle_timeout_secs);
 
-                // 检查过期的空闲进程
-                pool.idle.retain(|p| {
-                    if p.created_at.elapsed() > timeout {
-                        expired.push(p.session_id.clone());
-                        false
-                    } else {
-                        true
-                    }
-                });
+        let expired = {
+            let mut pool = self.inner.pool.lock();
+            let mut expired = Vec::new();
 
-                expired
-            };
+            // 检查过期的空闲进程
+            pool.idle.retain(|p| {
+                if p.created_at.elapsed() > timeout {
+                    expired.push(p.session_id.clone());
+                    false
+                } else {
+                    true
+                }
+            });
 
-            // 关闭过期进程
-            for session_id in expired {
-                let _ = self.inner.manager.close_session(&session_id).await;
-                info!("Closed idle process due to timeout: {}", session_id);
-            }
+            expired
+        };
+
+        // 关闭过期进程
+        for session_id in expired {
+            let _ = self.inner.manager.close_session(&session_id).await;
+            info!("Closed idle process due to timeout: {}", session_id);
         }
     }
 }
@@ -438,6 +449,14 @@ mod tests {
             model: model.to_string(),
             created_at: std::time::Instant::now(),
         });
+    }
+
+    /// Backdates every idle entry, so that an expiry assertion does not depend
+    /// on how many nanoseconds the test itself happened to take.
+    fn age_idle_entries(pool: &ProcessPool, by: Duration) {
+        for entry in pool.inner.pool.lock().idle.iter_mut() {
+            entry.created_at = entry.created_at.checked_sub(by).unwrap_or(entry.created_at);
+        }
     }
 
     fn seed_active(pool: &ProcessPool, session_id: &str) {
@@ -880,11 +899,28 @@ mod tests {
 
     // ───────────────────────── cleanup_loop ─────────────────────────
 
-    /// `cleanup_loop` sleeps 60 seconds before its first sweep, so the clock is
-    /// paused and auto-advanced. `created_at` is a `std::time::Instant`, which
-    /// tokio's paused clock does **not** move — hence `idle_timeout_secs = 0`,
-    /// which makes any elapsed time an expiry.
-    #[tokio::test(start_paused = true)]
+    /// The kill-arm of the sweep: an expired entry leaves the queue **and** its
+    /// CLI child is closed.
+    ///
+    /// Deliberately **not** `start_paused`. A live child plus tokio's paused
+    /// clock is a deadlock on Windows, and this test used to be it: it reached
+    /// the sweep through `cleanup_loop`'s 60-second tick, which only fires if
+    /// the paused clock auto-advances, and auto-advance only happens while the
+    /// runtime is idle. On Windows a child's stdout/stderr are
+    /// `tokio::io::blocking::Blocking` handles, so every pending read is a task
+    /// on the blocking pool, and `BlockingSchedule::new` calls
+    /// `Clock::inhibit_auto_advance()` for as long as that task lives. The fake
+    /// CLI never writes and never exits, so the read never returns, the
+    /// inhibition never lifts, and the time driver parks for the *real*
+    /// remaining duration of a clock that will never move — forever. On Unix the
+    /// same pipes are `PollEvented`, no blocking task exists, and auto-advance
+    /// works, which is why this only ever hung on Windows.
+    ///
+    /// So the sweep is called directly, in real time: `idle_timeout_secs = 0`
+    /// plus a backdated `created_at` makes the entry unambiguously expired, and
+    /// nothing here needs a clock at all. [`ProcessPool::cleanup_loop`] reaching
+    /// its sweep is covered separately, by a test with no child attached.
+    #[tokio::test]
     async fn cleanup_loop_kills_idle_processes_past_the_timeout() {
         let cli = FakeCli::blocking();
         let claude = manager(cli.command());
@@ -897,9 +933,13 @@ mod tests {
         pool_config.idle_timeout_secs = 0;
         let pool = pool_without_background_tasks(claude.clone(), pool_config);
         seed_idle(&pool, &session_id, "model-x");
+        age_idle_entries(&pool, Duration::from_secs(1));
 
-        let outcome = tokio::time::timeout(Duration::from_secs(90), pool.cleanup_loop()).await;
-        assert!(outcome.is_err(), "the cleanup loop never returns");
+        // A real-time bound, so that a regression fails the job instead of
+        // holding a runner for GitHub's six-hour limit.
+        tokio::time::timeout(Duration::from_secs(30), pool.sweep_expired_idle())
+            .await
+            .expect("one sweep must finish on its own");
 
         assert!(
             idle_entries(&pool).is_empty(),
@@ -913,20 +953,44 @@ mod tests {
 
     /// The `retain` keep-arm: an entry younger than `idle_timeout_secs` survives
     /// the sweep untouched.
-    #[tokio::test(start_paused = true)]
+    #[tokio::test]
     async fn cleanup_loop_keeps_idle_processes_that_are_still_fresh() {
         let mut pool_config = config(0, 5, 5);
         pool_config.idle_timeout_secs = 3600;
         let pool = pool_without_background_tasks(manager(no_such_command()), pool_config);
         seed_idle(&pool, "fresh-1", "model-x");
 
-        let outcome = tokio::time::timeout(Duration::from_secs(90), pool.cleanup_loop()).await;
-        assert!(outcome.is_err(), "the cleanup loop never returns");
+        tokio::time::timeout(Duration::from_secs(30), pool.sweep_expired_idle())
+            .await
+            .expect("one sweep must finish on its own");
 
         assert_eq!(
             idle_entries(&pool),
             vec![("fresh-1".to_string(), "model-x".to_string())],
             "a fresh entry survives the sweep"
+        );
+    }
+
+    /// `cleanup_loop` itself: it sleeps 60 seconds, *then* sweeps. The paused
+    /// clock is safe here because no child process is attached — `manager` is
+    /// pointed at a command that does not exist and the queue is seeded by hand,
+    /// so the runtime really does go idle and tokio auto-advances past the tick.
+    /// Without this test, splitting the sweep out of the loop would leave the
+    /// 60-second tick unproven.
+    #[tokio::test(start_paused = true)]
+    async fn cleanup_loop_reaches_its_first_sweep_after_the_sixty_second_tick() {
+        let mut pool_config = config(0, 5, 5);
+        pool_config.idle_timeout_secs = 0;
+        let pool = pool_without_background_tasks(manager(no_such_command()), pool_config);
+        seed_idle(&pool, "stale-1", "model-x");
+        age_idle_entries(&pool, Duration::from_secs(1));
+
+        let outcome = tokio::time::timeout(Duration::from_secs(90), pool.cleanup_loop()).await;
+        assert!(outcome.is_err(), "the cleanup loop never returns");
+
+        assert!(
+            idle_entries(&pool).is_empty(),
+            "the loop reached its sweep and dropped the expired entry"
         );
     }
 }
