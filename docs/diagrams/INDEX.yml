@@ -8,7 +8,7 @@
 # than implicit; binaries, `mod.rs` and re-exporting `lib.rs`
 # files legitimately live there.
 #
-# 12 diagrams, 73/79 source files claimed, 6 unclaimed.
+# 12 diagrams, 73/80 source files claimed, 7 unclaimed.
 
 diagrams:
   - name: nexus-api-core
@@ -100,6 +100,7 @@ orphans:
   - claude-code-api/src/bin/ccapi.rs
   - claude-code-api/src/core/mod.rs
   - claude-code-api/src/core/session_process.rs
+  - claude-code-api/src/core/test_exec.rs
   - claude-code-sdk-rs/src/bin/fake_claude.rs
   - claude-code-sdk-rs/src/bin/test_interactive.rs
   - claude-code-sdk-rs/src/lib.rs
