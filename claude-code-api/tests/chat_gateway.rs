@@ -6,7 +6,6 @@
 
 mod support;
 
-use std::io::Write;
 use std::path::PathBuf;
 
 use axum::http::StatusCode;
@@ -555,9 +554,6 @@ impl StdinHoldingCli {
         let payload = dir.path().join("payload.ndjson");
         std::fs::write(&payload, transcript).expect("write the transcript");
 
-        let script = dir
-            .path()
-            .join(if cfg!(windows) { "cli.cmd" } else { "cli.sh" });
         let body = if cfg!(windows) {
             // `findstr` reads stdin until the pipe closes, then the script ends.
             format!(
@@ -571,17 +567,7 @@ impl StdinHoldingCli {
             )
         };
 
-        let mut file = std::fs::File::create(&script).expect("create the fake CLI script");
-        file.write_all(body.as_bytes())
-            .expect("write the fake CLI script");
-        drop(file);
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
-                .expect("chmod the fake CLI script");
-        }
+        let script = support::fake_exec::plant_fake_cli(dir.path(), &body);
 
         Self { _dir: dir, script }
     }

@@ -43,7 +43,11 @@ use std::path::{Path, PathBuf};
 
 /// Name of the planted executable. Only the extension matters (`cmd.exe` needs
 /// one); the tests never look at it.
-const FAKE_CLI: &str = if cfg!(windows) { "fake-cli.cmd" } else { "fake-cli" };
+const FAKE_CLI: &str = if cfg!(windows) {
+    "fake-cli.cmd"
+} else {
+    "fake-cli"
+};
 
 /// Plant `body` as the fake `claude` executable inside `dir` and return the path
 /// to feed to `settings.claude.command` / `ClaudeManager::new`.
