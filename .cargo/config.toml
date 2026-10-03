@@ -4,3 +4,8 @@
 # on 2026-10-02. Stable since cargo 1.84.
 [resolver]
 incompatible-rust-versions = "fallback"
+
+# `cargo xtask …` runs the repository's own chores (xtask/): the diagram index and the diagram
+# drift gate. A workspace crate rather than a script, so the repository needs one toolchain.
+[alias]
+xtask = "run --quiet --package xtask --"

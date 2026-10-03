@@ -1,12 +1,14 @@
 %% name: nexus-ci-pipeline
 %% covers: .github/workflows/ci.yml, .github/workflows/release.yml
-%% verified: 2026-10-02
+%% verified: 2026-10-03
 flowchart TD
     subgraph PR["Pull Request"]
         direction TB
         push[Push / PR] --> fmt
 
-        fmt["fmt\n✅ rustfmt --check\n✅ diagram index derived & current"]
+        fmt["fmt\n✅ rustfmt --check\n✅ diagram index derived & current (cargo xtask)"]
+        push --> drift["diagram-drift (PR only)\n✅ covered file changed ⇒ .mmd touched\nor Diagram-Unchanged trailer with a reason\n(cargo xtask diagrams drift · xtask/tests/commands.rs)"]
+        drift --> ok
         fmt --> clippy["clippy\n✅ -D warnings"]
         fmt --> test["test matrix\nubuntu / macos / windows\nstable + beta + nightly"]
         fmt --> docs["docs\ncargo doc"]

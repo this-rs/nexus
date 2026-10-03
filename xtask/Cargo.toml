@@ -1,0 +1,17 @@
+[package]
+name = "xtask"
+description = "Repository chores for nexus, run with `cargo xtask`: the diagram index and the diagram drift gate."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+# No dependency on purpose: this runs first in CI and must not wait on a
+# dependency resolution, nor break when one moves.
+[dependencies]
+
+[dev-dependencies]
+tempfile = "3"
