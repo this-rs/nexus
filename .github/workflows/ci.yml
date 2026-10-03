@@ -36,6 +36,7 @@ jobs:
       # green run here as proof that the diagrams are accurate.
       - name: Check the diagram index is derived and current
         run: |
+          python3 -m unittest scripts/test_derive_diagram_index.py
           python3 scripts/derive_diagram_index.py
           python3 scripts/derive_diagram_index.py --write
           git diff --exit-code -- docs/diagrams/INDEX.yml \

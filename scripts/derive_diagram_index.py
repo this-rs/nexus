@@ -15,6 +15,7 @@ WHAT A HEADER LOOKS LIKE (see docs/diagrams/README.md for the full charter):
 
 WHAT THIS SCRIPT CHECKS, and fails on:
   * a header missing `name`, `covers` or `verified`;
+  * a `verified` that is neither an ISO date nor a git sha (cannot be replayed);
   * `name` disagreeing with the file name (the index keys on it);
   * a `covers` glob matching NO file — the usual cause is a file that moved,
     and the diagram silently stops owning anything;
@@ -32,14 +33,39 @@ Exit code is 1 when a check fails, so CI can gate on it. No network.
 
 from __future__ import annotations
 
+import datetime
 import glob
 import os
+import re
 import subprocess
 import sys
 
 DIAGRAM_DIR = "docs/diagrams"
 INDEX = f"{DIAGRAM_DIR}/INDEX.yml"
 HEADER_KEYS = ("name", "covers", "verified")
+
+
+SHA_RE = re.compile(r"^[0-9a-f]{7,40}$")
+
+
+def verified_problem(value: str) -> str | None:
+    """Why a `%% verified:` value cannot be replayed, or None when it can.
+
+    `verified` records WHAT the author checked the diagram against, so that a
+    reviewer can look at the same thing: a calendar date (`git log --until`) or
+    a git sha (`git show <sha>:<file>`). `yesterday` and `TODO` cannot be
+    replayed, which makes the diagram unverifiable — the very defect diagrams
+    are meant to remove.
+    """
+    if SHA_RE.match(value):
+        return None
+    if re.match(r"^\d{4}-\d{2}-\d{2}$", value):
+        try:
+            datetime.date.fromisoformat(value)
+            return None
+        except ValueError:
+            return f"`{value}` has the shape of a date but is not a calendar day"
+    return f"`{value}` is neither an ISO date (YYYY-MM-DD) nor a short git sha — it cannot be replayed"
 
 
 def repo_root() -> str:
@@ -71,6 +97,10 @@ def parse_header(path: str) -> tuple[dict, list[str]]:
     for key in HEADER_KEYS:
         if not found.get(key):
             problems.append(f"{path}: header `{key}` is missing or empty")
+    if found.get("verified"):
+        why = verified_problem(str(found["verified"]))
+        if why:
+            problems.append(f"{path}: header `verified`: {why}")
     stem = os.path.basename(path)[: -len(".mmd")]
     if found.get("name") and found["name"] != stem:
         problems.append(f"{path}: name `{found['name']}` does not match the file name")
