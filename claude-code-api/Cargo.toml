@@ -2,6 +2,7 @@
 name = "claude-code-api"
 version.workspace = true
 edition = "2024"
+rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
 description = "OpenAI-compatible API gateway for Claude Code CLI"
