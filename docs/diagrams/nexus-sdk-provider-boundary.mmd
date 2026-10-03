@@ -1,0 +1,131 @@
+%% name: nexus-sdk-provider-boundary
+%% covers: claude-code-sdk-rs/src/lib.rs, claude-code-sdk-rs/src/bin/fake_claude.rs
+%% verified: 2026-10-02
+%% ---
+%% PROUVE : où passe la frontière entre « un agent quelconque » et « Claude Code »
+%%   dans ce dépôt, au sha 443a2a0 (relu le 2026-10-02). Ce diagramme possède la
+%%   surface publique (lib.rs) et le faux CLI (bin/fake_claude.rs) — c'est-à-dire
+%%   ce qu'un appelant voit et ce qu'un provider doit reproduire. Le détail de chaque
+%%   module reste dans nexus-sdk-transport, -interactive, -types, -client, -util.
+%% ---
+%% SOURCES LUES :
+%%   claude-code-sdk-rs/src/lib.rs            — bloc `pub use` (clients, hooks, transport, types, memory)
+%%   claude-code-sdk-rs/src/bin/fake_claude.rs — directives emit, emit_json, emit_partial, stderr, sleep,
+%%                                               await_stdin, reply_control, wait_eof, exit ; --version
+%%   claude-code-sdk-rs/src/transport/mod.rs  — trait Transport (signatures), InputMessage
+%%   claude-code-sdk-rs/src/transport/subprocess.rs — build_command, find_claude_cli, check_cli_version,
+%%                                               spawn_process (routage stdout)
+%%   claude-code-sdk-rs/src/types.rs          — Message, ContentBlock, StreamEventData, ClaudeCodeOptions,
+%%                                               PermissionMode, SDKControlRequest, HookInput, McpServerConfig
+%%   claude-code-sdk-rs/src/interactive.rs    — set_permission_mode, initialize_hooks, send_hook_response,
+%%                                               build_interrupt_json (JSON de contrôle écrit à la main)
+%%   claude-code-sdk-rs/src/query.rs          — query_print_mode (second constructeur de ligne de commande)
+%%   claude-code-api/src/core/{claude_manager,interactive_session,process_pool}.rs — Command::new(claude)
+%%   tests/support/mod.rs                     — fake_cli_path (CARGO_BIN_EXE_fake_claude)
+%%   Commandes : grep -rn 'Command::new' claude-code-sdk-rs/src claude-code-api/src → 5 sites
+%%               grep -rln fake_cli_path tests → 8 fichiers d'intégration
+%%               grep -rn 'cancel_running_tools' . --include=*.rs → 0 (le backend PO le fait lui-même)
+%% ---
+%% NON ETABLI :
+%%   aucune mesure de ce qu'un autre CLI d'agent (Codex, Gemini) émet réellement :
+%%   la colonne « générique » est une lecture de types.rs, pas une comparaison de protocoles.
+%% ---
+%% LEGENDE
+%%   ✅ vérifié (le nœud dit comment)  🟠 décidé, non écrit  🔴 défaut constaté  ⚪ hors dépôt / autre diagramme
+
+flowchart TD
+    subgraph legend["Légende"]
+        direction LR
+        L1["✅ vérifié : test ou grep nommé"]
+        L2["🟠 décidé, non écrit"]
+        L3["🔴 défaut constaté"]
+        L4["⚪ hors dépôt / autre diagramme"]
+    end
+
+    BACKEND["⚪ backend PO : ChatManager (po-chat-manager)<br/>importe nexus_claude dans 10 fichiers"]
+    CLAUDE["⚪ processus claude (stream-json), version ≥ 2.1.280"]
+
+    subgraph surface["Surface publique — lib.rs : ce que le backend voit"]
+        direction TB
+        CLIENTS["✅ clients : InteractiveClient (= ClaudeSDKClientDefault),<br/>ClaudeSDKClient, ClaudeSDKClientWorking, OptimizedClient, Query, query<br/>— tous construisent SubprocessTransport en dur<br/><i>vérifié : grep 'SubprocessTransport::new' src → 5 fichiers<br/>(client, client_working, optimized_client, interactive, query)</i>"]
+        HOOKFN["✅ fonctions libres de hook : is_hook_callback,<br/>dispatch_hook_from_registry, build_hook_response_json<br/>(le backend les appelle depuis sa pompe de contrôle)<br/><i>vérifié : tests/interactive_client_fake_cli.rs</i>"]
+        TRANSPORTX["✅ transport : trait Transport, SubprocessTransport, MockTransport,<br/>find_claude_cli, get_cli_version, SemVer, describe_command_redacted<br/><i>vérifié : nexus-sdk-transport (faux CLI)</i>"]
+        TYPESX["✅ types : Message, ContentBlock, StreamEventData, ClaudeCodeOptions,<br/>PermissionMode, SDKControlRequest, Hook*, McpServerConfig, PermissionResult<br/><i>vérifié : nexus-sdk-types (parseur rejoué)</i>"]
+        REST["✅ cli_download (download_cli, get_cached_cli_path), memory,<br/>sdk_mcp (SdkMcpServer), token_tracker, model_recommendation<br/><i>vérifié : nexus-sdk-util, nexus-sdk-memory</i>"]
+    end
+
+    BACKEND --> CLIENTS
+    BACKEND --> HOOKFN
+    BACKEND --> TYPESX
+
+    subgraph generic["Générique — ce qu'un agent quelconque fournit (lecture de types.rs)"]
+        direction TB
+        G1["✅ tour utilisateur : Message::User, InputMessage::user<br/><i>vérifié : faux CLI, FAKE_CLAUDE_STDIN_OUT relu</i>"]
+        G2["✅ texte et raisonnement : ContentBlock::Text, ::Thinking<br/><i>vérifié : faux CLI, transcription par défaut</i>"]
+        G3["✅ appel et résultat d'outil : ContentBlock::ToolUse, ::ToolResult<br/><i>vérifié : tests/fake_cli_harness.rs</i>"]
+        G4["✅ flux de jetons : StreamEvent (forme SSE de l'API Messages)<br/><i>vérifié : emit_partial du faux CLI</i>"]
+        G5["✅ fin, coût, usage : Message::Result (subtype, num_turns, total_cost_usd)<br/><i>vérifié : transcription par défaut, result/success</i>"]
+        G6["✅ demande et réponse de permission : CanUseTool, PermissionResult<br/><i>vérifié : reply_control can_use_tool du faux CLI</i>"]
+        G7["✅ interruption, imbrication de sous-agents (parent_tool_use_id)<br/><i>vérifié : reply_control interrupt ; is_sidechain</i>"]
+    end
+
+    TYPESX --> generic
+
+    subgraph claude["Propre à Claude Code — protocole stream-json et CLI"]
+        direction TB
+        C1["✅ ligne de commande : build_command — --output-format stream-json,<br/>--input-format stream-json, --permission-prompt-tool, --permission-mode,<br/>--mcp-config JSON inline, --resume, --settings, --add-dir, --tools, --betas,<br/>--plugin-dir, --agents, --setting-sources… ; pas de --cwd (current_dir)<br/><i>vérifié : FAKE_CLAUDE_ARGS_OUT relu dans tests/transport_subprocess_runtime.rs</i>"]
+        C2["✅ localiser et vérifier le binaire : find_claude_cli (which, cache, chemins fixes),<br/>check_cli_version ≥ 2.1.280 (avertit seulement) ; cli_path est la seule surcharge,<br/>aucune variable CLAUDE_CLI_PATH dans ce dépôt<br/><i>vérifié : grep CLAUDE_CLI_PATH . → 0 ; tests de lookup en bac à sable</i>"]
+        C3["✅ routage stdout de spawn_process : control_response / control_request /<br/>control / sdk_control_request / system sdk_control:* → canal de contrôle ;<br/>le reste → message_parser::parse_message<br/><i>vérifié : transcriptions scriptées (nexus-sdk-transport)</i>"]
+        C4["✅ protocole de contrôle : request_id, poignée de main initialize + hookCallbackIds,<br/>can_use_tool, hook_callback, set_permission_mode (4 noms), set_model,<br/>mcp_message (MCP SDK tunnelé), rewind_files<br/><i>vérifié : reply_control du faux CLI, tests/sdk_client_fake_cli.rs</i>"]
+        C5["✅ modèle de hooks : PreToolUse, PostToolUse, UserPromptSubmit, Stop,<br/>SubagentStop, PreCompact ; additionalContext, permissionDecision<br/><i>vérifié : nexus-sdk-interactive (dispatch_hook_callback)</i>"]
+        C6["✅ System subtypes : init, compact_boundary, task_started / task_progress,<br/>sdk_control:* ; ClaudeCodeOptions presque entièrement propre au CLI<br/>(settings, setting_sources, betas, plugins, sandbox, agents, fork_session)<br/><i>vérifié : nexus-sdk-types</i>"]
+        C7["✅ JSON de contrôle écrit à la main dans InteractiveClient :<br/>set_permission_mode, initialize_hooks, send_hook_response, build_interrupt_json<br/><i>vérifié : grep 'control_request' src/interactive.rs</i>"]
+        C8["🔴 deux formes filaires d'interrupt coexistent :<br/>ControlRequest::Interrupt (request.type) et Query::interrupt (request.subtype) ;<br/>le faux CLI accepte les deux pour cette raison<br/><i>vérifié : reply_control lit request.subtype OU request.type</i>"]
+        C9["🔴 cinq constructeurs de ligne de commande claude : build_command (SDK),<br/>query_print_mode (query.rs), ClaudeManager (deux fonctions) et<br/>InteractiveSessionManager (claude-code-api, Command::new direct, passent --cwd) ;<br/>plus session_process.rs, jamais compilé (absent de core/mod.rs)<br/><i>vérifié : grep -rn Command::new claude-code-sdk-rs/src claude-code-api/src hors tests</i>"]
+        C1 --> C2
+        C3 --> C4 --> C5
+        C7 --> C8
+        C1 --> C9
+    end
+
+    CLIENTS --> C7
+    TRANSPORTX --> C1
+    TRANSPORTX --> C3
+    TYPESX --> C4
+    TYPESX --> C6
+    C1 --> CLAUDE
+    C3 <--> CLAUDE
+
+    subgraph seam["La couture — trait Transport (transport/mod.rs) et ce qu'elle laisse passer"]
+        direction TB
+        S1["✅ presque générique : connect, send_message, receive_messages,<br/>subscribe_messages, is_connected, disconnect, end_input<br/><i>vérifié : MockTransport::pair, tests e2e du protocole de contrôle</i>"]
+        S2["✅ fuites du protocole : send_sdk_control_request / _response en serde_json::Value,<br/>clone_stdin_sender (lignes brutes), child_pid et ControlRequest supposent un processus,<br/>InputMessage est l'enveloppe stream-json<br/><i>vérifié : signatures relues, grep 'fn clone_stdin_sender' transport/mod.rs</i>"]
+        S3["✅ la couture n'est utilisée qu'en test : InteractiveClient::from_transport<br/>+ MockTransport ; aucun second transport en production<br/><i>vérifié : grep from_transport src (clients + cfg(test)) ; backend : 3 fichiers, tests seulement</i>"]
+        S1 --> S2 --> S3
+    end
+
+    TRANSPORTX --> S1
+
+    subgraph fake["Le faux CLI — bin/fake_claude.rs : la spécification exécutable du contrat"]
+        direction TB
+        F1["✅ piloté par environnement : FAKE_CLAUDE_TRANSCRIPT, FAKE_CLAUDE_ARGS_OUT,<br/>FAKE_CLAUDE_STDIN_OUT, FAKE_CLAUDE_VERSION, FAKE_CLAUDE_MAX_RUNTIME_MS<br/><i>vérifié : tests/support/mod.rs fake_cli_path, 8 fichiers d'intégration</i>"]
+        F2["✅ directives : emit, emit_json, emit_partial, stderr, sleep, await_stdin,<br/>reply_control (répond à request.subtype ou request.type avec request_id),<br/>wait_eof, exit ; --version imprime 2.1.280 (Claude Code)<br/><i>vérifié : tests/interactive_client_fake_cli.rs, transport_subprocess_runtime.rs</i>"]
+        F3["🟠 ce qu'un nouveau provider doit livrer d'abord : un faux exécutable<br/>+ une transcription, avant tout code de transport — décidé, non écrit (RFC PO)"]
+        F1 --> F2 --> F3
+    end
+
+    C3 -.->|"ce qu'il simule"| F2
+    C4 -.-> F2
+
+    subgraph target["🟠 Cible — RFC PO « harness multi-provider » (décidé, non écrit)"]
+        direction TB
+        T1["🟠 trait AgentSession générique au-dessus de la couture :<br/>send_turn, events (G1→G7), answer_permission, interrupt, set_model, close —<br/>sans serde_json::Value ni stdin brut dans la signature"]
+        T2["🟠 ClaudeCodeProvider = SubprocessTransport + message_parser + protocole de contrôle<br/>(C1→C7 déplacés derrière l'adaptateur, un seul constructeur de commande)"]
+        T3["🟠 autres adaptateurs : un CLI d'agent (Codex, Gemini CLI) ou l'API Messages directe ;<br/>chacun avec son faux exécutable (F3) et ses conformance tests"]
+        T1 --> T2
+        T1 --> T3
+    end
+
+    S2 -.->|"à fermer"| T1
+    C9 -.->|"à réduire à un"| T2
+    F3 -.-> T3

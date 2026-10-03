@@ -1,0 +1,6 @@
+# Resolve dependencies to versions that build with the workspace `rust-version` (1.88).
+# Without this, a fresh resolution (Cargo.lock is not committed) takes the newest release of every
+# crate even when it needs a newer Rust: uuid 1.27.0 requires 1.89 and broke the MSRV job and main
+# on 2026-10-02. Stable since cargo 1.84.
+[resolver]
+incompatible-rust-versions = "fallback"

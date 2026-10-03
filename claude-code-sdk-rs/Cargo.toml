@@ -2,6 +2,7 @@
 name = "nexus-claude"
 version = "0.5.0"
 edition = "2024"
+rust-version.workspace = true
 authors = [
     "Original: ZhangHanDong <psiace@outlook.com>",
     "Fork: Théotime Rivière"
