@@ -32,8 +32,9 @@ jobs:
       # in a Rust repository, and no network.
       #
       # It does NOT check that a diagram still describes what its files do —
-      # only that the ownership map is well formed and current. Do not cite a
-      # green run here as proof that the diagrams are accurate.
+      # only that the ownership map is well formed and current. The `diagram-drift`
+      # job below asks that question on every pull request; neither is proof
+      # that the diagrams are accurate.
       - name: Check the diagram index is derived and current
         run: |
           python3 -m unittest scripts/test_derive_diagram_index.py
@@ -41,6 +42,28 @@ jobs:
           python3 scripts/derive_diagram_index.py --write
           git diff --exit-code -- docs/diagrams/INDEX.yml \
             || { echo "::error::INDEX.yml is stale — run python3 scripts/derive_diagram_index.py --write"; exit 1; }
+
+  # A pull request that changes a file a diagram owns must either change that
+  # diagram or say, in a commit message, `Diagram-Unchanged: <name> — <reason>`.
+  # See scripts/check_diagram_drift.py for the rule and what it does not prove.
+  #
+  # Pull requests only: on a push to main there is no branch to compare, and a
+  # squash merge may have rewritten the messages that carried the trailers.
+  # The PR HEAD is checked out (not GitHub's merge commit) with full history,
+  # so `origin/<base>...HEAD` is exactly what the branch changed.
+  diagram-drift:
+    name: Diagram drift
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+      - name: Check changed code against the diagrams that own it
+        run: |
+          python3 -m unittest scripts/test_check_diagram_drift.py
+          python3 scripts/check_diagram_drift.py --base "origin/${{ github.base_ref }}"
 
   # Clippy lints
   clippy:
@@ -213,7 +236,7 @@ jobs:
   ci-success:
     name: CI Success
     runs-on: ubuntu-latest
-    needs: [fmt, clippy, test, docs, msrv]
+    needs: [fmt, diagram-drift, clippy, test, docs, msrv]
     if: always()
     steps:
       - name: Check all jobs passed
@@ -223,6 +246,13 @@ jobs:
              [[ "${{ needs.test.result }}" != "success" ]] || \
              [[ "${{ needs.docs.result }}" != "success" ]] || \
              [[ "${{ needs.msrv.result }}" != "success" ]]; then
+            echo "One or more jobs failed"
+            exit 1
+          fi
+          # `skipped` is the expected result on a push (the job is PR-only).
+          drift="${{ needs.diagram-drift.result }}"
+          if [[ "$drift" != "success" && "$drift" != "skipped" ]]; then
+            echo "Diagram drift check: $drift"
             echo "One or more jobs failed"
             exit 1
           fi

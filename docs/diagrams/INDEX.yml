@@ -57,7 +57,7 @@ diagrams:
       - claude-code-api/src/core/storage/*.rs
   - name: nexus-ci-pipeline
     file: nexus-ci-pipeline.mmd
-    verified: 2026-10-02
+    verified: 2026-10-03
     covers:
       - .github/workflows/ci.yml
       - .github/workflows/release.yml
