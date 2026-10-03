@@ -24,7 +24,7 @@ Un ✅ sans moyen de vérification nommé n'est pas un ✅.
 ## En-tête obligatoire
 
 Les trois premières lignes d'un `.mmd` sont des commentaires Mermaid lus par
-`scripts/derive_diagram_index.py` :
+`cargo xtask diagrams index` (crate `xtask/`) :
 
 ```
 %% name: nexus-sdk-transport
@@ -37,14 +37,14 @@ Les trois premières lignes d'un `.mmd` sont des commentaires Mermaid lus par
   fichier modifié par une PR et capté par un `covers` oblige à toucher le diagramme
   correspondant dans la même PR, ou à porter le trailer de commit
   `Diagram-Unchanged: <nom> — <raison>`. La règle est appliquée sur chaque PR par
-  `scripts/check_diagram_drift.py` (job CI `diagram-drift`) ; la raison est obligatoire,
+  `cargo xtask diagrams drift` (job CI `diagram-drift`, code dans `xtask/src/drift.rs`) ; la raison est obligatoire,
   un trailer sans raison ou nommant un diagramme inexistant fait échouer le job. En
-  local : `python3 scripts/check_diagram_drift.py --base origin/main`. Ce que ce job ne
+  local : `cargo xtask diagrams drift --base origin/main`. Ce que ce job ne
   prouve PAS : que le diagramme est exact — il garantit seulement que la question a été
   posée. La CI vérifie par ailleurs : en-têtes complets et bien formés, chaque glob
   matche un fichier, un fichier a un seul propriétaire, `INDEX.yml` à jour.
 - `verified` : date ISO (`YYYY-MM-DD`) du dernier recoupement avec le code, ou sha git
-  court. Ce n'est plus une convention : `derive_diagram_index.py` refuse toute autre valeur
+  court. Ce n'est plus une convention : `cargo xtask diagrams index` refuse toute autre valeur
   (`yesterday`, `TODO`, une date impossible), parce que `verified` n'a de sens que si un
   relecteur peut rejouer ce que l'auteur a vu — une date se retrouve par `git log --until`,
   un sha par `git show <sha>:<fichier>`.

@@ -1,0 +1,31 @@
+%% name: nexus-xtask
+%% covers: xtask/src/*.rs
+%% verified: 2026-10-03
+%% ---
+%% PROUVE : ce que `cargo xtask diagrams …` vérifie, et ce qu'il ne vérifie pas.
+%% SOURCES LUES : xtask/src/lib.rs (run, repository, read_diagrams, run_index, run_drift),
+%%   header.rs (parse, verified_problem), glob.rs (matches), index.rs (derive, Index::render),
+%%   drift.rs (parse_trailers, find). Tests : `cargo test -p xtask`.
+%% NON ETABLI : l'exactitude d'un diagramme — aucun de ces contrôles ne la prouve.
+%% LEGENDE : ✅ vérifié (test nommé)  🟠 décidé, non écrit  ⚪ hors de ce crate
+flowchart TD
+    ci["⚪ CI nexus<br/>job fmt : diagrams index --check<br/>job diagram-drift (PR) : diagrams drift"] --> run
+
+    run["✅ run(args, cwd, out)<br/>0 ok · 1 contrôle en échec · 2 usage ou git<br/>(tests/commands.rs)"]
+    run --> repo["✅ repository()<br/>git ls-files suivis + non suivis non ignorés,<br/>moins les fichiers supprimés du disque<br/>(a_file_deleted_but_still_in_the_index_of_git_is_not_a_source)"]
+    repo --> read["✅ read_diagrams()<br/>docs/diagrams/*.mmd, _TEMPLATE et sous-dossiers exclus"]
+    read --> header["✅ header::parse<br/>name = nom de fichier, covers non vide,<br/>verified = date ISO réelle ou sha 7–40<br/>(header::tests)"]
+
+    header --> index["✅ index::derive<br/>glob sans fichier = erreur<br/>fichier à deux propriétaires = erreur<br/>source sans propriétaire = listé<br/>(index::tests)"]
+    index --> render["✅ Index::render → INDEX.yml<br/>--write : rien d'écrit s'il y a un problème<br/>--check : échec si le fichier commité diffère<br/>(index_prints_checks_and_writes,<br/>index_refuses_to_write_over_a_problem)"]
+
+    header --> drift["✅ drift::find<br/>fichier couvert modifié ⇒ .mmd touché<br/>ou trailer Diagram-Unchanged avec raison<br/>(drift::tests, tests/commands.rs)"]
+    gitdiff["✅ git diff base...HEAD + git log base..HEAD<br/>(covered_file_changed_with_nothing_said_fails)"] --> drift
+    drift --> trailer["✅ parse_trailers<br/>sans raison = erreur · diagramme inconnu = erreur<br/>(a_trailer_without_a_reason_is_a_problem_not_a_pass)"]
+
+    glob["✅ glob::matches<br/>compare des CHEMINS, pas le disque :<br/>un fichier supprimé compte<br/>(glob::tests, a_deleted_covered_file_fails)"]
+    index --> glob
+    drift --> glob
+
+    marked["🟠 invariant « tout nœud porte un marqueur »<br/>décidé dans la charte, vérifié par aucun code"]
+    header -.-> marked

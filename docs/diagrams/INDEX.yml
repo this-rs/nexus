@@ -1,14 +1,14 @@
 # Diagram -> the code it owns. See README.md for the charter.
 #
 # GENERATED from the .mmd headers — do not edit by hand:
-#   python3 scripts/derive_diagram_index.py --write
+#   cargo xtask diagrams index --write
 #
 # A diagram owns a source file exclusively. A file no diagram
 # claims is listed under `orphans` so the gap is visible rather
 # than implicit; binaries, `mod.rs` and re-exporting `lib.rs`
 # files legitimately live there.
 #
-# 14 diagrams, 77/79 source files claimed, 4 unclaimed.
+# 15 diagrams, 83/85 source files claimed, 4 unclaimed.
 
 diagrams:
   - name: nexus-api-core
@@ -107,6 +107,11 @@ diagrams:
       - claude-code-sdk-rs/src/perf_utils.rs
       - claude-code-sdk-rs/src/sdk_mcp.rs
       - claude-code-sdk-rs/src/token_tracker.rs
+  - name: nexus-xtask
+    file: nexus-xtask.mmd
+    verified: 2026-10-03
+    covers:
+      - xtask/src/*.rs
 
 orphans:
   - claude-code-api/src/bin/ccapi.rs
