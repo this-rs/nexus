@@ -335,6 +335,34 @@ impl InteractiveClient {
         &mut self,
         prompt: String,
     ) -> Result<impl Stream<Item = Result<Message>> + '_> {
+        self.send_input_and_receive_stream(InputMessage::user(prompt, "default".to_string()))
+            .await
+    }
+
+    /// Like [`Self::send_and_receive_stream`], for a message made of content
+    /// blocks (text and images) instead of a plain string.
+    ///
+    /// # Errors
+    ///
+    /// [`SdkError::InvalidState`] before `connect()` or when `blocks` is empty,
+    /// and whatever the transport reports while writing.
+    pub async fn send_blocks_and_receive_stream(
+        &mut self,
+        blocks: Vec<crate::transport::UserContentBlock>,
+    ) -> Result<impl Stream<Item = Result<Message>> + '_> {
+        if blocks.is_empty() {
+            return Err(SdkError::InvalidState {
+                message: "Cannot send a message with no content blocks".into(),
+            });
+        }
+        self.send_input_and_receive_stream(InputMessage::user_blocks(blocks, "default".to_string()))
+            .await
+    }
+
+    async fn send_input_and_receive_stream(
+        &mut self,
+        message: InputMessage,
+    ) -> Result<impl Stream<Item = Result<Message>> + '_> {
         if !self.connected {
             return Err(SdkError::InvalidState {
                 message: "Not connected".into(),
@@ -353,7 +381,6 @@ impl InteractiveClient {
             let mut stream = transport.receive_messages();
 
             // 2. THEN send the message
-            let message = InputMessage::user(prompt, "default".to_string());
             transport.send_message(message).await?;
 
             debug!("Message sent, subscription active");
@@ -2156,6 +2183,49 @@ mod tests {
         assert!(matches!(collected.last(), Some(Message::Result { .. })));
         let sent = handle.sent.lock().expect("sent");
         assert_eq!(sent.len(), 1, "the prompt was sent exactly once");
+    }
+
+    #[tokio::test]
+    async fn send_blocks_and_receive_stream_sends_the_array_and_stops_at_the_result() {
+        let (transport, handle) = ScriptedBuilder::new()
+            .msg(system_message("init"))
+            .msg(result_message("done"))
+            .build();
+        let mut client = InteractiveClient::from_transport(transport);
+        client.connect().await.unwrap();
+
+        let stream = client
+            .send_blocks_and_receive_stream(vec![
+                crate::transport::UserContentBlock::text("regarde"),
+                crate::transport::UserContentBlock::image_base64("image/png", "iVBOR"),
+            ])
+            .await
+            .unwrap();
+        let mut stream = std::pin::pin!(stream);
+        let mut collected = Vec::new();
+        while let Some(item) = stream.next().await {
+            collected.push(item.expect("no transport error"));
+        }
+
+        assert_eq!(collected.len(), 2, "stops on the Result message");
+        let sent = handle.sent.lock().expect("sent");
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].message["content"][1]["type"], "image");
+    }
+
+    #[tokio::test]
+    async fn send_blocks_and_receive_stream_refuses_empty_and_unconnected() {
+        let (transport, _handle) = ScriptedBuilder::new().build();
+        let mut client = InteractiveClient::from_transport(transport);
+        let block = crate::transport::UserContentBlock::text("x");
+        assert_not_connected(
+            client
+                .send_blocks_and_receive_stream(vec![block])
+                .await
+                .err(),
+        );
+        client.connect().await.unwrap();
+        assert!(client.send_blocks_and_receive_stream(vec![]).await.is_err());
     }
 
     #[tokio::test]
