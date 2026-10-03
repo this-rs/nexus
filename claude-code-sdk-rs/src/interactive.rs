@@ -240,6 +240,42 @@ impl InteractiveClient {
         Ok(())
     }
 
+    /// Send a message made of content blocks (text and images) without
+    /// waiting for a response.
+    ///
+    /// [`send_message`](Self::send_message) can only carry a string; this is the
+    /// way to attach an image. The CLI rejects an image it cannot decode, so
+    /// validate size and MIME type before calling.
+    ///
+    /// # Errors
+    ///
+    /// [`SdkError::InvalidState`] before `connect()` or when `blocks` is empty
+    /// (an empty user message is never what the caller meant), and whatever the
+    /// transport reports while writing.
+    pub async fn send_message_blocks(
+        &mut self,
+        blocks: Vec<crate::transport::UserContentBlock>,
+    ) -> Result<()> {
+        if !self.connected {
+            return Err(SdkError::InvalidState {
+                message: "Not connected".into(),
+            });
+        }
+        if blocks.is_empty() {
+            return Err(SdkError::InvalidState {
+                message: "Cannot send a message with no content blocks".into(),
+            });
+        }
+
+        let mut transport = self.transport.lock().await;
+        let message = InputMessage::user_blocks(blocks, "default".to_string());
+        transport.send_message(message).await?;
+        drop(transport);
+
+        debug!("Message with content blocks sent");
+        Ok(())
+    }
+
     /// Send a raw SDK control response to the Claude CLI subprocess.
     ///
     /// This is used to respond to control protocol requests (e.g., `can_use_tool`
@@ -1861,6 +1897,43 @@ mod tests {
             "the client hardcodes the session id instead of using the CLI's"
         );
         assert!(sent.parent_tool_use_id.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_send_message_blocks_writes_an_array_content() {
+        let (transport, mut handle) = MockTransport::pair();
+        let mut client = InteractiveClient::from_transport(transport);
+        client.connect().await.unwrap();
+
+        client
+            .send_message_blocks(vec![
+                crate::transport::UserContentBlock::text("regarde"),
+                crate::transport::UserContentBlock::image_base64("image/png", "iVBOR"),
+            ])
+            .await
+            .unwrap();
+
+        let sent = handle
+            .sent_input_rx
+            .recv()
+            .await
+            .expect("one input message");
+        assert_eq!(sent.message["content"][0]["text"], "regarde");
+        assert_eq!(sent.message["content"][1]["type"], "image");
+        assert_eq!(sent.message["content"][1]["source"]["data"], "iVBOR");
+    }
+
+    #[tokio::test]
+    async fn test_send_message_blocks_refuses_empty_and_unconnected() {
+        let (transport, _handle) = MockTransport::pair();
+        let mut client = InteractiveClient::from_transport(transport);
+        let block = crate::transport::UserContentBlock::text("x");
+        assert!(
+            client.send_message_blocks(vec![block]).await.is_err(),
+            "not connected"
+        );
+        client.connect().await.unwrap();
+        assert!(client.send_message_blocks(vec![]).await.is_err(), "empty");
     }
 
     #[tokio::test]
