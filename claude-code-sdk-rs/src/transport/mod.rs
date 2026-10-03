@@ -22,6 +22,49 @@ pub use subprocess::SubprocessTransport;
 /// values that follow a secret-bearing flag such as `--mcp-config`.
 pub use subprocess::describe_command_redacted;
 
+/// One block of a user message that carries more than plain text.
+///
+/// The Claude CLI accepts `content` either as a string or as an array of
+/// blocks; this is the array form, which is the only way to send an image.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UserContentBlock {
+    /// A text block.
+    Text(String),
+    /// A base64-encoded image. `media_type` is a MIME type such as
+    /// `image/png`; `data` is the base64 payload WITHOUT a `data:` prefix.
+    Image {
+        /// MIME type of the image (`image/png`, `image/jpeg`, `image/gif`, `image/webp`).
+        media_type: String,
+        /// Base64 payload, no `data:` URI prefix.
+        data: String,
+    },
+}
+
+impl UserContentBlock {
+    /// Text block.
+    pub fn text(text: impl Into<String>) -> Self {
+        Self::Text(text.into())
+    }
+
+    /// Image block from an already base64-encoded payload.
+    pub fn image_base64(media_type: impl Into<String>, data: impl Into<String>) -> Self {
+        Self::Image {
+            media_type: media_type.into(),
+            data: data.into(),
+        }
+    }
+
+    fn to_json(&self) -> serde_json::Value {
+        match self {
+            Self::Text(text) => serde_json::json!({ "type": "text", "text": text }),
+            Self::Image { media_type, data } => serde_json::json!({
+                "type": "image",
+                "source": { "type": "base64", "media_type": media_type, "data": data }
+            }),
+        }
+    }
+}
+
 /// Input message structure for sending to Claude
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct InputMessage {
@@ -44,6 +87,22 @@ impl InputMessage {
             message: serde_json::json!({
                 "role": "user",
                 "content": content
+            }),
+            parent_tool_use_id: None,
+            session_id,
+        }
+    }
+
+    /// Create a user message made of content blocks (text and images).
+    ///
+    /// An empty `blocks` list is sent as an empty array; callers that can end
+    /// up with nothing to send should check before calling.
+    pub fn user_blocks(blocks: Vec<UserContentBlock>, session_id: String) -> Self {
+        Self {
+            r#type: "user".to_string(),
+            message: serde_json::json!({
+                "role": "user",
+                "content": blocks.iter().map(UserContentBlock::to_json).collect::<Vec<_>>()
             }),
             parent_tool_use_id: None,
             session_id,
@@ -192,6 +251,26 @@ mod tests {
         let json = serde_json::to_string(&msg).unwrap();
         assert!(json.contains(r#""type":"user""#));
         assert!(json.contains(r#""content":"Hello""#));
+    }
+
+    #[test]
+    fn test_input_message_user_blocks_text_and_image() {
+        let msg = InputMessage::user_blocks(
+            vec![
+                UserContentBlock::text("what is this?"),
+                UserContentBlock::image_base64("image/png", "iVBOR"),
+            ],
+            "s".to_string(),
+        );
+        assert_eq!(msg.message["role"], "user");
+        let content = msg.message["content"].as_array().expect("array content");
+        assert_eq!(content.len(), 2);
+        assert_eq!(content[0]["type"], "text");
+        assert_eq!(content[0]["text"], "what is this?");
+        assert_eq!(content[1]["type"], "image");
+        assert_eq!(content[1]["source"]["type"], "base64");
+        assert_eq!(content[1]["source"]["media_type"], "image/png");
+        assert_eq!(content[1]["source"]["data"], "iVBOR");
     }
 
     #[test]
