@@ -17,6 +17,7 @@ pub mod limits;
 pub mod profile;
 pub mod protocol;
 pub mod registry;
+pub mod search;
 pub mod server;
 #[cfg(unix)]
 pub mod shell;
