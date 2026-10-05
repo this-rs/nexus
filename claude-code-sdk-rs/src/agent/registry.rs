@@ -48,7 +48,7 @@
 //! `cli_path` (string, claude_code: path of the CLI), `compaction_keep_recent`
 //! (unsigned integer, native), `codex_home` (string, codex: the instance's persistent
 //! `CODEX_HOME`), `env` (object of strings, acp), `thinking` (bool, acp), `login_hint`
-//! (string, acp). Their types are checked by
+//! (string, acp), `acp_home` (string, acp: the instance's dedicated `HOME`, created `0700`). Their types are checked by
 //! [`ProviderInstanceConfig::validate`]; other keys are kept untouched for the
 //! factory of the kind to read. A key whose name looks like a credential is refused.
 //!
@@ -447,6 +447,7 @@ impl ProviderInstanceConfig {
                 "cli_path" => value.as_str().is_some_and(|path| !path.is_empty()),
                 "compaction_keep_recent" => value.is_u64(),
                 "codex_home" => value.as_str().is_some_and(|path| !path.is_empty()),
+                "acp_home" => value.as_str().is_some_and(|path| !path.is_empty()),
                 "env" => value
                     .as_object()
                     .is_some_and(|env| env.values().all(Value::is_string)),
@@ -1040,6 +1041,9 @@ impl ProviderRegistry {
             .get("thinking")
             .and_then(Value::as_bool)
             .unwrap_or(false);
+        if let Some(home) = config.extensions.get("acp_home").and_then(Value::as_str) {
+            acp.home = PathBuf::from(home);
+        }
         acp.login_hint = config
             .extensions
             .get("login_hint")

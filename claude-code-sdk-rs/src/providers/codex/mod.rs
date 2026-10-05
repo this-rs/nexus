@@ -129,7 +129,7 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
 const VERSION_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Configuration of one Codex instance.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct CodexConfig {
     /// Identifier of the instance (registry key).
     pub instance_id: String,
@@ -157,6 +157,26 @@ pub struct CodexConfig {
     /// Models `catalog()` lists besides the default one (Codex's own `model/list`
     /// needs a process and a login).
     pub models: Vec<String>,
+}
+
+impl std::fmt::Debug for CodexConfig {
+    /// The instance's explicit environment may hold an API key an operator put there:
+    /// only the NAMES and the length of each value are printed, never a value.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CodexConfig")
+            .field("instance_id", &self.instance_id)
+            .field("program", &self.program)
+            .field("codex_home", &self.codex_home)
+            .field("default_model", &self.default_model)
+            .field("context_window", &self.context_window)
+            .field("cost_basis", &self.cost_basis)
+            .field("prices", &self.prices)
+            .field("env_inherit", &self.env_inherit)
+            .field("env_set", &crate::agent::spec::redacted_map(&self.env_set))
+            .field("credential", &self.credential)
+            .field("models", &self.models)
+            .finish()
+    }
 }
 
 impl CodexConfig {
@@ -274,10 +294,18 @@ impl CodexProvider {
         )
     }
 
+    /// The dedicated `HOME` of the instance (decision A33): Codex keeps its state in
+    /// `CODEX_HOME`, and nothing else of the host user's dotfiles or credentials is
+    /// reachable through `HOME`.
+    fn instance_home(&self) -> std::path::PathBuf {
+        self.config.codex_home.join("home")
+    }
+
     fn base_policy(&self, extra: &[String]) -> EnvPolicy {
         EnvPolicy::allowlist()
             .with_inherited(self.config.env_inherit.iter().cloned())
             .with_inherited(extra.iter().cloned())
+            .with_home(self.instance_home())
     }
 
     /// The instance's explicit variables: its own, then `CODEX_HOME` (which nothing
@@ -305,6 +333,12 @@ impl CodexProvider {
         create_private_dir(home).map_err(|error| {
             ProviderError::protocol(format!(
                 "CODEX_HOME could not be created: {:?}",
+                error.kind()
+            ))
+        })?;
+        create_private_dir(&self.instance_home()).map_err(|error| {
+            ProviderError::protocol(format!(
+                "the instance HOME could not be created: {:?}",
                 error.kind()
             ))
         })
@@ -853,6 +887,37 @@ pub fn mcp_launch(servers: &BTreeMap<String, McpServerSpec>) -> Result<McpLaunch
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_debug_of_a_config_never_prints_an_environment_value() {
+        let mut config = CodexConfig::new("codex-debug");
+        config.env_set.insert(
+            "SOME_API_KEY".to_owned(),
+            "sk-live-0123456789abcdef".to_owned(),
+        );
+        let shown = format!("{config:?}");
+        assert!(!shown.contains("sk-live-0123456789abcdef"), "{shown}");
+        assert!(shown.contains("SOME_API_KEY"), "the name stays: {shown}");
+    }
+
+    /// Decision A33: Codex runs with a HOME of its own inside the instance's state.
+    #[test]
+    fn codex_runs_with_a_dedicated_home_inside_codex_home() {
+        let mut config = CodexConfig::new("codex-home");
+        config.codex_home = std::path::PathBuf::from("/srv/nexus/codex-state");
+        let provider = CodexProvider::new(config);
+        let policy = provider.base_policy(&[]);
+        let command = crate::transport::spawn::isolated_command("codex", &policy);
+        let home = command
+            .as_std()
+            .get_envs()
+            .find(|(name, _)| *name == "HOME")
+            .and_then(|(_, value)| value);
+        assert_eq!(
+            home,
+            Some(std::ffi::OsStr::new("/srv/nexus/codex-state/home"))
+        );
+    }
 
     #[test]
     fn versions_are_read_from_the_cli_banner() {

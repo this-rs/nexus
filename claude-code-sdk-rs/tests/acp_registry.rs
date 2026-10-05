@@ -45,6 +45,16 @@ fn instance(health: &str) -> ProviderInstanceConfig {
         )
         .with_extension("env", json!({ "FAKE_ACP_TRANSCRIPT": transcript(health) }))
         .with_extension("thinking", Value::Bool(true))
+        // The agent's dedicated HOME: a temp dir, never the machine's data dir.
+        .with_extension(
+            "acp_home",
+            json!(
+                std::env::temp_dir()
+                    .join("nexus-acp-registry-test-home")
+                    .display()
+                    .to_string()
+            ),
+        )
 }
 
 #[test]

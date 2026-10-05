@@ -242,6 +242,26 @@ impl Drop for SecretFile {
     }
 }
 
+/// Creates a directory (and its parents) that only the current user can enter, or
+/// tightens one that already exists. Used for the dedicated `HOME` of a provider
+/// instance, which holds that agent's own credentials.
+#[cfg(unix)]
+pub fn ensure_private_dir(dir: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(dir)?;
+    // A directory that already existed keeps its mode through `create`: tighten it.
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+}
+
+/// See the Unix variant.
+#[cfg(not(unix))]
+pub fn ensure_private_dir(dir: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dir)
+}
+
 #[cfg(unix)]
 fn create_private_dir(dir: &Path) -> std::io::Result<()> {
     use std::os::unix::fs::DirBuilderExt;

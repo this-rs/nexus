@@ -175,7 +175,7 @@ impl McpServerSpec {
     }
 }
 
-fn redacted_map(map: &BTreeMap<String, String>) -> BTreeMap<&str, String> {
+pub(crate) fn redacted_map(map: &BTreeMap<String, String>) -> BTreeMap<&str, String> {
     map.iter()
         .map(|(name, value)| (name.as_str(), format!("<redacted:{}>", value.len())))
         .collect()

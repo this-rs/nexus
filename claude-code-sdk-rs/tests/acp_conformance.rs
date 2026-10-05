@@ -71,6 +71,8 @@ impl Staging {
     /// A configuration whose `health()` plays `health_transcript`.
     fn config_with(&self, health_transcript: &str) -> AcpConfig {
         let mut config = AcpConfig::new("acp-test", vec![FAKE.to_owned()]);
+        // The agent's dedicated HOME lives in the test's temp dir, not the data dir.
+        config.home = self.cwd.path().join("acp-home");
         config.default_model = Some(MODEL.to_owned());
         config.cost_basis = CostBasis::Priced;
         config.prices = nexus_claude::model::PriceTable::new().with(MODEL, price());

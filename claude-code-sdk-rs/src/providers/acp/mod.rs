@@ -112,7 +112,7 @@ pub const SUPPORTED_PROTOCOL_VERSION: u32 = wire::PROTOCOL_VERSION;
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Configuration of one ACP instance.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct AcpConfig {
     /// Identifier of the instance (registry key).
     pub instance_id: String,
@@ -138,13 +138,51 @@ pub struct AcpConfig {
     pub context_window: Option<u64>,
     /// What a human runs to log in to the agent (never run by PO).
     pub login_hint: Option<String>,
+    /// The dedicated `HOME` of the instance (decision A33): the agent keeps its own
+    /// configuration and login there, and cannot read the host user's. Created
+    /// `0700` when the agent starts. A human logs in with
+    /// `HOME=<this dir> <agent> login`.
+    pub home: std::path::PathBuf,
+}
+
+impl std::fmt::Debug for AcpConfig {
+    /// `env` is documented "not for secrets", but an operator can still put one
+    /// there: only the NAMES and the length of each value are printed.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AcpConfig")
+            .field("instance_id", &self.instance_id)
+            .field("command", &self.command)
+            .field("env_inherit", &self.env_inherit)
+            .field("env", &crate::agent::spec::redacted_map(&self.env))
+            .field("cost_basis", &self.cost_basis)
+            .field("prices", &self.prices)
+            .field("default_model", &self.default_model)
+            .field("models", &self.models)
+            .field("thinking", &self.thinking)
+            .field("context_window", &self.context_window)
+            .field("login_hint", &self.login_hint)
+            .field("home", &self.home)
+            .finish()
+    }
+}
+
+/// `<user data dir>/nexus/acp/<instance>/home`, or under the temp dir without a data dir.
+pub fn default_acp_home(instance_id: &str) -> std::path::PathBuf {
+    dirs::data_local_dir()
+        .unwrap_or_else(std::env::temp_dir)
+        .join("nexus")
+        .join("acp")
+        .join(instance_id)
+        .join("home")
 }
 
 impl AcpConfig {
     /// A configuration with the defaults: cost unknown, nothing inherited.
     pub fn new(instance_id: impl Into<String>, command: Vec<String>) -> Self {
+        let instance_id = instance_id.into();
         Self {
-            instance_id: instance_id.into(),
+            home: default_acp_home(&instance_id),
+            instance_id,
             command,
             env_inherit: Vec::new(),
             env: BTreeMap::new(),
@@ -263,6 +301,7 @@ impl AcpProvider {
         EnvPolicy::allowlist()
             .with_inherited(self.config.env_inherit.iter().cloned())
             .with_inherited(extra.iter().cloned())
+            .with_home(&self.config.home)
     }
 
     fn launch(&self, spec: Option<&SessionSpec>, cwd: std::path::PathBuf) -> Launch {
@@ -315,6 +354,13 @@ impl AcpProvider {
         ),
         ProviderError,
     > {
+        // The agent runs with a HOME of its own; it must exist before the process does.
+        crate::transport::spawn::ensure_private_dir(&self.config.home).map_err(|error| {
+            ProviderError::protocol(format!(
+                "the instance HOME could not be created: {:?}",
+                error.kind()
+            ))
+        })?;
         let (process, inbound) = Process::spawn(launch)?;
         let init = async {
             let value = process
@@ -769,6 +815,36 @@ impl AgentProvider for AcpProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `env` is documented "not for secrets", but an operator can still put one there:
+    /// a log line that prints the configuration must not repeat it.
+    #[test]
+    fn the_debug_of_a_config_never_prints_an_environment_value() {
+        let mut config = config(&["agent"]);
+        config.env.insert(
+            "AGENT_API_KEY".to_owned(),
+            "sk-live-0123456789abcdef".to_owned(),
+        );
+        let shown = format!("{config:?}");
+        assert!(!shown.contains("sk-live-0123456789abcdef"), "{shown}");
+        assert!(shown.contains("AGENT_API_KEY"), "the name stays: {shown}");
+    }
+
+    /// Decision A33: the agent runs with a HOME of its own, never the host user's.
+    #[test]
+    fn the_agent_runs_with_a_dedicated_home() {
+        let mut config = config(&["agent"]);
+        config.home = std::path::PathBuf::from("/srv/nexus/acp-home");
+        let provider = AcpProvider::new(config);
+        let policy = provider.env_policy(&[]);
+        let command = crate::transport::spawn::isolated_command("agent", &policy);
+        let home = command
+            .as_std()
+            .get_envs()
+            .find(|(name, _)| *name == "HOME")
+            .and_then(|(_, value)| value);
+        assert_eq!(home, Some(std::ffi::OsStr::new("/srv/nexus/acp-home")));
+    }
 
     fn config(command: &[&str]) -> AcpConfig {
         AcpConfig::new(
