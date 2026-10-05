@@ -8,6 +8,7 @@ mod atomic;
 mod edit;
 mod notebook;
 mod ordered;
+mod pdf;
 mod read;
 mod scope;
 mod search;

@@ -867,3 +867,115 @@ async fn a_file_that_claims_to_be_a_picture_but_is_not_is_read_as_what_it_is() {
     assert!(r.images.is_empty());
     assert_eq!(r.text, "1\tjust text\n2\t");
 }
+
+// ---------------------------------------------------------------------------
+// PDF (N19b)
+// ---------------------------------------------------------------------------
+
+/// A valid minimal PDF with one line of text per page.
+fn pdf(pages: &[&str]) -> Vec<u8> {
+    let mut objects: Vec<String> = Vec::new();
+    let n = pages.len();
+    objects.push("<< /Type /Catalog /Pages 2 0 R >>".into());
+    let kids: Vec<String> = (0..n).map(|i| format!("{} 0 R", 4 + 2 * i)).collect();
+    objects.push(format!(
+        "<< /Type /Pages /Kids [{}] /Count {n} >>",
+        kids.join(" ")
+    ));
+    objects.push("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".into());
+    for (i, text) in pages.iter().enumerate() {
+        objects.push(format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 300] /Resources << /Font << /F1 3 0 R >> >> /Contents {} 0 R >>", 5 + 2 * i));
+        let stream = format!("BT /F1 12 Tf 20 150 Td ({text}) Tj ET");
+        objects.push(format!(
+            "<< /Length {} >>\nstream\n{stream}\nendstream",
+            stream.len()
+        ));
+    }
+    let mut out = b"%PDF-1.4\n".to_vec();
+    let mut offsets = Vec::new();
+    for (i, body) in objects.iter().enumerate() {
+        offsets.push(out.len());
+        out.extend_from_slice(format!("{} 0 obj\n{body}\nendobj\n", i + 1).as_bytes());
+    }
+    let xref = out.len();
+    out.extend_from_slice(
+        format!("xref\n0 {}\n0000000000 65535 f \n", objects.len() + 1).as_bytes(),
+    );
+    for o in offsets {
+        out.extend_from_slice(format!("{o:010} 00000 n \n").as_bytes());
+    }
+    out.extend_from_slice(
+        format!(
+            "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n",
+            objects.len() + 1
+        )
+        .as_bytes(),
+    );
+    out
+}
+
+#[tokio::test]
+async fn read_extracts_the_text_of_a_short_pdf_page_by_page() {
+    let f = Fixture::new();
+    std::fs::write(
+        f.dir.path().join("d.pdf"),
+        pdf(&["alpha page", "beta page"]),
+    )
+    .unwrap();
+    let r = f.read("d.pdf").await;
+    assert!(!r.is_error, "{}", r.text);
+    assert!(
+        r.text.contains("--- page 1 of 2 ---\nalpha page"),
+        "{}",
+        r.text
+    );
+    assert!(
+        r.text.contains("--- page 2 of 2 ---\nbeta page"),
+        "{}",
+        r.text
+    );
+}
+
+#[tokio::test]
+async fn a_long_pdf_must_be_read_in_ranges_of_at_most_twenty_pages() {
+    let f = Fixture::new();
+    let texts: Vec<String> = (1..=30).map(|n| format!("text of page {n}")).collect();
+    let refs: Vec<&str> = texts.iter().map(String::as_str).collect();
+    std::fs::write(f.dir.path().join("long.pdf"), pdf(&refs)).unwrap();
+    let whole = f.read("long.pdf").await;
+    assert!(
+        whole.is_error && whole.text.contains("30 pages") && whole.text.contains("`pages`"),
+        "{}",
+        whole.text
+    );
+    let ask = |pages: &str| json!({"file_path": f.path("long.pdf"), "pages": pages});
+    let some = f.call("Read", ask("2-3,28")).await;
+    assert!(!some.is_error, "{}", some.text);
+    assert!(
+        some.text.contains("text of page 2")
+            && some.text.contains("text of page 28")
+            && !some.text.contains("page 4"),
+        "{}",
+        some.text
+    );
+    let too_many = f.call("Read", ask("1-21")).await;
+    assert!(
+        too_many.is_error && too_many.text.contains("at most 20"),
+        "{}",
+        too_many.text
+    );
+    assert!(f.call("Read", ask("99")).await.is_error);
+    assert!(f.call("Read", ask("x")).await.is_error);
+}
+
+#[tokio::test]
+async fn a_damaged_pdf_is_an_error_not_a_crash() {
+    let f = Fixture::new();
+    f.put("bad.pdf", "%PDF-1.4\nnot really\n");
+    let r = f.read("bad.pdf").await;
+    assert!(
+        r.is_error && r.text.contains("not a PDF that can be read"),
+        "{}",
+        r.text
+    );
+}

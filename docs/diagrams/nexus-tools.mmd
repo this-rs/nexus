@@ -34,7 +34,7 @@ flowchart TD
         WRITE["✅ Write, Edit : messages du relevé, jamais de fichier tronqué<br/>(temporaire voisin, fsync, rename), sauvegarde optionnelle<br/><i>vérifié : lecteur concurrent ne voit jamais un fichier à moitié écrit</i>"]
         NB["✅ NotebookEdit : replace, insert, delete par id de cellule ;<br/>JSON indenté d'un espace, ordre des clés conservé (type local)<br/><i>vérifié : fichier final comparé octet pour octet</i>"]
         SEARCH["✅ Glob (mtime décroissant, 100 chemins, gitignore) et Grep<br/>(content, files_with_matches, count, -i -n -A -B -C, glob, type, multiline,<br/>head_limit, offset) sur ignore + globset + regex, sans binaire rg<br/><i>vérifié : sortie identique à un vrai rg (ou à ses goldens) ; liens non suivis</i>"]
-        IMGPDF["🟠 images et PDF dans Read (bloc image, lecture de PDF en Rust pur)"]
+        IMGPDF["✅ Read d'une image : bloc image MCP + ligne de texte de repli ; Read d'un PDF (lopdf, Rust pur) : texte par pages, 20 pages max par appel, plus de 10 pages exigent `pages`<br/><i>vérifié : tests/files.rs (PDF construit à la main, mutation rouge)</i>"]
     end
 
     subgraph shell["Outils shell — shell/*.rs (N20)"]

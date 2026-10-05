@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use base64::Engine as _;
 use serde_json::{Value, json};
 
-use super::{FileConfig, file_state};
+use super::{FileConfig, file_state, pdf};
 use crate::tool::{Annotations, CallContext, Tool, ToolResult};
 
 /// Characters returned at most. Claude Code's real cap is in tokens (about 25 000); a
@@ -72,7 +72,8 @@ impl Tool for ReadTool {
             "properties": {
                 "file_path": {"type": "string", "description": "Path of the file to read"},
                 "offset": {"type": "integer", "minimum": 0, "description": "Number of the first line to return"},
-                "limit": {"type": "integer", "minimum": 1, "description": "Number of lines to return"}
+                "limit": {"type": "integer", "minimum": 1, "description": "Number of lines to return"},
+                "pages": {"type": "string", "description": "PDF page range, such as \"3\", \"1-5\" or \"2,4-6\" (at most 20 pages per request)"}
             },
             "required": ["file_path"]
         })
@@ -119,6 +120,18 @@ impl Tool for ReadTool {
                     mime_type: mime.to_owned(),
                     data: base64::engine::general_purpose::STANDARD.encode(&bytes),
                 });
+        }
+        if path
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("pdf"))
+        {
+            return match pdf::read(&path, arguments.get("pages").and_then(Value::as_str)) {
+                Ok(text) => {
+                    file_state(context).record(&path);
+                    ToolResult::ok(text)
+                },
+                Err(message) => ToolResult::error(message),
+            };
         }
         let bytes = match std::fs::read(&path) {
             Ok(bytes) => bytes,
