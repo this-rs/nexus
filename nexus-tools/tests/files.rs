@@ -683,3 +683,144 @@ async fn the_annotations_tell_the_policy_which_tools_change_things() {
     assert!(!note("Write").read_only && note("Write").destructive);
     assert!(!note("Edit").read_only && note("Edit").destructive);
 }
+
+// ---------------------------------------------------------------------------
+// NotebookEdit
+// ---------------------------------------------------------------------------
+
+const NOTEBOOK: &str = r##"{"cells":[{"id":"c1","cell_type":"code","metadata":{},"source":"print('a')","outputs":[{"output_type":"stream","name":"stdout","text":"a\n"}],"execution_count":3},{"id":"c2","cell_type":"markdown","metadata":{},"source":"# title"}],"metadata":{},"nbformat":4,"nbformat_minor":5}"##;
+
+async fn nb(f: &Fixture, args: Value) -> ToolResult {
+    let mut args = args;
+    args["notebook_path"] = json!(f.path("nb.ipynb"));
+    f.call("NotebookEdit", args).await
+}
+
+#[tokio::test]
+async fn notebook_edit_follows_the_recorded_sequence_and_file_format() {
+    let f = Fixture::new();
+    f.put("nb.ipynb", NOTEBOOK);
+    // Not read yet: refused, nothing changed.
+    let refused = nb(&f, json!({"cell_id": "c1", "new_source": "print('b')"})).await;
+    assert!(refused.is_error);
+    assert_eq!(refused.text, NOT_READ);
+    assert_eq!(f.get("nb.ipynb"), NOTEBOOK);
+
+    f.read("nb.ipynb").await;
+    let replaced = nb(&f, json!({"cell_id": "c1", "new_source": "print('b')"})).await;
+    assert_eq!(replaced.text, "Updated cell c1 with print('b')");
+
+    let inserted = nb(
+        &f,
+        json!({"cell_id": "c1", "new_source": "x = 1", "cell_type": "code", "edit_mode": "insert"}),
+    )
+    .await;
+    let id = inserted
+        .text
+        .strip_prefix("Inserted cell ")
+        .unwrap()
+        .strip_suffix(" with x = 1")
+        .unwrap()
+        .to_owned();
+    assert_eq!(id.len(), 8);
+    assert!(id.chars().all(|c| c.is_ascii_hexdigit()), "{id}");
+
+    let deleted = nb(
+        &f,
+        json!({"cell_id": "c2", "new_source": "", "edit_mode": "delete"}),
+    )
+    .await;
+    assert_eq!(deleted.text, "Deleted cell c2");
+
+    // The file as Claude Code wrote it: one-space indent, source as a string, the inserted
+    // cell's keys in the recorded order, the existing cell's keys where they were.
+    let expected = r#"{
+ "cells": [
+  {
+   "id": "c1",
+   "cell_type": "code",
+   "metadata": {},
+   "source": "print('b')",
+   "outputs": [],
+   "execution_count": null
+  },
+  {
+   "cell_type": "code",
+   "id": "<ID>",
+   "source": "x = 1",
+   "metadata": {},
+   "execution_count": null,
+   "outputs": []
+  }
+ ],
+ "metadata": {},
+ "nbformat": 4,
+ "nbformat_minor": 5
+}"#
+    .replace("<ID>", &id);
+    assert_eq!(f.get("nb.ipynb"), expected);
+    // Still a valid notebook after every operation.
+    let parsed: Value = serde_json::from_str(&f.get("nb.ipynb")).unwrap();
+    assert_eq!(parsed["cells"].as_array().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn notebook_edit_errors_are_the_recorded_ones_and_change_nothing() {
+    let f = Fixture::new();
+    f.put("nb.ipynb", NOTEBOOK);
+    f.read("nb.ipynb").await;
+    let unknown = nb(&f, json!({"cell_id": "nope", "new_source": "z"})).await;
+    assert!(unknown.is_error);
+    assert_eq!(
+        unknown.text,
+        "<tool_use_error>Cell with ID \"nope\" not found in notebook.</tool_use_error>"
+    );
+    let no_type = nb(
+        &f,
+        json!({"cell_id": "c1", "new_source": "z", "edit_mode": "insert"}),
+    )
+    .await;
+    assert!(
+        no_type.is_error && no_type.text.contains("cell_type is required"),
+        "{}",
+        no_type.text
+    );
+    let not_a_notebook = f
+        .call(
+            "NotebookEdit",
+            json!({"notebook_path": f.path("a.txt"), "new_source": "z"}),
+        )
+        .await;
+    assert!(not_a_notebook.is_error);
+    assert_eq!(f.get("nb.ipynb"), NOTEBOOK);
+}
+
+#[tokio::test]
+async fn notebook_edit_inserts_first_without_a_cell_id_and_is_in_scope() {
+    let f = Fixture::new();
+    f.put("nb.ipynb", NOTEBOOK);
+    f.read("nb.ipynb").await;
+    let r = nb(
+        &f,
+        json!({"new_source": "# top", "cell_type": "markdown", "edit_mode": "insert"}),
+    )
+    .await;
+    assert!(!r.is_error, "{}", r.text);
+    let parsed: Value = serde_json::from_str(&f.get("nb.ipynb")).unwrap();
+    assert_eq!(parsed["cells"][0]["source"], "# top");
+    assert_eq!(parsed["cells"][1]["id"], "c1");
+    // A markdown cell has no outputs.
+    assert!(parsed["cells"][0].get("outputs").is_none());
+
+    let outside = f.outside.path().join("o.ipynb");
+    std::fs::write(&outside, NOTEBOOK).unwrap();
+    let r = f
+        .call("NotebookEdit", json!({"notebook_path": outside.display().to_string(), "cell_id": "c1", "new_source": "x"}))
+        .await;
+    assert!(
+        r.is_error && r.text.contains("outside the directories"),
+        "{}",
+        r.text
+    );
+    assert_eq!(std::fs::read_to_string(outside).unwrap(), NOTEBOOK);
+}

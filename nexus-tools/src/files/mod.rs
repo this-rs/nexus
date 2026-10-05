@@ -1,4 +1,4 @@
-//! File tools at parity with Claude Code 2.1.287 (N19): `Read`, `Write`, `Edit`.
+//! File tools at parity with Claude Code 2.1.287 (N19): `Read`, `Write`, `Edit`, `NotebookEdit`.
 //!
 //! The behaviours, limits and messages come from recordings of the real CLI
 //! (`claude-code-sdk-rs/tests/parity/claude-code-2.1.287/`), not from the tools' descriptions:
@@ -6,6 +6,8 @@
 
 mod atomic;
 mod edit;
+mod notebook;
+mod ordered;
 mod read;
 mod scope;
 mod state;
@@ -15,6 +17,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 pub use edit::EditTool;
+pub use notebook::NotebookEditTool;
 pub use read::ReadTool;
 pub use scope::{Scope, ScopeError};
 pub use state::FileState;
@@ -53,6 +56,7 @@ pub fn register(registry: ToolRegistry, config: &FileConfig) -> ToolRegistry {
         .with(ReadTool::new(config.clone()))
         .with(WriteTool::new(config.clone()))
         .with(EditTool::new(config.clone()))
+        .with(NotebookEditTool::new(config.clone()))
 }
 
 pub(crate) fn file_state(context: &CallContext) -> Arc<FileState> {

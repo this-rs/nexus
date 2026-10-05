@@ -1,0 +1,61 @@
+%% name: nexus-tools
+%% covers: nexus-tools/src/*.rs, nexus-tools/src/files/*.rs, nexus-tools/tests/*.rs, docs/agent-tools-parity.md
+%% verified: 2026-10-05
+flowchart TD
+    subgraph legend["Légende"]
+        direction LR
+        L1["✅ écrit et vérifié par un test"]
+        L2["🟠 décidé, non écrit"]
+        L3["🔴 bug confirmé / code non branché"]
+        L4["⚪ hors de ce dépôt"]
+    end
+
+    HARNESS["⚪ harnais natif (nexus-claude)<br/>McpClient : stdio ou HTTP"]
+
+    subgraph serveur["Serveur MCP — server.rs, http.rs, protocol.rs"]
+        direction TB
+        RPC["✅ JSON-RPC : initialize, ping, tools/list, tools/call<br/><i>vérifié : tests/protocol.rs, sur flux de lignes</i>"]
+        STDIO["✅ stdio : appels concurrents, notifications/cancelled avorte l'outil,<br/>fin d'entrée avorte les appels en cours<br/><i>vérifié : un outil lent est abandonné (AbortOnDrop)</i>"]
+        HTTP["✅ HTTP : jeton Bearer, Host loopback, Origin refusé sauf liste,<br/>corps ≤ 1 MiB, état de session par mcp-session-id, DELETE l'oublie<br/><i>vérifié : le vrai McpClient du harnais pilote le serveur</i>"]
+        CAP["✅ plafond de sortie avec marqueur de troncature explicite ;<br/>panique d'un outil = un appel en échec ; journal sans arguments<br/><i>vérifié : sentinelle absente du journal et de stderr</i>"]
+    end
+
+    subgraph acces["Accès — profile.rs, token.rs, registry.rs"]
+        direction TB
+        TOKEN["✅ jeton v1 signé HMAC-SHA256, clé ≥ 32 octets, expiration,<br/>un seul message d'échec<br/><i>vérifié : tests unitaires et refus HTTP 401</i>"]
+        PROFILE["✅ profil par session : un outil hors profil n'est ni listé ni exécuté,<br/>et « interdit » a la même réponse que « inexistant »<br/><i>vérifié : compteur d'exécution à 0 ; mutation jouée</i>"]
+    end
+
+    subgraph fichiers["Outils fichiers — files/*.rs (N19)"]
+        direction TB
+        SCOPE["✅ périmètre : résolution composant par composant,<br/>liens symboliques et .. suivis là où ils mènent<br/><i>vérifié : tests/files.rs, un test par évasion</i>"]
+        STATE["✅ état « lu » par session : Edit/Write/NotebookEdit refusent un fichier<br/>non lu ou modifié depuis la lecture<br/><i>vérifié : mutation jouée (garde ignorée → test rouge)</i>"]
+        READ["✅ Read : texte numéroté comme cat -n, notebooks en cellules,<br/>plafond en caractères avec coupe annoncée (écart volontaire)<br/><i>vérifié : longueurs du relevé de Claude Code 2.1.287</i>"]
+        WRITE["✅ Write, Edit : messages du relevé, jamais de fichier tronqué<br/>(temporaire voisin, fsync, rename), sauvegarde optionnelle<br/><i>vérifié : lecteur concurrent ne voit jamais un fichier à moitié écrit</i>"]
+        NB["✅ NotebookEdit : replace, insert, delete par id de cellule ;<br/>JSON indenté d'un espace, ordre des clés conservé (type local)<br/><i>vérifié : fichier final comparé octet pour octet</i>"]
+        GLOBGREP["🟠 Glob et Grep (crates ignore, globset, regex) ; images et PDF dans Read"]
+    end
+
+    subgraph suite["Politique de dépendances — tests/dependency_policy.rs"]
+        DEPS["✅ la fermeture de nexus-tools se compile avec Rust seul :<br/>pas de links, pas de cc/cmake/bindgen, -sys limités aux liaisons de plateforme<br/><i>vérifié : cinq cas factices rouges, puis la vraie fermeture</i>"]
+    end
+
+    LATER["🟠 N20 Bash/Monitor · N21 WebFetch · N22 WebSearch · N23 Obscura (MCP externe)"]
+
+    HARNESS --> RPC
+    RPC --> STDIO
+    RPC --> HTTP
+    RPC --> CAP
+    HTTP --> TOKEN
+    TOKEN --> PROFILE
+    RPC --> PROFILE
+    PROFILE --> READ
+    PROFILE --> WRITE
+    PROFILE --> NB
+    SCOPE --> READ
+    SCOPE --> WRITE
+    SCOPE --> NB
+    STATE --> WRITE
+    STATE --> NB
+    READ --> STATE
+    GLOBGREP -.-> LATER

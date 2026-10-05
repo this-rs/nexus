@@ -8,7 +8,7 @@
 # than implicit; binaries, `mod.rs` and re-exporting `lib.rs`
 # files legitimately live there.
 #
-# 17 diagrams, 239/152 source files claimed, 15 unclaimed.
+# 18 diagrams, 264/161 source files claimed, 4 unclaimed.
 
 diagrams:
   - name: nexus-agent-contract
@@ -148,6 +148,14 @@ diagrams:
       - claude-code-sdk-rs/src/perf_utils.rs
       - claude-code-sdk-rs/src/sdk_mcp.rs
       - claude-code-sdk-rs/src/token_tracker.rs
+  - name: nexus-tools
+    file: nexus-tools.mmd
+    verified: 2026-10-05
+    covers:
+      - nexus-tools/src/*.rs
+      - nexus-tools/src/files/*.rs
+      - nexus-tools/tests/*.rs
+      - docs/agent-tools-parity.md
   - name: nexus-xtask
     file: nexus-xtask.mmd
     verified: 2026-10-03
@@ -159,14 +167,3 @@ orphans:
   - claude-code-api/src/core/mod.rs
   - claude-code-api/src/core/session_process.rs
   - claude-code-sdk-rs/src/bin/test_interactive.rs
-  - nexus-tools/src/http.rs
-  - nexus-tools/src/lib.rs
-  - nexus-tools/src/limits.rs
-  - nexus-tools/src/main.rs
-  - nexus-tools/src/profile.rs
-  - nexus-tools/src/protocol.rs
-  - nexus-tools/src/registry.rs
-  - nexus-tools/src/server.rs
-  - nexus-tools/src/testing.rs
-  - nexus-tools/src/token.rs
-  - nexus-tools/src/tool.rs
