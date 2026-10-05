@@ -1,0 +1,9 @@
+{"op":"include","file":"prelude.jsonl"}
+{"op":"include","file":"turn1_start.jsonl"}
+{"op":"notify","method":"item/started","params":{"threadId":"thr_fake1","turnId":"turn_1","item":{"type":"mcpToolCall","id":"call_1","server":"fake","tool":"echo","status":"inProgress","arguments":{"text":"a"}}}}
+{"op":"notify","method":"item/started","params":{"threadId":"thr_fake1","turnId":"turn_1","item":{"type":"mcpToolCall","id":"call_2","server":"fake","tool":"echo","status":"inProgress","arguments":{"text":"b"}}}}
+{"op":"notify","method":"item/completed","params":{"threadId":"thr_fake1","turnId":"turn_1","item":{"type":"mcpToolCall","id":"call_2","server":"fake","tool":"echo","status":"completed","arguments":{"text":"b"},"result":{"content":[{"type":"text","text":"b"}]}}}}
+{"op":"notify","method":"item/completed","params":{"threadId":"thr_fake1","turnId":"turn_1","item":{"type":"mcpToolCall","id":"call_1","server":"fake","tool":"echo","status":"completed","arguments":{"text":"a"},"result":{"content":[{"type":"text","text":"a"}]}}}}
+{"op":"notify","method":"item/started","params":{"threadId":"thr_fake1","turnId":"turn_1","item":{"type":"agentMessage","id":"msg_1","text":""}}}
+{"op":"notify","method":"item/completed","params":{"threadId":"thr_fake1","turnId":"turn_1","item":{"type":"agentMessage","id":"msg_1","text":"Both done."}}}
+{"op":"include","file":"turn1_end.jsonl"}

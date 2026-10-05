@@ -1,0 +1,2 @@
+{"op":"expect","method":"turn/start","reply":{"turn":{"id":"turn_2","status":"inProgress","items":[],"error":null}}}
+{"op":"notify","method":"turn/started","params":{"threadId":"thr_fake1","turn":{"id":"turn_2","status":"inProgress","items":[],"error":null}}}

@@ -1,0 +1,12 @@
+# An MCP tool call needs approval: mcpServer/elicitation/request (README, "MCP server
+# elicitations"); the _meta fields besides codex_approval_kind and persist are from memory.
+{"op":"include","file":"prelude.jsonl"}
+{"op":"include","file":"turn1_start.jsonl"}
+{"op":"notify","method":"item/started","params":{"threadId":"thr_fake1","turnId":"turn_1","item":{"type":"mcpToolCall","id":"call_1","server":"fake","tool":"write","status":"inProgress","arguments":{"path":"a.txt"}}}}
+{"op":"server_request","id":"srv_7","method":"mcpServer/elicitation/request","params":{"threadId":"thr_fake1","turnId":"turn_1","serverName":"fake","mode":"form","message":"Allow the fake MCP server to run the tool \"write\"?","requestedSchema":{"type":"object","properties":{}},"_meta":{"codex_approval_kind":"mcp_tool_call","persist":["session","always"],"tool_name":"write","tool_params":{"path":"a.txt"}}}}
+{"op":"await_response","id":"srv_7","expect":{"action":"accept","content":null}}
+{"op":"notify","method":"serverRequest/resolved","params":{"threadId":"thr_fake1","requestId":"srv_7"}}
+{"op":"notify","method":"item/completed","params":{"threadId":"thr_fake1","turnId":"turn_1","item":{"type":"mcpToolCall","id":"call_1","server":"fake","tool":"write","status":"completed","arguments":{"path":"a.txt"},"result":{"content":[{"type":"text","text":"written"}]}}}}
+{"op":"notify","method":"item/started","params":{"threadId":"thr_fake1","turnId":"turn_1","item":{"type":"agentMessage","id":"msg_1","text":""}}}
+{"op":"notify","method":"item/completed","params":{"threadId":"thr_fake1","turnId":"turn_1","item":{"type":"agentMessage","id":"msg_1","text":"Carried on."}}}
+{"op":"include","file":"turn1_end.jsonl"}

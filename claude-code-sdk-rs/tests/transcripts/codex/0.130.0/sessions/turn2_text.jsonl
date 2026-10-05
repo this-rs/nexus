@@ -1,0 +1,6 @@
+{"op":"include","file":"turn2_start.jsonl"}
+{"op":"notify","method":"item/started","params":{"threadId":"thr_fake1","turnId":"turn_2","item":{"type":"agentMessage","id":"msg_2","text":""}}}
+{"op":"notify","method":"item/agentMessage/delta","params":{"threadId":"thr_fake1","turnId":"turn_2","itemId":"msg_2","delta":"Hello "}}
+{"op":"notify","method":"item/agentMessage/delta","params":{"threadId":"thr_fake1","turnId":"turn_2","itemId":"msg_2","delta":"from codex"}}
+{"op":"notify","method":"item/completed","params":{"threadId":"thr_fake1","turnId":"turn_2","item":{"type":"agentMessage","id":"msg_2","text":"Hello from codex"}}}
+{"op":"include","file":"turn2_end.jsonl"}

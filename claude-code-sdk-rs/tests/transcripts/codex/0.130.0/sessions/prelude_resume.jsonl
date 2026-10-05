@@ -1,0 +1,6 @@
+# Same handshake, resuming thr_prev. The README says thread/resume answers like
+# thread/start and replays thread/tokenUsage/updated right after the response.
+{"op":"expect","method":"initialize","reply":{"userAgent":"fake_codex/0.130.0","codexHome":"/fake/codex-home","platformFamily":"unix","platformOs":"macos"}}
+{"op":"expect_notification","method":"initialized"}
+{"op":"expect","method":"thread/resume","reply":{"thread":{"id":"thr_prev","preview":"earlier","modelProvider":"openai","createdAt":1730900000},"model":"gpt-fake"}}
+{"op":"notify","method":"thread/tokenUsage/updated","params":{"threadId":"thr_prev","turnId":"turn_0","tokenUsage":{"total":{"totalTokens":1000,"inputTokens":800,"cachedInputTokens":100,"outputTokens":200,"reasoningOutputTokens":0},"last":{"totalTokens":500,"inputTokens":400,"cachedInputTokens":50,"outputTokens":100,"reasoningOutputTokens":0},"modelContextWindow":272000}}}

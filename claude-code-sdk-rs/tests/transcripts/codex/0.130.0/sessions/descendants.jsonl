@@ -1,0 +1,6 @@
+# The fake starts two children (one in its own process group, which killing the
+# group would miss) and waits: closing the session must kill the process AND both.
+{"op":"include","file":"prelude.jsonl"}
+{"op":"spawn_child","own_group":false}
+{"op":"spawn_child","own_group":true}
+{"op":"wait_eof"}

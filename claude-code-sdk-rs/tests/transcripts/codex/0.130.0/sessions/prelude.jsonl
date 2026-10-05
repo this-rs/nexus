@@ -1,0 +1,6 @@
+# Handshake and thread creation. From the README of codex-rs/app-server at rust-v0.130.0
+# (initialize -> initialized -> thread/start); NOT recorded from a real session.
+{"op":"expect","method":"initialize","reply":{"userAgent":"fake_codex/0.130.0","codexHome":"/fake/codex-home","platformFamily":"unix","platformOs":"macos"}}
+{"op":"expect_notification","method":"initialized"}
+{"op":"expect","method":"thread/start","reply":{"thread":{"id":"thr_fake1","preview":"","modelProvider":"openai","createdAt":1730910000},"model":"gpt-fake"}}
+{"op":"notify","method":"thread/started","params":{"thread":{"id":"thr_fake1","preview":"","modelProvider":"openai","createdAt":1730910000}}}

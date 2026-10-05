@@ -1,0 +1,9 @@
+{"op":"include","file":"prelude.jsonl"}
+{"op":"include","file":"turn1_start.jsonl"}
+{"op":"notify","method":"item/started","params":{"threadId":"thr_fake1","turnId":"turn_1","item":{"type":"reasoning","id":"rs_1","summary":[],"content":[]}}}
+{"op":"notify","method":"item/reasoning/summaryTextDelta","params":{"threadId":"thr_fake1","turnId":"turn_1","itemId":"rs_1","delta":"Let me ","summaryIndex":0}}
+{"op":"notify","method":"item/reasoning/summaryTextDelta","params":{"threadId":"thr_fake1","turnId":"turn_1","itemId":"rs_1","delta":"think.","summaryIndex":0}}
+{"op":"notify","method":"item/completed","params":{"threadId":"thr_fake1","turnId":"turn_1","item":{"type":"reasoning","id":"rs_1","summary":["Let me think."],"content":[]}}}
+{"op":"notify","method":"item/started","params":{"threadId":"thr_fake1","turnId":"turn_1","item":{"type":"agentMessage","id":"msg_1","text":""}}}
+{"op":"notify","method":"item/completed","params":{"threadId":"thr_fake1","turnId":"turn_1","item":{"type":"agentMessage","id":"msg_1","text":"Done thinking."}}}
+{"op":"include","file":"turn1_end.jsonl"}

@@ -1,0 +1,11 @@
+# A collabToolCall spawns a child thread; the child's events carry its own threadId.
+{"op":"include","file":"prelude.jsonl"}
+{"op":"include","file":"turn1_start.jsonl"}
+{"op":"notify","method":"item/started","params":{"threadId":"thr_fake1","turnId":"turn_1","item":{"type":"collabToolCall","id":"collab_1","tool":"spawn_agent","status":"inProgress","senderThreadId":"thr_fake1","prompt":"look around"}}}
+{"op":"notify","method":"item/started","params":{"threadId":"thr_child","turnId":"turn_c1","item":{"type":"agentMessage","id":"msg_c1","text":""}}}
+{"op":"notify","method":"item/completed","params":{"threadId":"thr_child","turnId":"turn_c1","item":{"type":"agentMessage","id":"msg_c1","text":"child says hi"}}}
+{"op":"notify","method":"turn/completed","params":{"threadId":"thr_child","turn":{"id":"turn_c1","status":"completed","items":[],"error":null}}}
+{"op":"notify","method":"item/completed","params":{"threadId":"thr_fake1","turnId":"turn_1","item":{"type":"collabToolCall","id":"collab_1","tool":"spawn_agent","status":"completed","senderThreadId":"thr_fake1","newThreadId":"thr_child","prompt":"look around"}}}
+{"op":"notify","method":"item/started","params":{"threadId":"thr_fake1","turnId":"turn_1","item":{"type":"agentMessage","id":"msg_1","text":""}}}
+{"op":"notify","method":"item/completed","params":{"threadId":"thr_fake1","turnId":"turn_1","item":{"type":"agentMessage","id":"msg_1","text":"The child reported."}}}
+{"op":"include","file":"turn1_end.jsonl"}

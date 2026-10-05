@@ -8,5 +8,7 @@
 //! directory.
 
 pub mod claude_code;
+#[cfg(feature = "provider-codex")]
+pub mod codex;
 #[cfg(feature = "provider-native")]
 pub mod native;

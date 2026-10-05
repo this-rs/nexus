@@ -326,6 +326,56 @@ Valeurs de référence (v1, à confirmer par la conformité de chaque adaptateur
   expiré (404) n'est pas rejoué ; un serveur MCP qui renvoie des requêtes (`sampling`, `roots`) reçoit
   `method not found`.
 
+Écarts constatés à l'implémentation de Codex (`claude-code-sdk-rs/src/providers/codex/`, feature
+`provider-codex`, `CodexProvider` / `CodexConfig`) ; **aucune session réelle** : le `codex` installé est
+0.38.0, sans `app-server`, tout est joué contre `fake_codex` et des transcriptions écrites depuis le README
+de `codex-rs/app-server` au tag `rust-v0.130.0` (`tests/transcripts/codex/0.130.0/schema/PROVENANCE.md` liste
+ce qui n'est PAS établi) :
+
+- **`hooks` = `none`**, pas `command` comme la table de référence : pas d'exécutable relais en v1 (A40) ;
+  `SessionHooks` ignoré, `provider_notice { hooks_not_supported }` en tête d'`out_of_band()`.
+- **`permission_scopes` = `once`, `session`, `always`** (la table disait `once`, `session`) : chaque
+  `permission_ask` n'offre que les portées que le serveur annonce (approbation de commande ou de fichier :
+  `once` + `session` ; élicitation MCP : selon `_meta.persist`) ; une portée non offerte répond
+  `Unsupported { permission_scope }`. Codex ne réécrit pas l'entrée d'un appel approuvé : `Allow` avec
+  `updated_input` répond `Unsupported { permission_updated_input }`.
+- **`native_question` = `false`** : aucun `question` n'est émis (repli §5 : le backend synthétise la question,
+  réponse par un tour) ; `item/tool/requestUserInput` est expérimental et jamais activé.
+- **`subagents` = `separate_thread`** : `parent` = identifiant du fil enfant (`collabToolCall`) ; la livraison à
+  ce client des événements du fil enfant n'est PAS vérifiée.
+- **`context_window`** : celle de la configuration (`configured`), sinon `None` ; la fenêtre rapportée par le
+  serveur n'entre pas dans les capacités figées.
+- **`cost`** : `unknown` par défaut, `free` ou `priced` selon la configuration, jamais `reported` (jetons
+  seuls, A40). `done.usage` = différence du cumul `total` de `thread/tokenUsage/updated` entre le début et la
+  fin du tour (l'usage rejoué après `thread/resume`, avant `turn/started`, n'est pas celui du tour) ;
+  `input_tokens` exclut les jetons en cache (`cache_read_tokens`), comme pour Claude Code.
+- **Politique** (§6) : `ask` et `auto_edits` → `on-request` + `workspaceWrite` ; `plan_only` → `on-request` +
+  `readOnly` ; `trust` → `never` + `workspaceWrite`, jamais `dangerFullAccess`. `set_policy_mode` et `set_model`
+  agissent au tour suivant (surcharges collantes de `turn/start`). La politique neutre s'applique d'abord
+  localement aux demandes d'approbation (un `deny`, `plan_only` pour un non-lecture : refus sans demander ;
+  un `allow`, `auto_edits` pour une édition : accord) ; ce qu'un outil fait sans demander n'est pas vu par les
+  motifs (`provider_notice { policy_patterns_partial }`).
+- **Limites** : `limits.turn_timeout_ms` tenu (`done { error: timeout }`) ; `max_turns`, `max_tokens`,
+  `max_cost_usd`, `max_tool_iterations` → `Unsupported { limits }` à l'ouverture.
+- **Fin de tour** : `turn/completed { failed }` → `done { is_error, error }` (`codexErrorInfo` :
+  `ContextWindowExceeded` → `context_too_small`, `UsageLimitExceeded` → `rate_limited`, `HttpConnectionFailed` /
+  `ResponseStreamDisconnected` / `ResponseStreamConnectionFailed` / `ResponseTooManyFailedAttempts` →
+  `endpoint_unreachable`, `Unauthorized` → `unauthorized` ou `auth_required`, `BadRequest` → `invalid_request`,
+  `SandboxError` / `InternalServerError` / `Other` → `protocol`) ; `error { process_exited }` terminal
+  seulement quand le processus meurt (la session est alors morte).
+- **Processus** : un `codex app-server` par session, lancé par `isolated_command` (liste blanche d'environnement,
+  `CODEX_HOME` et `CODEX_API_KEY` posés explicitement) ; `CODEX_HOME` persistant **par instance** (créé `0700`) ;
+  serveurs MCP de la session par `-c mcp_servers.<nom>.…` (jamais de secret sur argv : `env_vars`,
+  `bearer_token_env_var`, `env_http_headers` par nom de variable) ; `close` tue le processus **et ses
+  descendants** (groupe de processus et table des processus).
+- **`health()`** : `codex --version` seul ; version < `MIN_APP_SERVER_VERSION` (0.130.0) → `Unavailable`,
+  `error: Unsupported { app_server }` ; binaire absent → `cli_not_found` ; ni clé configurée ni
+  `<CODEX_HOME>/auth.json` → `auth_required` avec `login_hint` = `CODEX_HOME=<dir> codex login` (jamais exécutée,
+  A27).
+- **Non vérifié** : tout le protocole (aucune session réelle) ; en particulier l'orthographe d'`approvalPolicy`
+  et de `sandbox` à `thread/start`, la forme de `thread/tokenUsage/updated`, `_meta` de l'élicitation MCP et
+  la réponse d'une approbation persistante, `-c` avant `app-server`, `CODEX_API_KEY` lue par `app-server`.
+
 ## 6. `ToolPolicy` (A8)
 
 ```rust
@@ -573,10 +623,16 @@ instance intégrée, toujours présente.
 - `quirks` = préréglage ∪ surcharge : booléens en OU, `explicit_parallel_tool_calls` et `reasoning_field` pris
   de la surcharge quand elle les fixe. Une surcharge ne retire pas un drapeau du préréglage.
 - Clés d'`extensions` lues : `allow_private_network` (bool), `cli_path` (chaîne), `compaction_keep_recent`
-  (entier) ; une clé dont le nom évoque un identifiant est refusée.
-- Kinds : `claude_code` et `native` construits ; `codex` / `acp` / `scripted` sans constructeur répondent
-  `Unsupported { provider_codex | provider_acp | provider_scripted }` ; sans la feature `provider-native`,
-  `native` répond `Unsupported { provider_native }`.
+  (entier), `codex_home` (chaîne) ; une clé dont le nom évoque un identifiant est refusée.
+- Kinds : `claude_code`, `native` et `codex` construits ; `acp` / `scripted` sans constructeur répondent
+  `Unsupported { provider_acp | provider_scripted }` ; sans la feature `provider-native`, `native` répond
+  `Unsupported { provider_native }`, sans `provider-codex`, `codex` répond `Unsupported { provider_codex }`.
+  Une instance `codex` se décrit par `command` (le programme seul : des arguments en plus sont refusés,
+  `invalid_request`, ils sont ceux de l'adaptateur), `credential` (résolu à chaque `open`, posé dans
+  `CODEX_API_KEY` du seul processus), `cost_source` (`unknown`, `free`, `priced` ; `reported` est lu comme
+  `unknown`), `prices`, `context_window`, `default_model`, `env_inherit` et l'extension `codex_home`. La porte
+  A32 garde `codex` comme `native` : `upsert` répond `Unsupported { security_gate }` tant que le lot sécurité
+  n'est pas actif.
 
 ## 14. Table `Message` (SDK) → `AgentEvent` → `ChatEvent` (backend)
 
@@ -703,14 +759,14 @@ jeton, `add_dirs` ← `extra_dirs`, `env` ← `EnvSpec.set`, `cli_path` ← exte
 | `auto-download`, `memory` | existantes, inchangées | `auto-download` oui |
 | `testkit` | `testkit/` : conformité, `ScriptedProvider`, rejeu de transcriptions | non (`dev-dependencies` du backend) |
 | `provider-native` | EXISTE : client HTTP + SSE de `model/` (`reqwest` : `guard`, `sse`, `wire`, `openai`), `providers/native/` ; les types, `quirks` et `pricing` de `model/` sont toujours compilés (le registre les porte) | non |
-| `provider-codex` | CIBLE (n'existe pas encore) : `providers/codex/` | non |
+| `provider-codex` | EXISTE : `providers/codex/` (`CodexProvider` sur `codex app-server`, surface stable ; aucune dépendance de plus, le processus passe par `transport::spawn`) ; `src/bin/fake_codex.rs` ; schéma versionné et transcriptions dans `tests/transcripts/codex/<version>/` | non |
 | `provider-acp` | CIBLE (n'existe pas encore) : `providers/acp/` | non |
 
 - Côté backend : `nexus-claude = { …, features = ["memory", "auto-download", "provider-native",
   "provider-codex", "provider-acp"] }` et `features = ["testkit"]` en `dev-dependencies`. Pendant
   l'intégration : surcharge locale non commitée `[patch]` vers le worktree nexus (B3) ; l'épingle
   `rev` n'est montée qu'à la fin, sur un sha poussé de `integration/harness-multi-provider`.
-- Faux exécutables (`fake_claude`, `fake_openai`, `fake_codex`, `fake_acp`) : binaires du crate,
+- Faux exécutables (`fake_claude`, `fake_openai`, `fake_codex` (existe), `fake_acp`) : binaires du crate,
   non construits pour un crate dépendant. Le backend teste par `testkit::ScriptedProvider` et par
   `testkit::claude_code_replay(transcript)` (provider Claude monté sur un transport de rejeu, avec
   capture de stdin).

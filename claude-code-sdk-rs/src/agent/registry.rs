@@ -32,7 +32,7 @@
 //! |---|---|---|
 //! | `claude_code` | `ClaudeCodeProvider` | nothing |
 //! | `native` | `NativeProvider` on an `OpenAiEndpoint` | `endpoint`; cargo feature `provider-native` (else `Unsupported { provider_native }`) |
-//! | `codex` | not yet: `Unsupported { provider_codex }` | the `providers/codex` slice |
+//! | `codex` | `CodexProvider` driving `codex app-server`; cargo feature `provider-codex` (else `Unsupported { provider_codex }`) | optional `command` (the program, nothing else), `cost_source`, `prices`, `context_window`, `default_model`, `env_inherit`, `credential` (`CODEX_API_KEY`), extension `codex_home` |
 //! | `acp` | not yet: `Unsupported { provider_acp }` | `command`; the `providers/acp` slice |
 //! | `scripted` | no built-in constructor: register a factory (tests) | |
 //!
@@ -46,7 +46,8 @@
 //!
 //! `allow_private_network` (bool, native: accept RFC 1918 / CGNAT endpoints),
 //! `cli_path` (string, claude_code: path of the CLI), `compaction_keep_recent`
-//! (unsigned integer, native). Their types are checked by
+//! (unsigned integer, native), `codex_home` (string, codex: the instance's persistent
+//! `CODEX_HOME`). Their types are checked by
 //! [`ProviderInstanceConfig::validate`]; other keys are kept untouched for the
 //! factory of the kind to read. A key whose name looks like a credential is refused.
 //!
@@ -444,6 +445,7 @@ impl ProviderInstanceConfig {
                 "allow_private_network" => value.is_boolean(),
                 "cli_path" => value.as_str().is_some_and(|path| !path.is_empty()),
                 "compaction_keep_recent" => value.is_u64(),
+                "codex_home" => value.as_str().is_some_and(|path| !path.is_empty()),
                 _ => true,
             };
             if !well_typed {
@@ -956,12 +958,59 @@ impl ProviderRegistry {
         match config.kind {
             ProviderKind::ClaudeCode => Ok(build_claude_code(config)),
             ProviderKind::Native => self.build_native(config),
-            ProviderKind::Codex => Err(ProviderError::unsupported("provider_codex")),
+            ProviderKind::Codex => self.build_codex(config),
             ProviderKind::Acp => Err(ProviderError::unsupported("provider_acp")),
             ProviderKind::Scripted => Err(ProviderError::unsupported("provider_scripted")),
             #[allow(unreachable_patterns)]
             _ => Err(ProviderError::unsupported("provider_kind")),
         }
+    }
+
+    #[cfg(feature = "provider-codex")]
+    fn build_codex(&self, config: &ProviderInstanceConfig) -> Result<BuiltProvider, ProviderError> {
+        use crate::providers::codex::{CodexConfig, CodexProvider};
+
+        let mut codex = CodexConfig::new(&config.id);
+        if let Some(command) = &config.command {
+            if command.len() > 1 {
+                return Err(ProviderError::invalid(
+                    "a codex command is the program only: the adapter owns the arguments",
+                ));
+            }
+            if let Some(program) = command.first() {
+                codex.program = PathBuf::from(program);
+            }
+        }
+        if let Some(home) = config.extensions.get("codex_home").and_then(Value::as_str) {
+            codex.codex_home = PathBuf::from(home);
+        }
+        codex.default_model = config.default_model.clone();
+        codex.context_window = config.context_window;
+        codex.cost_basis = config.cost_source;
+        codex.prices = price_table_of(config);
+        codex.env_inherit = config.env_inherit.clone();
+        codex.credential = config.credential.clone();
+        let mut models: Vec<String> = config
+            .prices
+            .keys()
+            .chain(config.model_aliases.values())
+            .cloned()
+            .collect();
+        models.sort();
+        models.dedup();
+        codex.models = models;
+        Ok(BuiltProvider::new(Arc::new(CodexProvider::with_resolver(
+            codex,
+            Arc::clone(&self.resolver),
+        ))))
+    }
+
+    #[cfg(not(feature = "provider-codex"))]
+    fn build_codex(
+        &self,
+        _config: &ProviderInstanceConfig,
+    ) -> Result<BuiltProvider, ProviderError> {
+        Err(ProviderError::unsupported("provider_codex"))
     }
 
     #[cfg(feature = "provider-native")]
@@ -1577,8 +1626,14 @@ mod tests {
         registry
             .upsert(ProviderInstanceConfig::new("agent", ProviderKind::Acp).with_command(["agent"]))
             .unwrap();
-        let error = registry.get("codex-1").err().expect("no constructor");
-        assert!(unsupported(&error, "provider_codex"), "{error:?}");
+        // `codex` has a constructor behind the cargo feature `provider-codex`.
+        let built = registry.get("codex-1");
+        if cfg!(feature = "provider-codex") {
+            assert!(built.is_ok(), "{:?}", built.err());
+        } else {
+            let error = built.err().expect("no constructor");
+            assert!(unsupported(&error, "provider_codex"), "{error:?}");
+        }
         let error = registry.get("agent").err().expect("no constructor");
         assert!(unsupported(&error, "provider_acp"), "{error:?}");
     }
