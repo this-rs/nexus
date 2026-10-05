@@ -237,10 +237,23 @@ fn claude_code_like_capabilities() -> Capabilities {
 }
 
 fn current_snapshot() -> Value {
-    let events: BTreeMap<&str, Value> = event_samples()
+    let mut events: BTreeMap<&str, Value> = event_samples()
         .iter()
         .map(|event| (event.type_name(), serde_json::to_value(event).unwrap()))
         .collect();
+    // `done` without `error` is the sample above; the classified failure of the
+    // turn (contract v2, `done.error`) is its own entry so a renamed field shows.
+    let mut done_with_error = event_samples()
+        .into_iter()
+        .find(|event| event.type_name() == "done")
+        .expect("a done sample");
+    if let AgentEvent::Done { error, .. } = &mut done_with_error {
+        *error = Some(ProviderError::Overloaded);
+    }
+    events.insert(
+        "done_with_error",
+        serde_json::to_value(&done_with_error).unwrap(),
+    );
     let errors: BTreeMap<&str, Value> = error_samples()
         .iter()
         .map(|error| (error.kind(), serde_json::to_value(error).unwrap()))

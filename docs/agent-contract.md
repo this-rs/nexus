@@ -676,9 +676,9 @@ jeton, `add_dirs` ← `extra_dirs`, `env` ← `EnvSpec.set`, `cli_path` ← exte
 | (aucune) | `agent/` (types, traits, registre), `providers/claude_code/` | oui |
 | `auto-download`, `memory` | existantes, inchangées | `auto-download` oui |
 | `testkit` | `testkit/` : conformité, `ScriptedProvider`, rejeu de transcriptions | non (`dev-dependencies` du backend) |
-| `provider-native` | `model/` (HTTP + SSE, `reqwest`), `providers/native/` | non |
-| `provider-codex` | `providers/codex/` | non |
-| `provider-acp` | `providers/acp/` | non |
+| `provider-native` | EXISTE : `model/` (HTTP + SSE, `reqwest`), `providers/native/` | non |
+| `provider-codex` | CIBLE (n'existe pas encore) : `providers/codex/` | non |
+| `provider-acp` | CIBLE (n'existe pas encore) : `providers/acp/` | non |
 
 - Côté backend : `nexus-claude = { …, features = ["memory", "auto-download", "provider-native",
   "provider-codex", "provider-acp"] }` et `features = ["testkit"]` en `dev-dependencies`. Pendant
@@ -710,4 +710,12 @@ jeton, `add_dirs` ← `extra_dirs`, `env` ← `EnvSpec.set`, `cli_path` ← exte
   {"type":"done","stop_reason":"completed","subtype":"success","is_error":false,"result_text":"ok",
    "usage":{"input_tokens":12,"output_tokens":3,"by_model":[]},"cost":{"usd":0.0004,"basis":"reported"},
    "duration_ms":812,"num_turns":1,"provider_session_id":"…"}
+  ```
+- Exemple de `done` avec cause classée (v2, `done.error` : objet `ProviderError` avec `kind` ;
+  absent quand `is_error` est faux ou que la cause n'est pas classée ; instantané :
+  `tests/snapshots/agent_contract_v2.json`, entrée `done_with_error`) :
+  ```json
+  {"type":"done","stop_reason":"error","is_error":true,"result_text":"Overloaded",
+   "error":{"kind":"overloaded"},"usage":{"input_tokens":12,"output_tokens":0,"by_model":[]},
+   "cost":{"usd":null,"basis":"unknown"},"duration_ms":812,"num_turns":1}
   ```

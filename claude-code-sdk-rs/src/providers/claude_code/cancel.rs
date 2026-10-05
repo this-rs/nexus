@@ -148,9 +148,13 @@ pub async fn descendant_pids(root: u32) -> Vec<u32> {
 /// existed and was ours). A process already gone (`ESRCH`) is `false`, quietly.
 #[cfg(unix)]
 pub fn signal_pid(pid: u32, signal: i32) -> bool {
+    // Never 0 (the caller's process group) nor anything that is not a plain pid.
     let Ok(pid) = i32::try_from(pid) else {
         return false;
     };
+    if pid <= 0 {
+        return false;
+    }
     // SAFETY: `kill` takes two integers and touches no memory of ours.
     let status = unsafe { libc::kill(pid, signal) };
     if status == 0 {
@@ -272,6 +276,7 @@ mod tests {
         // Signal 0 checks existence without delivering anything; a pid above
         // every plausible pid_max is not ours.
         assert!(!signal_pid(u32::MAX - 1, 0));
+        assert!(!signal_pid(0, 0), "pid 0 is the caller's process group");
         assert!(signal_pid(std::process::id(), 0), "we exist");
     }
 

@@ -393,12 +393,26 @@ impl Fake {
                             .collect()
                     })
                     .unwrap_or_else(|| vec!["600".to_owned()]);
-                match std::process::Command::new(program)
+                let mut command = std::process::Command::new(program);
+                command
                     .args(&args)
                     .stdin(std::process::Stdio::null())
-                    .stdout(std::process::Stdio::null())
-                    .spawn()
+                    .stdout(std::process::Stdio::null());
+                #[cfg(unix)]
                 {
+                    use std::os::unix::process::CommandExt;
+                    // A runner started in the background leaves SIGINT ignored, and an
+                    // ignored disposition is inherited: restore the default so a
+                    // signalled tool dies whatever launched the test.
+                    // SAFETY: only async-signal-safe `signal` between fork and exec.
+                    unsafe {
+                        command.pre_exec(|| {
+                            libc::signal(libc::SIGINT, libc::SIG_DFL);
+                            Ok(())
+                        });
+                    }
+                }
+                match command.spawn() {
                     Ok(child) => self.children.push(child),
                     Err(e) => die(
                         EXIT_BAD_DIRECTIVE,

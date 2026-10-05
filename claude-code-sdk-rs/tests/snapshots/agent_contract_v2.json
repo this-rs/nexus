@@ -178,6 +178,41 @@
         "output_tokens": 3
       }
     },
+    "done_with_error": {
+      "cost": {
+        "basis": "reported",
+        "usd": 0.0004
+      },
+      "duration_api_ms": 640,
+      "duration_ms": 812,
+      "error": {
+        "kind": "overloaded"
+      },
+      "is_error": true,
+      "model": "model-a",
+      "num_turns": 50,
+      "provider_session_id": "sess-1",
+      "result_text": "stopped",
+      "stop_reason": "max_turns",
+      "subtype": "error_max_turns",
+      "type": "done",
+      "usage": {
+        "by_model": [
+          {
+            "cache_read_tokens": 100,
+            "context_window": 200000,
+            "cost_usd": 0.0004,
+            "input_tokens": 12,
+            "model": "model-a",
+            "output_tokens": 3
+          }
+        ],
+        "cache_read_tokens": 100,
+        "context_tokens": 115,
+        "input_tokens": 12,
+        "output_tokens": 3
+      }
+    },
     "error": {
       "error": {
         "kind": "rate_limited",

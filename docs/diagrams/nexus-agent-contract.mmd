@@ -56,6 +56,7 @@ flowchart TD
         CAP["✅ Capabilities par modèle, 18 champs, Capabilities::none() ; fenêtre inconnue = absente, jamais 200000<br/><i>agent/capabilities.rs ; vérifié : tests unitaires agent::capabilities ; les replis ne seront vérifiés que par testkit (palier 4)</i>"]
         RES["✅ ResumeToken opaque { k, v, d }, to_wire / from_wire, expect_kind refuse le jeton d'un autre provider<br/><i>agent/resume.rs ; vérifié : tests unitaires agent::resume</i>"]
         ERR["✅ ProviderError (16 variantes, retryable(), kind(), http_status_hint()), détails expurgés par credentials::redact<br/><i>agent/error.rs, agent/credentials.rs (Secret, CredentialRef, CredentialResolver) ; vérifié : instantané + tests agent::credentials</i>"]
+        DONEERR["✅ done.error (contrat v2) : cause classée portée par `done` (usage et coût conservés) ; épinglée par l'instantané tests/snapshots/agent_contract_v2.json, entrée done_with_error<br/><i>vérifié : cargo test -p nexus-claude --test agent_contract_snapshots (rouge avant l'ajout de l'entrée ; un renommage serde du champ casse l'instantané)</i>"]
         REG --> PROV
         PROV -->|"open / resume(ResumeToken)"| SESS
         PROV --> CAP

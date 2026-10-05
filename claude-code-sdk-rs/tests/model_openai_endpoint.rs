@@ -704,20 +704,88 @@ async fn private_range_is_refused_after_dns_resolution() {
     ));
 }
 
+/// Answers each call with the next address of its list (the last one repeats).
+struct SequenceResolver(Vec<IpAddr>, AtomicUsize);
+
+#[async_trait]
+impl DnsResolver for SequenceResolver {
+    async fn resolve(&self, _host: &str, port: u16) -> io::Result<Vec<SocketAddr>> {
+        let call = self.1.fetch_add(1, Ordering::SeqCst);
+        let ip = self.0[call.min(self.0.len() - 1)];
+        Ok(vec![SocketAddr::new(ip, port)])
+    }
+}
+
+/// A listener that only counts TCP connections: the TLS handshake that follows
+/// an `https` request to it fails, which is irrelevant here.
+async fn counting_listener() -> (u16, Arc<AtomicUsize>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let accepted = Arc::new(AtomicUsize::new(0));
+    let counter = accepted.clone();
+    tokio::spawn(async move {
+        while let Ok((socket, _)) = listener.accept().await {
+            counter.fetch_add(1, Ordering::SeqCst);
+            drop(socket);
+        }
+    });
+    (port, accepted)
+}
+
 #[tokio::test]
 async fn connection_is_pinned_on_the_validated_address() {
-    // `pin-test.localhost` is not in any hosts file: only the pin can make it connect.
-    let server = FakeOpenAi::start(json!([models_route()]));
-    let url = format!("http://pin-test.localhost:{}/v1", server.port());
-    let (endpoint, _) = endpoint_with(url, EndpointQuirks::generic(), |_| {});
-    let dns = Arc::new(MapResolver(
-        "127.0.0.1".parse().unwrap(),
+    // `pin-test.invalid` is reserved (RFC 6761) and never resolves through the
+    // system: only the address the guard validated can make the TCP connection.
+    let (port, accepted) = counting_listener().await;
+    let (endpoint, _) = endpoint_with(
+        format!("https://pin-test.invalid:{port}/v1"),
+        EndpointQuirks::generic(),
+        |_| {},
+    );
+    let dns = Arc::new(SequenceResolver(
+        vec!["127.0.0.1".parse().unwrap()],
         AtomicUsize::new(0),
     ));
     let endpoint = endpoint.with_dns_resolver(dns.clone());
-    endpoint.models().await.unwrap();
+    // The handshake fails (the listener is not TLS); the connection was made.
+    let _ = endpoint.models().await;
     assert_eq!(dns.1.load(Ordering::SeqCst), 1);
-    assert_eq!(server.requests_to("GET", "/v1/models").len(), 1);
+    assert!(
+        accepted.load(Ordering::SeqCst) >= 1,
+        "the client must connect to the validated address, not re-resolve the name"
+    );
+}
+
+#[tokio::test]
+async fn a_rebound_name_is_checked_again_and_refused() {
+    // First answer: an allowed address. Second answer for the same name: an
+    // internal one. The second request must be refused, and must not reuse the
+    // client pinned on the first answer.
+    let (port, accepted) = counting_listener().await;
+    let (endpoint, _) = endpoint_with(
+        format!("https://rebind.invalid:{port}/v1"),
+        EndpointQuirks::generic(),
+        |_| {},
+    );
+    let dns = Arc::new(SequenceResolver(
+        vec!["127.0.0.1".parse().unwrap(), "10.9.8.7".parse().unwrap()],
+        AtomicUsize::new(0),
+    ));
+    let endpoint = endpoint.with_dns_resolver(dns.clone());
+    let _ = endpoint.models().await;
+    let after_first = accepted.load(Ordering::SeqCst);
+    assert!(after_first >= 1);
+    let error = expect_err(endpoint.models().await);
+    assert!(
+        matches!(error, ProviderError::InvalidRequest { .. }),
+        "{error:?}"
+    );
+    assert_eq!(
+        accepted.load(Ordering::SeqCst),
+        after_first,
+        "no connection after the rebinding"
+    );
+    assert_eq!(dns.1.load(Ordering::SeqCst), 2);
 }
 
 #[tokio::test]
