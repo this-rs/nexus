@@ -1430,3 +1430,23 @@ async fn an_old_codex_without_app_server_fails_open_with_a_typed_error() {
         "{error:?}"
     );
 }
+
+#[tokio::test]
+async fn open_and_resume_refuse_a_codex_older_than_the_minimum_like_health_does() {
+    let home = tempfile::tempdir().unwrap();
+    let cwd = tempfile::tempdir().unwrap();
+    for version in ["0.38.0", "0.129.9"] {
+        let provider = health_provider(version, home.path());
+        let mut spec = SessionSpec::new(cwd.path());
+        spec.model = Some(MODEL.to_owned());
+        let error = provider.open(spec.clone()).await.err().expect("open fails");
+        assert_eq!(error, ProviderError::unsupported("app_server"), "{version}");
+        let token = ResumeToken::new(ProviderKind::Codex, 1, json!({"thread_id": "t-1"}));
+        let error = provider
+            .resume(spec, token)
+            .await
+            .err()
+            .expect("resume fails");
+        assert_eq!(error, ProviderError::unsupported("app_server"), "{version}");
+    }
+}

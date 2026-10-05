@@ -160,8 +160,15 @@ pub struct NativeConfig {
     pub prices: PriceTable,
     /// `Free` for a local model; anything else lets the price table decide.
     pub cost_basis: CostBasis,
-    /// Limits applied when the session's own are unset.
+    /// Limits applied when the session's own are unset. **Not unlimited by
+    /// default**: [`NativeConfig::new`] sets `turn_timeout_ms` to
+    /// [`NativeConfig::DEFAULT_TURN_TIMEOUT_MS`] and `max_tokens` to
+    /// [`NativeConfig::DEFAULT_MAX_TOKENS`]; set a field to `None` to lift it
+    /// (an explicit choice of the operator, not an omission).
     pub limits: SessionLimits,
+    /// Round trips to the model per turn, when `SessionSpec::max_turns` is unset;
+    /// [`NativeConfig::DEFAULT_MAX_TURNS`] by default, `None` lifts it.
+    pub max_turns: Option<u32>,
     /// Output cap of every request, in tokens.
     pub max_tokens: Option<u32>,
     /// Value of `parallel_tool_calls` sent with tools; `None` sends nothing.
@@ -180,8 +187,16 @@ pub struct NativeConfig {
 }
 
 impl NativeConfig {
+    /// Default bound on the model round trips of a turn (a runaway tool loop).
+    pub const DEFAULT_MAX_TURNS: u32 = 50;
+    /// Default longest a turn may run: 30 minutes.
+    pub const DEFAULT_TURN_TIMEOUT_MS: u64 = 30 * 60 * 1000;
+    /// Default token budget of a session (input + output, reported or estimated).
+    pub const DEFAULT_MAX_TOKENS: u64 = 10_000_000;
+
     /// A configuration with the defaults: strict exposure, compaction on, no
-    /// price, no default model.
+    /// price, no default model, bounded turns and budget (see the `DEFAULT_*`
+    /// constants).
     pub fn new(instance_id: impl Into<String>) -> Self {
         Self {
             instance_id: instance_id.into(),
@@ -189,7 +204,12 @@ impl NativeConfig {
             context_window: None,
             prices: PriceTable::new(),
             cost_basis: CostBasis::Unknown,
-            limits: SessionLimits::default(),
+            limits: SessionLimits {
+                turn_timeout_ms: Some(Self::DEFAULT_TURN_TIMEOUT_MS),
+                max_tokens: Some(Self::DEFAULT_MAX_TOKENS),
+                ..SessionLimits::default()
+            },
+            max_turns: Some(Self::DEFAULT_MAX_TURNS),
             max_tokens: None,
             parallel_tool_calls: None,
             strict_tool_exposure: true,
@@ -465,6 +485,7 @@ impl NativeProvider {
             deltas,
             ..
         } = spec;
+        let max_turns = max_turns.or(self.config.max_turns);
         let core = session::Core::new(session::CoreParts {
             capabilities,
             endpoint: Arc::clone(&self.endpoint),

@@ -561,6 +561,123 @@ async fn without_a_price_the_cost_of_a_turn_is_unknown_not_zero() {
 }
 
 #[tokio::test]
+async fn a_usd_budget_advances_on_an_estimate_when_the_endpoint_reports_no_usage() {
+    // The endpoint never says what a request cost; the model has a price.
+    let h = Harness::with(
+        vec![tool_reply(Some("spend"), &[echo_call()], None, None)],
+        |config| config.prices = PriceTable::new().with("m", price(1000.0)),
+    )
+    .await;
+    let log_dir = tempfile::tempdir().unwrap();
+    let log = log_path(&log_dir);
+    let mut spec = h.spec_with_mcp(&log);
+    spec.limits.max_cost_usd = Some(0.1);
+    let session = h.open(spec).await;
+    // About 4000 characters, so about 1000 prompt tokens: 1 USD at this price.
+    let prompt = format!("spend {}", "x".repeat(4000));
+    let events = turn(&*session, &prompt).await;
+    assert_eq!(stop_reason(&events), StopReason::BudgetExceeded);
+    // The tools would have run past the budget: they did not.
+    assert_eq!(mcp_calls(&log, "echo"), 0);
+    // The estimate is announced as such, with its basis.
+    let notice = events
+        .iter()
+        .find_map(|event| match event {
+            AgentEvent::ProviderNotice { kind, data } if kind == "usage_estimated" => Some(data),
+            _ => None,
+        })
+        .expect("a usage_estimated notice");
+    assert_eq!(notice["estimated"], true);
+    assert_eq!(notice["chars_per_token"], 4);
+    assert!(notice["tokens"].as_u64().unwrap() >= 1000, "{notice}");
+    assert!(notice["usd"].as_f64().unwrap() >= 1.0, "{notice}");
+    // The session budget is spent: the next turn does not call the model.
+    let again = turn(&*session, "again").await;
+    assert_eq!(stop_reason(&again), StopReason::BudgetExceeded);
+    assert_eq!(h.chat().len(), 1);
+}
+
+#[tokio::test]
+async fn a_report_from_the_endpoint_replaces_the_estimate_and_no_notice_is_made() {
+    let h = Harness::with(
+        vec![text_reply(None, "ok", None, Some((100, 10)))],
+        |config| config.prices = PriceTable::new().with("m", price(1000.0)),
+    )
+    .await;
+    let session = h.open(h.spec()).await;
+    let events = turn(&*session, "hi").await;
+    assert!(
+        !events.iter().any(|event| matches!(
+            event,
+            AgentEvent::ProviderNotice { kind, .. } if kind == "usage_estimated"
+        )),
+        "{events:?}"
+    );
+}
+
+#[test]
+fn the_defaults_of_a_native_config_are_bounded_not_unlimited() {
+    let config = NativeConfig::new("x");
+    assert_eq!(config.max_turns, Some(NativeConfig::DEFAULT_MAX_TURNS));
+    assert_eq!(
+        config.limits.turn_timeout_ms,
+        Some(NativeConfig::DEFAULT_TURN_TIMEOUT_MS)
+    );
+    assert_eq!(
+        config.limits.max_tokens,
+        Some(NativeConfig::DEFAULT_MAX_TOKENS)
+    );
+    const {
+        assert!(NativeConfig::DEFAULT_MAX_TURNS > 0);
+        assert!(NativeConfig::DEFAULT_TURN_TIMEOUT_MS > 0);
+        assert!(NativeConfig::DEFAULT_MAX_TOKENS > 0);
+    }
+}
+
+#[tokio::test]
+async fn a_session_without_its_own_max_turns_gets_the_one_of_the_config() {
+    let h = Harness::with(
+        vec![
+            tool_reply(Some("loop"), &[echo_call()], None, Some((10, 1))),
+            tool_reply(Some(TOOL), &[echo_call()], None, Some((10, 1))),
+        ],
+        |config| config.max_turns = Some(2),
+    )
+    .await;
+    let log_dir = tempfile::tempdir().unwrap();
+    // Neither `max_turns` nor any limit in the spec.
+    let session = h.open(h.spec_with_mcp(&log_path(&log_dir))).await;
+    let events = turn(&*session, "loop").await;
+    assert_eq!(stop_reason(&events), StopReason::MaxTurns);
+    let AgentEvent::Done { num_turns, .. } = done(&events) else {
+        unreachable!()
+    };
+    assert_eq!(*num_turns, 2);
+}
+
+#[tokio::test]
+async fn the_spec_limits_win_over_the_defaults_of_the_config() {
+    let h = Harness::with(
+        vec![
+            tool_reply(Some("loop"), &[echo_call()], None, Some((10, 1))),
+            tool_reply(Some(TOOL), &[echo_call()], None, Some((10, 1))),
+            text_reply(Some("never"), "x", None, None),
+        ],
+        |config| config.max_turns = Some(1),
+    )
+    .await;
+    let log_dir = tempfile::tempdir().unwrap();
+    let mut spec = h.spec_with_mcp(&log_path(&log_dir));
+    spec.max_turns = Some(3);
+    let session = h.open(spec).await;
+    let events = turn(&*session, "loop").await;
+    let AgentEvent::Done { num_turns, .. } = done(&events) else {
+        unreachable!()
+    };
+    assert_eq!(*num_turns, 3);
+}
+
+#[tokio::test]
 async fn max_turns_bounds_the_round_trips_of_a_turn() {
     let h = Harness::new(vec![
         tool_reply(Some("loop"), &[echo_call()], None, Some((10, 1))),

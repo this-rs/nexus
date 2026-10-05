@@ -376,6 +376,21 @@ impl CodexProvider {
         Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
     }
 
+    /// The installed version, refused when it is older than
+    /// [`MIN_APP_SERVER_VERSION`] (`Unsupported { app_server }`, what `health()`
+    /// answers too): `open` and `resume` must not start an `app-server` the wire
+    /// types were never written for. Costs one `codex --version` per call.
+    async fn checked_version(&self) -> Result<String, ProviderError> {
+        let output = self.run_version().await?;
+        let found = parse_version(&output)
+            .ok_or_else(|| ProviderError::protocol("`codex --version` printed no version"))?;
+        let minimum = parse_version(MIN_APP_SERVER_VERSION).unwrap_or((0, 0, 0));
+        if found < minimum {
+            return Err(ProviderError::unsupported("app_server"));
+        }
+        Ok(format!("{}.{}.{}", found.0, found.1, found.2))
+    }
+
     /// Whether somebody is logged in: a configured credential that resolves, or an
     /// `auth.json` in the instance's home (NOT VERIFIED as the login's location).
     async fn logged_in(&self) -> Result<bool, ProviderError> {
@@ -417,6 +432,8 @@ impl CodexProvider {
         if !spec.cwd.is_dir() {
             return Err(ProviderError::invalid("cwd is not a directory"));
         }
+        // Before the credential is resolved or any process is started.
+        self.checked_version().await?;
         let model = spec
             .model
             .clone()
@@ -762,6 +779,34 @@ fn toml_array(items: &[String]) -> String {
     format!("[{}]", inner.join(","))
 }
 
+/// Puts a generated credential variable in `launch.env`, for `server` only.
+///
+/// Variable names are derived from server names by folding every character that
+/// is not alphanumeric to `_` and upper-casing (`a-b`, `a_b` and `A_B` all give
+/// `A_B`): two servers landing on one variable would be sent each other's secret,
+/// so the second one is refused (`invalid_request`, nothing echoed), as is a
+/// variable that a stdio server already sets itself.
+fn claim_generated_variable(
+    launch: &mut McpLaunch,
+    owners: &mut BTreeMap<String, String>,
+    variable: String,
+    server: &str,
+    value: &str,
+) -> Result<(), ProviderError> {
+    let taken = match owners.get(&variable) {
+        Some(owner) => owner != server,
+        None => launch.env.contains_key(&variable),
+    };
+    if taken {
+        return Err(ProviderError::invalid(
+            "two MCP servers map to the same credential variable name: rename one",
+        ));
+    }
+    owners.insert(variable.clone(), server.to_owned());
+    launch.env.insert(variable, value.to_owned());
+    Ok(())
+}
+
 fn env_name(parts: &[&str]) -> String {
     parts
         .join("_")
@@ -785,6 +830,8 @@ fn env_name(parts: &[&str]) -> String {
 pub fn mcp_launch(servers: &BTreeMap<String, McpServerSpec>) -> Result<McpLaunch, ProviderError> {
     let bad = |detail: &str| Err(ProviderError::invalid(detail));
     let mut launch = McpLaunch::default();
+    // Generated variable -> the server it belongs to.
+    let mut owners: BTreeMap<String, String> = BTreeMap::new();
     for (name, server) in servers {
         if name.is_empty()
             || !name
@@ -822,6 +869,11 @@ pub fn mcp_launch(servers: &BTreeMap<String, McpServerSpec>) -> Result<McpLaunch
                         }
                     }
                     for (variable, value) in env {
+                        if owners.contains_key(variable) {
+                            return bad(
+                                "an MCP environment variable collides with a generated one",
+                            );
+                        }
                         match launch.env.get(variable) {
                             Some(existing) if existing != value => {
                                 return bad("two MCP servers give one variable different values");
@@ -866,7 +918,7 @@ pub fn mcp_launch(servers: &BTreeMap<String, McpServerSpec>) -> Result<McpLaunch
                             key("bearer_token_env_var"),
                             toml_string(&variable)
                         ));
-                        launch.env.insert(variable, token.to_owned());
+                        claim_generated_variable(&mut launch, &mut owners, variable, name, token)?;
                     } else {
                         let variable = env_name(&["NEXUS_MCP", name, "HEADER", &index.to_string()]);
                         launch.overrides.push(format!(
@@ -874,7 +926,7 @@ pub fn mcp_launch(servers: &BTreeMap<String, McpServerSpec>) -> Result<McpLaunch
                             key(&format!("env_http_headers.{header}")),
                             toml_string(&variable)
                         ));
-                        launch.env.insert(variable, value.clone());
+                        claim_generated_variable(&mut launch, &mut owners, variable, name, value)?;
                     }
                 }
             },
@@ -972,6 +1024,52 @@ mod tests {
             argv.contains(r#"mcp_servers.remote.bearer_token_env_var="NEXUS_MCP_REMOTE_BEARER""#)
         );
         assert!(argv.contains("mcp_servers.remote.env_http_headers.X-Tenant="));
+    }
+
+    fn bearer_server(token: &str) -> McpServerSpec {
+        McpServerSpec::Http {
+            url: "https://mcp.example/api".to_owned(),
+            headers: BTreeMap::from([("Authorization".to_owned(), format!("Bearer {token}"))]),
+        }
+    }
+
+    #[test]
+    fn two_servers_whose_names_fold_to_one_variable_are_refused_not_merged() {
+        // `a-b` and `a_b` (and `A_B`) would all be NEXUS_MCP_A_B_BEARER: one
+        // server would be sent the other one's token.
+        for (first, second) in [("a-b", "a_b"), ("a_b", "A_B"), ("x-y", "X-Y")] {
+            let servers = BTreeMap::from([
+                (first.to_owned(), bearer_server("token-one-value")),
+                (second.to_owned(), bearer_server("token-two-value")),
+            ]);
+            let error = mcp_launch(&servers).unwrap_err();
+            assert_eq!(error.kind(), "invalid_request", "{first} / {second}");
+            assert!(!error.to_string().contains("token-"), "{error}");
+        }
+        // Distinct names keep distinct variables, each with its own token.
+        let servers = BTreeMap::from([
+            ("a-b".to_owned(), bearer_server("token-one-value")),
+            ("a-c".to_owned(), bearer_server("token-two-value")),
+        ]);
+        let launch = mcp_launch(&servers).unwrap();
+        assert_eq!(launch.env["NEXUS_MCP_A_B_BEARER"], "token-one-value");
+        assert_eq!(launch.env["NEXUS_MCP_A_C_BEARER"], "token-two-value");
+        // A stdio server cannot squat a generated variable either.
+        let squat = BTreeMap::from([
+            ("remote".to_owned(), bearer_server("token-one-value")),
+            (
+                "stdio".to_owned(),
+                McpServerSpec::Stdio {
+                    command: "x".to_owned(),
+                    args: Vec::new(),
+                    env: BTreeMap::from([(
+                        "NEXUS_MCP_REMOTE_BEARER".to_owned(),
+                        "other-value".to_owned(),
+                    )]),
+                },
+            ),
+        ]);
+        assert_eq!(mcp_launch(&squat).unwrap_err().kind(), "invalid_request");
     }
 
     #[test]

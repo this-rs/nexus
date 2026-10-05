@@ -117,7 +117,7 @@ flowchart TD
     C3 -.->|"ce qu'il simule"| F2
     C4 -.-> F2
 
-    subgraph target["🟠 Cible — RFC PO « harness multi-provider » (décidé, non écrit)"]
+    subgraph target["Harness multi-provider (RFC PO) : écrit côté nexus ; AUCUN consommateur backend à ce jour (le backend ne consomme que ClaudeCodeProvider, au mieux, sur sa branche d'intégration non fusionnée ; Codex et ACP ne sont appelés que par les tests du SDK)"]
         direction TB
         T1["✅ `pub mod agent` : traits AgentProvider / AgentSession et types neutres (AgentEvent, ToolPolicy, Capabilities,<br/>ProviderError, ResumeToken, SessionSpec) — sans serde_json::Value de protocole ni stdin brut dans les signatures ;<br/>aucun provider RÉEL ne les implémente encore (seul le double de test T4)<br/><i>vérifié : tests/agent_contract_snapshots.rs, cargo test --lib agent:: ; détail dans nexus-agent-contract</i>"]
         T2["✅ partiel — `pub mod providers` dans lib.rs (toujours compilé) : providers::claude_code::ClaudeCodeProvider = façade sur<br/>InteractiveClient + message_parser + protocole de contrôle (control.rs), environnement en liste blanche par défaut<br/>(EnvPolicy::claude_code), config MCP par fichier. 🟠 reste : annulation d'outils, tâches de fond, six modes au lancement ;<br/>l'ancien chemin (InteractiveClient direct, C1→C7) reste public et inchangé (A14)<br/><i>vérifié : cargo test -p nexus-claude --features testkit --test claude_code_conformance ; détail dans nexus-agent-providers</i>"]

@@ -363,6 +363,9 @@ struct Core {
     stdin: Mutex<Option<mpsc::Sender<String>>>,
     /// Process identifier of the CLI; `None` behind a transport without a process.
     cli_pid: Mutex<Option<u32>>,
+    /// The tasks answering `hook_callback` requests: tracked so `close` cancels
+    /// a hook that never answers instead of leaking it.
+    hook_tasks: Mutex<tokio::task::JoinSet<()>>,
 }
 
 enum OutOfBandNext {
@@ -394,6 +397,7 @@ impl Core {
             shutdown: Notify::new(),
             stdin: Mutex::new(None),
             cli_pid: Mutex::new(None),
+            hook_tasks: Mutex::new(tokio::task::JoinSet::new()),
         }
     }
 
@@ -723,9 +727,15 @@ async fn on_control(core: &Arc<Core>, message: Value, registry: &HookRegistry) {
         InboundControl::HookCallback { request_id } => {
             // A hook may take its time (it calls the host): it must not hold
             // back the events of the turn.
-            let core = Arc::clone(core);
             let registry = Arc::clone(registry);
-            tokio::spawn(async move {
+            let mut tasks = core
+                .hook_tasks
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            // Reap the finished ones so the set stays as small as the hooks in flight.
+            while tasks.try_join_next().is_some() {}
+            let core = Arc::clone(core);
+            tasks.spawn(async move {
                 let Some(result) = dispatch_hook_from_registry(&message, &registry).await else {
                     // The CLI and the registry disagree on what was registered:
                     // worth a warning, not an invented answer.
@@ -1172,6 +1182,12 @@ impl AgentSession for ClaudeCodeSession {
         }
         self.core.wake.notify_waiters();
         self.core.shutdown.notify_one();
+        // A hook still waiting on the host dies with the session.
+        self.core
+            .hook_tasks
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .abort_all();
         // Our clone of the CLI's stdin must go, or its input would stay open.
         self.core
             .stdin

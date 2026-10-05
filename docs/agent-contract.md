@@ -264,6 +264,11 @@ Valeurs de référence (v1, à confirmer par la conformité de chaque adaptateur
 | compaction_signal | oui | oui | oui | non |
 | thinking | oui | selon modèle | oui | oui |
 | images | non en v1 (A12) | non | non | non |
+
+Règle `images` par moteur (A12) : `images` est `false` pour TOUS les moteurs en v1, quoi que le moteur annonce
+(`promptCapabilities.image` d'ACP, `supports_images` d'un modèle, entrée image de Codex, `ModelInfo.supports_images`).
+Un bloc `image` dans `send_turn` rend `Unsupported { capability: "images" }` ; une capacité réelle d'un moteur ne
+bascule `images` à `true` qu'avec une décision de contrat et un scénario `message_images` joué (et non replié).
 | tools | oui | selon modèle (sonde) | oui | oui |
 | context_window | reported | configured / probed | configured | None |
 | set_model_live | oui | oui (entre deux tours) | oui (par tour) | non |
@@ -301,7 +306,15 @@ Valeurs de référence (v1, à confirmer par la conformité de chaque adaptateur
   (`isolated_command`, HOME dédié par instance) et HTTP streamable ; le transport HTTP+SSE historique
   (`McpServerSpec::Sse`) est refusé (`Unsupported { mcp_sse }`).
 - **Budgets** : `limits.max_tokens` est un budget de **session**, compté sur l'usage rapporté (estimé à
-  4 caractères par jeton si l'endpoint n'en rapporte pas) ; il fonctionne sans fenêtre de contexte
+  4 caractères par jeton si l'endpoint n'en rapporte pas : texte envoyé et reçu, schémas d'outils non
+  comptés, donc le réel est plus haut) ; **le budget USD avance aussi sur cette estimation** quand le modèle a un
+  prix, et chaque requête ainsi comptée émet `provider_notice { kind: "usage_estimated", data: { estimated:
+  true, chars_per_token: 4, tokens, usd } }` ; `done.usage` et `done.cost` ne portent que ce que l'endpoint a
+  rapporté. **Défauts non nuls** (réglages d'adaptateur dans `NativeConfig`, `SessionSpec` inchangé) : quand le
+  `SessionSpec` ne fixe pas la limite, `NativeConfig::new` applique `max_turns` = 50
+  (`DEFAULT_MAX_TURNS`), délai de tour = 30 min (`DEFAULT_TURN_TIMEOUT_MS`), budget de session = 10 000 000
+  jetons (`DEFAULT_MAX_TOKENS`) ; l'opérateur les lève en mettant le champ à `None`, le `SessionSpec` gagne
+  toujours ; il fonctionne sans fenêtre de contexte
   connue (écart à la ligne `context_window` du tableau). `limits.max_cost_usd` sans prix pour le modèle
   → `Unsupported { cost }` à l'ouverture (A21) ; avec prix, ou endpoint `free`, il est tenu. Dépassement
   → `done { stop_reason: budget_exceeded }`, contrôlé avant chaque requête et avant d'exécuter les
@@ -322,7 +335,13 @@ Valeurs de référence (v1, à confirmer par la conformité de chaque adaptateur
   dès l'ouverture ; un flux de tour lâché envoie le reste du tour (permissions comprises) hors tour.
   La conformité de `permission_hors_tour` est montée ainsi (`DetachedTurn` dans
   `tests/native_conformance.rs`).
-- **Non prouvé** : épinglage DNS des serveurs MCP HTTP (même réserve que `model/`) ; `Mcp-Session-Id`
+- **Serveurs MCP stdio** : une ligne de plus de 8 Mio (`MAX_LINE_BYTES`) n'est jamais accumulée au-delà de la
+  borne : la lecture s'arrête au dépassement, jette le reste de la ligne et répond aux requêtes en attente par une
+  erreur `protocol` (même lecteur borné pour Codex et ACP, où la ligne est signalée `malformed`).
+- **Serveurs MCP HTTP** : connexion épinglée sur les adresses validées (`resolve_to_addrs`, résolveur
+  injectable `McpConfig::dns_resolver`), nom re-vérifié à chaque requête (`an_http_server_connection_is_pinned_…`,
+  `an_http_server_name_that_rebinds_…`, rouges sans épinglage).
+- **Non prouvé** : aucun https réel ; `Mcp-Session-Id`
   expiré (404) n'est pas rejoué ; un serveur MCP qui renvoie des requêtes (`sampling`, `roots`) reçoit
   `method not found`.
 
@@ -374,6 +393,11 @@ contre `fake_codex` et des transcriptions écrites depuis le README de `codex-rs
   serveurs MCP de la session par `-c mcp_servers.<nom>.…` (jamais de secret sur argv : `env_vars`,
   `bearer_token_env_var`, `env_http_headers` par nom de variable) ; `close` tue le processus **et ses
   descendants** (groupe de processus et table des processus).
+- **Variables MCP générées** (`NEXUS_MCP_<NOM>_BEARER`, `…_HEADER_<n>`) : le nom est replié en `[A-Z0-9_]` ; deux
+  serveurs dont les noms se replient pareil (`a-b` / `a_b`), ou un serveur stdio qui poserait lui-même la même
+  variable, sont refusés (`invalid_request`) au lieu de se partager le secret de l'autre.
+- **`open` / `resume`** contrôlent la version comme `health()` : < `MIN_APP_SERVER_VERSION` →
+  `Unsupported { app_server }`, avant toute résolution de clé ou tout lancement du serveur.
 - **`health()`** : `codex --version` seul ; version < `MIN_APP_SERVER_VERSION` (0.130.0) → `Unavailable`,
   `error: Unsupported { app_server }` ; binaire absent → `cli_not_found` ; ni clé configurée ni
   `<CODEX_HOME>/auth.json` → `auth_required` avec `login_hint` = `CODEX_HOME=<dir> codex login` (jamais exécutée,
@@ -704,7 +728,9 @@ instance intégrée, toujours présente.
 - `ProviderInstanceConfig` est `#[non_exhaustive]` (constructeurs `new`, `claude_code`, `native`, `with_*`),
   désérialisé avec champs inconnus refusés (une clé collée sous `api_key` échoue au lieu d'être jetée) ;
   `from_json` renvoie `invalid_request` à message fixe (mauvaise référence d'identifiant, kind inconnu).
-- `SecurityGate` ne se construit que par `SecurityGate::attest(&'static str /* lot */)`. L'activation est
+- `SecurityGate` ne se construit que par `SecurityGate::attest(&'static str /* lot */)`. `attest` est une
+  **simple déclaration de l'hôte** : rien dans nexus ne vérifie que le lot de sécurité du backend existe ni
+  qu'il est actif ; la sûreté repose sur l'hôte. L'activation est
   irréversible. La porte garde aussi `test_connection` ; `list()` n'est jamais gardée.
 - `remove(id)` rend `false` pour `claude-code` (refus) et pour un id inconnu. `claude-code` peut être
   reconfigurée (même kind), pas remplacée par un autre kind.
@@ -962,6 +988,8 @@ jeton, `add_dirs` ← `extra_dirs`, `env` ← `EnvSpec.set`, `cli_path` ← exte
   (kind `model_protocol_mismatch`, N16 ; ajout compatible : un pair v2 qui ne la connaît pas la traite
   comme une erreur inconnue). Le fichier `tests/snapshots/agent_contract_v2.json` est conservé : le
   backend et le frontend, tant qu'ils sont en v2, le copient comme fixture.
+  L'instantané v2 porte aussi `provider_instance_config` (natif avec préréglage, prix et extension ; ACP ; Claude Code) : une entrée d'instantané ajoutée pour une
+  forme que le registre sérialisait déjà, **sans changement de forme ni de `CONTRACT_VERSION`**.
 - `agent::CONTRACT_VERSION: u32`. Monte de 1 à chaque changement d'une forme sérialisée
   (`AgentEvent`, `Capabilities`, `ProviderError`, `ToolPolicy`, `ResumeToken`) ou d'une signature de
   trait. Les instantanés JSON de `tests/agent_contract_snapshots.rs` portent la version : changer

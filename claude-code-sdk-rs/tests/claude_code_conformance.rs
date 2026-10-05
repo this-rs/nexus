@@ -1276,3 +1276,104 @@ async fn a_refused_turn_writes_nothing_and_close_ends_the_running_turn() {
         "only the accepted turn reached the CLI"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Close: nothing the session started outlives it
+// ---------------------------------------------------------------------------
+
+/// Sets a flag when dropped: proves a future was cancelled, not just forgotten.
+struct DropFlag(Arc<std::sync::atomic::AtomicBool>);
+
+impl Drop for DropFlag {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+}
+
+/// A host hook that never answers.
+struct HangingHooks {
+    started: Arc<std::sync::atomic::AtomicBool>,
+    dropped: Arc<std::sync::atomic::AtomicBool>,
+}
+
+#[async_trait]
+impl SessionHooks for HangingHooks {
+    async fn before_tool(&self, _call: &ToolCallInfo) -> HookVerdict {
+        let _flag = DropFlag(self.dropped.clone());
+        self.started.store(true, Ordering::SeqCst);
+        std::future::pending::<()>().await;
+        HookVerdict::Continue
+    }
+}
+
+async fn eventually(what: &str, mut condition: impl FnMut() -> bool) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while !condition() {
+        assert!(std::time::Instant::now() < deadline, "timed out: {what}");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+#[tokio::test]
+async fn a_hook_still_running_at_close_is_cancelled() {
+    let started = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    // The request is emitted without waiting for the answer, which never comes.
+    let (_fake, provider, mut spec) = stage(
+        Transcript::new()
+            .capture_hooks()
+            .await_stdin_containing("hang")
+            .init("fake-session")
+            .directive(json!({
+                "op": "emit_hook", "event": "PreToolUse", "request_id": "hook-hang",
+                "input": hook_input("PreToolUse",
+                    json!({"tool_name": "Read", "tool_input": {"file_path": "/x"}})),
+                "tool_use_id": "toolu_1", "await_response": false,
+            }))
+            .wait_eof_for(20_000),
+    );
+    spec.hooks = Some(Arc::new(HangingHooks {
+        started: started.clone(),
+        dropped: dropped.clone(),
+    }));
+    let session = open(&provider, spec).await;
+    let _stream = session.send_turn(TurnInput::text("hang")).await.unwrap();
+    eventually("the hook starts", || started.load(Ordering::SeqCst)).await;
+    assert!(!dropped.load(Ordering::SeqCst));
+    session.close().await.unwrap();
+    eventually("the hook task is cancelled by close", || {
+        dropped.load(Ordering::SeqCst)
+    })
+    .await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn the_children_of_the_cli_are_killed_at_close() {
+    let dir = tempfile::tempdir().unwrap();
+    let pid_file = dir.path().join("child.pid");
+    let script = format!("echo $$ > '{}'; exec sleep 120", pid_file.display());
+    let (_fake, provider, spec) = stage(
+        Transcript::new()
+            .await_stdin_containing("tool")
+            .init("fake-session")
+            .directive(json!({"op": "spawn_child", "program": "sh", "args": ["-c", script]}))
+            .wait_eof_for(20_000),
+    );
+    let session = open(&provider, spec).await;
+    let _stream = session.send_turn(TurnInput::text("tool")).await.unwrap();
+    eventually("the child wrote its pid", || {
+        std::fs::read_to_string(&pid_file).is_ok_and(|text| text.trim().parse::<i32>().is_ok())
+    })
+    .await;
+    let pid: i32 = std::fs::read_to_string(&pid_file)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    // SAFETY: signal 0 only checks that the process exists.
+    let alive = || unsafe { libc::kill(pid, 0) == 0 };
+    assert!(alive(), "the tool process runs before close");
+    session.close().await.unwrap();
+    eventually("the CLI's child is gone after close", || !alive()).await;
+}

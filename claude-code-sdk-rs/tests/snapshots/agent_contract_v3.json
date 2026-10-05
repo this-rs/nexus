@@ -415,6 +415,50 @@
     "status": "unavailable",
     "version": "0.38.0"
   },
+  "provider_instance_config": {
+    "acp": {
+      "command": [
+        "opencode",
+        "acp"
+      ],
+      "cost_source": "unknown",
+      "credential": "env:OPENCODE_KEY",
+      "env_inherit": [
+        "AWS_REGION"
+      ],
+      "id": "opencode",
+      "kind": "acp"
+    },
+    "claude_code": {
+      "cost_source": "reported",
+      "credential": "none",
+      "id": "claude-code",
+      "kind": "claude_code"
+    },
+    "native": {
+      "context_window": 64000,
+      "cost_source": "priced",
+      "credential": "vault:deepseek",
+      "default_model": "deepseek-chat",
+      "endpoint": "https://api.deepseek.com/v1",
+      "extensions": {
+        "max_turns": 25
+      },
+      "id": "deepseek",
+      "kind": "native",
+      "model_aliases": {
+        "fast": "deepseek-chat"
+      },
+      "preset": "deepseek",
+      "prices": {
+        "deepseek-chat": {
+          "cache_read_per_mtok": 0.028,
+          "input_per_mtok": 0.28,
+          "output_per_mtok": 0.42
+        }
+      }
+    }
+  },
   "question_answers": [
     {
       "answers": [

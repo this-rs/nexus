@@ -38,12 +38,13 @@ use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use reqwest::redirect::Policy;
 use reqwest::{Client, Response};
 use serde_json::{Value, json};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::AsyncWriteExt;
 use tokio::process::{Child, ChildStdin, ChildStdout};
 use tokio::sync::oneshot;
 
 use crate::agent::{EnvSpec, McpServerSpec, ProviderError, redact};
-use crate::model::{EndpointGuard, SseDecoder};
+use crate::model::{DnsResolver, EndpointGuard, SseDecoder};
+use crate::providers::lines::{BoundedLines, Line, too_long_error};
 use crate::transport::spawn::{EnvPolicy, isolated_command};
 
 /// Protocol revision announced at `initialize`.
@@ -55,7 +56,7 @@ const BODY_LIMIT: usize = 16 * 1024 * 1024;
 const MAX_LIST_PAGES: usize = 50;
 
 /// Limits and policy of the MCP clients of a provider.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct McpConfig {
     /// Time allowed to start a server and complete `initialize`.
     pub connect_timeout: Duration,
@@ -67,6 +68,22 @@ pub struct McpConfig {
     pub max_output_bytes: usize,
     /// Give stdio servers a dedicated `HOME` (contract §11) instead of the host's.
     pub isolated_home: bool,
+    /// Another DNS resolver for the HTTP servers' guard (tests, hosts with their
+    /// own); `None` uses the system's.
+    pub dns_resolver: Option<Arc<dyn DnsResolver>>,
+}
+
+impl std::fmt::Debug for McpConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("McpConfig")
+            .field("connect_timeout", &self.connect_timeout)
+            .field("call_timeout", &self.call_timeout)
+            .field("allow_private_network", &self.allow_private_network)
+            .field("max_output_bytes", &self.max_output_bytes)
+            .field("isolated_home", &self.isolated_home)
+            .field("dns_resolver", &self.dns_resolver.is_some())
+            .finish()
+    }
 }
 
 impl Default for McpConfig {
@@ -77,6 +94,7 @@ impl Default for McpConfig {
             allow_private_network: false,
             max_output_bytes: 100_000,
             isolated_home: true,
+            dns_resolver: None,
         }
     }
 }
@@ -540,6 +558,11 @@ impl StdioInner {
 
     fn fail_all(&self, code: Option<i32>) {
         *self.dead.lock().unwrap_or_else(PoisonError::into_inner) = Some(code);
+        self.fail_pending(McpError::Died { code });
+    }
+
+    /// Answers every request still waiting with `error`.
+    fn fail_pending(&self, error: McpError) {
         let pending: Vec<_> = self
             .pending
             .lock()
@@ -547,7 +570,7 @@ impl StdioInner {
             .drain()
             .collect();
         for (_, reply) in pending {
-            let _ = reply.send(Err(McpError::Died { code }));
+            let _ = reply.send(Err(error.clone()));
         }
     }
 
@@ -600,8 +623,16 @@ impl StdioInner {
 }
 
 async fn read_loop(inner: Arc<StdioInner>, stdout: ChildStdout) {
-    let mut lines = BufReader::new(stdout).lines();
+    let mut lines = BoundedLines::new(stdout);
     while let Ok(Some(line)) = lines.next_line().await {
+        let line = match line {
+            Line::Text(line) => line,
+            // A reply may have been the one dropped: nobody waits for it forever.
+            Line::TooLong => {
+                inner.fail_pending(McpError::Failed(too_long_error()));
+                continue;
+            },
+        };
         let Ok(message) = serde_json::from_str::<Value>(&line) else {
             continue;
         };
@@ -685,10 +716,14 @@ impl HttpInner {
             value.set_sensitive(true);
             map.insert(name, value);
         }
+        let mut guard = EndpointGuard::new().allow_private_network(config.allow_private_network);
+        if let Some(resolver) = &config.dns_resolver {
+            guard = guard.with_resolver(Arc::clone(resolver));
+        }
         Ok(Arc::new(Self {
             url: url.to_owned(),
             headers: map,
-            guard: EndpointGuard::new().allow_private_network(config.allow_private_network),
+            guard,
             client: Mutex::new(None),
             session_id: Mutex::new(None),
             next_id: AtomicU64::new(1),
@@ -958,6 +993,144 @@ fn create_private(dir: &Path) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Answers each call with the next address of its list (the last one stays).
+    struct SequenceResolver(Vec<std::net::IpAddr>, std::sync::atomic::AtomicUsize);
+
+    #[async_trait::async_trait]
+    impl DnsResolver for SequenceResolver {
+        async fn resolve(&self, _host: &str, port: u16) -> std::io::Result<Vec<SocketAddr>> {
+            let call = self.1.fetch_add(1, Ordering::SeqCst);
+            Ok(vec![SocketAddr::new(
+                self.0[call.min(self.0.len() - 1)],
+                port,
+            )])
+        }
+    }
+
+    fn sequence(addresses: &[&str]) -> Arc<SequenceResolver> {
+        Arc::new(SequenceResolver(
+            addresses.iter().map(|a| a.parse().unwrap()).collect(),
+            std::sync::atomic::AtomicUsize::new(0),
+        ))
+    }
+
+    /// A listener that only counts TCP connections (the TLS handshake that follows
+    /// an `https` request to it fails, which is irrelevant here).
+    async fn counting_listener() -> (u16, Arc<AtomicU64>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let accepted = Arc::new(AtomicU64::new(0));
+        let counter = Arc::clone(&accepted);
+        tokio::spawn(async move {
+            while let Ok((socket, _)) = listener.accept().await {
+                counter.fetch_add(1, Ordering::SeqCst);
+                drop(socket);
+            }
+        });
+        (port, accepted)
+    }
+
+    fn launch() -> McpLaunch {
+        McpLaunch {
+            cwd: std::env::temp_dir(),
+            env: EnvSpec::default(),
+            home: None,
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_stdio_server_printing_an_over_long_line_fails_the_request_with_a_protocol_error() {
+        // 9 MiB of `a` on one line, then silence: the line is over the 8 MiB bound.
+        let script = "head -c 9437184 /dev/zero | tr '\\000' a; echo; sleep 30";
+        let config = McpConfig {
+            connect_timeout: Duration::from_secs(20),
+            ..McpConfig::default()
+        };
+        let started = std::time::Instant::now();
+        let error = McpClient::connect(
+            "x",
+            &McpServerSpec::Stdio {
+                command: "sh".into(),
+                args: vec!["-c".into(), script.into()],
+                env: Default::default(),
+            },
+            &launch(),
+            &config,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.kind(), "protocol", "{error}");
+        assert!(
+            started.elapsed() < Duration::from_secs(15),
+            "the request must fail at once, not at the timeout"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_http_server_connection_is_pinned_on_the_validated_address() {
+        // `mcp-pin-test.invalid` is reserved (RFC 6761) and never resolves through
+        // the system: only the address the guard validated can take the connection.
+        let (port, accepted) = counting_listener().await;
+        let dns = sequence(&["127.0.0.1"]);
+        let config = McpConfig {
+            connect_timeout: Duration::from_secs(3),
+            dns_resolver: Some(dns.clone()),
+            ..McpConfig::default()
+        };
+        // The handshake fails (the listener is not TLS); the connection was made.
+        let _ = McpClient::connect(
+            "x",
+            &McpServerSpec::Http {
+                url: format!("https://mcp-pin-test.invalid:{port}/mcp"),
+                headers: Default::default(),
+            },
+            &launch(),
+            &config,
+        )
+        .await;
+        assert_eq!(dns.1.load(Ordering::SeqCst), 1);
+        assert!(
+            accepted.load(Ordering::SeqCst) >= 1,
+            "the client must connect to the validated address, not re-resolve the name"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_http_server_name_that_rebinds_is_checked_again_and_refused() {
+        let (port, accepted) = counting_listener().await;
+        let dns = sequence(&["127.0.0.1", "10.9.8.7"]);
+        let config = McpConfig {
+            dns_resolver: Some(dns.clone()),
+            ..McpConfig::default()
+        };
+        let inner = HttpInner::new(
+            &format!("https://mcp-rebind.invalid:{port}/mcp"),
+            &Default::default(),
+            &config,
+        )
+        .unwrap();
+        // First answer: an allowed address; the client is built on it and pinned.
+        let _ = inner.post(&json!({}), None, Duration::from_secs(3)).await;
+        let after_first = accepted.load(Ordering::SeqCst);
+        assert!(after_first >= 1);
+        // Second answer for the same name: an internal address. Refused, and the
+        // client pinned on the first answer is not reused.
+        let error = inner
+            .post(&json!({}), None, Duration::from_secs(3))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                &error,
+                McpError::Failed(ProviderError::InvalidRequest { .. })
+            ),
+            "{error:?}"
+        );
+        assert_eq!(accepted.load(Ordering::SeqCst), after_first);
+        assert_eq!(dns.1.load(Ordering::SeqCst), 2);
+    }
 
     #[test]
     fn a_tool_listing_entry_is_read_with_its_read_only_hint() {

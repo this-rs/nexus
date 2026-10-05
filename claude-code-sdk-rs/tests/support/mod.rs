@@ -133,6 +133,11 @@ impl Transcript {
         self
     }
 
+    /// An arbitrary directive of the fake, for the ones no helper spells.
+    pub fn directive(self, directive: Value) -> Self {
+        self.push(directive)
+    }
+
     // ----- raw directives -------------------------------------------------
 
     /// Emit `line` on stdout verbatim. Use it for noise and malformed JSON.
