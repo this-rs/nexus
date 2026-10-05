@@ -37,8 +37,10 @@ fn check(name: &str, argv: Vec<String>) {
         std::fs::write(&path, &rendered).unwrap();
         return;
     }
+    // A Windows checkout may turn the fixture's LF into CRLF (autocrlf): the content is what counts.
     let expected = std::fs::read_to_string(&path)
-        .unwrap_or_else(|_| panic!("missing fixture {}; UPDATE_GOLDEN=1", path.display()));
+        .unwrap_or_else(|_| panic!("missing fixture {}; UPDATE_GOLDEN=1", path.display()))
+        .replace("\r\n", "\n");
     assert_eq!(
         expected, rendered,
         "command line `{name}` changed (UPDATE_GOLDEN=1 to re-record after review)"
