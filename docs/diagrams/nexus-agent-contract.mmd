@@ -1,5 +1,5 @@
 %% name: nexus-agent-contract
-%% covers: docs/diagrams/nexus-agent-contract.mmd
+%% covers: docs/diagrams/nexus-agent-contract.mmd, docs/agent-contract.md
 %% verified: 2026-10-05
 %% ---
 %% PROUVE : le contrat CIBLE `agent/` (RFC PO b53e11c7) et, pour chaque brique,
@@ -22,10 +22,11 @@
 %%   claude-code-sdk-rs/src/errors.rs     — SdkError (CliNotFound, ConnectionError, Timeout, SessionNotFound, ProcessExited, NotSupported…)
 %%   claude-code-api/src/core/model_registry.rs — ModelRegistry::get_models/refresh (catalogue Anthropic seulement)
 %% ---
-%% NON ETABLI :
-%%   - `ResumeToken` et `ProviderRegistry` ne figurent PAS dans le texte de la RFC b53e11c7
-%%     (elle a `resume(spec, provider_session_id: &str)` et un choix par `CHAT_PROVIDER`) : ces deux types sont ajoutés ici, à trancher.
-%%   - `Capabilities` n'a dans la RFC que cinq axes cités en prose, pas de champs.
+%% TRANCHE (docs/agent-contract.md, spécification gelée CONTRACT_VERSION = 1, décisions A1–A14 de docs/harness-consolidation-2026-10-05.md) :
+%%   - ResumeToken opaque {kind, version, data} (A3, spec §8) ; ProviderRegistry unique dans nexus (A1, spec §13).
+%%   - Capabilities : 18 champs PAR MODELE, un repli écrit par champ (A4, spec §5).
+%%   - Annulation : interrupt(scope) + cancel_tools(scope) qui préserve le tour (A6, spec §10).
+%%   - Concurrence : un tour à la fois, hors tour par out_of_band() (A13, spec §9).
 %% ---
 %% LEGENDE
 %%   ✅ vérifié (le nœud dit comment)  🟠 décidé, non écrit  🔴 défaut constaté  ⚪ hors dépôt / autre diagramme
@@ -43,14 +44,14 @@ flowchart TD
 
     subgraph target["🟠 Cible — claude-code-sdk-rs/src/agent/"]
         direction TB
-        REG["🟠 ProviderRegistry : id → Arc dyn AgentProvider, défaut, repli si health() échoue<br/><i>vérifié absent : grep ProviderRegistry → 0</i>"]
-        PROV["🟠 trait AgentProvider : id, health, catalog, open, resume, capabilities<br/><i>vérifié absent : grep AgentProvider → 0</i>"]
-        SESS["🟠 trait AgentSession : send_turn, answer_permission, answer_question,<br/>interrupt, set_model, set_policy, out_of_band, close<br/><i>vérifié absent : grep AgentSession → 0</i>"]
-        EVT["🟠 enum AgentEvent : SessionStarted, Text, Thinking, Delta, ToolCall, ToolResult,<br/>PermissionAsk, Question, Compaction, Done, Error, ProviderNotice<br/><i>vérifié absent : grep AgentEvent → 0</i>"]
-        POL["🟠 ToolPolicy { mode: Ask|AutoEdits|PlanOnly|Trust, allow, deny }<br/><i>vérifié absent : grep ToolPolicy → 0</i>"]
-        CAP["🟠 Capabilities : hooks, permissions interactives, compaction, sous-agents, mcp, images<br/><i>vérifié absent : grep 'struct Capabilities' → 0</i>"]
-        RES["🔴 ResumeToken : absent de la RFC b53e11c7 (qui passe un &str provider_session_id)<br/><i>à trancher : type opaque par provider, sérialisable, persisté par ChatSession</i>"]
-        ERR["🟠 ProviderError : CliNotFound/AuthRequired/Timeout/ProcessExited/Protocol/Unsupported<br/><i>vérifié absent : grep ProviderError → 0</i>"]
+        REG["🟠 ProviderRegistry UNIQUE (nexus) : id d'instance → Arc dyn AgentProvider, CredentialResolver, porte de sécurité A32<br/><i>spec §13 ; vérifié absent : grep ProviderRegistry → 0</i>"]
+        PROV["🟠 trait AgentProvider : id, kind, health, catalog, capabilities(model), open, resume(ResumeToken)<br/><i>spec §2 ; vérifié absent : grep AgentProvider → 0</i>"]
+        SESS["🟠 trait AgentSession (&self partout) : send_turn, answer_permission, answer_question, interrupt(scope),<br/>cancel_tools(scope), set_model, set_policy_mode, out_of_band, resume_token, capabilities, close<br/><i>spec §2 ; vérifié absent : grep AgentSession → 0</i>"]
+        EVT["🟠 enum AgentEvent : session_started, user_echo, text, thinking, delta, tool_call, tool_result, permission_ask, question,<br/>compaction, background_tasks, task_update, model_changed, policy_mode_changed, done, error, provider_notice<br/><i>spec §4 et table §14 ; vérifié absent : grep AgentEvent → 0</i>"]
+        POL["🟠 ToolPolicy { mode: PlanOnly|Ask|AutoEdits|Trust, native_mode, allow, deny } + restrict(parent) monotone<br/><i>spec §6 ; vérifié absent : grep ToolPolicy → 0</i>"]
+        CAP["🟠 Capabilities par modèle, 18 champs, figées sur la session ; capacité absente = Unsupported ou repli écrit<br/><i>spec §5 ; vérifié absent : grep 'struct Capabilities' → 0</i>"]
+        RES["🟠 ResumeToken opaque { kind, version, data }, sérialisé en chaîne, persisté sur la session<br/><i>tranché A3, spec §8 ; vérifié absent : grep ResumeToken → 0</i>"]
+        ERR["🟠 ProviderError typé (16 variantes, retryable()), jamais d'identifiant dans un message<br/><i>spec §7 ; vérifié absent : grep ProviderError → 0</i>"]
         REG --> PROV
         PROV -->|"open / resume(ResumeToken)"| SESS
         PROV --> CAP

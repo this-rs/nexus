@@ -1,5 +1,5 @@
 %% name: nexus-agent-providers
-%% covers: docs/diagrams/nexus-agent-providers.mmd
+%% covers: docs/diagrams/nexus-agent-providers.mmd, docs/harness-consolidation-2026-10-05.md
 %% verified: 2026-10-05
 %% ---
 %% PROUVE : les adaptateurs CIBLE (façade claude_code, model/ OpenAI-compatible, native,
@@ -17,9 +17,12 @@
 %%   claude-code-sdk-rs/src/bin/fake_claude.rs, tests/support/mod.rs (fake_cli_path, scripts de transcription)
 %%   claude-code-sdk-rs/src/transport/mock.rs — MockTransport::pair
 %% ---
+%% TRANCHE (docs/harness-consolidation-2026-10-05.md) :
+%%   - native = AgentProvider composé sur ModelEndpoint, outils MCP seulement (A2, A35).
+%%   - conformité dans un module publié testkit/ (A3) ; FakeProvider = testkit::ScriptedProvider.
+%%   - v1 : Claude Code, natif OpenAI-compatible, Codex app-server, AcpProvider générique stdio à la place d'un adaptateur opencode HTTP (A38).
 %% NON ETABLI :
-%%   - protocole filaire réel de Codex et d'OpenCode : non lu, aucune mesure ; les nœuds codex/opencode ne sont que des cibles nommées.
-%%   - `native` (agent à boucle d'outils propre, outils exécutés par PO) : sa frontière avec model/ n'est pas dans la RFC ; hypothèse ci-dessous.
+%%   - protocole filaire réel de Codex app-server : codex 0.38.0 local ne l'a pas ; livré contre faux exécutable + schéma (A40).
 %% ---
 %% LEGENDE
 %%   ✅ vérifié (le nœud dit comment)  🟠 décidé, non écrit  🔴 défaut constaté  ⚪ hors dépôt / autre diagramme
@@ -52,13 +55,13 @@ flowchart TD
     end
 
     subgraph native["providers/native"]
-        NAT["🟠 agent natif : boucle d'outils exécutés par PO au-dessus de model/ (hypothèse : native = model/ + boucle d'outils)<br/><i>non établi : frontière native/model non spécifiée dans la RFC</i>"]
+        NAT["🟠 harness natif : AgentProvider composé sur ModelEndpoint, boucle d'outils MCP seulement, budget, transcript, compaction<br/><i>tranché A2 ; vérifié absent : pas de providers/native</i>"]
     end
 
-    subgraph cli["providers CLI JSONL"]
+    subgraph cli["providers CLI (JSON-RPC stdio)"]
         direction TB
-        CDX["🟠 providers/codex : CLI Codex, protocole non lu<br/><i>vérifié absent : grep -i codex → 0</i>"]
-        OPC["🟠 providers/opencode : CLI OpenCode, protocole non lu<br/><i>vérifié absent : grep -i opencode → 0</i>"]
+        CDX["🟠 providers/codex : codex app-server (JSON-RPC stdio), version minimale vérifiée par health(), schéma versionné<br/><i>A40 ; vérifié absent : grep -i codex → 0</i>"]
+        OPC["🟠 providers/acp : AcpProvider générique stdio (opencode acp, Gemini CLI par configuration), contre bin/fake_acp<br/><i>tranché A38 (remplace l'adaptateur opencode HTTP) ; vérifié absent : grep -i acp → 0</i>"]
     end
 
     subgraph tk["testkit/conformance"]
@@ -68,7 +71,7 @@ flowchart TD
         MOCK["✅ MockTransport::pair : double en mémoire du transport (seul double existant)<br/><i>vérifié : transport/mock.rs</i>"]
         FP["🟠 FakeProvider en mémoire (CI backend sans CLI), remplace MockTransport côté backend<br/><i>vérifié absent</i>"]
         SSE["✅ claude-code-api/tests/sse_stream_conformance.rs : conformité du flux SSE OpenAI de la passerelle ; PAS la conformité provider<br/><i>vérifié : en-tête du fichier</i>"]
-        CONFLOC["🔴 emplacement divergent : RFC = tests/agent_conformance.rs ; mission = testkit/conformance<br/>une suite réutilisable par des crates tiers impose un module `testkit` publié, pas un test d'intégration<br/><i>à trancher</i>"]
+        CONFLOC["🟠 emplacement tranché (A3) : module publié `testkit/` derrière la feature `testkit`,<br/>piloté par tests/agent_conformance.rs ; utilisable par le backend en dev-dependency<br/><i>spec §16</i>"]
         CONF --> CONFLOC
     end
 
