@@ -555,12 +555,18 @@ async fn run_tools(core: &Core, signal: &TurnSignal, calls: &[ToolCallChunk]) ->
     // Tokens first: a consumer that reacts to `tool_call` may cancel at once.
     let tokens: Vec<_> = calls.iter().map(|call| core.begin_tool(&call.id)).collect();
     for call in calls {
+        // A `nexus-tools` call is rendered under its canonical name and real category (N24).
+        let entry = core.registry.get(&call.name);
         core.emit(AgentEvent::ToolCall {
             id: call.id.clone(),
             name: call.name.clone(),
             input: parse_arguments(&call.arguments).unwrap_or_else(|()| json!({})),
-            category: ToolCategory::Mcp,
-            canonical: Some(call.name.clone()),
+            category: entry.map_or(ToolCategory::Mcp, |entry| entry.category),
+            canonical: Some(
+                entry
+                    .and_then(|entry| entry.canonical.clone())
+                    .unwrap_or_else(|| call.name.clone()),
+            ),
             input_complete: true,
             seq: None,
             parent: None,
@@ -638,8 +644,13 @@ async fn ask(
         request_id: request_id.clone(),
         tool_name: entry.name.clone(),
         input: input.clone(),
-        category: ToolCategory::Mcp,
-        canonical: Some(entry.name.clone()),
+        category: entry.category,
+        canonical: Some(
+            entry
+                .canonical
+                .clone()
+                .unwrap_or_else(|| entry.name.clone()),
+        ),
         tool_call_id: Some(call.id.clone()),
         scopes: core.capabilities.permission_scopes.clone(),
         parent: None,
@@ -684,7 +695,7 @@ async fn execute(
     let Ok(mut input) = parse_arguments(&call.arguments) else {
         return fail("the tool arguments are not a JSON object");
     };
-    match core.decide(&entry.name, &input, entry.read_only) {
+    match core.decide(entry, &input) {
         PolicyDecision::Allow => {},
         PolicyDecision::Ask if core.capabilities.interactive_permissions => {
             match ask(core, signal, entry, call, &input, token).await {

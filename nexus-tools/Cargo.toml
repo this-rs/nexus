@@ -62,6 +62,7 @@ nix = { version = "0.30", default-features = false, features = ["signal"] }
 [dev-dependencies]
 nexus-claude = { path = "../claude-code-sdk-rs", features = ["provider-native"] }
 tempfile = "3"
+futures = "0.3"
 
 [[test]]
 name = "protocol"
@@ -69,4 +70,8 @@ required-features = ["test-tools"]
 
 [[test]]
 name = "server_binary"
+required-features = ["test-tools"]
+
+[[test]]
+name = "native_e2e"
 required-features = ["test-tools"]

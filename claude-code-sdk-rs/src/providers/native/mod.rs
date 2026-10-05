@@ -49,7 +49,8 @@
 //!
 //! Listed in `docs/agent-contract.md` §5 (native paragraph).
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use async_trait::async_trait;
@@ -66,6 +67,7 @@ pub mod cancel;
 pub mod compaction;
 pub mod r#loop;
 pub mod mcp;
+pub(crate) mod policy_args;
 pub mod session;
 pub mod tools;
 pub mod transcript;
@@ -74,10 +76,74 @@ pub use cancel::CancelToken;
 pub use compaction::CompactionConfig;
 pub use mcp::{McpClient, McpConfig, McpError, McpLaunch, McpTool};
 pub use session::NativeSession;
-pub use tools::{ToolEntry, ToolRegistry, exposed_name};
+pub use tools::{NEXUS_TOOLS_SERVER, ToolEntry, ToolRegistry, exposed_name};
 pub use transcript::{
     FileTranscriptStore, MemoryTranscriptStore, TranscriptStore, new_transcript_id,
 };
+
+/// How the harness attaches `nexus-tools` to a session that names no `nexus` server (N24).
+///
+/// The server is the harness's own child, spoken to over a private pipe: `--trust-harness` tells
+/// it so (it does not ask for a signed profile, the harness is the only client and enforces the
+/// session's policy before any call). It gets the session's working directory and extra
+/// directories as its scope and nothing else from the host: the MCP launch applies the empty
+/// environment plus the allow-list (decision A33).
+#[derive(Debug, Clone)]
+pub struct DefaultTools {
+    /// The `nexus-tools` executable.
+    pub program: PathBuf,
+    /// Extra arguments (for example `--search-engine searxng:URL`).
+    pub args: Vec<String>,
+    /// Environment of the server (for example the variable that holds a search key).
+    pub env: BTreeMap<String, String>,
+}
+
+impl DefaultTools {
+    /// `nexus-tools` at `program`.
+    pub fn new(program: impl Into<PathBuf>) -> Self {
+        Self {
+            program: program.into(),
+            args: Vec::new(),
+            env: BTreeMap::new(),
+        }
+    }
+
+    /// Looks for `nexus-tools` next to the running executable, then in the `PATH`.
+    pub fn locate() -> Option<Self> {
+        let name = format!("nexus-tools{}", std::env::consts::EXE_SUFFIX);
+        let beside = std::env::current_exe()
+            .ok()
+            .and_then(|exe| exe.parent().map(|dir| dir.join(&name)))
+            .filter(|path| path.is_file());
+        let on_path = || {
+            std::env::var_os("PATH").and_then(|paths| {
+                std::env::split_paths(&paths)
+                    .map(|dir| dir.join(&name))
+                    .find(|path| path.is_file())
+            })
+        };
+        beside.or_else(on_path).map(Self::new)
+    }
+
+    /// The MCP server entry for a session.
+    pub fn server_for(&self, spec: &SessionSpec) -> McpServerSpec {
+        let mut args = vec![
+            "--trust-harness".to_owned(),
+            "--cwd".to_owned(),
+            spec.cwd.display().to_string(),
+        ];
+        for dir in &spec.extra_dirs {
+            args.push("--add-dir".to_owned());
+            args.push(dir.display().to_string());
+        }
+        args.extend(self.args.iter().cloned());
+        McpServerSpec::Stdio {
+            command: self.program.display().to_string(),
+            args,
+            env: self.env.clone(),
+        }
+    }
+}
 
 /// Configuration of one native instance.
 #[derive(Debug, Clone)]
@@ -104,6 +170,8 @@ pub struct NativeConfig {
     pub compaction: CompactionConfig,
     /// MCP clients.
     pub mcp: McpConfig,
+    /// The tools every session has unless it names its own `nexus` server. `None`: none.
+    pub default_tools: Option<DefaultTools>,
 }
 
 impl NativeConfig {
@@ -122,6 +190,7 @@ impl NativeConfig {
             strict_tool_exposure: true,
             compaction: CompactionConfig::default(),
             mcp: McpConfig::default(),
+            default_tools: None,
         }
     }
 }
@@ -268,6 +337,22 @@ impl NativeProvider {
         if !spec.mcp_servers.is_empty() && !capabilities.tools {
             return Err(ProviderError::ModelNoTools { model });
         }
+        // The default tools (N24): attached unless the session brought its own `nexus` server,
+        // and only to a model that can call tools: a chat-only model keeps working as chat.
+        let mut servers = spec.mcp_servers.clone();
+        let mut notices = Vec::new();
+        if let Some(default) = &self.config.default_tools
+            && !servers.contains_key(NEXUS_TOOLS_SERVER)
+        {
+            if capabilities.tools {
+                servers.insert(NEXUS_TOOLS_SERVER.to_owned(), default.server_for(&spec));
+            } else {
+                notices.push(AgentEvent::ProviderNotice {
+                    kind: "default_tools_skipped".to_owned(),
+                    data: serde_json::json!({ "reason": "model_no_tools", "model": model }),
+                });
+            }
+        }
         let mut limits = spec.limits;
         limits.max_cost_usd = limits.max_cost_usd.or(self.config.limits.max_cost_usd);
         limits.max_tokens = limits.max_tokens.or(self.config.limits.max_tokens);
@@ -282,8 +367,7 @@ impl NativeProvider {
         }
 
         let home = (self.config.mcp.isolated_home
-            && spec
-                .mcp_servers
+            && servers
                 .values()
                 .any(|server| matches!(server, McpServerSpec::Stdio { .. })))
         .then(|| mcp::isolated_home(&self.config.instance_id))
@@ -297,19 +381,18 @@ impl NativeProvider {
         let mut registry = ToolRegistry::new();
         let mut statuses = Vec::new();
         let connected = async {
-            for (name, server) in &spec.mcp_servers {
+            for (name, server) in &servers {
                 let client = McpClient::connect(name, server, &launch, &self.config.mcp).await?;
                 let listed = client.list_tools().await;
                 clients.insert(name.clone(), client);
                 for tool in listed? {
-                    registry.insert(ToolEntry {
-                        name: exposed_name(name, &tool.name),
-                        server: name.clone(),
-                        tool: tool.name,
-                        description: tool.description,
-                        schema: tool.input_schema,
-                        read_only: tool.read_only,
-                    })?;
+                    registry.insert(ToolEntry::mcp(
+                        name,
+                        &tool.name,
+                        tool.description,
+                        tool.input_schema,
+                        tool.read_only,
+                    ))?;
                 }
                 statuses.push(McpServerStatus {
                     name: name.clone(),
@@ -330,7 +413,7 @@ impl NativeProvider {
             Some(found) => found,
             None => (new_transcript_id(), Vec::new()),
         };
-        let mut initial_events = Vec::new();
+        let mut initial_events = notices;
         if spec.hooks.is_some() {
             initial_events.push(AgentEvent::ProviderNotice {
                 kind: "hooks_not_supported".to_owned(),
@@ -351,6 +434,7 @@ impl NativeProvider {
             cwd: Some(spec.cwd.display().to_string()),
         });
         let SessionSpec {
+            cwd,
             system_prompt,
             policy,
             policy_ceiling,
@@ -369,6 +453,7 @@ impl NativeProvider {
             max_turns,
             limits,
             ceiling: policy_ceiling,
+            cwd,
             transcript_id,
             store: Arc::clone(&self.store),
             policy,

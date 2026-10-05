@@ -45,6 +45,8 @@ reqwest = { version = "0.12", features = ["rustls-tls"], default-features = fals
 # For memory system
 meilisearch-sdk = { version = "0.33", default-features = false, features = ["reqwest", "tls", "jwt_rust_crypto"], optional = true }
 chrono = { version = "0.4", optional = true }
+# Domain of a URL, for `WebFetch(domain:…)` policy patterns (native harness).
+url = { version = "2", optional = true }
 
 [features]
 default = ["auto-download"]
@@ -57,7 +59,7 @@ memory = ["meilisearch-sdk", "chrono"]
 testkit = []
 # HTTP model endpoints (OpenAI-compatible chat/completions + SSE): `model` module.
 # Pulls `reqwest` (rustls, no `json`/`stream` features); not in `default`.
-provider-native = ["reqwest"]
+provider-native = ["reqwest", "dep:url"]
 # Codex `app-server` (JSON-RPC over stdio) behind the agent contract: `providers::codex`.
 # Needs no extra dependency (the process is launched through `transport::spawn`).
 provider-codex = []

@@ -21,7 +21,7 @@ use nexus_tools::{Profile, Server, Session, SigningKey, ToolRegistry, serve_line
 use tokio::io::BufReader;
 
 const USAGE: &str = "usage: nexus-tools [--listen ADDR] [--allow-origin ORIGIN]... \
-[--max-output-chars N] [--cwd DIR] [--add-dir DIR]... [--backup-dir DIR] [--search-engine SPEC]... [--search-allow-private] [--brave-endpoint URL] [--unrestricted]\n\
+[--max-output-chars N] [--cwd DIR] [--add-dir DIR]... [--backup-dir DIR] [--search-engine SPEC]... [--search-allow-private] [--brave-endpoint URL] [--unrestricted | --trust-harness]\n\
 environment: NEXUS_TOOLS_KEY (signing key, >= 32 bytes), NEXUS_TOOLS_PROFILE (stdio token), \
 NEXUS_TOOLS_LOG";
 
@@ -30,6 +30,8 @@ struct Options {
     allow_origins: Vec<String>,
     max_output_chars: usize,
     unrestricted: bool,
+    /// Served to one harness over a private pipe: it enforces the policy, no signed profile.
+    trust_harness: bool,
     cwd: Option<std::path::PathBuf>,
     add_dirs: Vec<std::path::PathBuf>,
     backup_dir: Option<std::path::PathBuf>,
@@ -50,6 +52,7 @@ fn parse_args() -> Result<Options, String> {
         allow_origins: Vec::new(),
         max_output_chars: DEFAULT_MAX_OUTPUT_CHARS,
         unrestricted: false,
+        trust_harness: false,
         cwd: None,
         add_dirs: Vec::new(),
         backup_dir: None,
@@ -81,6 +84,7 @@ fn parse_args() -> Result<Options, String> {
             "--search-allow-private" => options.search_allow_private = true,
             "--brave-endpoint" => options.brave_endpoint = Some(value("--brave-endpoint")?),
             "--unrestricted" => options.unrestricted = true,
+            "--trust-harness" => options.trust_harness = true,
             "--version" => {
                 println!("nexus-tools {}", env!("CARGO_PKG_VERSION"));
                 std::process::exit(0);
@@ -284,6 +288,9 @@ async fn run(options: Options) -> ExitCode {
                 Err(_) => return fail("NEXUS_TOOLS_PROFILE is not a valid, unexpired token"),
             }
         },
+        // One harness, over a private pipe (N24): it enforces the session's policy before any call
+        // and is the only client, so there is no profile to sign and nothing to warn about.
+        Err(_) if options.trust_harness => Profile::unrestricted("harness"),
         Err(_) if options.unrestricted => {
             eprintln!(
                 "nexus-tools: WARNING: --unrestricted gives the session EVERY tool; development only"
@@ -291,7 +298,9 @@ async fn run(options: Options) -> ExitCode {
             Profile::unrestricted("dev")
         },
         Err(_) => {
-            return fail("stdio mode needs NEXUS_TOOLS_PROFILE (a signed token) or --unrestricted");
+            return fail(
+                "stdio mode needs NEXUS_TOOLS_PROFILE (a signed token), --trust-harness or --unrestricted",
+            );
         },
     };
     serve_lines(

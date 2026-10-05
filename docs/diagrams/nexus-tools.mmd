@@ -71,6 +71,10 @@ flowchart TD
         REPLAY["✅ les 52 appels enregistrés sur le vrai Claude Code 2.1.287 sont rejoués hors ligne sur nexus-tools :<br/>48 identiques au caractère près, 3 écarts volontaires listés avec leur raison, 1 dépendant de la machine ;<br/>une excuse devenue fausse fait aussi échouer le banc<br/><i>vérifié : 3 divergences introduites dans Edit et Bash, 1 excuse périmée — toutes rouges</i>"]
     end
 
+    subgraph harness["Branchement au harnais natif — N24 (voir nexus-agent-providers, noeud NATTOOLS)"]
+        WIRED["✅ chaque outil traverse le vrai NativeProvider : Write, Read, Edit, Glob, Grep, NotebookEdit, Bash, WebFetch (SSRF refusée de bout en bout), WebSearch ;<br/>événements au nom canonique ; politique par motifs à la Claude Code ; outil hors profil jamais exécuté ; aucune variable de l'hôte dans une commande ; fin de session = commandes arrêtées<br/><i>vérifié : tests/native_e2e.rs (10 tests)</i>"]
+    end
+
     subgraph suite["Politique de dépendances — tests/dependency_policy.rs"]
         DEPS["✅ la fermeture de nexus-tools se compile avec Rust seul :<br/>pas de links, pas de cc/cmake/bindgen, -sys limités aux liaisons de plateforme<br/><i>vérifié : cinq cas factices rouges, puis la vraie fermeture</i>"]
     end
@@ -94,6 +98,8 @@ flowchart TD
     STATE --> NB
     READ --> STATE
     SCOPE --> SEARCH
+    PROFILE --> WIRED
+    BASH --> WIRED
     READ --> REPLAY
     WRITE --> REPLAY
     BASH --> REPLAY

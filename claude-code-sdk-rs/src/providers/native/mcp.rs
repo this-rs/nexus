@@ -307,7 +307,7 @@ impl McpClient {
     /// Stops the server (kills the process, ends the HTTP session). Idempotent.
     pub async fn close(&self) {
         match &self.transport {
-            Transport::Stdio(inner) => inner.shutdown(),
+            Transport::Stdio(inner) => inner.shutdown_gracefully().await,
             Transport::Http(inner) => inner.end_session().await,
         }
     }
@@ -471,6 +471,29 @@ impl StdioInner {
 
     fn death(&self) -> Option<Option<i32>> {
         *self.dead.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Ends the server the polite way first: closing its stdin is how an MCP server over stdio
+    /// is told the session is over, and a server that runs commands (`nexus-tools`) uses that
+    /// moment to stop them and their descendants. A server that has not exited after
+    /// `GRACE` is killed.
+    async fn shutdown_gracefully(&self) {
+        const GRACE: Duration = Duration::from_millis(2500);
+        self.closing.store(true, Ordering::SeqCst);
+        self.stdin.lock().await.take();
+        let exited = tokio::time::timeout(GRACE, async {
+            loop {
+                if let Ok(Some(_)) = self.child.lock().await.try_wait() {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .is_ok();
+        if !exited {
+            self.shutdown();
+        }
     }
 
     fn shutdown(&self) {

@@ -1130,6 +1130,7 @@ impl ProviderRegistry {
         {
             native.compaction.keep_recent = usize::try_from(keep).unwrap_or(usize::MAX);
         }
+        native.default_tools = default_tools_of(config)?;
         let mut provider = NativeProvider::new(native, endpoint);
         if let Some(store) = self
             .transcripts
@@ -1150,6 +1151,48 @@ impl ProviderRegistry {
         _credential_owner: &str,
     ) -> Result<BuiltProvider, ProviderError> {
         Err(ProviderError::unsupported("provider_native"))
+    }
+}
+
+/// The `nexus_tools` extension of a native instance: `true` (find `nexus-tools` beside the
+/// running executable or in the `PATH`), or `{"program": "...", "args": [...], "env": {...}}`.
+/// Absent or `false`: the sessions of the instance have no default tools.
+#[cfg(feature = "provider-native")]
+fn default_tools_of(
+    config: &ProviderInstanceConfig,
+) -> Result<Option<crate::providers::native::DefaultTools>, ProviderError> {
+    use crate::providers::native::DefaultTools;
+    let Some(value) = config.extensions.get("nexus_tools") else {
+        return Ok(None);
+    };
+    match value {
+        Value::Bool(false) | Value::Null => Ok(None),
+        Value::Bool(true) => DefaultTools::locate().map(Some).ok_or_else(|| {
+            ProviderError::invalid(
+                "extensions.nexus_tools is true but no `nexus-tools` executable was found beside this program or in the PATH",
+            )
+        }),
+        Value::Object(object) => {
+            let program = object
+                .get("program")
+                .and_then(Value::as_str)
+                .filter(|p| !p.is_empty())
+                .ok_or_else(|| ProviderError::invalid("extensions.nexus_tools.program is required"))?;
+            let mut tools = DefaultTools::new(program);
+            if let Some(args) = object.get("args").and_then(Value::as_array) {
+                tools.args = args.iter().filter_map(Value::as_str).map(str::to_owned).collect();
+            }
+            if let Some(env) = object.get("env").and_then(Value::as_object) {
+                tools.env = env
+                    .iter()
+                    .filter_map(|(k, v)| v.as_str().map(|v| (k.clone(), v.to_owned())))
+                    .collect();
+            }
+            Ok(Some(tools))
+        },
+        _ => Err(ProviderError::invalid(
+            "extensions.nexus_tools must be true, false or an object",
+        )),
     }
 }
 

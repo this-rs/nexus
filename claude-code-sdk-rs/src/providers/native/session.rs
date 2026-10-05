@@ -30,14 +30,14 @@ use tokio::sync::{Notify, mpsc, oneshot};
 
 use super::cancel::CancelToken;
 use super::mcp::McpClient;
-use super::tools::ToolRegistry;
+use super::tools::{ToolEntry, ToolRegistry};
 use super::transcript::TranscriptStore;
 use super::{NativeConfig as Settings, r#loop};
 use crate::agent::{
     AgentEvent, AgentSession, CancelOutcome, CancelScope, Capabilities, EventStream,
     InterruptOutcome, InterruptScope, PermissionDecision, PermissionScope, PolicyDecision,
     PolicyMode, ProviderError, ProviderKind, QuestionAnswer, ResumeToken, SessionLimits,
-    ToolCategory, ToolPolicy, TurnInput,
+    ToolPolicy, TurnInput,
 };
 use crate::model::{ChatMessage, ModelEndpoint};
 
@@ -159,6 +159,8 @@ pub(crate) struct Core {
     pub(crate) max_turns: Option<u32>,
     pub(crate) limits: SessionLimits,
     pub(crate) ceiling: Option<ToolPolicy>,
+    /// The session directory: paths in policy patterns are relative to it.
+    pub(crate) cwd: std::path::PathBuf,
     pub(crate) transcript_id: String,
     pub(crate) store: Arc<dyn TranscriptStore>,
     pub(crate) state: Mutex<State>,
@@ -177,6 +179,7 @@ pub(crate) struct CoreParts {
     pub(crate) max_turns: Option<u32>,
     pub(crate) limits: SessionLimits,
     pub(crate) ceiling: Option<ToolPolicy>,
+    pub(crate) cwd: std::path::PathBuf,
     pub(crate) transcript_id: String,
     pub(crate) store: Arc<dyn TranscriptStore>,
     pub(crate) policy: ToolPolicy,
@@ -219,6 +222,7 @@ impl Core {
             max_turns: parts.max_turns,
             limits: parts.limits,
             ceiling: parts.ceiling,
+            cwd: parts.cwd,
             transcript_id: parts.transcript_id,
             store: parts.store,
             state: Mutex::new(state),
@@ -257,19 +261,12 @@ impl Core {
     /// The local policy decision for a call (contract §6). A read-only tool
     /// counts as a read, so plan mode lets it through; a tool approved for the
     /// session is not asked about again, unless it is denied.
-    pub(crate) fn decide(&self, tool: &str, input: &Value, read_only: bool) -> PolicyDecision {
-        let category = if read_only {
-            ToolCategory::Read
-        } else {
-            ToolCategory::Mcp
-        };
-        let arg = input.to_string();
+    ///
+    /// A `nexus-tools` tool is judged under both its names and by what the call really does
+    /// (the parts of a command line, the normal form of a path): see `policy_args`.
+    pub(crate) fn decide(&self, entry: &ToolEntry, input: &Value) -> PolicyDecision {
         let state = self.lock();
-        let decision = state.policy.decide(tool, Some(&arg), category);
-        if decision == PolicyDecision::Ask && state.approved.contains(tool) {
-            return PolicyDecision::Allow;
-        }
-        decision
+        super::policy_args::decide_call(&state.policy, &state.approved, entry, input, &self.cwd)
     }
 
     /// Registers a tool call as running and returns its token.

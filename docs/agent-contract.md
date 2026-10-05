@@ -791,6 +791,50 @@ variables `ANTHROPIC_*`. Le cas D est le remède, appliqué par `open_session`. 
 quitte la machine, l'URL de base est locale). **Non prouvé** : aucune passerelle réelle, aucun
 Bedrock ni Vertex.
 
+### 13.3 Outils livrés avec nexus (N24)
+
+Une instance native qui le demande a des outils sans que la session ait à les configurer :
+`extensions.nexus_tools` = `true` (cherche `nexus-tools` à côté du programme puis dans le `PATH`) ou
+`{"program": "...", "args": [...], "env": {...}}`. Le harnais lance alors `nexus-tools` comme **son enfant**
+(MCP sur stdio, `--trust-harness` : le harnais est l'unique client et applique la politique avant tout appel, il
+n'y a pas de profil signé à fabriquer) sous le nom de serveur `nexus`, avec pour périmètre le répertoire de la
+session et ses `extra_dirs`. Une session qui nomme déjà son propre serveur `nexus` garde le sien. L'attache n'a
+lieu que pour un modèle capable d'appeler des outils ; sinon `provider_notice { default_tools_skipped }` et la
+session reste un simple échange de texte.
+
+**Noms canoniques.** Les outils de ce serveur (`Read`, `Write`, `Edit`, `NotebookEdit`, `Glob`, `Grep`, `Bash`,
+`Monitor`, `TaskStop`, `WebFetch`, `WebSearch`) portent, en plus de `mcp__nexus__<outil>`, le nom que Claude Code
+leur donne. Un motif écrit `Read(.env*)` ou `Bash(git *)` s'applique ; l'exposition suit aussi (`allow: ["Read"]`
+n'offre que `Read`, `deny: ["Bash"]` retire `Bash`). Un outil d'un AUTRE serveur qui s'appellerait `Read` n'hérite
+de rien : le nom canonique n'est donné qu'au serveur `nexus`. `tool_call` et `permission_ask` portent le nom
+canonique et la vraie catégorie (lecture, édition, recherche, commande, web).
+
+**Ce à quoi un motif est comparé** (`providers/native/policy_args.rs`) : jamais le JSON entier.
+- *Commande* (`Bash`, `Monitor`) : la ligne est coupée en commandes simples (`;`, `&`, `|`, retour à la ligne,
+  hors guillemets, sous-shells et groupes aussi). Un `deny` qui reconnaît la ligne ou **une** partie refuse ; un
+  `allow` exige **chaque** partie permise. Une substitution (`$(…)`, accents graves, `<(…)`, guillemet non
+  fermé) n'est jamais autorisée par un motif à argument (elle tombe sur le mode) et les commandes qu'elle contient
+  sont soumises aux `deny`. `Bash(git *)` ne couvre donc pas `git status && rm -rf ~`.
+- *Chemin* (`Read`, `Write`, `Edit`, `NotebookEdit`) : sous sa forme normale (relatif au répertoire de la
+  session, `.` et `..` résolus). Un `deny` essaie aussi le chemin tel qu'écrit et son dernier composant (un motif
+  sans `/` vaut « n'importe où ») ; un `allow` n'a que la forme normale. `./.env`, `src/../.env` et le chemin
+  absolu sont refusés par `Read(.env*)`, et `src/../.env` n'est pas couvert par `Edit(src/*)`.
+- *Web* : `domain:<hôte>` pour `WebFetch` ; la requête pour `WebSearch`. Les deux **demandent** par défaut
+  (catégorie web) ; `auto_edits` laisse passer les éditions, pas les commandes ni le web.
+- Un champ absent ou illisible n'est jamais autorisé par un motif à argument ; un `deny` à argument le reconnaît
+  (échec fermé, A35).
+
+Limites dites : la comparaison est lexicale (un lien symbolique innocent vers `.env` est jugé sur son nom ; ce qui
+borne les outils de fichiers est le périmètre de `nexus-tools`, qui résout les liens) ; un shell lit tout ce que son
+utilisateur système lit : la politique décide de ce qui est *demandé*, ce n'est pas un bac à sable (capacité
+`sandbox: none`, `trust` refusé).
+
+**Fermeture.** `close` d'une session native ferme l'entrée du serveur et lui laisse 2,5 s pour partir avant de le
+tuer : `nexus-tools` arrête alors les commandes de la session et leurs descendants. Un `SIGKILL` du serveur ne
+leur laisse pas cette chance (limite).
+
+**`WebSearch`** n'existe que si le serveur a au moins un moteur configuré (`args: ["--search-engine", …]`).
+
 ## 14. Table `Message` (SDK) → `AgentEvent` → `ChatEvent` (backend)
 
 Relevée le 2026-10-05 sur `claude-code-sdk-rs/src/types.rs` (`Message`, `ContentBlock`,

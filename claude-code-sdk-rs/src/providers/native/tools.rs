@@ -9,6 +9,18 @@
 //! a name longer than 64 characters is cut and given a hash suffix. Two tools that
 //! end up with the same name refuse the session (`invalid_request`).
 //!
+//! # Canonical names (N24)
+//!
+//! The tools of the `nexus` server (`nexus-tools`: `Read`, `Write`, `Edit`, `NotebookEdit`,
+//! `Glob`, `Grep`, `Bash`, `Monitor`, `TaskStop`, `WebFetch`, `WebSearch`) also have a
+//! **canonical name**: their own, the one Claude Code uses. A policy written as
+//! `Read(.env*)` or `Bash(git *)` applies to `mcp__nexus__Read` / `mcp__nexus__Bash`, with the
+//! pattern's argument matched against the call's *primary argument* (the command line, the
+//! path, the URL's domain) and not against the JSON of the whole input; a pattern written with
+//! the full name (`mcp__nexus__Bash`) applies too. Their category follows what they do (read,
+//! edit, search, command, web), so `auto_edits` lets edits through and `ask` still asks for a
+//! command or a web fetch. Tools of other servers keep their old treatment.
+//!
 //! # Exposure rule
 //!
 //! A tool is **offered** unless one of these holds:
@@ -27,11 +39,38 @@
 
 use std::collections::BTreeMap;
 
-use crate::agent::{PolicyMode, ProviderError, ToolPolicy};
+use serde_json::Value;
+
+use crate::agent::{PolicyMode, ProviderError, ToolCategory, ToolPolicy};
 use crate::model::ToolSpec;
 
 /// Longest function name OpenAI-compatible servers accept.
 const MAX_NAME: usize = 64;
+
+/// The name under which the harness attaches `nexus-tools`.
+pub const NEXUS_TOOLS_SERVER: &str = "nexus";
+
+/// The category of a canonical `nexus-tools` tool, and the input fields that make up its
+/// primary argument (first present wins), or `None` for a tool that is not one of theirs.
+fn canonical_profile(tool: &str) -> Option<(ToolCategory, &'static [&'static str])> {
+    Some(match tool {
+        "Read" | "Write" | "Edit" => (
+            if tool == "Read" {
+                ToolCategory::Read
+            } else {
+                ToolCategory::Edit
+            },
+            &["file_path"],
+        ),
+        "NotebookEdit" => (ToolCategory::Edit, &["notebook_path"]),
+        "Glob" | "Grep" => (ToolCategory::Search, &["pattern"]),
+        "Bash" | "Monitor" => (ToolCategory::Command, &["command"]),
+        "TaskStop" => (ToolCategory::Command, &["task_id", "shell_id"]),
+        "WebFetch" => (ToolCategory::Web, &["url"]),
+        "WebSearch" => (ToolCategory::Web, &["query"]),
+        _ => return None,
+    })
+}
 
 /// One tool of one MCP server, as offered to the model.
 #[derive(Debug, Clone, PartialEq)]
@@ -48,6 +87,66 @@ pub struct ToolEntry {
     pub schema: serde_json::Value,
     /// The server declared `readOnlyHint: true`.
     pub read_only: bool,
+    /// The canonical name (`Read`, `Bash`…) when this is a `nexus-tools` tool: what policy
+    /// patterns written the Claude Code way match.
+    pub canonical: Option<String>,
+    /// What the tool does, for the policy: read, edit, search, command, web; `Read` for a
+    /// read-only tool of another server and `Mcp` for the rest.
+    pub category: ToolCategory,
+}
+
+impl ToolEntry {
+    /// The entry of `tool` served by `server`.
+    pub fn mcp(
+        server: &str,
+        tool: &str,
+        description: String,
+        schema: Value,
+        read_only: bool,
+    ) -> Self {
+        let profile = (server == NEXUS_TOOLS_SERVER)
+            .then(|| canonical_profile(tool))
+            .flatten();
+        Self {
+            name: exposed_name(server, tool),
+            server: server.to_owned(),
+            tool: tool.to_owned(),
+            description,
+            schema,
+            read_only,
+            canonical: profile.map(|_| tool.to_owned()),
+            category: match profile {
+                Some((category, _)) => category,
+                None if read_only => ToolCategory::Read,
+                None => ToolCategory::Mcp,
+            },
+        }
+    }
+
+    /// Every name a policy pattern may match this tool by: the offered name, then the canonical.
+    pub fn names(&self) -> impl Iterator<Item = &str> {
+        std::iter::once(self.name.as_str()).chain(self.canonical.as_deref())
+    }
+
+    /// What a pattern's argument is matched against: the primary argument of a canonical
+    /// tool (the command, the path, the domain of the URL), the whole input for the others.
+    pub fn primary_argument(&self, input: &Value) -> Option<String> {
+        let Some(canonical) = self.canonical.as_deref() else {
+            return Some(input.to_string());
+        };
+        let (_, fields) = canonical_profile(canonical)?;
+        let text = fields
+            .iter()
+            .find_map(|field| input.get(*field).and_then(Value::as_str))?;
+        if canonical == "WebFetch" {
+            // `WebFetch(domain:example.com)`, as in Claude Code.
+            let host = url::Url::parse(text.trim())
+                .ok()
+                .and_then(|u| u.host_str().map(str::to_owned))?;
+            return Some(format!("domain:{host}"));
+        }
+        Some(text.to_owned())
+    }
 }
 
 fn sanitize(segment: &str) -> String {
@@ -121,11 +220,9 @@ impl ToolRegistry {
 
     /// Whether `entry` is offered under `policy` (module documentation).
     pub fn is_exposed(entry: &ToolEntry, policy: &ToolPolicy, strict: bool) -> bool {
-        if policy
-            .deny
-            .iter()
-            .any(|pattern| pattern.arg.is_none() && pattern.matches(&entry.name, None))
-        {
+        if policy.deny.iter().any(|pattern| {
+            pattern.arg.is_none() && entry.names().any(|name| pattern.matches(name, None))
+        }) {
             return false;
         }
         if policy.mode == PolicyMode::PlanOnly && !entry.read_only {
@@ -136,7 +233,7 @@ impl ToolRegistry {
             && !policy
                 .allow
                 .iter()
-                .any(|pattern| pattern.matches_closed(&entry.name, None))
+                .any(|pattern| entry.names().any(|name| pattern.matches_closed(name, None)))
         {
             return false;
         }
@@ -167,18 +264,17 @@ impl ToolRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::ToolPattern;
+    use crate::agent::{ToolCategory, ToolPattern};
     use serde_json::json;
 
     fn entry(server: &str, tool: &str, read_only: bool) -> ToolEntry {
-        ToolEntry {
-            name: exposed_name(server, tool),
-            server: server.into(),
-            tool: tool.into(),
-            description: String::new(),
-            schema: json!({"type": "object"}),
+        ToolEntry::mcp(
+            server,
+            tool,
+            String::new(),
+            json!({"type": "object"}),
             read_only,
-        }
+        )
     }
 
     fn registry() -> ToolRegistry {
@@ -259,5 +355,81 @@ mod tests {
             arg: Some("*rm*".into()),
         });
         assert_eq!(names(&registry, &policy, true).len(), 2);
+    }
+
+    #[test]
+    fn a_nexus_tool_has_a_canonical_name_a_category_and_a_primary_argument() {
+        let bash = entry("nexus", "Bash", false);
+        assert_eq!(bash.canonical.as_deref(), Some("Bash"));
+        assert_eq!(bash.category, ToolCategory::Command);
+        assert_eq!(bash.name, "mcp__nexus__Bash");
+        assert_eq!(
+            bash.names().collect::<Vec<_>>(),
+            ["mcp__nexus__Bash", "Bash"]
+        );
+        assert_eq!(
+            bash.primary_argument(&json!({"command": "git status"}))
+                .as_deref(),
+            Some("git status")
+        );
+        for (tool, category) in [
+            ("Read", ToolCategory::Read),
+            ("Write", ToolCategory::Edit),
+            ("Edit", ToolCategory::Edit),
+            ("NotebookEdit", ToolCategory::Edit),
+            ("Glob", ToolCategory::Search),
+            ("Grep", ToolCategory::Search),
+            ("Monitor", ToolCategory::Command),
+            ("TaskStop", ToolCategory::Command),
+            ("WebFetch", ToolCategory::Web),
+            ("WebSearch", ToolCategory::Web),
+        ] {
+            assert_eq!(entry("nexus", tool, false).category, category, "{tool}");
+        }
+        let fetch = entry("nexus", "WebFetch", true);
+        assert_eq!(
+            fetch
+                .primary_argument(&json!({"url": "https://docs.rs:443/x?q=1"}))
+                .as_deref(),
+            Some("domain:docs.rs")
+        );
+        assert_eq!(fetch.primary_argument(&json!({"url": "nope"})), None);
+    }
+
+    #[test]
+    fn other_servers_and_unknown_tools_get_no_canonical_name() {
+        assert_eq!(entry("other", "Bash", false).canonical, None);
+        assert_eq!(entry("nexus", "Mystery", false).canonical, None);
+        // As before: the whole input is the argument; read-only means read, else generic MCP.
+        let other = entry("other", "Bash", true);
+        assert_eq!(other.category, ToolCategory::Read);
+        assert_eq!(entry("other", "Bash", false).category, ToolCategory::Mcp);
+        assert_eq!(
+            other.primary_argument(&json!({"a": 1})).as_deref(),
+            Some("{\"a\":1}")
+        );
+    }
+
+    #[test]
+    fn exposure_patterns_can_use_the_canonical_name() {
+        let mut registry = ToolRegistry::new();
+        for tool in ["Read", "Grep", "Bash", "WebFetch"] {
+            registry
+                .insert(entry("nexus", tool, tool == "Read"))
+                .unwrap();
+        }
+        registry.insert(entry("po", "task", false)).unwrap();
+        // An allow list is an exposure list: `Read` and `Grep` expose the nexus tools of that name.
+        let allow = policy(PolicyMode::Ask, &["Read", "Grep"], &[]);
+        assert_eq!(
+            names(&registry, &allow, true),
+            vec!["mcp__nexus__Grep", "mcp__nexus__Read"]
+        );
+        // A deny without argument hides the tool, by either name.
+        let deny = policy(PolicyMode::Ask, &[], &["Bash", "mcp__nexus__WebFetch"]);
+        assert_eq!(
+            names(&registry, &deny, true),
+            vec!["mcp__nexus__Grep", "mcp__nexus__Read", "mcp__po__task"]
+        );
     }
 }
