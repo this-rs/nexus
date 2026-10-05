@@ -311,6 +311,156 @@ async fn golden_08_noise_and_failed_result() {
 }
 
 // ---------------------------------------------------------------------------
+// control flow: permissions, interruption, process death
+// ---------------------------------------------------------------------------
+//
+// These do not travel on the `Message` stream: a `can_use_tool` request arrives on
+// the inbound control channel and the answer goes back on stdin. The golden for
+// them therefore also records what the SDK wrote to the child (everything after
+// the first prompt line), because that is the other half of the contract.
+
+/// Messages plus the control-channel traffic, canonicalised with one shared
+/// numbering so an id seen in a message and in a control line gets one placeholder.
+fn canonical_with_control(messages: &[Message], control: &[Value], stdin: &[Value]) -> Value {
+    let mut n = Normalizer::default();
+    let msgs: Vec<Value> = messages
+        .iter()
+        .map(|m| n.value(None, &serde_json::to_value(m).expect("Message serialises")))
+        .collect();
+    let ctl: Vec<Value> = control.iter().map(|v| n.value(None, v)).collect();
+    let sent: Vec<Value> = stdin.iter().map(|v| n.value(None, v)).collect();
+    json!({
+        "messages": msgs,
+        "control_requests_from_cli": ctl,
+        "lines_sent_to_cli": sent,
+    })
+}
+
+async fn permission_scenario(name: &str, decision: Value, final_text: &str) {
+    let fake = Transcript::new()
+        .await_stdin()
+        .init("sess-aaa")
+        .permission_request("req_perm1", "Bash", json!({"command": "rm -rf build"}))
+        .await_stdin_containing("control_response")
+        .assistant_text(final_text)
+        .result_ok(final_text)
+        .wait_eof()
+        .build();
+    let mut transport = fake.transport();
+    transport.connect().await.expect("connect");
+    let mut control_rx = transport.take_sdk_control_receiver().expect("control rx");
+    let stream = start_turn(&mut transport, "clean").await;
+    let request = tokio::time::timeout(WAIT, control_rx.recv())
+        .await
+        .expect("permission request arrives")
+        .expect("control channel open");
+    transport
+        .send_sdk_control_response(json!({
+            "subtype": "success",
+            "request_id": "req_perm1",
+            "response": decision,
+        }))
+        .await
+        .expect("answer");
+    let messages = collect_until_result(stream, WAIT).await;
+    let sent = fake.wait_for_stdin_lines(2, WAIT).await;
+    transport.disconnect().await.ok();
+    let sent: Vec<Value> = sent
+        .iter()
+        .skip(1) // the prompt itself; its shape is covered by the transport tests
+        .map(|l| serde_json::from_str(l).expect("stdin line is JSON"))
+        .collect();
+    check_golden(name, &canonical_with_control(&messages, &[request], &sent));
+}
+
+#[tokio::test]
+async fn golden_09_permission_granted() {
+    permission_scenario(
+        "09_permission_granted",
+        json!({"behavior": "allow", "updatedInput": {"command": "rm -rf build"}}),
+        "Cleaned.",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn golden_10_permission_denied() {
+    permission_scenario(
+        "10_permission_denied",
+        json!({"behavior": "deny", "message": "not allowed"}),
+        "I was refused.",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn golden_11_interrupt() {
+    use nexus_claude::ControlRequest;
+    let fake = Transcript::new()
+        .await_stdin()
+        .init("sess-aaa")
+        .assistant_text("Working on it")
+        .reply_control_success("interrupt")
+        .result_error("interrupted")
+        .wait_eof()
+        .build();
+    let mut transport = fake.transport();
+    transport.connect().await.expect("connect");
+    let stream = start_turn(&mut transport, "long job").await;
+    transport
+        .send_control_request(ControlRequest::Interrupt {
+            request_id: "req_int1".into(),
+        })
+        .await
+        .expect("send interrupt");
+    let ack = tokio::time::timeout(WAIT, transport.receive_control_response())
+        .await
+        .expect("ack in time")
+        .expect("an ack");
+    let messages = collect_until_result(stream, WAIT).await;
+    let sent = fake.wait_for_stdin_lines(2, WAIT).await;
+    transport.disconnect().await.ok();
+    let sent: Vec<Value> = sent
+        .iter()
+        .skip(1)
+        .map(|l| serde_json::from_str(l).expect("stdin line is JSON"))
+        .collect();
+    let ack = serde_json::to_value(&ack).expect("ack serialises");
+    check_golden(
+        "11_interrupt",
+        &canonical_with_control(&messages, &[ack], &sent),
+    );
+}
+
+#[tokio::test]
+async fn golden_12_process_death_mid_turn() {
+    let fake = Transcript::new()
+        .await_stdin()
+        .init("sess-aaa")
+        .assistant_text("half an answer")
+        .exit_with(9)
+        .build();
+    let mut transport = fake.transport();
+    transport.connect().await.expect("connect");
+    let mut stream = start_turn(&mut transport, "die").await;
+    let mut messages = Vec::new();
+    let _ = tokio::time::timeout(WAIT, async {
+        while let Some(item) = futures::StreamExt::next(&mut stream).await {
+            if let Ok(m) = item {
+                messages.push(m);
+            }
+        }
+    })
+    .await;
+    transport.disconnect().await.ok();
+    assert!(
+        !messages.iter().any(|m| matches!(m, Message::Result { .. })),
+        "a dead CLI never produces a result: {messages:?}"
+    );
+    check_golden("12_process_death_mid_turn", &canonical(&messages));
+}
+
+// ---------------------------------------------------------------------------
 // the normaliser itself
 // ---------------------------------------------------------------------------
 
