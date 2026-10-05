@@ -262,7 +262,9 @@ pub enum Scenario {
     /// Stage: a first turn failing with a retryable error (rate limit, overload,
     /// unreachable endpoint, timeout), and a second, plain turn.
     ///
-    /// Checked: the terminal `error` is retryable and the session survives it.
+    /// Checked: the turn ends with a typed, retryable failure — a terminal `error`,
+    /// or a `done` in error carrying its classified `error` — and the session
+    /// survives it.
     ErreurRetryable,
     /// Stage: one plain turn whose `done` carries token usage and cost.
     ///
@@ -2332,12 +2334,24 @@ async fn erreur_retryable(ctx: &mut Ctx, prepared: &Prepared) {
         .await
         .unwrap_or_default();
     match terminal(&events) {
-        Some(AgentEvent::Error { error }) if error.retryable() => {},
-        Some(AgentEvent::Error { error }) => ctx.fail(format!(
+        // Either form is a typed, retryable failure: a terminal `error`, or a
+        // `done` in error that carries its classification (and keeps usage and cost).
+        Some(AgentEvent::Error { error })
+        | Some(AgentEvent::Done {
+            is_error: true,
+            error: Some(error),
+            ..
+        }) if error.retryable() => {},
+        Some(AgentEvent::Error { error })
+        | Some(AgentEvent::Done {
+            error: Some(error), ..
+        }) => ctx.fail(format!(
             "the failing turn ended with `{}`, which is not retryable",
             error.kind()
         )),
-        Some(_) => ctx.fail("the failing turn ended with `done`, expected a retryable `error`"),
+        Some(_) => ctx.fail(
+            "the failing turn ended with a `done` carrying no classified `error`, expected a retryable failure",
+        ),
         None => {},
     }
     plain_turn(ctx, &*session, "the turn after the retryable error").await;

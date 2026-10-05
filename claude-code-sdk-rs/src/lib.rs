@@ -46,6 +46,7 @@ mod message_parser;
 pub mod model_recommendation;
 mod optimized_client;
 mod perf_utils;
+pub mod providers;
 mod query;
 mod sdk_mcp;
 #[cfg(feature = "testkit")]

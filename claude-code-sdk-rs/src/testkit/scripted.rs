@@ -466,6 +466,7 @@ pub fn done_event(
         model: None,
         provider_session_id: None,
         structured_output: None,
+        error: None,
     }
 }
 

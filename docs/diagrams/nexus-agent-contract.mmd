@@ -4,7 +4,7 @@
 %% ---
 %% ETAT au palier 2 : `claude-code-sdk-rs/src/agent/` existe (types et traits, SANS implémentation de provider).
 %%   Vérifié par : cargo test -p nexus-claude --lib agent:: (24 tests) ; cargo test -p nexus-claude --test agent_contract_snapshots (5 tests,
-%%   instantané tests/snapshots/agent_contract_v1.json) ; cargo test -p nexus-claude --doc agent (Secret sans Debug ni Display : compile_fail).
+%%   instantané tests/snapshots/agent_contract_v2.json) ; cargo test -p nexus-claude --doc agent (Secret sans Debug ni Display : compile_fail).
 %%   Les lignes « PROUVE » et « SOURCES LUES » ci-dessous décrivent l'état AVANT (58e27e6) et restent pour la partie « code actuel ».
 %% PROUVE : le contrat CIBLE `agent/` (RFC PO b53e11c7) et, pour chaque brique,
 %%   ce qui existe AUJOURD'HUI dans le dépôt qui s'en rapproche. Au 2026-10-05 le
@@ -26,7 +26,7 @@
 %%   claude-code-sdk-rs/src/errors.rs     — SdkError (CliNotFound, ConnectionError, Timeout, SessionNotFound, ProcessExited, NotSupported…)
 %%   claude-code-api/src/core/model_registry.rs — ModelRegistry::get_models/refresh (catalogue Anthropic seulement)
 %% ---
-%% TRANCHE (docs/agent-contract.md, spécification gelée CONTRACT_VERSION = 1, décisions A1–A14 de docs/harness-consolidation-2026-10-05.md) :
+%% TRANCHE (docs/agent-contract.md, spécification gelée CONTRACT_VERSION = 2, décisions A1–A14 de docs/harness-consolidation-2026-10-05.md) :
 %%   - ResumeToken opaque {kind, version, data} (A3, spec §8) ; ProviderRegistry unique dans nexus (A1, spec §13).
 %%   - Capabilities : 18 champs PAR MODELE, un repli écrit par champ (A4, spec §5).
 %%   - Annulation : interrupt(scope) + cancel_tools(scope) qui préserve le tour (A6, spec §10).
@@ -51,7 +51,7 @@ flowchart TD
         REG["🟠 ProviderRegistry UNIQUE (nexus) : id d'instance → Arc dyn AgentProvider, CredentialResolver, porte de sécurité A32<br/><i>spec §13 ; vérifié absent : grep ProviderRegistry → 0</i>"]
         PROV["✅ trait AgentProvider : id, kind, health, catalog, capabilities(model), open, resume(ResumeToken)<br/><i>agent/mod.rs ; signature seule, aucune implémentation encore</i>"]
         SESS["✅ trait AgentSession (&self partout) : send_turn, answer_permission, answer_question, interrupt(scope),<br/>cancel_tools(scope), set_model, set_policy_mode, out_of_band, resume_token, capabilities, close<br/><i>agent/mod.rs ; signature seule, aucune implémentation encore ; run_turn agrège un tour</i>"]
-        EVT["✅ enum AgentEvent (17 variantes, non_exhaustive) + Usage, Cost, StopReason, BackgroundTask…<br/><i>agent/event.rs ; vérifié : tests/agent_contract_snapshots.rs (aller-retour, champs optionnels absents, instantané v1)</i>"]
+        EVT["✅ enum AgentEvent (17 variantes, non_exhaustive) + Usage, Cost, StopReason, BackgroundTask…<br/><i>agent/event.rs ; vérifié : tests/agent_contract_snapshots.rs (aller-retour, champs optionnels absents, instantané v2)</i>"]
         POL["✅ ToolPolicy { mode, native_mode, allow, deny }, ToolPattern, decide() en refus par défaut, restrict(parent) monotone<br/><i>agent/policy.rs ; vérifié : tests unitaires agent::policy (10 tests : deny l'emporte, restrict idempotent, motif malformé = erreur)</i>"]
         CAP["✅ Capabilities par modèle, 18 champs, Capabilities::none() ; fenêtre inconnue = absente, jamais 200000<br/><i>agent/capabilities.rs ; vérifié : tests unitaires agent::capabilities ; les replis ne seront vérifiés que par testkit (palier 4)</i>"]
         RES["✅ ResumeToken opaque { k, v, d }, to_wire / from_wire, expect_kind refuse le jeton d'un autre provider<br/><i>agent/resume.rs ; vérifié : tests unitaires agent::resume</i>"]

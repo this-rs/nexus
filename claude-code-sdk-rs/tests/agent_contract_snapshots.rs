@@ -161,6 +161,7 @@ fn event_samples() -> Vec<AgentEvent> {
             model: Some("model-a".into()),
             provider_session_id: Some("sess-1".into()),
             structured_output: None,
+            error: None,
         },
         AgentEvent::Error {
             error: ProviderError::RateLimited {

@@ -424,6 +424,7 @@ mod tests {
                 model: None,
                 provider_session_id: Some(format!("sess-{suffix}")),
                 structured_output: None,
+                error: None,
             },
         ]);
         transcript.out_of_band.push(AgentEvent::BackgroundTasks {

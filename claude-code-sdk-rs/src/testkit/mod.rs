@@ -1,7 +1,10 @@
 //! Test kit of the agent contract (feature `testkit`).
 //!
-//! Three pieces, usable from another crate with `features = ["testkit"]`:
+//! Four pieces, usable from another crate with `features = ["testkit"]`:
 //!
+//! - [`claude_replay`]: [`claude_code_replay`], the **real** Claude Code provider
+//!   on an in-memory replay transport that plays a list of messages and captures
+//!   every line written to the CLI's stdin. No executable needed.
 //! - [`scripted`]: [`ScriptedProvider`], an in-memory [`AgentProvider`](crate::agent::AgentProvider)
 //!   that plays a serialisable [`Script`] and applies the concurrency rules and the
 //!   capability fallbacks of `docs/agent-contract.md` (§5, §9, §10). It is the fake
@@ -13,10 +16,14 @@
 //!   provider through a [`ConformanceTarget`]; an absent capability does not skip a
 //!   scenario, the suite then verifies the fallback written in §5.
 
+pub mod claude_replay;
 pub mod conformance;
 pub mod scripted;
 pub mod transcript;
 
+pub use claude_replay::{
+    ClaudeCodeReplay, ReplayStep, claude_code_replay, claude_code_replay_steps,
+};
 pub use conformance::{
     ConformanceReport, ConformanceTarget, Prepared, Scenario, ScenarioOutcome, ScriptedTarget,
     StreamKind, capability_present, check_stream_invariants, run_all, run_scenario,

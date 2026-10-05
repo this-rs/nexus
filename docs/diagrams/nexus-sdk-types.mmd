@@ -44,7 +44,7 @@ flowchart TD
         a_loop --> blocks
         blocks["✅ parse_content_block<br/>aiguille sur le champ type du bloc"]
         blocks -->|"text"| b_text["✅ ContentBlock::Text — champ text obligatoire"]
-        blocks -->|"thinking"| b_think["✅ ContentBlock::Thinking<br/>thinking ET signature obligatoires"]
+        blocks -->|"thinking"| b_think["✅ ContentBlock::Thinking<br/>thinking obligatoire ; signature absente → chaîne vide (un endpoint compatible ne signe pas toujours ;<br/>avant, le bloc était refusé et le message ENTIER perdu)<br/><i>vérifié : test_parse_assistant_message_keeps_a_thinking_block_without_signature (rouge sans le correctif),<br/>tests/fake_cli_harness.rs thinking_blocks_need_a_signature</i>"]
         blocks -->|"tool_use"| b_use["✅ ContentBlock::ToolUse<br/>input absent devient un objet vide, aucune erreur"]
         blocks -->|"tool_result"| b_res["✅ ContentBlock::ToolResult<br/>content chaîne vers Text, tableau vers Structured,<br/>autre scalaire vers None silencieux"]
         blocks -->|"type de bloc inconnu"| b_drop["✅ Ok de None — bloc jeté, ligne debug"]

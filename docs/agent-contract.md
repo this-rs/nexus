@@ -1,6 +1,6 @@
 # Contrat `agent/` — spécification gelée (v1)
 
-Statut : **gelée le 2026-10-05**, `CONTRACT_VERSION = 1`. Fait autorité pour les trois couloirs
+Statut : **gelée le 2026-10-05**, `CONTRACT_VERSION = 2` (v2, même jour : `done.error` ajouté — voir §16). Fait autorité pour les trois couloirs
 (nexus, backend, frontend) du chantier « harness multi-provider ». Les décisions A1–A45 sont dans
 [`harness-consolidation-2026-10-05.md`](harness-consolidation-2026-10-05.md) ; ce document les
 traduit en signatures, en formes JSON et en règles vérifiables. En cas de contradiction entre ce
@@ -41,7 +41,7 @@ Règle transversale (contrainte `d79436cc`) : **une capacité absente rend `Prov
 ## 2. Traits
 
 ```rust
-pub const CONTRACT_VERSION: u32 = 1;
+pub const CONTRACT_VERSION: u32 = 2;
 
 pub type EventStream = Pin<Box<dyn Stream<Item = AgentEvent> + Send>>;
 
@@ -184,7 +184,7 @@ regrouper une sortie hors tour en un seul `background_output`).
 | `task_update` | `phase: started \| progress \| updated \| notification`, `task_id: Option<String>`, `tool_call_id: Option<String>`, `description: Option<String>`, `status: Option<String>`, `summary: Option<String>`, `event_id: Option<String>`, `data: Value` |
 | `model_changed` | `model: String` |
 | `policy_mode_changed` | `mode: PolicyMode`, `native_mode: Option<String>` |
-| `done` | `stop_reason: StopReason`, `subtype: Option<String>`, `is_error: bool`, `result_text: Option<String>`, `usage: Usage`, `cost: Cost`, `duration_ms: u64`, `duration_api_ms: Option<u64>`, `num_turns: u32`, `model: Option<String>`, `provider_session_id: Option<String>`, `structured_output: Option<Value>` |
+| `done` | `stop_reason: StopReason`, `subtype: Option<String>`, `is_error: bool`, `result_text: Option<String>`, `usage: Usage`, `cost: Cost`, `duration_ms: u64`, `duration_api_ms: Option<u64>`, `num_turns: u32`, `model: Option<String>`, `provider_session_id: Option<String>`, `structured_output: Option<Value>`, `error: Option<ProviderError>` (échec classé derrière `is_error` ; le tour finit quand même par `done`, usage et coût conservés) |
 | `error` | `error: ProviderError` — TERMINAL pour le tour (ou la session si `!error.retryable()` et que le processus est mort) |
 | `provider_notice` | `kind: String`, `data: Value` — diagnostic propre au provider ; **aucune information affichée aujourd'hui pour Claude Code n'y passe** (A5) |
 
@@ -344,7 +344,9 @@ d'erreur**, corps HTTP tronqué à 512 octets. `From<SdkError> for ProviderError
 `ProcessExited → process_exited`, `NotSupported → unsupported`, le reste → `protocol`. La
 classification des erreurs Anthropic (`overloaded`, `rate_limited`, « prompt is too long » →
 `context_too_small`, 401 → `unauthorized`) est faite par l'adaptateur Claude Code à partir du texte
-de `done.result_text` quand `is_error`, et non par le backend.
+du résultat quand `is_error`, et non par le backend : elle est portée par **`done.error`** (le tour
+se termine par `done`, pas par `error`, pour ne perdre ni usage, ni coût, ni durée). Le backend
+décide de réessayer sur `done.error.retryable()` comme il le fait aujourd'hui sur le texte.
 
 ## 8. `ResumeToken` (A3)
 
@@ -594,6 +596,8 @@ jeton, `add_dirs` ← `extra_dirs`, `env` ← `EnvSpec.set`, `cli_path` ← exte
 
 ## 16. Versionnement et features cargo (A12, A14)
 
+- Historique : v1 (e15cd6e, 81ad207) ; **v2** = v1 + champ optionnel `done.error` (ajout compatible :
+  un pair v1 qui l'ignore reste correct).
 - `agent::CONTRACT_VERSION: u32`. Monte de 1 à chaque changement d'une forme sérialisée
   (`AgentEvent`, `Capabilities`, `ProviderError`, `ToolPolicy`, `ResumeToken`) ou d'une signature de
   trait. Les instantanés JSON de `tests/agent_contract_snapshots.rs` portent la version : changer

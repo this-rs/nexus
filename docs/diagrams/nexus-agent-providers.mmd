@@ -1,13 +1,14 @@
 %% name: nexus-agent-providers
-%% covers: docs/diagrams/nexus-agent-providers.mmd, docs/harness-consolidation-2026-10-05.md, claude-code-sdk-rs/src/testkit/*.rs, claude-code-sdk-rs/tests/agent_conformance.rs
+%% covers: docs/diagrams/nexus-agent-providers.mmd, docs/harness-consolidation-2026-10-05.md, claude-code-sdk-rs/src/testkit/*.rs, claude-code-sdk-rs/tests/agent_conformance.rs, claude-code-sdk-rs/src/providers/claude_code/*.rs, claude-code-sdk-rs/src/providers/mod.rs, claude-code-sdk-rs/tests/claude_code_conformance.rs, claude-code-sdk-rs/tests/providers_spawn_guard.rs
 %% verified: 2026-10-05
 %% ---
 %% PROUVE : les adaptateurs CIBLE (façade claude_code, model/ OpenAI-compatible, native,
 %%   codex, opencode) et le banc de conformité (testkit/conformance), face à ce qui existe
-%%   aujourd'hui au sha 58e27e6 (2026-10-05). Aucun ADAPTATEUR n'existe : `ls claude-code-sdk-rs/src`
-%%   ne montre ni providers/, ni model/. Le banc existe : src/testkit/ (feature `testkit`) — scripted.rs,
-%%   transcript.rs, conformance.rs — et tests/agent_conformance.rs. `covers` pointe aussi sur ce fichier (le gate
-%%   refuse un glob sans fichier) ; à compléter par src/providers/**, src/model/*.rs quand ils existent. Le contrat qu'ils implémentent est dans nexus-agent-contract.
+%%   aujourd'hui (2026-10-05). UN adaptateur existe : src/providers/claude_code/ (control.rs, policy_map.rs,
+%%   map_events.rs, error_map.rs, options.rs, session.rs), toujours compilé. Les autres (model/, native, codex, acp)
+%%   n'existent pas. Le banc existe : src/testkit/ (feature `testkit`) — scripted.rs, transcript.rs, conformance.rs,
+%%   claude_replay.rs — et tests/agent_conformance.rs, tests/claude_code_conformance.rs. À compléter par src/model/*.rs
+%%   et les autres providers quand ils existent. Le contrat qu'ils implémentent est dans nexus-agent-contract.
 %% ---
 %% SOURCES LUES :
 %%   grep -rniE 'codex|opencode' --include=*.rs --include=*.toml . → 0 (hors target/) ; testkit : src/testkit/{mod,scripted,transcript,conformance}.rs, tests/agent_conformance.rs
@@ -41,9 +42,19 @@ flowchart TD
 
     subgraph claude["providers/claude_code"]
         direction TB
-        CCP["🟠 ClaudeCodeProvider : façade sur InteractiveClient, aucun changement de comportement<br/><i>vérifié absent : ls src → pas de providers/</i>"]
+        CCP["✅ ClaudeCodeProvider / session (session.rs) : façade sur InteractiveClient. UNE pompe par session lit subscribe_messages +<br/>take_sdk_control_receiver (messages avant contrôle), projette et route vers le tour actif ou out_of_band (tampon 1024, `lagged`) ;<br/>tour inactif à l'ÉMISSION de done/error ; fin du flux sans Result → error process_exited, session morte ; close idempotent → error closed.<br/>answer_permission rejoue l'entrée d'origine ; AskUserQuestion → question reply:turn + auto-réponse ; hooks neutres → 3 HookCallback<br/><i>vérifié : cargo test -p nexus-claude --features testkit --test claude_code_conformance — a_claude_code_passes_the_conformance_suite<br/>(25 scénarios contre bin/fake_claude : 22 joués, 3 replis), a_cli_dying_mid_turn_…, a_permission_arriving_out_of_turn_…,<br/>the_neutral_hooks_are_called_…, the_cli_gets_an_allowlisted_environment_and_no_mcp_secret_on_argv</i>"]
+        CTL["✅ control.rs : TOUT le JSON de contrôle écrit vers le CLI (permission_allow / _deny / _allow_with_updates, set_permission_mode,<br/>set_model, interrupt, hook_response) + parse_can_use_tool (request_id à la racine)<br/><i>vérifié octet pour octet : --lib providers::claude_code::control (chaînes en dur, UUID masqué) ET sur le stdin reçu par fake_claude<br/>(a_granted_permission_replays_the_original_input_byte_for_byte, a_denied_…, set_policy_mode_and_set_model_…,<br/>an_interruption_is_written_…, ask_user_question_is_unblocked_…)</i>"]
+        MAP["✅ map_events.rs : pub map_message(&Message, &mut MapState) = table §14.1 (seq par message, parent, deltas, init, compaction,<br/>task_*, background_tasks_changed, Result → done, stop_reason) ; permission_event ; error_map.rs : From SdkError, classify_result_error ;<br/>policy_map.rs : modes §6, tool_category, canonical_name ; options.rs : ClaudeCodeConfig, build_options (= build_options du backend)<br/><i>vérifié : cargo test -p nexus-claude --lib providers:: (un test par ligne de la table, result_maps_to_done_and_no_field_is_lost)</i>"]
+        CCLEFT["🟠 reste à écrire dans la façade : annulation d'outils (tool_cancel déclaré false : cancel_tools → Unsupported ; interrupt écrit<br/>la même chose pour turn_and_tools et turn_only, pas de signal aux descendants), tâches de fond (background_tasks déclaré false :<br/>task_* et background_tasks_changed sortent en provider_notice), les six modes au lancement (auto / dontAsk / manual rendus par<br/>NativePolicy::native_override mais build_command ne connaît que 4 modes ; à chaud set_policy_mode les écrit déjà), images (A12)<br/><i>replis vérifiés par la conformité : annulation_tour_preserve, annulation_tache, message_images → FallbackVerified</i>"]
+        CCGAP["🔴 Message::Result n'a pas de champ modelUsage (clé de premier niveau du CLI, perdue par le parseur) : done.usage.by_model<br/>n'est rempli que si la clé est SOUS usage ; aucune place dans le protocole de hook pour les instructions rendues par before_compaction<br/>(signalé par provider_notice compaction_instructions_unsupported) ; un retard du broadcast SDK (Lagged) est filtré par le transport, invisible ici<br/><i>vérifié : types.rs Message::Result, HookSpecificOutput (pas de variante PreCompact), transport/subprocess.rs message_stream</i>"]
+        GUARD["✅ garde A33 : aucun `Command::new` sous src/providers/ (lanceur unique transport::spawn::isolated_command)<br/><i>vérifié : cargo test -p nexus-claude --test providers_spawn_guard (recherche textuelle récursive + contrôle positif)</i>"]
         IC["✅ InteractiveClient + SubprocessTransport + message_parser (ce que la façade enveloppe)<br/><i>vérifié : tests/interactive_client_fake_cli.rs, transport_subprocess_runtime.rs</i>"]
         CCP --> IC
+        CCP --> CTL
+        CCP --> MAP
+        CCP -.-> CCLEFT
+        CCP -.-> CCGAP
+        GUARD -.->|"surveille"| CCP
     end
 
     subgraph model["model/ — client OpenAI-compatible"]
@@ -67,11 +78,13 @@ flowchart TD
 
     subgraph tk["testkit/conformance"]
         direction TB
-        CONF["✅ suite de conformité paramétrée par provider (testkit/conformance.rs : ConformanceTarget, Scenario × 25, run_scenario, run_all,<br/>check_stream_invariants) : la suite PILOTE la session et vérifie les invariants §4 ; une capacité absente ne saute pas le scénario,<br/>son repli §5 est vérifié (FallbackVerified) ; une capacité déclarée non mise en scène est refusée (assert_conformant).<br/>Rejouée aujourd'hui contre ScriptedProvider SEULEMENT (les autres cibles sont 🟠)<br/><i>vérifié : cargo test -p nexus-claude --features testkit --test agent_conformance (toutes capacités, aucune capacité,<br/>les contrôles négatifs c_* qui doivent échouer) ; cargo test -p nexus-claude --features testkit --lib testkit:: (every_capability_field_has_a_scenario)</i>"]
+        CONF["✅ suite de conformité paramétrée par provider (testkit/conformance.rs : ConformanceTarget, Scenario × 25, run_scenario, run_all,<br/>check_stream_invariants) : la suite PILOTE la session et vérifie les invariants §4 ; une capacité absente ne saute pas le scénario,<br/>son repli §5 est vérifié (FallbackVerified) ; une capacité déclarée non mise en scène est refusée (assert_conformant).<br/>Rejouée aujourd'hui contre ScriptedProvider et contre ClaudeCodeProvider (tests/claude_code_conformance.rs, faux CLI) ; les autres cibles sont 🟠<br/><i>vérifié : cargo test -p nexus-claude --features testkit --test agent_conformance (toutes capacités, aucune capacité,<br/>les contrôles négatifs c_* qui doivent échouer) ; cargo test -p nexus-claude --features testkit --lib testkit:: (every_capability_field_has_a_scenario)</i>"]
         FAKE["✅ faux CLI bin/fake_claude.rs + tests/support (fake_cli_path, scripts) : spécification exécutable côté Claude Code<br/><i>vérifié : 8 fichiers d'intégration l'utilisent</i>"]
         MOCK["✅ MockTransport::pair : double en mémoire du transport (seul double existant)<br/><i>vérifié : transport/mock.rs</i>"]
         FP["✅ FakeProvider en mémoire = testkit::ScriptedProvider (testkit/scripted.rs : Script sérialisable, Step, RecordedCall, calls()) :<br/>un tour à la fois, une destination par événement, out_of_band pris une fois, close idempotent, replis §5 d'après Script.capabilities ;<br/>testkit/transcript.rs : Transcript canonique, Recorder, normalize, Script::from_transcript (rejeu octet pour octet).<br/>Pas encore branché côté backend (MockTransport y reste)<br/><i>vérifié : cargo test -p nexus-claude --features testkit --test agent_conformance (tests e_* et d_*) ;<br/>cargo test -p nexus-claude --features testkit --lib testkit::</i>"]
         SSE["✅ claude-code-api/tests/sse_stream_conformance.rs : conformité du flux SSE OpenAI de la passerelle ; PAS la conformité provider<br/><i>vérifié : en-tête du fichier</i>"]
+        REPLAY["✅ testkit::claude_code_replay (testkit/claude_replay.rs) : le VRAI ClaudeCodeProvider monté sur un transport de rejeu en mémoire<br/>(ClaudeCodeProvider::with_client_factory + InteractiveClient::from_transport) ; rejoue des Message par tour, capture chaque ligne<br/>écrite sur stdin (entrées, contrôle, hooks) et les options de session. Non capturable : argv, environnement, fichier MCP, signaux (pas de processus)<br/><i>vérifié : cargo test -p nexus-claude --features testkit --lib testkit::claude_replay</i>"]
+        REPLAY -.->|"monte"| CCP
         CONFLOC["✅ emplacement (A3) : module publié `testkit/` derrière la feature `testkit` (Cargo.toml `testkit = []`, non défaut),<br/>piloté par tests/agent_conformance.rs (`required-features = [testkit]`) ; utilisable par le backend en dev-dependency<br/><i>vérifié : cargo test -p nexus-claude --features testkit --test agent_conformance (crate externe au module) ;<br/>cargo build -p nexus-claude sans la feature ; spec §16</i>"]
         CONF --> CONFLOC
     end

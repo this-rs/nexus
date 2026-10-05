@@ -235,6 +235,32 @@ impl Transcript {
         self.push(json!({"op": "reply_control", "match_request_id": request_id.into()}))
     }
 
+    /// Wait for the SDK's `initialize` request, remember the hook callback ids it
+    /// registers and acknowledge it. Needed before [`Transcript::emit_hook`]: the
+    /// ids are minted at run time, a transcript cannot spell them.
+    pub fn capture_hooks(self) -> Self {
+        self.push(json!({"op": "capture_hooks"}))
+    }
+
+    /// A `hook_callback` request for the callback the SDK registered for `event`
+    /// (`PreToolUse`, `PostToolUse`, `PreCompact`), then wait for its response.
+    pub fn emit_hook(
+        self,
+        event: &str,
+        request_id: &str,
+        input: Value,
+        tool_use_id: Option<&str>,
+    ) -> Self {
+        self.push(json!({
+            "op": "emit_hook",
+            "event": event,
+            "request_id": request_id,
+            "input": input,
+            "tool_use_id": tool_use_id,
+            "await_response": true,
+        }))
+    }
+
     /// Stay alive until the SDK closes stdin (`end_input` / `disconnect`).
     pub fn wait_eof(self) -> Self {
         self.push(json!({"op": "wait_eof"}))

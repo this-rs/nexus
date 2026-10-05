@@ -272,6 +272,12 @@ pub enum AgentEvent {
         /// Structured output, when one was requested.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         structured_output: Option<Value>,
+        /// The failure behind `is_error`, when the adapter could classify it (rate
+        /// limit, overload, context too small…). The turn still ends with `done`,
+        /// so usage, cost and duration are not lost; the host reads
+        /// `error.retryable()` to decide whether to try again.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<ProviderError>,
     },
     /// The turn (or the session) failed. Terminal.
     Error {

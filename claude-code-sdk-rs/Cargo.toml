@@ -72,3 +72,7 @@ tower-http = { version = "0.4", features = ["cors"] }
 [[test]]
 name = "agent_conformance"
 required-features = ["testkit"]
+
+[[test]]
+name = "claude_code_conformance"
+required-features = ["testkit"]
