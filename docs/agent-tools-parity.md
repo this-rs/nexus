@@ -338,3 +338,22 @@ disjoncteur ; mode `standard` = une requête, `extended` = plusieurs variantes (
 Écarts avec Claude Code : pas de synthèse par un second modèle (le modèle de la session lit les résultats) ;
 pas de moteur par défaut ; https dépend de la décision TLS en attente (§6), donc pour l'instant seuls les
 moteurs en `http` (SearXNG sur un réseau privé) fonctionnent de bout en bout.
+
+## 8. Le banc de parité rejoué (N25)
+
+`nexus-tools/tests/parity_replay.rs` rejoue, **hors ligne et sans clé**, les 52 appels enregistrés sur le vrai
+Claude Code 2.1.287 (`claude-code-sdk-rs/tests/parity/claude-code-2.1.287/`, coût de l'enregistrement : 0,42 dollar,
+accord explicite de l'utilisateur) sur des fichiers synthétiques reconstruits d'après le README des enregistrements,
+puis compare chaque réponse, son `is_error` et les fichiers finals.
+
+Résultat : **48 appels identiques au caractère près** (Read, Write, Edit, NotebookEdit, Bash), **3 écarts volontaires**
+(table `DEVIATIONS` du test, chacun avec sa raison : ligne de 60 000 caractères rendue entière et dernière ligne
+vide remplacée par une coupe annoncée ; pas de « You will be notified » en arrière-plan ; shell bash et non le
+shell de connexion), **1 appel dépendant de la machine** (le libellé de l'erreur de `ls`, première ligne seule
+comparée). La table est vérifiée dans les deux sens : un écart non expliqué échoue, et une excuse devenue fausse aussi.
+
+Preuve que le banc mord : un Edit qui accepte un remplacement identique, un Edit qui accepte une chaîne non
+unique, un `Exit status` au lieu de `Exit code`, et une excuse périmée font chacun échouer le banc.
+
+Non couvert par des enregistrements (ils n'existent pas dans `claude -p` 2.1.287) : `Glob`, `Grep` (comparés à un
+vrai ripgrep, `tests/search.rs`), `WebFetch`, `WebSearch`, `Monitor`, `TaskStop`.

@@ -1,5 +1,5 @@
 %% name: nexus-tools
-%% covers: nexus-tools/src/*.rs, nexus-tools/src/files/*.rs, nexus-tools/src/shell/*.rs, nexus-tools/src/web/*.rs, nexus-tools/src/search/*.rs, nexus-tools/src/fake_search.rs, nexus-tools/src/bin/fake_search.rs, nexus-tools/tests/data/html/*.html, nexus-tools/tests/*.rs, nexus-tools/tests/golden_grep/*.txt, docs/agent-tools-parity.md
+%% covers: nexus-tools/src/*.rs, nexus-tools/src/files/*.rs, nexus-tools/src/shell/*.rs, nexus-tools/src/web/*.rs, nexus-tools/src/search/*.rs, nexus-tools/src/fake_search.rs, nexus-tools/src/bin/fake_search.rs, nexus-tools/tests/data/html/*.html, nexus-tools/tests/*.rs, nexus-tools/tests/golden_grep/*.txt, claude-code-sdk-rs/tests/parity/claude-code-2.1.287/*.json, docs/agent-tools-parity.md
 %% verified: 2026-10-05
 flowchart TD
     subgraph legend["Légende"]
@@ -67,6 +67,10 @@ flowchart TD
         STLS["🟠 https des moteurs : même décision TLS en attente que WebFetch"]
     end
 
+    subgraph bench["Banc de parité — tests/parity_replay.rs (N25)"]
+        REPLAY["✅ les 52 appels enregistrés sur le vrai Claude Code 2.1.287 sont rejoués hors ligne sur nexus-tools :<br/>48 identiques au caractère près, 3 écarts volontaires listés avec leur raison, 1 dépendant de la machine ;<br/>une excuse devenue fausse fait aussi échouer le banc<br/><i>vérifié : 3 divergences introduites dans Edit et Bash, 1 excuse périmée — toutes rouges</i>"]
+    end
+
     subgraph suite["Politique de dépendances — tests/dependency_policy.rs"]
         DEPS["✅ la fermeture de nexus-tools se compile avec Rust seul :<br/>pas de links, pas de cc/cmake/bindgen, -sys limités aux liaisons de plateforme<br/><i>vérifié : cinq cas factices rouges, puis la vraie fermeture</i>"]
     end
@@ -90,6 +94,10 @@ flowchart TD
     STATE --> NB
     READ --> STATE
     SCOPE --> SEARCH
+    READ --> REPLAY
+    WRITE --> REPLAY
+    BASH --> REPLAY
+    NB --> REPLAY
     PROFILE --> TRAIT
     TRAIT --> FILTER
     FILTER --> UNTRUSTED
