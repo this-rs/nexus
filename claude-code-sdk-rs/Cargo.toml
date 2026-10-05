@@ -55,6 +55,9 @@ memory = ["meilisearch-sdk", "chrono"]
 # Test kit of the agent contract: ScriptedProvider, transcripts, conformance suite.
 # Meant for the dev-dependencies of a host; not built by default.
 testkit = []
+# HTTP model endpoints (OpenAI-compatible chat/completions + SSE): `model` module.
+# Pulls `reqwest` (rustls, no `json`/`stream` features); not in `default`.
+provider-native = ["reqwest"]
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
@@ -76,3 +79,7 @@ required-features = ["testkit"]
 [[test]]
 name = "claude_code_conformance"
 required-features = ["testkit"]
+
+[[test]]
+name = "model_openai_endpoint"
+required-features = ["provider-native"]

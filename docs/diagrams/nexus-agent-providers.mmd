@@ -1,14 +1,13 @@
 %% name: nexus-agent-providers
-%% covers: docs/diagrams/nexus-agent-providers.mmd, docs/harness-consolidation-2026-10-05.md, claude-code-sdk-rs/src/testkit/*.rs, claude-code-sdk-rs/tests/agent_conformance.rs, claude-code-sdk-rs/src/providers/claude_code/*.rs, claude-code-sdk-rs/src/providers/mod.rs, claude-code-sdk-rs/tests/claude_code_conformance.rs, claude-code-sdk-rs/tests/providers_spawn_guard.rs
+%% covers: docs/diagrams/nexus-agent-providers.mmd, docs/harness-consolidation-2026-10-05.md, claude-code-sdk-rs/src/testkit/*.rs, claude-code-sdk-rs/tests/agent_conformance.rs, claude-code-sdk-rs/src/providers/claude_code/*.rs, claude-code-sdk-rs/src/providers/mod.rs, claude-code-sdk-rs/tests/claude_code_conformance.rs, claude-code-sdk-rs/tests/providers_spawn_guard.rs, claude-code-sdk-rs/src/model/*.rs, claude-code-sdk-rs/src/bin/fake_openai.rs, claude-code-sdk-rs/tests/model_openai_endpoint.rs, claude-code-sdk-rs/tests/support/fake_openai.rs
 %% verified: 2026-10-05
 %% ---
 %% PROUVE : les adaptateurs CIBLE (façade claude_code, model/ OpenAI-compatible, native,
 %%   codex, opencode) et le banc de conformité (testkit/conformance), face à ce qui existe
 %%   aujourd'hui (2026-10-05). UN adaptateur existe : src/providers/claude_code/ (control.rs, policy_map.rs,
-%%   map_events.rs, error_map.rs, options.rs, session.rs, cancel.rs, tasks.rs), toujours compilé. Les autres (model/, native, codex, acp)
-%%   n'existent pas. Le banc existe : src/testkit/ (feature `testkit`) — scripted.rs, transcript.rs, conformance.rs,
-%%   claude_replay.rs — et tests/agent_conformance.rs, tests/claude_code_conformance.rs. À compléter par src/model/*.rs
-%%   et les autres providers quand ils existent. Le contrat qu'ils implémentent est dans nexus-agent-contract.
+%%   map_events.rs, error_map.rs, options.rs, session.rs, cancel.rs, tasks.rs), toujours compilé. Le client model/ existe (feature `provider-native`, src/model/*.rs). Les autres (native, codex, acp)
+%%   n existent pas. Le banc existe : src/testkit/ (feature `testkit`) — scripted.rs, transcript.rs, conformance.rs,
+%%   claude_replay.rs — et tests/agent_conformance.rs, tests/claude_code_conformance.rs. À compléter par les autres providers quand ils existent. Le contrat qu'ils implémentent est dans nexus-agent-contract.
 %% ---
 %% SOURCES LUES :
 %%   grep -rniE 'codex|opencode' --include=*.rs --include=*.toml . → 0 (hors target/) ; testkit : src/testkit/{mod,scripted,transcript,conformance}.rs, tests/agent_conformance.rs
@@ -17,6 +16,7 @@
 %%   claude-code-api/src/api/chat.rs       — chat_completions : passerelle OpenAI → processus claude
 %%   claude-code-sdk-rs/Cargo.toml         — reqwest 0.12 optionnel (feature auto-download), futures, async-trait
 %%   claude-code-sdk-rs/src/bin/fake_claude.rs, tests/support/mod.rs (fake_cli_path, scripts de transcription)
+%%   claude-code-sdk-rs/src/model/{mod,quirks,pricing,sse,guard,wire,openai}.rs, src/bin/fake_openai.rs, tests/support/fake_openai.rs, tests/model_openai_endpoint.rs — client OpenAI-compatible (A2, A30, A36, A39)
 %%   claude-code-sdk-rs/src/transport/mock.rs — MockTransport::pair
 %% ---
 %% TRANCHE (docs/harness-consolidation-2026-10-05.md) :
@@ -63,9 +63,9 @@ flowchart TD
 
     subgraph model["model/ — client OpenAI-compatible"]
         direction TB
-        MOD["🟠 client chat/completions (HTTP + SSE) vers un endpoint OpenAI-compatible : catalog() via /models, deltas via stream<br/><i>vérifié absent : pas de model/ ; reqwest n'est qu'optionnel (feature auto-download)</i>"]
+        MOD["✅ src/model/ (feature `provider-native`, non défaut) : trait ModelEndpoint (id, health, models, complete, probe) ; OpenAiEndpoint = chat/completions en HTTP + SSE ; GET /models → catalog + fenêtre de contexte ; sonde d'appel d'outil (outil factice `ping`, ModelNoTools sinon, cache par modèle avec TTL) ;<br/>quirks par drapeaux + préréglages (deepseek : reasoning_content renvoyé seulement avec tools ; ollama : sans tool_choice ; vllm : champ `reasoning` ; llama_server/nim : parallel_tool_calls explicite ; generic) ; appels d'outils entiers ou fragmentés → un seul ToolCall ;<br/>PriceTable UNIQUE (None sans prix, jamais 0) ; décodeur SSE incrémental ; garde A36 (https hors boucle locale, plages internes refusées après résolution DNS, connexion épinglée, pas de redirection, pas de proxy) ;<br/>clé résolue à chaque requête, jamais stockée, enregistrée au masqueur, corps d'erreur masqué puis tronqué à 512 octets<br/><i>vérifié : cargo test -p nexus-claude --features provider-native --lib model:: (58 tests) ; cargo test -p nexus-claude --features provider-native --test model_openai_endpoint (32 tests, contre bin/fake_openai) ;<br/>rejoué SANS le correctif (échec constaté) : garde A36 désactivée → 2 tests rouges ; masquage de la clé retiré → 2 rouges ; reasoning_content renvoyé sans condition → 1 rouge ; redirections suivies → 1 rouge.<br/>🟠 reste : ModelEndpoint pas encore rejoué par la suite de conformité ; providers/native. NON ÉTABLI : l épinglage DNS n est pas prouvé par un test qui échoue sans lui (sur macOS `*.localhost` se résout par le système) ; 404 « modèle absent » classé InvalidRequest (pas de variante dédiée, écart au texte de la spécification)</i>"]
         GW["🔴 claude-code-api/src/models/openai.rs existe mais dans le sens INVERSE :<br/>formes servies par la passerelle (ChatCompletionRequest en entrée), pas un client<br/><i>vérifié : api/chat.rs chat_completions est un handler axum</i>"]
-        DEP["🔴 reqwest est une dépendance optionnelle du SDK (auto-download) : model/ devra la rendre non optionnelle ou la mettre derrière une feature dédiée<br/><i>vérifié : Cargo.toml reqwest optional = true</i>"]
+        DEP["✅ reqwest reste optionnel (rustls, sans features json/stream : Response::chunk() pour le flux SSE) ; la feature `provider-native = [reqwest]` le tire pour model/, hors default (default = auto-download seul)<br/><i>vérifié : Cargo.toml `provider-native = [\"reqwest\"]` ; cargo build -p nexus-claude et cargo build -p nexus-claude --no-default-features (sans la feature, model/ absent)</i>"]
         MOD -.-> GW
         MOD -.-> DEP
     end

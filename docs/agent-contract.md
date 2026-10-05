@@ -460,6 +460,16 @@ pub type CompletionStream = Pin<Box<dyn Stream<Item = Result<CompletionChunk, Pr
 - Table de prix UNIQUE (`model::pricing::PriceTable`, A1) : coût = usage × prix, `None` sans prix.
 - HTTP : `reqwest` derrière la feature `provider-native` ; redirections désactivées ; identifiant
   résolu par rappel à chaque requête, jamais stocké.
+- Écarts constatés à l'implémentation (`claude-code-sdk-rs/src/model/`, feature `provider-native`) :
+  `CompletionChunk` est sérialisé en `{"type","data"}` (variantes tuple) ; l'ordre émis est texte et
+  raisonnement, puis `tool_call`, puis `usage`, `finish` en dernier ; `Usage.input_tokens` compte les
+  jetons **hors cache** (le cache lu est dans `cache_read_tokens`) pour que `PriceTable` multiplie sans
+  double compte ; `PriceTable::cost(model, usage, basis) -> Cost` (`usd: None` sans prix) ;
+  `EndpointGuard` ajoute `allow_private_network` (défaut `false`, absent d'A36 : un vLLM sur LAN en a besoin ;
+  n'ouvre pas le lien-local ni `http` hors boucle locale) ; aucune connexion ne passe par un proxy (il
+  résoudrait lui-même le nom) ; un 404 est `invalid_request` (pas de variante « modèle absent ») ;
+  `EndpointProbe.parallel_tools` reprend le drapeau déclaré (`explicit_parallel_tool_calls`), il n'est pas
+  mesuré ; `CompletionRequest.stream = false` est réservé (le fil est toujours en flux).
 
 ## 13. `ProviderRegistry` (A1, A32)
 
