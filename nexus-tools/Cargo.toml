@@ -1,0 +1,51 @@
+[package]
+name = "nexus-tools"
+description = "MCP server of the base tools of a Nexus agent harness (files, shell, web), in pure Rust."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+name = "nexus_tools"
+path = "src/lib.rs"
+
+[[bin]]
+name = "nexus-tools"
+path = "src/main.rs"
+
+[features]
+default = []
+# `echo` and `write` tools, to exercise the server end to end without the real tools.
+# Never in a release build of the harness.
+test-tools = []
+
+# Rust only, by decision N17: nothing here may need a C or C++ toolchain, Node, Python or a
+# browser at build or run time.
+[dependencies]
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+async-trait = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "env-filter", "ansi"] }
+axum = { version = "0.7", default-features = false, features = ["http1", "tokio", "json"] }
+base64 = "0.22"
+hmac = "0.12"
+sha2 = "0.10"
+
+[dev-dependencies]
+nexus-claude = { path = "../claude-code-sdk-rs", features = ["provider-native"] }
+tempfile = "3"
+
+[[test]]
+name = "protocol"
+required-features = ["test-tools"]
+
+[[test]]
+name = "server_binary"
+required-features = ["test-tools"]

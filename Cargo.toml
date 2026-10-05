@@ -1,5 +1,5 @@
 [workspace]
-members = ["claude-code-api", "claude-code-sdk-rs", "xtask"]
+members = ["claude-code-api", "claude-code-sdk-rs", "nexus-tools", "xtask"]
 resolver = "2"
 
 [workspace.package]
