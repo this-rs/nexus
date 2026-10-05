@@ -1,0 +1,70 @@
+{
+ "scenario": "notebook",
+ "claude_code_version": "2.1.287",
+ "calls": [
+  {
+   "tool": "NotebookEdit",
+   "input": {
+    "notebook_path": "<FIXTURE>/nb.ipynb",
+    "cell_id": "c1",
+    "new_source": "print('b')"
+   },
+   "is_error": true,
+   "result": "<tool_use_error>File has not been read yet. Read it first before writing to it.</tool_use_error>"
+  },
+  {
+   "tool": "Read",
+   "input": {
+    "file_path": "<FIXTURE>/nb.ipynb"
+   },
+   "is_error": false,
+   "result": "<cell id=\"c1\">print('a')</cell id=\"c1\">\n<cell id=\"c2\"><cell_type>markdown</cell_type># title</cell id=\"c2\">"
+  },
+  {
+   "tool": "NotebookEdit",
+   "input": {
+    "notebook_path": "<FIXTURE>/nb.ipynb",
+    "cell_id": "c1",
+    "new_source": "print('b')"
+   },
+   "is_error": false,
+   "result": "Updated cell c1 with print('b')"
+  },
+  {
+   "tool": "NotebookEdit",
+   "input": {
+    "notebook_path": "<FIXTURE>/nb.ipynb",
+    "cell_id": "c1",
+    "new_source": "x = 1",
+    "cell_type": "code",
+    "edit_mode": "insert"
+   },
+   "is_error": false,
+   "result": "Inserted cell <CELL> with x = 1"
+  },
+  {
+   "tool": "NotebookEdit",
+   "input": {
+    "notebook_path": "<FIXTURE>/nb.ipynb",
+    "cell_id": "c2",
+    "new_source": "",
+    "edit_mode": "delete"
+   },
+   "is_error": false,
+   "result": "Deleted cell c2"
+  },
+  {
+   "tool": "NotebookEdit",
+   "input": {
+    "notebook_path": "<FIXTURE>/nb.ipynb",
+    "cell_id": "nope",
+    "new_source": "z"
+   },
+   "is_error": true,
+   "result": "<tool_use_error>Cell with ID \"nope\" not found in notebook.</tool_use_error>"
+  }
+ ],
+ "final_files": {
+  "nb.ipynb": "{\n \"cells\": [\n  {\n   \"id\": \"c1\",\n   \"cell_type\": \"code\",\n   \"metadata\": {},\n   \"source\": \"print('b')\",\n   \"outputs\": [],\n   \"execution_count\": null\n  },\n  {\n   \"cell_type\": \"code\",\n   \"id\": \"<CELL>\",\n   \"source\": \"x = 1\",\n   \"metadata\": {},\n   \"execution_count\": null,\n   \"outputs\": []\n  }\n ],\n \"metadata\": {},\n \"nbformat\": 4,\n \"nbformat_minor\": 5\n}"
+ }
+}

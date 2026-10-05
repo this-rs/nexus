@@ -99,55 +99,88 @@ Ce que ce relevé corrige dans l'inventaire écrit de mémoire :
 
 ## 3. Ce que « équivalence » veut dire, outil par outil
 
-Relevé dans les schémas et les descriptions de la session. **Ce n'est pas encore une preuve de
-comportement** : la preuve, c'est le banc de N25.
+**Relevé réel** : `claude -p` 2.1.287, modèle `claude-haiku-4-5`, sur des fichiers synthétiques, résultats
+d'outils lus dans le flux `stream-json`. Les enregistrements normalisés sont sous
+`claude-code-sdk-rs/tests/parity/claude-code-2.1.287/` (README : comment les reproduire). **Là où le
+relevé contredit la description de l'outil, c'est le relevé qui fait foi** : on égale ce que fait le
+vrai Claude Code, pas ce qu'il dit faire.
 
 ### Read
 
-- `file_path` absolu ; `offset` et `limit` pour de gros fichiers ; `pages` pour un PDF (plage, au
-  plus 20 pages par appel ; obligatoire au-delà de 10 pages).
-- Jusqu'à 2000 lignes par défaut ; lignes numérotées au format `cat -n` ; les lignes de plus de
-  2000 caractères sont tronquées.
-- Lit aussi les images (rendues en blocs image), les PDF et les notebooks (cellules et sorties).
-- Un fichier vide produit un avertissement, pas un contenu vide silencieux.
+- Sortie : une ligne `N<TAB>contenu` par ligne (format `cat -n`). Un fichier qui finit par un retour à
+  la ligne rend une dernière ligne numérotée **vide** (`13<TAB>` pour un fichier de 12 lignes).
+- `offset` est le numéro de la première ligne rendue (1 = la première). `offset: 0` est pris
+  littéralement et **décale la numérotation** (0, 1, 2). `limit` coupe sans ligne vide finale. Un
+  `offset` au-delà de la fin n'est pas une erreur : `<system-reminder>Warning: the file exists but is
+  shorter than the provided offset (5000). The file has 3001 lines.</system-reminder>`.
+- Un chemin **relatif** est accepté (résolu depuis le répertoire de travail), bien que la description
+  exige un chemin absolu.
+- Fichier absent : erreur `File does not exist. Note: your current working directory is <cwd>.` ;
+  dossier : erreur `EISDIR: illegal operation on a directory, read '<chemin>'` ; fichier vide : **pas**
+  une erreur, `<system-reminder>Warning: the file exists but the contents are empty.</system-reminder>`.
+- **Pas de plafond de 2000 lignes** (un fichier de 3000 lignes est rendu en entier, 3001 lignes
+  numérotées) et **pas de troncature des lignes longues à 2000 caractères** (lignes de 2 500 et de
+  60 000 caractères rendues entières), contrairement à la description de l'outil. Le plafond réel est
+  **en jetons** (de l'ordre de 25 000) : un fichier de 3 300 lignes est coupé à 1 250 lignes
+  (56 392 caractères), à une frontière de ligne, **silencieusement** (aucune mention de coupe). Un
+  tokenizer n'étant pas disponible en Rust pur, N19 devra approcher ce plafond et le dire.
+- Notebooks : `<cell id="c1">source</cell id="c1">` ; une cellule markdown ajoute
+  `<cell_type>markdown</cell_type>` avant sa source.
 
-### Write
+### Write et Edit
 
-- `file_path` absolu, `content`. Écraser un fichier existant exige de l'avoir **lu** dans la
-  session (sinon l'outil échoue).
-
-### Edit
-
-- `file_path`, `old_string`, `new_string`, `replace_all` (faux par défaut).
-- Exige une lecture préalable du fichier dans la session.
-- `old_string` doit être **unique** dans le fichier, sauf `replace_all` ; remplacement identique
-  refusé ; le préfixe de numéro de ligne de la sortie de `Read` n'appartient pas au contenu.
+- Les échecs sont `is_error` avec le corps `<tool_use_error>…</tool_use_error>`.
+- **État « lu » par session** : `Edit` ou `Write` d'un fichier existant non lu échoue avec
+  `File has not been read yet. Read it first before writing to it.` ; une lecture suffit ensuite. `Write`
+  d'un **nouveau** fichier n'exige aucune lecture et crée les dossiers parents.
+- `Edit` — non unique : `Found 3 matches of the string to replace, but replace_all is false. To replace
+  all occurrences, set replace_all to true. To replace only one occurrence, please provide more context
+  to uniquely identify the instance.\nString: alpha` ; identique : `No changes to make: old_string and
+  new_string are exactly the same.` ; absent : `String to replace not found in file.\nString: zzz`.
+- **Aucun retrait automatique du préfixe de numéro de ligne** : un `old_string` écrit
+  `3<TAB>line 3` est introuvable.
+- Succès : `The file <chemin> has been updated successfully. (file state is current in your context — no
+  need to Read it back)` ; avec `replace_all` : `The file <chemin> has been updated. All occurrences were
+  successfully replaced. (file state is current …)` ; création : `File created successfully at:
+  <chemin> (file state is current …)`.
+- Un échec ne modifie pas le fichier (vérifié sur les fichiers finals).
 
 ### Bash
 
-- `command`, `description`, `timeout` en millisecondes (120 000 par défaut, 600 000 au plus),
-  `run_in_background`, `dangerouslyDisableSandbox`.
-- Le répertoire de travail persiste d'un appel à l'autre ; l'état du shell ne persiste pas.
-- Sortie tronquée au-delà d'un plafond ; une tâche d'arrière-plan notifie sa fin.
+- Sortie standard et d'erreur **fusionnées** (`out\nerr`). Aucune sortie : `(Bash completed with no
+  output)`. Code de sortie non nul : `is_error` et `Exit code 3` (suivi de la sortie s'il y en a) ; le
+  code retenu est celui de la **dernière** commande (`echo a; false; echo b` n'est pas une erreur).
+- Dépassement de durée : `Exit code 143\nCommand timed out after 1s` (SIGTERM). Une `timeout` énorme
+  (99 999 999) est acceptée sans erreur ni plafonnement signalé.
+- **Sortie persistée au-delà de 30 000 caractères** : 29 000 caractères passent en ligne ; 31 000 donnent
+  `<persisted-output>\nOutput too large (30.3KB). Full output saved to: <chemin>\n\nPreview (first
+  2KB):\n…\n...\n</persisted-output>` avec un aperçu de 2 Ko.
+- Le **répertoire de travail persiste** d'un appel à l'autre (`cd sub` puis `pwd` rend `<…>/sub`).
+- Arrière-plan : `Command running in background with ID: <id>. Output is being written to: <chemin>.
+  You will be notified when it completes. To check interim output, use Read on that file path.`
+  Pas d'outil de lecture de sortie dédié dans 2.1.287 : on lit le fichier avec `Read`.
+- Le shell est celui de l'utilisateur (`$0` = `/bin/zsh` sur la machine de relevé).
 
-### WebSearch
+### NotebookEdit
 
-- `query` (2 caractères au moins), `mode` obligatoire (`standard` ou `extended`),
-  `allowed_domains`, `blocked_domains`.
-- Rend des blocs de résultats avec titres et URL ; la description impose de terminer la réponse par
-  une liste « Sources » avec des liens. Service limité aux États-Unis chez l'éditeur.
+- Même règle « lu d'abord » que `Edit`. Remplacement : `Updated cell c1 with <source>` ; insertion
+  (**après** la cellule `cell_id`) : `Inserted cell <id aléatoire de 8 hex> with <source>` ;
+  suppression : `Deleted cell c2` ; cellule inconnue : `<tool_use_error>Cell with ID "nope" not found in
+  notebook.</tool_use_error>`.
+- Le fichier est réécrit en JSON indenté d'un espace, la `source` stockée **comme une chaîne** (pas une
+  liste), les clés d'une cellule insérée dans l'ordre `cell_type`, `id`, `source`, `metadata`,
+  `execution_count`, `outputs`.
 
-### Monitor
+### Non relevé, et pourquoi
 
-- `command`, `description`, `timeout_ms` (300 000 par défaut ; plafonné à 1 800 000), ou `ws`
-  (`url`, `protocols`) ; chaque ligne de sortie est un événement ; la sortie sur `stderr` ne notifie
-  pas.
+- **`WebFetch`** : absent de `claude -p` 2.1.287 (aucun appel possible, même avec `--tools WebFetch`).
+  N21 ne peut pas s'appuyer sur un enregistrement ; le comportement attendu vient de la description de
+  l'outil et reste à confirmer en session interactive.
+- `Monitor`, `TaskStop`, `EnterWorktree` / `ExitWorktree` : non essayés (processus longs ou état de
+  dépôt). `Glob` et `Grep` : n'existent pas (voir §2.1).
 
-### À relever
-
-`WebFetch`, `NotebookEdit`, `TaskStop`, `EnterWorktree` / `ExitWorktree` : schémas absents de la
-session. Étape 2 de N17, par exécution du vrai `claude` sur des fichiers de test, ou par N25.
-(`Glob` et `Grep` n'ont pas de référence : voir §2.1.)
+Coût total des enregistrements : 0,42 dollar (modèle `haiku`, 36 appels d'outils en 6 sessions) ; le plus cher
+(0,17 dollar) est la lecture de très gros fichiers.
 
 ## 4. Politique de dépendances
 
