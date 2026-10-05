@@ -1,0 +1,84 @@
+{
+  "messages": [
+    {
+      "data": {
+        "apiKeySource": "none",
+        "cwd": ".",
+        "model": "fake-claude",
+        "permissionMode": "default",
+        "session_id": "<SESSION1>",
+        "tools": [
+          "Bash",
+          "Read"
+        ]
+      },
+      "subtype": "init",
+      "type": "system"
+    },
+    {
+      "message": {
+        "content": [
+          {
+            "id": "<TOOL1>",
+            "input": {
+              "description": "dig",
+              "prompt": "dig"
+            },
+            "name": "Task"
+          }
+        ]
+      },
+      "type": "assistant"
+    },
+    {
+      "message": {
+        "content": [
+          {
+            "text": "sub-agent working"
+          }
+        ]
+      },
+      "parent_tool_use_id": "<TOOL1>",
+      "type": "assistant"
+    },
+    {
+      "message": {
+        "content": "",
+        "content_blocks": [
+          {
+            "content": "found it",
+            "is_error": false,
+            "tool_use_id": "<TOOL1>"
+          }
+        ]
+      },
+      "parent_tool_use_id": "<TOOL1>",
+      "type": "user"
+    },
+    {
+      "message": {
+        "content": [
+          {
+            "text": "The agent found it."
+          }
+        ]
+      },
+      "type": "assistant"
+    },
+    {
+      "duration_api_ms": "<MS>",
+      "duration_ms": "<MS>",
+      "is_error": false,
+      "num_turns": 1,
+      "result": "The agent found it.",
+      "session_id": "<SESSION2>",
+      "subtype": "success",
+      "total_cost_usd": 0.0001,
+      "type": "result",
+      "usage": {
+        "input_tokens": 3,
+        "output_tokens": 5
+      }
+    }
+  ]
+}

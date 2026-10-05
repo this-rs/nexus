@@ -1,0 +1,44 @@
+{
+  "messages": [
+    {
+      "data": {
+        "apiKeySource": "none",
+        "cwd": ".",
+        "model": "fake-claude",
+        "permissionMode": "default",
+        "session_id": "<SESSION1>",
+        "tools": [
+          "Bash",
+          "Read"
+        ]
+      },
+      "subtype": "init",
+      "type": "system"
+    },
+    {
+      "message": {
+        "content": [
+          {
+            "text": "Still here."
+          }
+        ]
+      },
+      "type": "assistant"
+    },
+    {
+      "duration_api_ms": "<MS>",
+      "duration_ms": "<MS>",
+      "is_error": true,
+      "num_turns": 1,
+      "result": "boom",
+      "session_id": "<SESSION2>",
+      "subtype": "error_during_execution",
+      "total_cost_usd": 0.0001,
+      "type": "result",
+      "usage": {
+        "input_tokens": 3,
+        "output_tokens": 5
+      }
+    }
+  ]
+}
