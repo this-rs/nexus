@@ -12,6 +12,7 @@ use serde_json::Value;
 
 use super::capabilities::PermissionScope;
 use super::error::ProviderError;
+use super::model_provider::ModelBinding;
 use super::policy::{ToolCategory, ToolPolicy};
 
 /// Everything needed to open (or resume) a session.
@@ -49,6 +50,11 @@ pub struct SessionSpec {
     pub deltas: bool,
     /// Provider-specific settings, keyed by provider kind (`claude_code`, `codex`, `acp`, `native`).
     pub extensions: BTreeMap<String, Value>,
+    /// The model provider this session runs over, apart from the harness (N16). Applied
+    /// by [`ProviderRegistry::open_session`](super::ProviderRegistry::open_session), which
+    /// resolves it and clears it; a provider that receives it set refuses the session
+    /// (`Unsupported { model_binding }`) rather than ignore the request.
+    pub model_binding: Option<ModelBinding>,
 }
 
 impl SessionSpec {
@@ -69,12 +75,17 @@ impl SessionSpec {
             lineage: None,
             deltas: true,
             extensions: BTreeMap::new(),
+            model_binding: None,
         }
     }
 
     /// Checks the rules every provider applies before opening (contract §3):
     /// the policy must stay within its ceiling.
     pub fn validate(&self) -> Result<(), ProviderError> {
+        if self.model_binding.is_some() {
+            // Opened through a provider directly, a binding would be silently ignored.
+            return Err(ProviderError::unsupported("model_binding"));
+        }
         if let Some(ceiling) = &self.policy_ceiling
             && !self.policy.is_within(ceiling)
         {
@@ -109,6 +120,7 @@ impl fmt::Debug for SessionSpec {
             .field("lineage", &self.lineage)
             .field("deltas", &self.deltas)
             .field("extensions", &self.extensions.keys().collect::<Vec<_>>())
+            .field("model_binding", &self.model_binding)
             .finish()
     }
 }

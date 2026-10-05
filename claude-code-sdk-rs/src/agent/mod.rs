@@ -26,6 +26,7 @@ pub mod capabilities;
 pub mod credentials;
 pub mod error;
 pub mod event;
+pub mod model_provider;
 pub mod policy;
 pub mod registry;
 pub mod resume;
@@ -38,16 +39,18 @@ pub use capabilities::{
 pub use credentials::{
     CredentialRef, CredentialResolver, EnvCredentialResolver, Secret, redact, redact_with,
 };
-pub use error::ProviderError;
+pub use error::{ProtocolMismatch, ProviderError};
 pub use event::{
     AgentEvent, BackgroundTask, BackgroundTaskKind, BackgroundTaskStatus, CompactionPhase,
     CompactionTrigger, Cost, DeltaKind, McpServerStatus, ModelUsage, QuestionOption, QuestionReply,
     QuestionSpec, StopReason, TaskPhase, ToolOutput, Usage,
 };
+pub use model_provider::{ModelBinding, ModelProtocol, ModelProviderConfig, ProtocolSupport};
 pub use policy::{PolicyDecision, PolicyMode, ToolCategory, ToolPattern, ToolPolicy};
 pub use registry::{
-    BUILTIN_CLAUDE_CODE_ID, BuiltProvider, CapabilityRefresher, KindFactory, PriceBook,
-    ProviderInstanceConfig, ProviderRegistry, SECURITY_GATE_CAPABILITY, SecurityGate,
+    BUILTIN_ANTHROPIC_PROVIDER_ID, BUILTIN_CLAUDE_CODE_ID, BuiltProvider, CapabilityRefresher,
+    KindFactory, PriceBook, ProviderInstanceConfig, ProviderRegistry, SECURITY_GATE_CAPABILITY,
+    SecurityGate,
 };
 pub use resume::ResumeToken;
 pub use spec::{
@@ -62,7 +65,7 @@ pub use spec::{
 /// [`ResumeToken`]) or a trait signature changes. The JSON snapshots in
 /// `tests/agent_contract_snapshots.rs` carry it: changing a shape without
 /// changing the version fails that test.
-pub const CONTRACT_VERSION: u32 = 2;
+pub const CONTRACT_VERSION: u32 = 3;
 
 /// Events of a turn, or of the out-of-band channel.
 pub type EventStream = Pin<Box<dyn Stream<Item = AgentEvent> + Send>>;

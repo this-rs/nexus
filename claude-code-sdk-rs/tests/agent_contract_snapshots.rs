@@ -204,6 +204,12 @@ fn error_samples() -> Vec<ProviderError> {
         ProviderError::TurnInProgress,
         ProviderError::invalid("unknown request id"),
         ProviderError::Closed,
+        ProviderError::ModelProtocolMismatch(Box::new(ProtocolMismatch {
+            harness: "codex-main".into(),
+            provider: "deepseek".into(),
+            protocol: "openai_chat".into(),
+            accepts: vec!["openai_responses".into()],
+        })),
     ]
 }
 
@@ -331,7 +337,7 @@ fn every_variant_has_a_sample() {
     let kinds: Vec<&str> = error_samples().iter().map(ProviderError::kind).collect();
     let unique: std::collections::BTreeSet<&str> = kinds.iter().copied().collect();
     assert_eq!(kinds.len(), unique.len());
-    assert_eq!(kinds.len(), 16, "one sample per ProviderError variant");
+    assert_eq!(kinds.len(), 17, "one sample per ProviderError variant");
 }
 
 #[test]

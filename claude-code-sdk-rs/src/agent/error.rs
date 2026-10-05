@@ -104,6 +104,28 @@ pub enum ProviderError {
     /// The session is closed.
     #[error("session closed")]
     Closed,
+    /// The model provider speaks a protocol the harness cannot consume (N16). Boxed: this
+    /// payload is four times the size of any other, and every `AgentEvent` carries a
+    /// `ProviderError`. The serialised form stays flat (`kind` plus the four fields).
+    #[error(
+        "harness {} cannot use model provider {}: it serves {}, the harness accepts [{}]",
+        .0.harness, .0.provider, .0.protocol, .0.accepts.join(", ")
+    )]
+    ModelProtocolMismatch(Box<ProtocolMismatch>),
+}
+
+/// The two sides of a pair whose protocols do not meet (see
+/// [`ProviderError::ModelProtocolMismatch`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProtocolMismatch {
+    /// Id of the harness instance.
+    pub harness: String,
+    /// Id of the model provider.
+    pub provider: String,
+    /// The protocol the model provider serves.
+    pub protocol: String,
+    /// The protocols the harness consumes; empty for an agent that picks its own model.
+    pub accepts: Vec<String>,
 }
 
 impl ProviderError {
@@ -165,6 +187,7 @@ impl ProviderError {
             Self::TurnInProgress => "turn_in_progress",
             Self::InvalidRequest { .. } => "invalid_request",
             Self::Closed => "closed",
+            Self::ModelProtocolMismatch { .. } => "model_protocol_mismatch",
         }
     }
 
@@ -177,7 +200,9 @@ impl ProviderError {
             Self::EndpointUnreachable { .. }
             | Self::ProcessExited { .. }
             | Self::Protocol { .. } => 502,
-            Self::ModelNoTools { .. } | Self::ContextTooSmall { .. } => 422,
+            Self::ModelNoTools { .. }
+            | Self::ContextTooSmall { .. }
+            | Self::ModelProtocolMismatch { .. } => 422,
             Self::RateLimited { .. } => 429,
             Self::Timeout { .. } => 504,
             Self::Unsupported { .. } => 501,

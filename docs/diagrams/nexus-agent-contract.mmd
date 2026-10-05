@@ -55,8 +55,14 @@ flowchart TD
         POL["✅ ToolPolicy { mode, native_mode, allow, deny }, ToolPattern, decide() en refus par défaut, restrict(parent) monotone<br/><i>agent/policy.rs ; vérifié : tests unitaires agent::policy (10 tests : deny l'emporte, restrict idempotent, motif malformé = erreur)</i>"]
         CAP["✅ Capabilities par modèle, 18 champs, Capabilities::none() ; fenêtre inconnue = absente, jamais 200000<br/><i>agent/capabilities.rs ; vérifié : tests unitaires agent::capabilities ; les replis ne seront vérifiés que par testkit (palier 4)</i>"]
         RES["✅ ResumeToken opaque { k, v, d }, to_wire / from_wire, expect_kind refuse le jeton d'un autre provider<br/><i>agent/resume.rs ; vérifié : tests unitaires agent::resume</i>"]
-        ERR["✅ ProviderError (16 variantes, retryable(), kind(), http_status_hint()), détails expurgés par credentials::redact<br/><i>agent/error.rs, agent/credentials.rs (Secret, CredentialRef, CredentialResolver) ; vérifié : instantané + tests agent::credentials</i>"]
+        ERR["✅ ProviderError (17 variantes, retryable(), kind(), http_status_hint()), détails expurgés par credentials::redact<br/><i>agent/error.rs, agent/credentials.rs (Secret, CredentialRef, CredentialResolver) ; vérifié : instantané + tests agent::credentials</i>"]
         DONEERR["✅ done.error (contrat v2) : cause classée portée par `done` (usage et coût conservés) ; épinglée par l'instantané tests/snapshots/agent_contract_v2.json, entrée done_with_error<br/><i>vérifié : cargo test -p nexus-claude --test agent_contract_snapshots (rouge avant l'ajout de l'entrée ; un renommage serde du champ casse l'instantané)</i>"]
+        MODELP["✅ fournisseur de modèle APART du harnais (agent/model_provider.rs) : ModelProtocol (anthropic_messages, openai_chat, openai_responses), ModelProviderConfig (sans secret, champ inconnu refusé), ModelBinding sur SessionSpec ; chaque harnais déclare les protocoles qu il consomme (ProviderKind::model_protocols) ; contrat v3, instantané tests/snapshots/agent_contract_v3.json<br/><i>vérifié : tests unitaires agent::model_provider (7) ; tests/model_binding.rs (11, trois mutations jouées : sans masquage de la clé de l hôte, identifiant résolu au nom du harnais, sans vérification de paire — chacune attrapée)</i>"]
+        OPEN["✅ ProviderRegistry::open_session(harnais, spec) : paire vérifiée AVANT tout lancement (ModelProtocolMismatch nomme les deux côtés, HTTP 422) ; natif = provider composé, identifiant résolu pour le fournisseur de modèle ; Claude Code = ANTHROPIC_BASE_URL + clé, l autre variable d authentification posée VIDE (le CLI envoie sinon les deux en-têtes : mesuré sur la version 2.1.287)<br/><i>vérifié : tests/model_binding.rs ; tests/real_claude_gateway.rs (ignoré par défaut, vrai CLI)</i>"]
+        OPENGAP["🟠 non appliqué : Codex (Unsupported model_binding : sa configuration de fournisseur personnalisé n est pas vérifiée contre un vrai app-server), ACP (l agent choisit son modèle) ; aucune passerelle réelle essayée"]
+        REG --> MODELP
+        MODELP --> OPEN
+        OPEN --- OPENGAP
         REG --> PROV
         PROV -->|"open / resume(ResumeToken)"| SESS
         PROV --> CAP

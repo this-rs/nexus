@@ -494,6 +494,7 @@ ACP : `session/set_mode` quand l'agent publie des modes, sinon `Unsupported`.
 | `turn_in_progress` | — | non | 409 |
 | `invalid_request` | `detail` | non | 400 |
 | `closed` | — | non | 410 |
+| `model_protocol_mismatch` | `harness`, `provider`, `protocol`, `accepts: Vec<String>` | non | 422 |
 
 Règles : `detail` passe par `agent::redact()` avant construction (en-têtes d'autorisation, valeurs
 de `Secret` enregistrées, URL avec identifiants) ; **jamais d'identifiant dans un message
@@ -728,6 +729,62 @@ instance intégrée, toujours présente.
   les extensions `env` (objet de variables non secrètes ; un nom évoquant un identifiant est refusé), `thinking` (bool),
   `login_hint` (chaîne) ; la porte A32 la garde comme `codex`.
 
+### 13.1 Harnais et fournisseur de modèle (N16, décision `130fa134`)
+
+Un **harnais** exécute la session (Claude Code, Codex, un agent ACP, la boucle native) ; un
+**fournisseur de modèle** sert le modèle (Anthropic, OpenAI, DeepSeek, Ollama, vLLM…). Avant N16 les
+deux étaient fusionnés dans une instance. Ils se rencontrent par un **protocole** : le format de fil
+qu'un harnais parle à son modèle.
+
+| Harnais | Protocole consommé (`ProviderKind::model_protocols`) | Lien appliqué par `open_session` |
+|---|---|---|
+| `claude_code` | `anthropic_messages` | oui : `ANTHROPIC_BASE_URL` et la clé en variables explicites, l'autre variable d'authentification posée **vide** (§13.2) |
+| `native` | `openai_chat` | oui : provider composé sur l'endpoint du fournisseur de modèle ; identifiant résolu **pour le fournisseur de modèle** |
+| `codex` | `openai_responses` | non : `Unsupported { model_binding }` — la configuration de fournisseur personnalisé de Codex n'est pas vérifiée contre un vrai `app-server` |
+| `acp`, `scripted` | l'agent choisit son modèle | refusé : `ModelProtocolMismatch` avec `accepts` vide |
+
+- `SessionSpec.model_binding: Option<ModelBinding { provider, model }>` ; absent, `open_session` est
+  `get(harnais).open(spec)` **inchangé**. Un provider qui reçoit un lien directement (hors registre)
+  le refuse (`Unsupported { model_binding }`) plutôt que de l'ignorer.
+- `ProviderRegistry::{upsert_model_provider, remove_model_provider, model_provider,
+  list_model_providers, open_session}`. `anthropic` est intégré (API du fournisseur, première
+  partie) : il ne s'enlève pas et ne se redéfinit pas.
+- **Paire vérifiée avant tout lancement** : un protocole que le harnais ne consomme pas est
+  `ProviderError::ModelProtocolMismatch { harness, provider, protocol, accepts }` (HTTP 422, `kind`
+  `model_protocol_mismatch`), qui nomme les deux côtés.
+- **Modèle d'une session** : `spec.model` d'abord, puis `binding.model`, puis le défaut du
+  fournisseur de modèle (alias résolus).
+- **Identifiants et consentement suivent le fournisseur de modèle** : le `CredentialResolver` est
+  appelé avec l'id du fournisseur de modèle, jamais celui du harnais (grant `Provider(<id du
+  fournisseur de modèle>)`, A26). Le consentement par origine (A28) suit l'URL du fournisseur de
+  modèle : c'est au backend de le lier à cet id.
+- **Porte (A32)** : un fournisseur de modèle tiers est refusé tant que la porte de sécurité est
+  fermée (`Unsupported { security_gate }`) ; `anthropic` n'en a pas besoin.
+- **Lecture sans migration** : `ProviderInstanceConfig::model_provider()` lit le côté modèle d'une
+  instance existante (mêmes champs, vus comme un couple) ; `None` pour `acp` et `scripted`.
+- Un fournisseur de modèle ne porte aucun secret : `credential` est une référence, et un champ
+  inconnu (un `api_key` collé) est refusé.
+
+### 13.2 Mesure sur le vrai CLI Claude Code (2026-10-05, version 2.1.287)
+
+Pourquoi l'autre variable d'authentification est posée vide. `claude -p` lancé contre un serveur
+HTTP local qui capture les en-têtes (les valeurs ne sont comparées qu'à celles du test, jamais
+affichées) :
+
+| Cas | Variables | En-têtes reçus |
+|---|---|---|
+| A | `ANTHROPIC_BASE_URL` + `ANTHROPIC_AUTH_TOKEN` | `Authorization: Bearer <jeton>` seul |
+| B | `ANTHROPIC_BASE_URL` + `ANTHROPIC_API_KEY` | `x-api-key` seul |
+| C | jeton **et** une clé d'hôte présente | **les deux** : la clé de l'hôte part vers l'URL de base |
+| D | jeton et `ANTHROPIC_API_KEY=""` | `Authorization` seul : la valeur vide supprime l'en-tête |
+
+Le cas C est le risque : un Claude Code lié à une passerelle tierce enverrait la clé Anthropic de
+l'hôte à cette passerelle, parce que la politique d'environnement de Claude Code hérite les
+variables `ANTHROPIC_*`. Le cas D est le remède, appliqué par `open_session`. Rejouable :
+`cargo test --test real_claude_gateway -- --ignored` (nécessite `claude` installé ; aucune requête ne
+quitte la machine, l'URL de base est locale). **Non prouvé** : aucune passerelle réelle, aucun
+Bedrock ni Vertex.
+
 ## 14. Table `Message` (SDK) → `AgentEvent` → `ChatEvent` (backend)
 
 Relevée le 2026-10-05 sur `claude-code-sdk-rs/src/types.rs` (`Message`, `ContentBlock`,
@@ -836,7 +893,10 @@ jeton, `add_dirs` ← `extra_dirs`, `env` ← `EnvSpec.set`, `cli_path` ← exte
 ## 16. Versionnement et features cargo (A12, A14)
 
 - Historique : v1 (e15cd6e, 81ad207) ; **v2** = v1 + champ optionnel `done.error` (ajout compatible :
-  un pair v1 qui l'ignore reste correct).
+  un pair v1 qui l'ignore reste correct) ; **v3** = v2 + variante `ProviderError::ModelProtocolMismatch`
+  (kind `model_protocol_mismatch`, N16 ; ajout compatible : un pair v2 qui ne la connaît pas la traite
+  comme une erreur inconnue). Le fichier `tests/snapshots/agent_contract_v2.json` est conservé : le
+  backend et le frontend, tant qu'ils sont en v2, le copient comme fixture.
 - `agent::CONTRACT_VERSION: u32`. Monte de 1 à chaque changement d'une forme sérialisée
   (`AgentEvent`, `Capabilities`, `ProviderError`, `ToolPolicy`, `ResumeToken`) ou d'une signature de
   trait. Les instantanés JSON de `tests/agent_contract_snapshots.rs` portent la version : changer

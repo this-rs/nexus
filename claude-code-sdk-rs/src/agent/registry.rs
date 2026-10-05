@@ -78,9 +78,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::credentials::{CredentialRef, CredentialResolver, is_sensitive_name, redact};
+use super::model_provider::ModelProviderConfig;
 use super::{
-    AgentProvider, Capabilities, ContextWindow, ContextWindowSource, CostBasis, HealthStatus,
-    ModelInfo, ModelPrice, ProviderError, ProviderHealth, ProviderKind, Usage,
+    AgentProvider, AgentSession, Capabilities, ContextWindow, ContextWindowSource, CostBasis,
+    HealthStatus, ModelInfo, ModelPrice, ProviderError, ProviderHealth, ProviderKind, SessionSpec,
+    Usage,
 };
 use crate::model::{EndpointQuirks, PriceTable};
 use crate::providers::claude_code::{ClaudeCodeConfig, ClaudeCodeProvider};
@@ -333,13 +335,7 @@ impl ProviderInstanceConfig {
     /// (a value may be a credential pasted in the wrong field).
     pub fn validate(&self) -> Result<(), ProviderError> {
         let bad = |detail: &str| Err(ProviderError::invalid(detail));
-        if self.id.is_empty()
-            || self.id.len() > MAX_ID_LEN
-            || !self
-                .id
-                .chars()
-                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '_' | '-'))
-        {
+        if !valid_instance_id(&self.id) {
             return bad("instance id must be 1-64 characters of [a-z0-9_-]");
         }
         if self.id == BUILTIN_CLAUDE_CODE_ID && self.kind != ProviderKind::ClaudeCode {
@@ -473,6 +469,15 @@ impl ProviderInstanceConfig {
     }
 }
 
+/// Syntax of an instance id (and of a model provider id): 1-64 of `[a-z0-9_-]`.
+pub(crate) fn valid_instance_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= MAX_ID_LEN
+        && id
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '_' | '-'))
+}
+
 fn valid_model_name(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= 256
@@ -481,7 +486,7 @@ fn valid_model_name(name: &str) -> bool {
 
 /// Syntax of an endpoint URL, without a URL parser (the parser lives behind
 /// `provider-native`). The request-time guard (A36) does the rest.
-fn check_endpoint(raw: &str) -> Result<(), ProviderError> {
+pub(crate) fn check_endpoint(raw: &str) -> Result<(), ProviderError> {
     let bad = |detail: &str| Err(ProviderError::invalid(detail));
     let text = raw.trim();
     if text.chars().any(|c| c.is_whitespace() || c.is_control()) {
@@ -663,6 +668,8 @@ pub struct ProviderRegistry {
     gate: OnceLock<&'static str>,
     entries: Mutex<BTreeMap<String, Entry>>,
     factories: Mutex<HashMap<ProviderKind, KindFactory>>,
+    model_providers: Mutex<BTreeMap<String, Arc<ModelProviderConfig>>>,
+    composed: Mutex<BTreeMap<(String, String), BuiltProvider>>,
     #[cfg(feature = "provider-native")]
     transcripts: Mutex<Option<Arc<dyn crate::providers::native::TranscriptStore>>>,
 }
@@ -698,6 +705,14 @@ impl ProviderRegistry {
             gate: OnceLock::new(),
             entries: Mutex::new(entries),
             factories: Mutex::new(HashMap::new()),
+            model_providers: Mutex::new(BTreeMap::from([(
+                BUILTIN_ANTHROPIC_PROVIDER_ID.to_owned(),
+                Arc::new(ModelProviderConfig::new(
+                    BUILTIN_ANTHROPIC_PROVIDER_ID,
+                    super::model_provider::ModelProtocol::AnthropicMessages,
+                )),
+            )])),
+            composed: Mutex::new(BTreeMap::new()),
             #[cfg(feature = "provider-native")]
             transcripts: Mutex::new(None),
         }
@@ -783,6 +798,7 @@ impl ProviderRegistry {
                     built: None,
                 },
             );
+        self.clear_composed();
         Ok(())
     }
 
@@ -792,11 +808,14 @@ impl ProviderRegistry {
         if id == BUILTIN_CLAUDE_CODE_ID {
             return false;
         }
-        self.entries
+        let removed = self
+            .entries
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .remove(id)
-            .is_some()
+            .is_some();
+        self.clear_composed();
+        removed
     }
 
     /// The provider of an instance, built on first use and cached until the
@@ -1071,10 +1090,20 @@ impl ProviderRegistry {
         Err(ProviderError::unsupported("provider_acp"))
     }
 
-    #[cfg(feature = "provider-native")]
     fn build_native(
         &self,
         config: &ProviderInstanceConfig,
+    ) -> Result<BuiltProvider, ProviderError> {
+        self.build_native_for(config, &config.id)
+    }
+
+    /// `credential_owner` is the id the credential grant names: the instance itself for
+    /// a native instance of its own, the model provider for a composed one (N16).
+    #[cfg(feature = "provider-native")]
+    fn build_native_for(
+        &self,
+        config: &ProviderInstanceConfig,
+        credential_owner: &str,
     ) -> Result<BuiltProvider, ProviderError> {
         use crate::model::{OpenAiEndpoint, OpenAiEndpointConfig};
         use crate::providers::native::{NativeConfig, NativeProvider};
@@ -1083,7 +1112,7 @@ impl ProviderRegistry {
             .endpoint
             .clone()
             .ok_or_else(|| ProviderError::invalid("native requires an endpoint"))?;
-        let mut endpoint = OpenAiEndpointConfig::new(&config.id, base_url);
+        let mut endpoint = OpenAiEndpointConfig::new(credential_owner, base_url);
         endpoint.credential = config.credential.clone();
         endpoint.quirks = config.effective_quirks()?;
         endpoint.allow_private_network = config.extension_bool("allow_private_network");
@@ -1115,9 +1144,10 @@ impl ProviderRegistry {
     }
 
     #[cfg(not(feature = "provider-native"))]
-    fn build_native(
+    fn build_native_for(
         &self,
         _config: &ProviderInstanceConfig,
+        _credential_owner: &str,
     ) -> Result<BuiltProvider, ProviderError> {
         Err(ProviderError::unsupported("provider_native"))
     }
@@ -1171,6 +1201,252 @@ fn build_claude_code(config: &ProviderInstanceConfig) -> BuiltProvider {
         })
         .collect();
     BuiltProvider::new(Arc::new(ClaudeCodeProvider::new(claude)))
+}
+
+// ---------------------------------------------------------------------------
+// Model providers and the binding of a session to one (N16)
+// ---------------------------------------------------------------------------
+
+/// Id of the built-in model provider: Anthropic's own API, reached with no endpoint of
+/// the operator's. The only first-party one; it cannot be removed or redefined.
+pub const BUILTIN_ANTHROPIC_PROVIDER_ID: &str = "anthropic";
+
+impl ProviderInstanceConfig {
+    /// The model side of this instance, read as a model provider.
+    ///
+    /// An instance written before N16 fuses a harness and a model provider; this reads
+    /// the second out of it **without migrating anything**: the same fields, seen as the
+    /// pair `(kind, model provider)`. `None` for an agent that picks its own model
+    /// (`acp`, `scripted`).
+    pub fn model_provider(&self) -> Option<ModelProviderConfig> {
+        let protocol = self.kind.default_model_protocol()?;
+        let mut provider = ModelProviderConfig::new(self.id.clone(), protocol);
+        provider.endpoint = self.endpoint.clone();
+        provider.credential = self.credential.clone();
+        provider.preset = self.preset.clone();
+        provider.quirks = self.quirks.clone();
+        provider.default_model = self.default_model.clone();
+        provider.model_aliases = self.model_aliases.clone();
+        provider.context_window = self.context_window;
+        provider.cost_source = self.cost_source;
+        provider.prices = self.prices.clone();
+        if let Some(allow) = self.extensions.get("allow_private_network") {
+            provider
+                .extensions
+                .insert("allow_private_network".to_owned(), allow.clone());
+        }
+        Some(provider)
+    }
+}
+
+impl ProviderRegistry {
+    /// Adds a model provider or replaces the one with the same id.
+    ///
+    /// Refused: a third-party model provider before the security gate is open
+    /// (`Unsupported { security_gate }`, the A32 rule extended to the model side), an
+    /// invalid configuration, and a redefinition of the built-in `anthropic`.
+    pub fn upsert_model_provider(&self, config: ModelProviderConfig) -> Result<(), ProviderError> {
+        if config.id == BUILTIN_ANTHROPIC_PROVIDER_ID && !config.is_first_party() {
+            return Err(ProviderError::invalid(
+                "the id anthropic is reserved for Anthropic's own API",
+            ));
+        }
+        if !config.is_first_party() && !self.security_gate_active() {
+            return Err(ProviderError::unsupported(SECURITY_GATE_CAPABILITY));
+        }
+        config.validate()?;
+        self.model_providers
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(config.id.clone(), Arc::new(config));
+        self.clear_composed();
+        Ok(())
+    }
+
+    /// Removes a model provider. `false` when there is none, and for the built-in
+    /// `anthropic`.
+    pub fn remove_model_provider(&self, id: &str) -> bool {
+        if id == BUILTIN_ANTHROPIC_PROVIDER_ID {
+            return false;
+        }
+        let removed = self
+            .model_providers
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(id)
+            .is_some();
+        self.clear_composed();
+        removed
+    }
+
+    /// Configuration of one model provider.
+    pub fn model_provider(&self, id: &str) -> Option<ModelProviderConfig> {
+        self.model_providers
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(id)
+            .map(|config| (**config).clone())
+    }
+
+    /// Every model provider, built-in included, sorted by id. Never gated.
+    pub fn list_model_providers(&self) -> Vec<ModelProviderConfig> {
+        self.model_providers
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .values()
+            .map(|config| (**config).clone())
+            .collect()
+    }
+
+    fn clear_composed(&self) {
+        self.composed
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clear();
+    }
+
+    /// Opens a session on a harness instance, over the model provider the spec names.
+    ///
+    /// Without a [`ModelBinding`] this is `get(harness).open(spec)`, unchanged. With one,
+    /// **before anything starts**: the harness and the model provider are looked up, the
+    /// pair is checked against the protocols the harness consumes (a mismatch is
+    /// [`ProviderError::ModelProtocolMismatch`], naming both), then the binding is
+    /// applied the way that harness takes it:
+    ///
+    /// - `native`: a provider composed from the harness and the model provider's endpoint;
+    ///   the credential is resolved **for the model provider**, never for the harness.
+    /// - `claude_code`: `ANTHROPIC_BASE_URL` and the key reach the child as explicit
+    ///   variables, and the other authentication variable is set empty: the CLI sends
+    ///   both headers when both exist, which would hand the host's own Anthropic key to
+    ///   a third-party gateway (measured on the real CLI, 2.1.287).
+    /// - `codex`, `acp`, `scripted`: `Unsupported { model_binding }`. Codex consumes the
+    ///   Responses protocol, so a compatible pair passes the check, but writing its custom
+    ///   provider configuration is not verified against a real `app-server`.
+    ///
+    /// The session's own `model` wins; else the binding's; else the model provider's
+    /// default (aliases resolved).
+    pub async fn open_session(
+        &self,
+        harness_id: &str,
+        mut spec: SessionSpec,
+    ) -> Result<Arc<dyn AgentSession>, ProviderError> {
+        let Some(binding) = spec.model_binding.take() else {
+            return self.get(harness_id)?.open(spec).await;
+        };
+        let harness = self
+            .config(harness_id)
+            .ok_or_else(|| ProviderError::invalid("unknown provider instance"))?;
+        let provider = self
+            .model_provider(&binding.provider)
+            .ok_or_else(|| ProviderError::invalid("unknown model provider"))?;
+        super::model_provider::check_pair(harness_id, harness.kind, &provider)?;
+        if spec.model.is_none() {
+            spec.model = provider.resolve_model(&binding);
+        }
+        match harness.kind {
+            ProviderKind::Native => {
+                self.check_gate(harness.kind)?;
+                self.composed_native(&harness, &provider)?
+                    .provider
+                    .open(spec)
+                    .await
+            },
+            ProviderKind::ClaudeCode => {
+                self.bind_claude_code(&provider, &mut spec).await?;
+                self.get(harness_id)?.open(spec).await
+            },
+            _ => Err(ProviderError::unsupported("model_binding")),
+        }
+    }
+
+    /// The model provider's key, resolved for the model provider, into the variables a
+    /// Claude Code child takes.
+    async fn bind_claude_code(
+        &self,
+        provider: &ModelProviderConfig,
+        spec: &mut SessionSpec,
+    ) -> Result<(), ProviderError> {
+        if provider.is_first_party() {
+            return Ok(());
+        }
+        let Some(endpoint) = &provider.endpoint else {
+            return Ok(());
+        };
+        let api_key = provider
+            .extensions
+            .get("anthropic_auth")
+            .and_then(Value::as_str)
+            == Some("api_key");
+        let (used, shadowed) = if api_key {
+            ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")
+        } else {
+            ("ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY")
+        };
+        // The grant names the model provider: a harness cannot read a key meant for another.
+        let secret = self
+            .resolver
+            .resolve(&provider.id, &provider.credential)
+            .await?;
+        spec.env
+            .set
+            .insert("ANTHROPIC_BASE_URL".to_owned(), endpoint.clone());
+        spec.env.set.insert(
+            used.to_owned(),
+            secret.map(|s| s.expose().to_owned()).unwrap_or_default(),
+        );
+        spec.env.set.insert(shadowed.to_owned(), String::new());
+        Ok(())
+    }
+
+    #[cfg(feature = "provider-native")]
+    fn composed_native(
+        &self,
+        harness: &ProviderInstanceConfig,
+        provider: &ModelProviderConfig,
+    ) -> Result<BuiltProvider, ProviderError> {
+        let key = (harness.id.clone(), provider.id.clone());
+        if let Some(built) = self
+            .composed
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&key)
+        {
+            return Ok(built.clone());
+        }
+        let mut config = ProviderInstanceConfig::new(
+            format!("{}--{}", harness.id, provider.id),
+            ProviderKind::Native,
+        );
+        config.endpoint = provider.endpoint.clone();
+        config.credential = provider.credential.clone();
+        config.preset = provider.preset.clone();
+        config.quirks = provider.quirks.clone();
+        config.default_model = provider.default_model.clone();
+        config.model_aliases = provider.model_aliases.clone();
+        config.context_window = provider.context_window.or(harness.context_window);
+        config.cost_source = provider.cost_source;
+        config.prices = provider.prices.clone();
+        config.extensions = harness.extensions.clone();
+        config.extensions.extend(provider.extensions.clone());
+        // The key is resolved for the model provider, not for the composed instance.
+        let built = self.build_native_for(&config, &provider.id)?;
+        Ok(self
+            .composed
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .entry(key)
+            .or_insert(built)
+            .clone())
+    }
+
+    #[cfg(not(feature = "provider-native"))]
+    fn composed_native(
+        &self,
+        _harness: &ProviderInstanceConfig,
+        _provider: &ModelProviderConfig,
+    ) -> Result<BuiltProvider, ProviderError> {
+        Err(ProviderError::unsupported("provider_native"))
+    }
 }
 
 #[cfg(test)]
