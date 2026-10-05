@@ -18,10 +18,21 @@
 //!
 //! Control writes go through a clone of the CLI's stdin sender: the client is
 //! never locked while a turn runs, only for the time of `send_message`.
+//!
+//! # Cancellation and background tasks
+//!
+//! The CLI's tools are its child processes. `cancel_tools(all)` and
+//! `interrupt(turn_and_tools)` send `SIGINT` to the CLI's descendants and never
+//! to the CLI ([`super::cancel`]); `interrupt(turn_only)` only writes the
+//! interrupt request. A complete `tool_call` of `Bash { run_in_background }` or
+//! `Monitor` opens a background task ([`super::tasks`]); its process is claimed a
+//! second later from the descendants that appeared since, and every change to
+//! the table is followed by a complete `background_tasks` snapshot.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use futures::{Stream, StreamExt};
@@ -31,20 +42,23 @@ use tokio::task::JoinHandle;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use tracing::{debug, warn};
 
+use super::cancel;
 use super::control::{self, InboundControl, PermissionRequest};
 use super::map_events::{MapState, compaction_trigger, map_message, permission_event};
 use super::options::{ClaudeCodeConfig, build_options, ignored_extension_keys};
 use super::policy_map::{canonical_name, neutral_to_native, tool_category};
+use super::tasks::{TaskTable, task_from_tool_call};
 use crate::agent::{
-    AgentEvent, AgentProvider, AgentSession, CancelOutcome, CancelScope, Capabilities,
-    CompactionInfo, CompactionPhase, CostBasis, EventStream, HookVerdict, InterruptOutcome,
-    InterruptScope, ModelInfo, PermissionDecision, PermissionScope, PolicyMode, ProcessDiagnostic,
-    ProviderError, ProviderHealth, ProviderKind, QuestionAnswer, ResumeToken, SessionHooks,
-    SessionSpec, ToolCallInfo, ToolResultInfo, TurnInput,
+    AgentEvent, AgentProvider, AgentSession, BackgroundTaskStatus, CancelOutcome, CancelScope,
+    Capabilities, CompactionInfo, CompactionPhase, CostBasis, EventStream, HealthStatus,
+    HookVerdict, InterruptOutcome, InterruptScope, ModelInfo, PermissionDecision, PermissionScope,
+    PolicyMode, ProcessDiagnostic, ProviderError, ProviderHealth, ProviderKind, QuestionAnswer,
+    ResumeToken, SessionHooks, SessionSpec, TaskPhase, ToolCallInfo, ToolResultInfo, TurnInput,
+    now_ms,
 };
 use crate::errors::SdkError;
 use crate::interactive::{InteractiveClient, dispatch_hook_from_registry};
-use crate::transport::subprocess::{find_claude_cli, get_cli_version_with_policy};
+use crate::transport::subprocess::{find_claude_cli, get_cli_version_with_policy, min_cli_version};
 use crate::types::{
     ClaudeCodeOptions, HookCallback, HookContext, HookInput, HookJSONOutput, HookMatcher,
     HookSpecificOutput, Message, PostToolUseHookSpecificOutput, PreToolUseHookSpecificOutput,
@@ -53,6 +67,14 @@ use crate::types::{
 
 /// Capacity of the out-of-band buffer (contract §9).
 const OUT_OF_BAND_CAPACITY: usize = 1024;
+
+/// Delay between the two readings of the CLI's descendants that attribute a
+/// process to a background task (what the orchestrator's `async_pid_claim` did).
+const PID_CLAIM_DELAY: Duration = Duration::from_secs(1);
+
+/// How long `cancel_tools(task)` waits for a claim still in flight before it
+/// decides the task has no known process.
+const PID_CLAIM_WAIT: Duration = Duration::from_millis(2_500);
 
 /// Builds the client of a session from its options. The default spawns the CLI;
 /// a test kit substitutes an in-memory transport.
@@ -147,6 +169,7 @@ impl ClaudeCodeProvider {
         };
         let registry = client.hook_callbacks();
         let pid = client.child_pid().await;
+        *core.cli_pid.lock().unwrap_or_else(PoisonError::into_inner) = pid;
         let pump = tokio::spawn(pump(Arc::clone(&core), messages, control_rx, registry));
         Ok(Arc::new(ClaudeCodeSession {
             core,
@@ -186,7 +209,12 @@ impl AgentProvider for ClaudeCodeProvider {
         ProviderKind::ClaudeCode
     }
 
-    /// Whether the CLI is there, and its version. Never runs a login.
+    /// Whether the CLI is there, and its version. Never runs a login (A27).
+    ///
+    /// `cli_not_found` when the executable is missing; `degraded` with a
+    /// `detail` when its version is below the SDK's minimum (recent models are
+    /// gated on it); `ok` with the probed version otherwise, or with no version
+    /// when the probe says nothing.
     async fn health(&self) -> ProviderHealth {
         if self.factory.is_some() {
             // No executable behind a custom client.
@@ -205,7 +233,21 @@ impl AgentProvider for ClaudeCodeProvider {
             });
         }
         let version = get_cli_version_with_policy(&path, &self.config.env_policy).await;
-        ProviderHealth::ok(version.map(|version| version.to_string()))
+        let minimum = min_cli_version();
+        match version {
+            Some(version) if version < minimum => ProviderHealth {
+                status: HealthStatus::Degraded,
+                version: Some(version.to_string()),
+                detail: Some(format!(
+                    "Claude CLI {version} is below the minimum {minimum}: recent models may be \
+                     refused; upgrade with `claude update`"
+                )),
+                error: None,
+                login_hint: None,
+                checked_at_ms: now_ms(),
+            },
+            version => ProviderHealth::ok(version.map(|version| version.to_string())),
+        }
     }
 
     async fn catalog(&self) -> Result<Vec<ModelInfo>, ProviderError> {
@@ -263,9 +305,19 @@ struct State {
     tool_calls: HashSet<String>,
     session_started: bool,
     session_id: Option<String>,
+    /// The background tasks of the session (§4 `background_tasks`).
+    tasks: TaskTable,
+    /// Tasks whose process is being looked for (a claim in flight).
+    claims: HashSet<String>,
 }
 
 impl State {
+    /// Routes the complete table of background tasks.
+    fn route_tasks(&mut self) {
+        let tasks = self.tasks.snapshot();
+        self.route(AgentEvent::BackgroundTasks { tasks });
+    }
+
     /// Sends the event to its one destination.
     fn route(&mut self, event: AgentEvent) {
         if self.closed {
@@ -309,6 +361,8 @@ struct Core {
     shutdown: Notify,
     /// The CLI's stdin; `None` once the session is closed.
     stdin: Mutex<Option<mpsc::Sender<String>>>,
+    /// Process identifier of the CLI; `None` behind a transport without a process.
+    cli_pid: Mutex<Option<u32>>,
 }
 
 enum OutOfBandNext {
@@ -333,15 +387,71 @@ impl Core {
                 tool_calls: HashSet::new(),
                 session_started: false,
                 session_id: None,
+                tasks: TaskTable::new(),
+                claims: HashSet::new(),
             }),
             wake: Notify::new(),
             shutdown: Notify::new(),
             stdin: Mutex::new(None),
+            cli_pid: Mutex::new(None),
         }
     }
 
     fn lock(&self) -> MutexGuard<'_, State> {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn cli_pid(&self) -> Option<u32> {
+        *self.cli_pid.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Marks `killed` the tasks whose process is among `pids`, with a snapshot
+    /// when something changed.
+    fn mark_killed(&self, pids: &[u32]) {
+        if pids.is_empty() {
+            return;
+        }
+        let mut state = self.lock();
+        if state.tasks.mark_killed(pids) > 0 {
+            state.route_tasks();
+            drop(state);
+            self.wake.notify_waiters();
+        }
+    }
+
+    /// Looks for the process of a background task started by `task_id`: the
+    /// CLI's descendants are read now and again after [`PID_CLAIM_DELAY`]; the
+    /// youngest newcomer is the task's. Runs on its own task so the pump never
+    /// waits; needs a runtime, without one the pid simply stays unknown.
+    fn schedule_pid_claim(self: &Arc<Self>, task_id: String, cli_pid: u32) {
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        self.lock().claims.insert(task_id.clone());
+        let core = Arc::clone(self);
+        handle.spawn(async move {
+            let before = cancel::descendant_pids(cli_pid).await;
+            tokio::time::sleep(PID_CLAIM_DELAY).await;
+            let after = cancel::descendant_rows(cli_pid).await;
+            let claimed = cancel::claim_pid(&before, &after);
+            let mut state = core.lock();
+            state.claims.remove(&task_id);
+            match claimed {
+                Some(pid) if state.tasks.set_pid(&task_id, pid) => state.route_tasks(),
+                Some(_) => {},
+                None => debug!(%task_id, "no new descendant of the CLI to attribute to the task"),
+            }
+            drop(state);
+            core.wake.notify_waiters();
+        });
+    }
+
+    /// Waits for a claim in flight on `task_id`, at most [`PID_CLAIM_WAIT`].
+    async fn await_pid_claim(&self, task_id: &str) {
+        let deadline = tokio::time::Instant::now() + PID_CLAIM_WAIT;
+        while self.lock().claims.contains(task_id) && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
     }
 
     fn emit(&self, event: AgentEvent) {
@@ -377,7 +487,7 @@ impl Core {
     }
 
     /// One message of the CLI: projected, post-processed, routed.
-    fn on_message(&self, message: &Message) {
+    fn on_message(self: &Arc<Self>, message: &Message) {
         let mut state = self.lock();
         let mut events = map_message(message, &mut state.map);
         if !self.capabilities.background_tasks
@@ -398,8 +508,51 @@ impl Core {
                 data: data.clone(),
             }];
         }
+        let tasks = self.capabilities.background_tasks;
+        let mut claims: Vec<String> = Vec::new();
         for event in events {
+            // What the event does to the table of background tasks (A5); the
+            // snapshot that follows the event is routed after it.
+            let mut snapshot_after = false;
             let event = match event {
+                AgentEvent::ToolCall {
+                    ref id,
+                    ref name,
+                    ref input,
+                    input_complete: true,
+                    ref parent,
+                    ..
+                } if tasks => {
+                    if let Some(task) =
+                        task_from_tool_call(id, name, input, parent.as_deref(), now_ms())
+                    {
+                        state.tasks.start(task);
+                        snapshot_after = true;
+                        claims.push(id.clone());
+                    }
+                    event
+                },
+                AgentEvent::BackgroundTasks { tasks: reported } if tasks => {
+                    // The CLI's own report, merged: the snapshot IS the event.
+                    state.tasks.merge(reported);
+                    AgentEvent::BackgroundTasks {
+                        tasks: state.tasks.snapshot(),
+                    }
+                },
+                AgentEvent::TaskUpdate {
+                    phase: TaskPhase::Notification,
+                    ref task_id,
+                    ref tool_call_id,
+                    ref status,
+                    ..
+                } if tasks => {
+                    snapshot_after = state.tasks.apply_notification(
+                        task_id.as_deref(),
+                        tool_call_id.as_deref(),
+                        status.as_deref(),
+                    );
+                    event
+                },
                 AgentEvent::SessionStarted {
                     provider_session_id,
                     ..
@@ -439,9 +592,17 @@ impl Core {
                 other => other,
             };
             state.route(event);
+            if snapshot_after {
+                state.route_tasks();
+            }
         }
         drop(state);
         self.wake.notify_waiters();
+        if let Some(cli_pid) = self.cli_pid() {
+            for task_id in claims {
+                self.schedule_pid_claim(task_id, cli_pid);
+            }
+        }
     }
 
     /// The CLI's message stream ended without `close()`: the process is gone.
@@ -854,12 +1015,11 @@ impl AgentSession for ClaudeCodeSession {
         Err(ProviderError::unsupported("answer_question"))
     }
 
-    /// Writes the interrupt request (§15.5) on the CLI's stdin.
-    ///
-    /// In this slice both scopes write the same thing: signalling the CLI's
-    /// descendants (what makes `turn_and_tools` differ from `turn_only`) comes
-    /// with the tracking of its process tree, and `tools_cancelled` is 0.
-    async fn interrupt(&self, _scope: InterruptScope) -> Result<InterruptOutcome, ProviderError> {
+    /// Writes the interrupt request (§15.5) on the CLI's stdin; with
+    /// `turn_and_tools`, also sends `SIGINT` to the CLI's descendants (the
+    /// tools it is running), never to the CLI. `turn_only` leaves every process
+    /// alone: background work survives the end of the turn.
+    async fn interrupt(&self, scope: InterruptScope) -> Result<InterruptOutcome, ProviderError> {
         {
             let mut state = self.core.lock();
             Core::check_usable(&state)?;
@@ -872,20 +1032,88 @@ impl AgentSession for ClaudeCodeSession {
             self.core.lock().map.set_interrupt_requested(false);
             return Err(error);
         }
+        let killed = match (scope, self.pid) {
+            (InterruptScope::TurnAndTools, Some(pid)) => {
+                cancel::signal_descendants(pid, cancel::SIGINT).await
+            },
+            _ => Vec::new(),
+        };
+        self.core.mark_killed(&killed);
         Ok(InterruptOutcome {
             turn_interrupted: true,
-            tools_cancelled: 0,
+            tools_cancelled: u32::try_from(killed.len()).unwrap_or(u32::MAX),
             diagnostic: self.pid.map(|pid| ProcessDiagnostic {
                 pid: Some(pid),
-                killed_pids: Vec::new(),
+                killed_pids: killed,
             }),
         })
     }
 
-    /// `Unsupported { tool_cancel }` in this slice.
-    async fn cancel_tools(&self, _scope: CancelScope) -> Result<CancelOutcome, ProviderError> {
+    /// Stops tools without ending the turn (§10, A6).
+    ///
+    /// `all`: `SIGINT` to every descendant of the CLI, the CLI untouched; the
+    /// turn goes on to its own `done` once the CLI has reported the cut tools.
+    /// `task { id }`: `SIGINT` to the subtree of that background task's process,
+    /// then the task is `killed` and a snapshot follows. An unknown task is
+    /// `invalid_request`; a task whose process was never found (the claim found
+    /// no newcomer, or there is no process behind this transport) is left as it
+    /// is and `tools_cancelled` is 0 — never a `killed` nothing was sent to.
+    async fn cancel_tools(&self, scope: CancelScope) -> Result<CancelOutcome, ProviderError> {
         self.usable()?;
-        Err(ProviderError::unsupported("tool_cancel"))
+        let diagnostic = |killed: Vec<u32>| {
+            Some(ProcessDiagnostic {
+                pid: self.pid,
+                killed_pids: killed,
+            })
+        };
+        match scope {
+            CancelScope::All => {
+                let killed = match self.pid {
+                    Some(pid) => cancel::signal_descendants(pid, cancel::SIGINT).await,
+                    None => Vec::new(),
+                };
+                self.core.mark_killed(&killed);
+                Ok(CancelOutcome {
+                    tools_cancelled: u32::try_from(killed.len()).unwrap_or(u32::MAX),
+                    diagnostic: diagnostic(killed),
+                })
+            },
+            CancelScope::Task { id } => {
+                if self.core.lock().tasks.get(&id).is_none() {
+                    return Err(ProviderError::invalid(format!(
+                        "unknown background task `{id}`"
+                    )));
+                }
+                self.core.await_pid_claim(&id).await;
+                let target = {
+                    let state = self.core.lock();
+                    Core::check_usable(&state)?;
+                    state.tasks.get(&id).and_then(|task| task.pid)
+                };
+                let Some(target) = target else {
+                    debug!(task = %id, "background task without a known process: nothing signalled");
+                    return Ok(CancelOutcome {
+                        tools_cancelled: 0,
+                        diagnostic: diagnostic(Vec::new()),
+                    });
+                };
+                let killed = cancel::signal_subtree(target).await;
+                {
+                    let mut state = self.core.lock();
+                    if state.tasks.set_status(&id, BackgroundTaskStatus::Killed) {
+                        state.route_tasks();
+                    }
+                }
+                self.core.wake.notify_waiters();
+                Ok(CancelOutcome {
+                    tools_cancelled: 1,
+                    diagnostic: diagnostic(killed),
+                })
+            },
+            // `CancelScope` is `#[non_exhaustive]`.
+            #[allow(unreachable_patterns)]
+            _ => Err(ProviderError::unsupported("cancel_scope")),
+        }
     }
 
     async fn set_model(&self, model: &str) -> Result<(), ProviderError> {
@@ -1119,7 +1347,10 @@ mod tests {
 
     #[test]
     fn task_messages_travel_as_notices_while_background_tasks_is_absent() {
-        let core = core();
+        // A core declaring the capability absent (§5 fallback).
+        let mut capabilities = ClaudeCodeConfig::default().capabilities(None);
+        capabilities.background_tasks = false;
+        let core = Arc::new(Core::new(capabilities, CostBasis::Reported));
         assert!(!core.capabilities.background_tasks);
         for subtype in ["task_started", "background_tasks_changed"] {
             core.on_message(&Message::System {
@@ -1142,6 +1373,118 @@ mod tests {
             );
         }
         assert_eq!(state.map.seq(), 2, "the messages are still numbered");
+    }
+
+    fn tool_use(id: &str, name: &str, input: Value) -> Message {
+        Message::Assistant {
+            message: crate::types::AssistantMessage {
+                content: vec![crate::types::ContentBlock::ToolUse(
+                    crate::types::ToolUseContent {
+                        id: id.to_owned(),
+                        name: name.to_owned(),
+                        input,
+                    },
+                )],
+            },
+            parent_tool_use_id: None,
+        }
+    }
+
+    fn snapshots(events: &[AgentEvent]) -> Vec<Vec<(String, BackgroundTaskStatus)>> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                AgentEvent::BackgroundTasks { tasks } => Some(
+                    tasks
+                        .iter()
+                        .map(|task| (task.id.clone(), task.status))
+                        .collect(),
+                ),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A5: the table is fed by the tool calls, the CLI's report and the terminal
+    /// notifications; every change is followed by the COMPLETE table.
+    #[test]
+    fn background_tasks_are_a_complete_snapshot_after_every_change() {
+        let core = core();
+        assert!(core.capabilities.background_tasks);
+        core.on_message(&tool_use("toolu_fg", "Bash", json!({"command": "ls"})));
+        core.on_message(&tool_use(
+            "toolu_bg",
+            "Bash",
+            json!({"command": "sleep 30", "run_in_background": true, "description": "nap"}),
+        ));
+        core.on_message(&tool_use(
+            "toolu_mon",
+            "Monitor",
+            json!({"description": "watch"}),
+        ));
+        core.on_message(&Message::System {
+            subtype: "background_tasks_changed".to_owned(),
+            data: json!({"tasks": [{"id": "agent-1", "type": "agent", "description": "explore", "status": "running"}]}),
+        });
+        core.on_message(&Message::System {
+            subtype: "task_progress".to_owned(),
+            data: json!({"task_id": "toolu_bg", "status": "running"}),
+        });
+        core.on_message(&Message::System {
+            subtype: "task_notification".to_owned(),
+            data: json!({"task_id": "toolu_bg", "status": "completed", "summary": "slept"}),
+        });
+        let state = core.lock();
+        let events: Vec<AgentEvent> = state.out_of_band.iter().cloned().collect();
+        let names: Vec<&str> = events.iter().map(AgentEvent::type_name).collect();
+        assert_eq!(
+            names,
+            [
+                "tool_call",        // foreground: no task
+                "tool_call",        // background Bash
+                "background_tasks", // … followed by the table
+                "tool_call",        // Monitor
+                "background_tasks",
+                "background_tasks", // the CLI's report, merged
+                "task_update",      // progress: typed, no change to the table
+                "task_update",      // notification …
+                "background_tasks", // … completed
+            ]
+        );
+        use BackgroundTaskStatus::{Completed, Running};
+        assert_eq!(
+            snapshots(&events),
+            [
+                vec![("toolu_bg".to_owned(), Running)],
+                vec![
+                    ("toolu_bg".to_owned(), Running),
+                    ("toolu_mon".to_owned(), Running)
+                ],
+                vec![
+                    ("toolu_bg".to_owned(), Running),
+                    ("toolu_mon".to_owned(), Running),
+                    ("agent-1".to_owned(), Running)
+                ],
+                vec![
+                    ("toolu_bg".to_owned(), Completed),
+                    ("toolu_mon".to_owned(), Running),
+                    ("agent-1".to_owned(), Running)
+                ],
+            ]
+        );
+        assert!(matches!(
+            &events[6],
+            AgentEvent::TaskUpdate { phase: TaskPhase::Progress, task_id: Some(id), .. } if id == "toolu_bg"
+        ));
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, AgentEvent::ProviderNotice { .. })),
+            "no task message travels as a notice when the capability is declared"
+        );
+        // Without a runtime no claim was scheduled: the pids stay unknown.
+        assert!(state.claims.is_empty());
+        assert!(state.tasks.snapshot().iter().all(|task| task.pid.is_none()));
     }
 
     #[tokio::test]

@@ -65,6 +65,10 @@
 //!   that event. Optional: `"tool_use_id":"..."`, `"await_response":true` (then
 //!   block until a stdin line containing the `request_id` arrives), `"optional":true`
 //!   (do nothing, instead of failing, when no callback was captured for the event).
+//! * `{"op":"spawn_child","program":"sleep","args":["600"]}` — start a real child
+//!   process (the fake's "tool"), kept until it exits; default `sleep 600`.
+//! * `{"op":"wait_children_exit"}` — block until every spawned child has exited
+//!   (e.g. been signalled). Optional `"timeout_ms"`, `"optional":true`.
 //! * `{"op":"exit","code":N}` — flush and exit with that code (default 0).
 //!
 //! When the transcript runs out the fake exits 0, which closes stdout and ends the
@@ -140,6 +144,7 @@ fn main() {
         rx,
         default_timeout: Duration::from_millis(env_u64("FAKE_CLAUDE_STDIN_TIMEOUT_MS", 10_000)),
         hooks: BTreeMap::new(),
+        children: Vec::new(),
     };
 
     match std::env::var("FAKE_CLAUDE_TRANSCRIPT") {
@@ -157,6 +162,10 @@ fn main() {
         Err(_) => fake.replay(DEFAULT_TRANSCRIPT),
     }
 
+    for child in &mut fake.children {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
     let _ = fake.out.flush();
 }
 
@@ -292,6 +301,9 @@ struct Fake {
     /// Hook callback ids registered by the SDK's `initialize` request, by event
     /// name. Filled by the `capture_hooks` directive.
     hooks: BTreeMap<String, Vec<String>>,
+    /// Processes started by `spawn_child`: the fake's own "tools", so a test can
+    /// signal them the way it signals a real CLI's.
+    children: Vec<std::process::Child>,
 }
 
 impl Fake {
@@ -368,6 +380,50 @@ impl Fake {
                             );
                         },
                     }
+                }
+            },
+            "spawn_child" => {
+                let program = d.get("program").and_then(Value::as_str).unwrap_or("sleep");
+                let args: Vec<String> = d
+                    .get("args")
+                    .and_then(Value::as_array)
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|v| v.as_str().map(str::to_owned))
+                            .collect()
+                    })
+                    .unwrap_or_else(|| vec!["600".to_owned()]);
+                match std::process::Command::new(program)
+                    .args(&args)
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
+                    .spawn()
+                {
+                    Ok(child) => self.children.push(child),
+                    Err(e) => die(
+                        EXIT_BAD_DIRECTIVE,
+                        &format!("transcript line {lineno}: spawn_child failed: {e}"),
+                    ),
+                }
+            },
+            "wait_children_exit" => {
+                let deadline = std::time::Instant::now() + self.timeout(d);
+                loop {
+                    self.children
+                        .retain_mut(|child| !matches!(child.try_wait(), Ok(Some(_))));
+                    if self.children.is_empty() {
+                        return;
+                    }
+                    if std::time::Instant::now() >= deadline {
+                        if optional(d) {
+                            return;
+                        }
+                        die(
+                            EXIT_STDIN_TIMEOUT,
+                            &format!("transcript line {lineno}: wait_children_exit timed out"),
+                        );
+                    }
+                    std::thread::sleep(Duration::from_millis(20));
                 }
             },
             "exit" => {

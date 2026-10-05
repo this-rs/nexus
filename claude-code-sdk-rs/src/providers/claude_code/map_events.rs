@@ -14,9 +14,9 @@ use super::control::PermissionRequest;
 use super::error_map::classify_result_error;
 use super::policy_map::{canonical_name, native_to_neutral, tool_category};
 use crate::agent::{
-    AgentEvent, BackgroundTask, BackgroundTaskKind, BackgroundTaskStatus, CompactionPhase,
-    CompactionTrigger, Cost, CostBasis, DeltaKind, McpServerStatus, ModelUsage, PermissionScope,
-    QuestionOption, QuestionReply, QuestionSpec, StopReason, TaskPhase, ToolOutput, Usage,
+    AgentEvent, BackgroundTask, BackgroundTaskKind, CompactionPhase, CompactionTrigger, Cost,
+    CostBasis, DeltaKind, McpServerStatus, ModelUsage, PermissionScope, QuestionOption,
+    QuestionReply, QuestionSpec, StopReason, TaskPhase, ToolOutput, Usage,
 };
 use crate::types::{ContentBlock, ContentValue, Message, StreamDelta, StreamEventData};
 
@@ -419,12 +419,7 @@ fn background_task(task: &Value) -> Option<BackgroundTask> {
         "agent" | "subagent" | "task" | "local_agent" => BackgroundTaskKind::Agent,
         _ => BackgroundTaskKind::Other,
     };
-    let status = match str_at(task, &["status"]).unwrap_or_default() {
-        "completed" | "done" | "success" => BackgroundTaskStatus::Completed,
-        "failed" | "error" => BackgroundTaskStatus::Failed,
-        "killed" | "cancelled" | "canceled" | "stopped" => BackgroundTaskStatus::Killed,
-        _ => BackgroundTaskStatus::Running,
-    };
+    let status = super::tasks::parse_status(str_at(task, &["status"]).unwrap_or_default());
     Some(BackgroundTask {
         id: owned_at(task, &["id", "task_id"])?,
         kind,
@@ -554,6 +549,7 @@ pub fn permission_event(request: &PermissionRequest, state: &MapState) -> AgentE
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::BackgroundTaskStatus;
     use crate::agent::{PolicyMode, ToolCategory};
 
     fn message(value: Value) -> Message {

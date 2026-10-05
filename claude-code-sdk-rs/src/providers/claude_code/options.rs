@@ -81,12 +81,13 @@ impl ClaudeCodeConfig {
     /// Capabilities of this instance for a model (`None`: the default model):
     /// the "Claude Code" column of contract §5.
     ///
-    /// Three values differ from that column **in this slice**, each with its
-    /// fallback verified by the conformance suite: `tool_cancel` and
-    /// `background_tasks` are `false` until the adapter tracks the CLI's
-    /// descendants, and `images` is `false` in v1 (A12). `secret_isolation` is
-    /// declared only when the instance really isolates: an allowlist
-    /// environment **and** the MCP configuration off the command line.
+    /// One value differs from that column, its fallback verified by the
+    /// conformance suite: `images` is `false` in v1 (A12). `tool_cancel` and
+    /// `background_tasks` are declared: the session signals the CLI's
+    /// descendants ([`super::cancel`]) and keeps a table of background tasks
+    /// ([`super::tasks`]). `secret_isolation` is declared only when the instance
+    /// really isolates: an allowlist environment **and** the MCP configuration
+    /// off the command line.
     pub fn capabilities(&self, model: Option<&str>) -> Capabilities {
         let model = model.or(self.default_model.as_deref());
         let mut capabilities = Capabilities::none();
@@ -111,8 +112,8 @@ impl ClaudeCodeConfig {
             .or(self.context_window);
         capabilities.set_model_live = true;
         capabilities.native_question = true;
-        capabilities.tool_cancel = false;
-        capabilities.background_tasks = false;
+        capabilities.tool_cancel = true;
+        capabilities.background_tasks = true;
         capabilities.resume = true;
         capabilities.cost = self.cost_basis;
         capabilities
@@ -174,8 +175,9 @@ fn mcp_config(server: &McpServerSpec) -> Result<McpServerConfig, ProviderError> 
 /// Not carried: `spec.hooks` (attached by the session, which owns the callbacks),
 /// `spec.lineage`, and the limits other than `max_cost_usd` (`--max-budget-usd`),
 /// which this adapter does not enforce. A native mode outside the SDK's
-/// `PermissionMode` (`auto`, `dontAsk`, `manual`) starts in the closest of the
-/// four modes; see [`NativePolicy::native_override`](super::policy_map::NativePolicy::native_override).
+/// `PermissionMode` (`auto`, `dontAsk`, `manual`) is written verbatim to
+/// `--permission-mode` through `ClaudeCodeOptions::permission_mode_native`; see
+/// [`NativePolicy::native_override`](super::policy_map::NativePolicy::native_override).
 pub fn build_options(
     config: &ClaudeCodeConfig,
     spec: &SessionSpec,
@@ -197,6 +199,9 @@ pub fn build_options(
     }
     let mut options = builder.build();
 
+    // The six modes at launch (§6): `auto`, `dontAsk`, `manual` go on the
+    // command line as themselves, the four others through the enum.
+    options.permission_mode_native = policy.native_override;
     options.model = spec.model.clone().or_else(|| config.default_model.clone());
     if let Some(turns) = spec.max_turns {
         options.max_turns = Some(i32::try_from(turns).unwrap_or(i32::MAX));
@@ -309,8 +314,8 @@ mod tests {
                 "tools": true,
                 "set_model_live": true,
                 "native_question": true,
-                "tool_cancel": false,
-                "background_tasks": false,
+                "tool_cancel": true,
+                "background_tasks": true,
                 "resume": true,
                 "cost": "reported",
             })
@@ -365,6 +370,7 @@ mod tests {
         .unwrap();
         assert_eq!(options.cwd, Some(PathBuf::from("/work")));
         assert_eq!(options.permission_mode, PermissionMode::Default);
+        assert_eq!(options.permission_mode_native, None);
         assert_eq!(
             options.permission_prompt_tool_name.as_deref(),
             Some("stdio")
@@ -466,6 +472,43 @@ mod tests {
             options.mcp_servers.get("remote"),
             Some(McpServerConfig::Http { headers: None, .. })
         ));
+    }
+
+    /// Table of §6: the three modes the enum cannot name reach the options as a
+    /// native string; the four others leave it `None`.
+    #[test]
+    fn the_six_modes_reach_the_options_at_launch() {
+        for (mode, native, launch) in [
+            (PolicyMode::AutoEdits, "auto", PermissionMode::AcceptEdits),
+            (PolicyMode::Ask, "dontAsk", PermissionMode::Default),
+            (PolicyMode::Ask, "manual", PermissionMode::Default),
+        ] {
+            let mut spec = SessionSpec::new("/work");
+            spec.policy = ToolPolicy::new(mode);
+            spec.policy.native_mode = Some(native.to_owned());
+            let options = build_options(&ClaudeCodeConfig::default(), &spec, None).unwrap();
+            assert_eq!(options.permission_mode, launch, "{native}");
+            assert_eq!(options.permission_mode_native.as_deref(), Some(native));
+        }
+        for (mode, launch) in [
+            (PolicyMode::PlanOnly, PermissionMode::Plan),
+            (PolicyMode::Ask, PermissionMode::Default),
+            (PolicyMode::AutoEdits, PermissionMode::AcceptEdits),
+            (PolicyMode::Trust, PermissionMode::BypassPermissions),
+        ] {
+            let mut spec = SessionSpec::new("/work");
+            spec.policy = ToolPolicy::new(mode);
+            let options = build_options(&ClaudeCodeConfig::default(), &spec, None).unwrap();
+            assert_eq!(options.permission_mode, launch);
+            assert_eq!(options.permission_mode_native, None, "{mode:?}");
+        }
+        // A native string of another neutral mode never escalates at launch.
+        let mut spec = SessionSpec::new("/work");
+        spec.policy = ToolPolicy::new(PolicyMode::Ask);
+        spec.policy.native_mode = Some("bypassPermissions".to_owned());
+        let options = build_options(&ClaudeCodeConfig::default(), &spec, None).unwrap();
+        assert_eq!(options.permission_mode, PermissionMode::Default);
+        assert_eq!(options.permission_mode_native, None);
     }
 
     #[test]

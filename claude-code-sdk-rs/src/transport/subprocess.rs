@@ -132,6 +132,12 @@ pub async fn get_cli_version(cli_path: &std::path::Path) -> Option<SemVer> {
     get_cli_version_with_policy(cli_path, &super::spawn::EnvPolicy::InheritAll).await
 }
 
+/// The oldest CLI version this SDK is known to work with ([`MIN_CLI_VERSION`]),
+/// for a caller that reports a health check rather than a warning.
+pub(crate) fn min_cli_version() -> SemVer {
+    SemVer::new(MIN_CLI_VERSION.0, MIN_CLI_VERSION.1, MIN_CLI_VERSION.2)
+}
+
 /// [`get_cli_version`] with the environment policy of the session about to start:
 /// the version probe runs the same executable, so it gets the same isolation.
 pub(crate) async fn get_cli_version_with_policy(
@@ -545,20 +551,26 @@ impl SubprocessTransport {
                 .arg(self.options.disallowed_tools.join(","));
         }
 
-        // Permission mode
-        match self.options.permission_mode {
-            PermissionMode::Default => {
-                cmd.arg("--permission-mode").arg("default");
-            },
-            PermissionMode::AcceptEdits => {
-                cmd.arg("--permission-mode").arg("acceptEdits");
-            },
-            PermissionMode::Plan => {
-                cmd.arg("--permission-mode").arg("plan");
-            },
-            PermissionMode::BypassPermissions => {
-                cmd.arg("--permission-mode").arg("bypassPermissions");
-            },
+        // Permission mode. A native string (one of the CLI's modes the enum
+        // cannot name: `auto`, `dontAsk`, `manual`) is written verbatim and
+        // replaces the enum; without one the enum is rendered as always.
+        if let Some(native) = &self.options.permission_mode_native {
+            cmd.arg("--permission-mode").arg(native);
+        } else {
+            match self.options.permission_mode {
+                PermissionMode::Default => {
+                    cmd.arg("--permission-mode").arg("default");
+                },
+                PermissionMode::AcceptEdits => {
+                    cmd.arg("--permission-mode").arg("acceptEdits");
+                },
+                PermissionMode::Plan => {
+                    cmd.arg("--permission-mode").arg("plan");
+                },
+                PermissionMode::BypassPermissions => {
+                    cmd.arg("--permission-mode").arg("bypassPermissions");
+                },
+            }
         }
 
         // Model
@@ -2072,6 +2084,36 @@ mod tests {
                 "{mode:?} must reach the CLI as {expected:?}"
             );
         }
+    }
+
+    /// A native mode string is written verbatim to `--permission-mode` and
+    /// replaces the enum; `None` leaves the enum rendering untouched.
+    #[test]
+    fn build_command_writes_a_native_permission_mode_verbatim() {
+        for native in ["auto", "dontAsk", "manual"] {
+            let args = args_for(
+                ClaudeCodeOptions::builder()
+                    .permission_mode(PermissionMode::AcceptEdits)
+                    .permission_mode_native(native)
+                    .build(),
+            );
+            assert_eq!(value_after(&args, "--permission-mode"), Some(native));
+            assert_eq!(
+                occurrences(&args, "--permission-mode"),
+                1,
+                "the native string replaces the enum, it is not added to it"
+            );
+        }
+        let witness = args_for(
+            ClaudeCodeOptions::builder()
+                .permission_mode(PermissionMode::AcceptEdits)
+                .build(),
+        );
+        assert_eq!(
+            value_after(&witness, "--permission-mode"),
+            Some("acceptEdits"),
+            "without a native string the enum is rendered as before"
+        );
     }
 
     /// `system_prompt_v2` replaces the deprecated pair outright: when it is set

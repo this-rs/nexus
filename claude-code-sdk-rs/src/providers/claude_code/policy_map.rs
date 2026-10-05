@@ -82,12 +82,10 @@ pub struct NativePolicy {
     /// `Some` when [`NativePolicy::native_mode`] is one of the modes the SDK's
     /// [`PermissionMode`] cannot express (`auto`, `dontAsk`, `manual`).
     ///
-    /// **Not applied at launch yet**: `SubprocessTransport::build_command` only
-    /// renders the four values of [`PermissionMode`], so a session asked for
-    /// `auto` starts in `acceptEdits` (and `dontAsk` / `manual` in `default`).
-    /// Carrying the six modes to the command line is the next slice; the value is
-    /// returned here so that slice has nothing to recompute. At run time the six
-    /// modes already work: `set_policy_mode` writes the string as is.
+    /// Applied at launch by `build_options`, which copies it to
+    /// `ClaudeCodeOptions::permission_mode_native`: `build_command` then writes
+    /// the string verbatim to `--permission-mode` in place of the enum. At run
+    /// time `set_policy_mode` writes the string as is.
     pub native_override: Option<String>,
     /// `ToolPolicy::allow`, in Claude Code's `Tool(glob)` syntax.
     pub allowed_tools: Vec<String>,

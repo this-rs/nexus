@@ -36,7 +36,12 @@ impl From<SdkError> for ProviderError {
 /// - overloaded (`overloaded_error`, HTTP 529) → [`ProviderError::Overloaded`] ;
 /// - rate limit (`rate_limit_error`, HTTP 429) → [`ProviderError::RateLimited`] ;
 /// - "prompt is too long" → [`ProviderError::ContextTooSmall`] ;
-/// - HTTP 401 / `authentication_error` / invalid API key → [`ProviderError::Unauthorized`].
+/// - HTTP 401 / `authentication_error` / invalid API key → [`ProviderError::Unauthorized`] ;
+/// - the CLI itself is not logged in ("not logged in", "please log in", "login
+///   required"…) → [`ProviderError::AuthRequired`] with `login_hint: "claude login"`
+///   (A29: a human runs it, never the orchestrator). An invalid API key stays
+///   `unauthorized` even when the CLI suggests `/login`: the credential exists
+///   and is wrong, a login would not fix it.
 ///
 /// `None` for any other text: the turn then ends with its `done`, error flag set.
 pub fn classify_result_error(text: &str) -> Option<ProviderError> {
@@ -65,8 +70,25 @@ pub fn classify_result_error(text: &str) -> Option<ProviderError> {
     {
         return Some(ProviderError::Unauthorized);
     }
+    if has("not logged in")
+        || has("please log in")
+        || has("please login")
+        || has("login required")
+        || has("not authenticated")
+        || has("authentication required")
+        || has("claude login")
+        || has("run /login")
+    {
+        return Some(ProviderError::AuthRequired {
+            login_hint: Some(LOGIN_HINT.to_owned()),
+        });
+    }
     None
 }
+
+/// What a human runs when the CLI is not logged in (A27: never run by the
+/// orchestrator).
+pub const LOGIN_HINT: &str = "claude login";
 
 #[cfg(test)]
 mod tests {
@@ -160,6 +182,28 @@ mod tests {
         );
         assert_eq!(classify_result_error("the build failed"), None);
         assert_eq!(classify_result_error(""), None);
+    }
+
+    #[test]
+    fn a_cli_that_is_not_logged_in_asks_for_a_login_and_names_the_command() {
+        let expected = Some(ProviderError::AuthRequired {
+            login_hint: Some("claude login".into()),
+        });
+        assert_eq!(
+            classify_result_error("Not logged in · Please run /login"),
+            expected
+        );
+        assert_eq!(
+            classify_result_error("Error: not authenticated. Run `claude login` first."),
+            expected
+        );
+        assert_eq!(classify_result_error("Login required"), expected);
+        // A wrong key is `unauthorized`, whatever the CLI suggests next.
+        assert_eq!(
+            classify_result_error("Invalid API key · Please run /login"),
+            Some(ProviderError::Unauthorized)
+        );
+        assert!(!classify_result_error("not logged in").unwrap().retryable());
     }
 
     #[test]

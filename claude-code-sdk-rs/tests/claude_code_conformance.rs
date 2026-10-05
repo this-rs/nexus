@@ -143,19 +143,38 @@ fn transcript_for(scenario: Scenario) -> Transcript {
         | Scenario::ChangementPolitique
         | Scenario::Reprise
         | Scenario::FinUsageCout
-        | Scenario::AnnulationTourPreserve
         | Scenario::MessageImages => answer(begin(scenario), "bonjour"),
-        // Fallback of `background_tasks`: the CLI does report tasks, and the
-        // session must not turn them into `task_update` / `background_tasks`.
-        Scenario::AnnulationTache => answer(
+        // A tool is a real child process of the fake; cancelling the tools
+        // signals it, the tool ends in error and the turn goes on to its end.
+        Scenario::AnnulationTourPreserve => answer(
             begin(scenario)
-                .system("task_started", json!({"task_id": "t1", "uuid": "evt-1"}))
-                .system(
-                    "background_tasks_changed",
-                    json!({"tasks": [{"id": "b1", "type": "shell", "status": "running"}]}),
-                ),
-            "bonjour",
+                // The tool's process exists before the call is announced: the
+                // suite cancels as soon as it sees the complete call.
+                .spawn_child()
+                .json(tool_use("toolu_cut", "Bash", json!({"command": "sleep 600"})))
+                .wait_children_exit(15_000)
+                .json(tool_result("toolu_cut", "interrupted by cancel_tools", true)),
+            "went on",
         ),
+        // A background task: a `Bash` call with `run_in_background`, its process
+        // appearing after the adapter has read the process table, then the turn
+        // ends and the process lives on until the task is cancelled.
+        Scenario::AnnulationTache => {
+            let script = answer(
+                begin(scenario)
+                    .json(tool_use(
+                        "toolu_bg",
+                        "Bash",
+                        json!({"command": "sleep 600", "run_in_background": true}),
+                    ))
+                    .sleep_ms(400)
+                    .spawn_child()
+                    .json(tool_result("toolu_bg", "started", false)),
+                "started a task",
+            )
+            .wait_children_exit(15_000);
+            return until_closed(script);
+        },
         Scenario::FluxDeltas => begin(scenario)
             .json(stream_event(json!({"type": "message_start", "message": {}})))
             .json(stream_event(json!({
@@ -386,13 +405,11 @@ async fn a_claude_code_passes_the_conformance_suite() {
     println!("{}", report.summary());
     report.assert_conformant();
 
-    // The three capabilities this slice declares absent had their FALLBACK
+    // The capability this slice declares absent (images) had its FALLBACK
     // verified; everything else played out for real.
     for (scenario, outcome) in &report.results {
         let expected = match scenario {
-            Scenario::AnnulationTourPreserve
-            | Scenario::AnnulationTache
-            | Scenario::MessageImages => ScenarioOutcome::FallbackVerified,
+            Scenario::MessageImages => ScenarioOutcome::FallbackVerified,
             _ => ScenarioOutcome::Passed,
         };
         assert_eq!(outcome, &expected, "{scenario}");
@@ -406,8 +423,8 @@ fn the_declared_capabilities_are_the_ones_of_this_slice() {
     assert_eq!(provider.id(), "claude-code");
     let capabilities = provider.capabilities(None);
     assert!(capabilities.secret_isolation);
-    assert!(!capabilities.tool_cancel);
-    assert!(!capabilities.background_tasks);
+    assert!(capabilities.tool_cancel);
+    assert!(capabilities.background_tasks);
     assert!(!capabilities.images);
     assert_eq!(
         capabilities.permission_scopes,

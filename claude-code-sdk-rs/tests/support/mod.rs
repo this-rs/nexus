@@ -271,6 +271,16 @@ impl Transcript {
         self.push(json!({"op": "wait_eof", "timeout_ms": ms, "optional": true}))
     }
 
+    /// Start a real child process (the fake's own "tool"); default `sleep 120`.
+    pub fn spawn_child(self) -> Self {
+        self.push(json!({"op": "spawn_child", "program": "sleep", "args": ["120"]}))
+    }
+
+    /// Block until every spawned child has exited (been signalled), or `ms`.
+    pub fn wait_children_exit(self, ms: u64) -> Self {
+        self.push(json!({"op": "wait_children_exit", "timeout_ms": ms, "optional": true}))
+    }
+
     /// Exit with `code`, immediately.
     pub fn exit_with(self, code: i32) -> Self {
         self.push(json!({"op": "exit", "code": code}))

@@ -1109,6 +1109,14 @@ pub struct ClaudeCodeOptions {
     /// receives its path, and the file is deleted when the transport disconnects.
     /// Default: false (inline JSON, the historical behaviour).
     pub mcp_config_via_file: bool,
+
+    /// Permission mode written **verbatim** to `--permission-mode`, for the CLI
+    /// modes [`PermissionMode`] cannot name (`auto`, `dontAsk`, `manual`).
+    ///
+    /// When `Some`, the string replaces [`ClaudeCodeOptions::permission_mode`] on
+    /// the command line; when `None` (the default) the enum is rendered as
+    /// before. Not validated: the CLI is the authority on its own modes.
+    pub permission_mode_native: Option<String>,
 }
 
 impl std::fmt::Debug for ClaudeCodeOptions {
@@ -1144,6 +1152,7 @@ impl std::fmt::Debug for ClaudeCodeOptions {
             .field("control_protocol_format", &self.control_protocol_format)
             .field("env_policy", &self.env_policy)
             .field("mcp_config_via_file", &self.mcp_config_via_file)
+            .field("permission_mode_native", &self.permission_mode_native)
             .finish()
     }
 }
@@ -1620,6 +1629,14 @@ impl ClaudeCodeOptionsBuilder {
     /// See [`ClaudeCodeOptions::mcp_config_via_file`].
     pub fn mcp_config_via_file(mut self, via_file: bool) -> Self {
         self.options.mcp_config_via_file = via_file;
+        self
+    }
+
+    /// Write this exact mode to `--permission-mode` instead of the enum.
+    ///
+    /// See [`ClaudeCodeOptions::permission_mode_native`].
+    pub fn permission_mode_native(mut self, mode: impl Into<String>) -> Self {
+        self.options.permission_mode_native = Some(mode.into());
         self
     }
 

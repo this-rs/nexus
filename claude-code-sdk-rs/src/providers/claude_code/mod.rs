@@ -10,23 +10,25 @@
 //! - [`policy_map`]: neutral policy ↔ Claude Code modes, tool categories (§6);
 //! - [`map_events`]: `Message` → `AgentEvent`, the public [`map_message`] (§14.1);
 //! - [`error_map`]: failures → `ProviderError` (§7);
-//! - [`options`]: instance configuration, `SessionSpec` → `ClaudeCodeOptions`;
+//! - [`options`]: instance configuration, `SessionSpec` → `ClaudeCodeOptions`,
+//!   the six permission modes at launch (§6);
+//! - [`cancel`]: the CLI's process tree — descendants, signals, pid claim (§10);
+//! - [`tasks`]: the table of background tasks behind `background_tasks` (§4);
 //! - [`session`]: the provider, the session and its pump (§9).
 //!
 //! # What this slice does not do yet
 //!
-//! `tool_cancel` and `background_tasks` are declared absent (their fallbacks
-//! apply: `cancel_tools` answers `Unsupported`, task messages travel as
-//! `provider_notice`); `interrupt` writes the same request for both scopes; a
-//! session asked for the native modes `auto`, `dontAsk` or `manual` starts in the
-//! closest of the SDK's four modes (they can be set on the live session).
+//! `images` is declared absent (A12): a turn carrying an image is refused with
+//! `Unsupported { images }`.
 
+pub mod cancel;
 pub mod control;
 pub mod error_map;
 pub mod map_events;
 pub mod options;
 pub mod policy_map;
 pub mod session;
+pub mod tasks;
 
 pub use error_map::classify_result_error;
 pub use map_events::{MapState, map_message, permission_event};
