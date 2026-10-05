@@ -202,7 +202,7 @@ const SENSITIVE_MARKERS: [&str; 9] = [
     "bearer",
 ];
 
-fn is_sensitive_name(name: &str) -> bool {
+pub(crate) fn is_sensitive_name(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
     SENSITIVE_MARKERS
         .iter()

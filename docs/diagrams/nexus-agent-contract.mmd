@@ -1,5 +1,5 @@
 %% name: nexus-agent-contract
-%% covers: claude-code-sdk-rs/src/agent/*.rs, docs/agent-contract.md, claude-code-sdk-rs/tests/agent_contract_snapshots.rs
+%% covers: claude-code-sdk-rs/src/agent/*.rs, docs/agent-contract.md, claude-code-sdk-rs/tests/agent_contract_snapshots.rs, claude-code-sdk-rs/tests/agent_registry.rs
 %% verified: 2026-10-05
 %% ---
 %% ETAT au palier 2 : `claude-code-sdk-rs/src/agent/` existe (types et traits, SANS implémentation de provider).
@@ -48,7 +48,7 @@ flowchart TD
 
     subgraph target["🟠 Cible — claude-code-sdk-rs/src/agent/"]
         direction TB
-        REG["🟠 ProviderRegistry UNIQUE (nexus) : id d'instance → Arc dyn AgentProvider, CredentialResolver, porte de sécurité A32<br/><i>spec §13 ; vérifié absent : grep ProviderRegistry → 0</i>"]
+        REG["✅ ProviderRegistry UNIQUE (nexus, agent/registry.rs) : id d'instance → Arc dyn AgentProvider construit à la demande et mis en cache ; ProviderInstanceConfig sans secret (référence vault:|env:|none seule, JSON à champs inconnus refusés) ; claude-code intégrée, non supprimable ; rechargement à chaud (les sessions ouvertes gardent l'ancien Arc) ; resolve_alias ; PriceBook (prix par instance, pas de mélange) ; test_connection sans enregistrement (A30) ; porte de sécurité A32 : toute instance hors claude_code/scripted refusée par upsert, get et test_connection (Unsupported security_gate) tant que SecurityGate::attest n'a pas activé la porte, irréversible ; codex et acp : Unsupported provider_codex/provider_acp (point d'extension register_kind_factory, pas encore branchés)<br/><i>vérifié : cargo test -p nexus-claude --all-features --lib agent::registry (18 tests, dont registry_refuses_third_party_instance_without_security_gate) ; cargo test -p nexus-claude --features provider-native --test agent_registry (7 tests contre fake_openai : clé présente dans Authorization, jamais dans une erreur ni un Debug, vault verrouillé sans requête ni repli) ; cargo test -p nexus-claude --all-features --test native_conformance (suite de conformité rejouée sur une instance native obtenue par le registre). Rejoué SANS le correctif : porte désactivée → 2 tests rouges ; erreur de référence d'identifiant qui répète la valeur → 1 rouge ; URL à identifiants acceptée → 1 rouge. NON ÉTABLI : le lot sécurité du backend n'existe pas, l'attestation est une déclaration de l'hôte</i>"]
         PROV["✅ trait AgentProvider : id, kind, health, catalog, capabilities(model), open, resume(ResumeToken)<br/><i>agent/mod.rs ; signature seule, aucune implémentation encore</i>"]
         SESS["✅ trait AgentSession (&self partout) : send_turn, answer_permission, answer_question, interrupt(scope),<br/>cancel_tools(scope), set_model, set_policy_mode, out_of_band, resume_token, capabilities, close<br/><i>agent/mod.rs ; signature seule, aucune implémentation encore ; run_turn agrège un tour</i>"]
         EVT["✅ enum AgentEvent (17 variantes, non_exhaustive) + Usage, Cost, StopReason, BackgroundTask…<br/><i>agent/event.rs ; vérifié : tests/agent_contract_snapshots.rs (aller-retour, champs optionnels absents, instantané v2)</i>"]

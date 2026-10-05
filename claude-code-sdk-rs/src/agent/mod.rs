@@ -27,6 +27,7 @@ pub mod credentials;
 pub mod error;
 pub mod event;
 pub mod policy;
+pub mod registry;
 pub mod resume;
 pub mod spec;
 
@@ -44,6 +45,10 @@ pub use event::{
     QuestionSpec, StopReason, TaskPhase, ToolOutput, Usage,
 };
 pub use policy::{PolicyDecision, PolicyMode, ToolCategory, ToolPattern, ToolPolicy};
+pub use registry::{
+    BUILTIN_CLAUDE_CODE_ID, BuiltProvider, CapabilityRefresher, KindFactory, PriceBook,
+    ProviderInstanceConfig, ProviderRegistry, SECURITY_GATE_CAPABILITY, SecurityGate,
+};
 pub use resume::ResumeToken;
 pub use spec::{
     CancelOutcome, CancelScope, CompactionInfo, EnvSpec, HookVerdict, InputBlock, InterruptOutcome,

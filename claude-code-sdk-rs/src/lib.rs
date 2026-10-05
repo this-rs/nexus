@@ -43,7 +43,6 @@ mod errors;
 mod interactive;
 mod internal_query;
 mod message_parser;
-#[cfg(feature = "provider-native")]
 pub mod model;
 pub mod model_recommendation;
 mod optimized_client;

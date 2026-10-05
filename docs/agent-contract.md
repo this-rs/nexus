@@ -552,6 +552,32 @@ rend `Unsupported { capability: "security_gate" }` tant que `activate_security_g
 appelé. Aucun secret dans `Debug` ni dans la sérialisation d'une config. `claude-code` est une
 instance intégrée, toujours présente.
 
+Écarts et précisions constatés à l'implémentation (`claude-code-sdk-rs/src/agent/registry.rs`) :
+
+- `ProviderInstanceConfig` est `#[non_exhaustive]` (constructeurs `new`, `claude_code`, `native`, `with_*`),
+  désérialisé avec champs inconnus refusés (une clé collée sous `api_key` échoue au lieu d'être jetée) ;
+  `from_json` renvoie `invalid_request` à message fixe (mauvaise référence d'identifiant, kind inconnu).
+- `SecurityGate` ne se construit que par `SecurityGate::attest(&'static str /* lot */)`. L'activation est
+  irréversible. La porte garde aussi `test_connection` ; `list()` n'est jamais gardée.
+- `remove(id)` rend `false` pour `claude-code` (refus) et pour un id inconnu. `claude-code` peut être
+  reconfigurée (même kind), pas remplacée par un autre kind.
+- Ajouts : `register_kind_factory(kind, factory)` (point d'extension des kinds codex/acp, ou rejeu en test),
+  `test_connection(&config) -> ProviderHealth` (A30 : construit une instance éphémère, `health()`, puis sonde
+  d'outil du modèle par défaut pour un native ; n'enregistre rien), `refresh_capabilities(id, model)`,
+  `capabilities_for(id, model)`, `config(id)`, `set_transcript_store` (feature `provider-native`).
+- `price_table()` rend un `PriceBook` (une `PriceTable` par instance) : le coût d'un modèle est celui des prix de
+  SON instance. Chaque `PriceTable` reste la seule à calculer un coût.
+- `resolve_alias` : alias connu → cible ; sinon le nom passe tel quel s'il est connu de la configuration (cible
+  d'alias, `default_model`, modèle tarifé) ou si l'instance ne déclare aucun alias ; sinon `invalid_request`.
+  Le catalogue (asynchrone) n'est pas consulté.
+- `quirks` = préréglage ∪ surcharge : booléens en OU, `explicit_parallel_tool_calls` et `reasoning_field` pris
+  de la surcharge quand elle les fixe. Une surcharge ne retire pas un drapeau du préréglage.
+- Clés d'`extensions` lues : `allow_private_network` (bool), `cli_path` (chaîne), `compaction_keep_recent`
+  (entier) ; une clé dont le nom évoque un identifiant est refusée.
+- Kinds : `claude_code` et `native` construits ; `codex` / `acp` / `scripted` sans constructeur répondent
+  `Unsupported { provider_codex | provider_acp | provider_scripted }` ; sans la feature `provider-native`,
+  `native` répond `Unsupported { provider_native }`.
+
 ## 14. Table `Message` (SDK) → `AgentEvent` → `ChatEvent` (backend)
 
 Relevée le 2026-10-05 sur `claude-code-sdk-rs/src/types.rs` (`Message`, `ContentBlock`,
@@ -676,7 +702,7 @@ jeton, `add_dirs` ← `extra_dirs`, `env` ← `EnvSpec.set`, `cli_path` ← exte
 | (aucune) | `agent/` (types, traits, registre), `providers/claude_code/` | oui |
 | `auto-download`, `memory` | existantes, inchangées | `auto-download` oui |
 | `testkit` | `testkit/` : conformité, `ScriptedProvider`, rejeu de transcriptions | non (`dev-dependencies` du backend) |
-| `provider-native` | EXISTE : `model/` (HTTP + SSE, `reqwest`), `providers/native/` | non |
+| `provider-native` | EXISTE : client HTTP + SSE de `model/` (`reqwest` : `guard`, `sse`, `wire`, `openai`), `providers/native/` ; les types, `quirks` et `pricing` de `model/` sont toujours compilés (le registre les porte) | non |
 | `provider-codex` | CIBLE (n'existe pas encore) : `providers/codex/` | non |
 | `provider-acp` | CIBLE (n'existe pas encore) : `providers/acp/` | non |
 

@@ -3,7 +3,10 @@
 //! agent. `ModelEndpoint` is a distinct trait: the native harness composes an
 //! `AgentProvider` on top of one.
 //!
-//! Compiled only with the `provider-native` cargo feature (it pulls `reqwest`).
+//! The wire-neutral types, [`quirks`] and [`pricing`] are always compiled (the
+//! provider registry holds them in its instance configuration); the HTTP client
+//! side (`guard`, `sse`, `wire`, `openai`) needs the `provider-native` cargo
+//! feature (it pulls `reqwest`).
 //!
 //! | File | Role |
 //! |---|---|
@@ -23,19 +26,26 @@ use serde::{Deserialize, Serialize};
 
 use crate::agent::{ModelInfo, ProviderError, ProviderHealth, Usage};
 
+#[cfg(feature = "provider-native")]
 pub mod guard;
+#[cfg(feature = "provider-native")]
 pub mod openai;
 pub mod pricing;
 pub mod quirks;
+#[cfg(feature = "provider-native")]
 pub mod sse;
+#[cfg(feature = "provider-native")]
 pub(crate) mod wire;
 
+#[cfg(feature = "provider-native")]
 pub use guard::{
     CheckedEndpoint, DnsResolver, EndpointGuard, IpClass, SystemResolver, classify_ip,
 };
+#[cfg(feature = "provider-native")]
 pub use openai::{OpenAiEndpoint, OpenAiEndpointConfig};
 pub use pricing::PriceTable;
 pub use quirks::{EndpointQuirks, ReasoningField};
+#[cfg(feature = "provider-native")]
 pub use sse::{SseDecoder, SseEvent};
 
 /// Stream of chunks of one completion. Errors end the stream.

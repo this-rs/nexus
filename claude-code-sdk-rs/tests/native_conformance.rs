@@ -23,8 +23,9 @@ use async_trait::async_trait;
 use fake_openai::FakeOpenAi;
 use native::*;
 use nexus_claude::agent::{
-    AgentProvider, AgentSession, Capabilities, CostBasis, ModelInfo, ModelPrice, ProviderError,
-    ProviderHealth, ProviderKind, ResumeToken, SessionSpec, TurnInput,
+    AgentProvider, AgentSession, Capabilities, CostBasis, EnvCredentialResolver, ModelInfo,
+    ModelPrice, ProviderError, ProviderHealth, ProviderInstanceConfig, ProviderKind,
+    ProviderRegistry, ResumeToken, SecurityGate, SessionSpec, TurnInput,
 };
 use nexus_claude::model::{ChatMessage, EndpointQuirks, PriceTable};
 use nexus_claude::providers::native::{
@@ -188,23 +189,84 @@ struct Staging {
     _cwd: tempfile::TempDir,
 }
 
+/// How the provider of a scenario is obtained.
+#[derive(Clone, Copy, PartialEq)]
+enum Route {
+    /// `NativeProvider::new` on an `OpenAiEndpoint`, by hand.
+    Direct,
+    /// `ProviderRegistry::upsert` of an instance configuration, then `get`.
+    Registry,
+}
+
 struct NativeTarget {
-    base: Arc<NativeProvider>,
+    route: Route,
+    base: Arc<dyn AgentProvider>,
     _base_server: FakeOpenAi,
 }
 
+/// The instance the registry route builds: the same endpoint, dialect, price and
+/// window as [`config`], described as configuration.
+fn registry_instance(scenario: Option<Scenario>, url: String) -> ProviderInstanceConfig {
+    let mut instance = ProviderInstanceConfig::native("native-test", url)
+        .with_preset("deepseek")
+        .with_default_model("m")
+        .with_price(
+            "m",
+            ModelPrice {
+                input_per_mtok: 1.0,
+                output_per_mtok: 2.0,
+                cache_read_per_mtok: None,
+                cache_write_per_mtok: None,
+            },
+        );
+    if scenario == Some(Scenario::Compaction) {
+        instance = instance
+            .with_context_window(12_000)
+            .with_extension("compaction_keep_recent", json!(2));
+    }
+    instance
+}
+
+/// A provider obtained from a registry (gate open), probed for model `m`.
+async fn from_registry(
+    scenario: Option<Scenario>,
+    url: String,
+    store: Option<Arc<MemoryTranscriptStore>>,
+) -> Option<Arc<dyn AgentProvider>> {
+    let registry = ProviderRegistry::new(Arc::new(EnvCredentialResolver));
+    registry.activate_security_gate(SecurityGate::attest("native-conformance"));
+    if let Some(store) = store {
+        registry.set_transcript_store(store);
+    }
+    registry.upsert(registry_instance(scenario, url)).ok()?;
+    registry
+        .refresh_capabilities("native-test", "m")
+        .await
+        .ok()?;
+    registry.get("native-test").ok()
+}
+
 impl NativeTarget {
-    async fn new() -> Self {
+    async fn new(route: Route) -> Self {
         let server = FakeOpenAi::start(json!([probe_route(true), models_route(128_000)]));
-        let provider = Arc::new(NativeProvider::new(
-            config(None),
-            endpoint(server.base_url(), EndpointQuirks::deepseek()),
-        ));
-        provider
-            .refresh_capabilities("m")
-            .await
-            .expect("the probe of the base provider");
+        let provider: Arc<dyn AgentProvider> = match route {
+            Route::Direct => {
+                let provider = Arc::new(NativeProvider::new(
+                    config(None),
+                    endpoint(server.base_url(), EndpointQuirks::deepseek()),
+                ));
+                provider
+                    .refresh_capabilities("m")
+                    .await
+                    .expect("the probe of the base provider");
+                provider
+            },
+            Route::Registry => from_registry(None, server.base_url(), None)
+                .await
+                .expect("the base provider from the registry"),
+        };
         Self {
+            route,
             base: provider,
             _base_server: server,
         }
@@ -214,7 +276,7 @@ impl NativeTarget {
 /// Starts a turn when a session opens and drops its stream: the turn goes on and
 /// everything it emits goes out of band (§9).
 struct DetachedTurn {
-    inner: Arc<NativeProvider>,
+    inner: Arc<dyn AgentProvider>,
     prompt: String,
 }
 
@@ -262,7 +324,12 @@ impl AgentProvider for DetachedTurn {
 #[async_trait]
 impl ConformanceTarget for NativeTarget {
     fn name(&self) -> &str {
-        "native (OpenAiEndpoint on fake_openai, MCP over stdio on fake_mcp)"
+        match self.route {
+            Route::Direct => "native (OpenAiEndpoint on fake_openai, MCP over stdio on fake_mcp)",
+            Route::Registry => {
+                "native from ProviderRegistry (instance config, fake_openai, fake_mcp)"
+            },
+        }
     }
 
     fn provider(&self) -> Arc<dyn AgentProvider> {
@@ -272,14 +339,22 @@ impl ConformanceTarget for NativeTarget {
     async fn prepare(&self, scenario: Scenario) -> Option<Prepared> {
         let server = FakeOpenAi::start(json!(script(scenario)));
         let store = Arc::new(MemoryTranscriptStore::new());
-        let provider = Arc::new(
-            NativeProvider::new(
-                config(Some(scenario)),
-                endpoint(server.base_url(), EndpointQuirks::deepseek()),
-            )
-            .with_transcript_store(store.clone()),
-        );
-        provider.refresh_capabilities("m").await.ok()?;
+        let provider: Arc<dyn AgentProvider> = match self.route {
+            Route::Direct => {
+                let provider = Arc::new(
+                    NativeProvider::new(
+                        config(Some(scenario)),
+                        endpoint(server.base_url(), EndpointQuirks::deepseek()),
+                    )
+                    .with_transcript_store(store.clone()),
+                );
+                provider.refresh_capabilities("m").await.ok()?;
+                provider
+            },
+            Route::Registry => {
+                from_registry(Some(scenario), server.base_url(), Some(store.clone())).await?
+            },
+        };
         let cwd = tempfile::tempdir().ok()?;
         let mut spec = SessionSpec::new(cwd.path());
         spec.model = Some("m".to_owned());
@@ -323,7 +398,18 @@ impl ConformanceTarget for NativeTarget {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_native_harness_passes_the_conformance_suite() {
-    let target = NativeTarget::new().await;
+    check_conformance(Route::Direct).await;
+}
+
+/// The same suite, with the provider of every scenario obtained from a
+/// `ProviderRegistry` that was given an instance configuration.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_native_instance_built_by_the_registry_passes_the_conformance_suite() {
+    check_conformance(Route::Registry).await;
+}
+
+async fn check_conformance(route: Route) {
+    let target = NativeTarget::new(route).await;
     let report = run_all(&target).await;
     eprintln!("{}", report.summary());
     report.assert_conformant();

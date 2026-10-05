@@ -91,3 +91,7 @@ required-features = ["testkit", "provider-native"]
 [[test]]
 name = "native_harness"
 required-features = ["provider-native"]
+
+[[test]]
+name = "agent_registry"
+required-features = ["provider-native"]
