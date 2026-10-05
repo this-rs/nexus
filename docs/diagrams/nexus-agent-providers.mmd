@@ -1,0 +1,91 @@
+%% name: nexus-agent-providers
+%% covers: docs/diagrams/nexus-agent-providers.mmd
+%% verified: 2026-10-05
+%% ---
+%% PROUVE : les adaptateurs CIBLE (façade claude_code, model/ OpenAI-compatible, native,
+%%   codex, opencode) et le banc de conformité (testkit/conformance), face à ce qui existe
+%%   aujourd'hui au sha 58e27e6 (2026-10-05). Aucun de ces modules n'existe : `ls claude-code-sdk-rs/src`
+%%   ne montre ni providers/, ni model/, ni testkit/. `covers` pointe sur ce fichier (le gate refuse un glob
+%%   sans fichier) ; à remplacer par src/providers/**, src/model/*.rs, src/testkit/*.rs quand ils existent. Le contrat qu'ils implémentent est dans nexus-agent-contract.
+%% ---
+%% SOURCES LUES :
+%%   grep -rniE 'codex|opencode|testkit' --include=*.rs --include=*.toml . → 0 (hors target/)
+%%   grep -rniE 'conformance' --include=*.rs . → claude-code-api/tests/sse_stream_conformance.rs seulement (conformité SSE OpenAI, autre sujet)
+%%   claude-code-api/src/models/openai.rs  — ChatCompletionRequest/Response/StreamResponse : formes OpenAI SERVIES par la passerelle (sens entrant)
+%%   claude-code-api/src/api/chat.rs       — chat_completions : passerelle OpenAI → processus claude
+%%   claude-code-sdk-rs/Cargo.toml         — reqwest 0.12 optionnel (feature auto-download), futures, async-trait
+%%   claude-code-sdk-rs/src/bin/fake_claude.rs, tests/support/mod.rs (fake_cli_path, scripts de transcription)
+%%   claude-code-sdk-rs/src/transport/mock.rs — MockTransport::pair
+%% ---
+%% NON ETABLI :
+%%   - protocole filaire réel de Codex et d'OpenCode : non lu, aucune mesure ; les nœuds codex/opencode ne sont que des cibles nommées.
+%%   - `native` (agent à boucle d'outils propre, outils exécutés par PO) : sa frontière avec model/ n'est pas dans la RFC ; hypothèse ci-dessous.
+%% ---
+%% LEGENDE
+%%   ✅ vérifié (le nœud dit comment)  🟠 décidé, non écrit  🔴 défaut constaté  ⚪ hors dépôt / autre diagramme
+
+flowchart TD
+    subgraph legend["Légende"]
+        direction LR
+        L1["✅ existe, vérifié par grep nommé"]
+        L2["🟠 cible, non écrit"]
+        L3["🔴 écart code ↔ cible"]
+        L4["⚪ hors dépôt / autre diagramme"]
+    end
+
+    CONTRACT["⚪ nexus-agent-contract : AgentProvider, AgentSession, AgentEvent, ToolPolicy, Capabilities, ResumeToken, ProviderError, ProviderRegistry"]
+
+    subgraph claude["providers/claude_code"]
+        direction TB
+        CCP["🟠 ClaudeCodeProvider : façade sur InteractiveClient, aucun changement de comportement<br/><i>vérifié absent : ls src → pas de providers/</i>"]
+        IC["✅ InteractiveClient + SubprocessTransport + message_parser (ce que la façade enveloppe)<br/><i>vérifié : tests/interactive_client_fake_cli.rs, transport_subprocess_runtime.rs</i>"]
+        CCP --> IC
+    end
+
+    subgraph model["model/ — client OpenAI-compatible"]
+        direction TB
+        MOD["🟠 client chat/completions (HTTP + SSE) vers un endpoint OpenAI-compatible : catalog() via /models, deltas via stream<br/><i>vérifié absent : pas de model/ ; reqwest n'est qu'optionnel (feature auto-download)</i>"]
+        GW["🔴 claude-code-api/src/models/openai.rs existe mais dans le sens INVERSE :<br/>formes servies par la passerelle (ChatCompletionRequest en entrée), pas un client<br/><i>vérifié : api/chat.rs chat_completions est un handler axum</i>"]
+        DEP["🔴 reqwest est une dépendance optionnelle du SDK (auto-download) : model/ devra la rendre non optionnelle ou la mettre derrière une feature dédiée<br/><i>vérifié : Cargo.toml reqwest optional = true</i>"]
+        MOD -.-> GW
+        MOD -.-> DEP
+    end
+
+    subgraph native["providers/native"]
+        NAT["🟠 agent natif : boucle d'outils exécutés par PO au-dessus de model/ (hypothèse : native = model/ + boucle d'outils)<br/><i>non établi : frontière native/model non spécifiée dans la RFC</i>"]
+    end
+
+    subgraph cli["providers CLI JSONL"]
+        direction TB
+        CDX["🟠 providers/codex : CLI Codex, protocole non lu<br/><i>vérifié absent : grep -i codex → 0</i>"]
+        OPC["🟠 providers/opencode : CLI OpenCode, protocole non lu<br/><i>vérifié absent : grep -i opencode → 0</i>"]
+    end
+
+    subgraph tk["testkit/conformance"]
+        direction TB
+        CONF["🟠 suite de conformité paramétrée par provider : tour simple, outil, permission accordée/refusée,<br/>interruption, sous-agent, compaction, mort du processus<br/><i>vérifié absent : grep testkit → 0 ; la RFC la place dans tests/agent_conformance.rs, pas testkit/</i>"]
+        FAKE["✅ faux CLI bin/fake_claude.rs + tests/support (fake_cli_path, scripts) : spécification exécutable côté Claude Code<br/><i>vérifié : 8 fichiers d'intégration l'utilisent</i>"]
+        MOCK["✅ MockTransport::pair : double en mémoire du transport (seul double existant)<br/><i>vérifié : transport/mock.rs</i>"]
+        FP["🟠 FakeProvider en mémoire (CI backend sans CLI), remplace MockTransport côté backend<br/><i>vérifié absent</i>"]
+        SSE["✅ claude-code-api/tests/sse_stream_conformance.rs : conformité du flux SSE OpenAI de la passerelle ; PAS la conformité provider<br/><i>vérifié : en-tête du fichier</i>"]
+        CONFLOC["🔴 emplacement divergent : RFC = tests/agent_conformance.rs ; mission = testkit/conformance<br/>une suite réutilisable par des crates tiers impose un module `testkit` publié, pas un test d'intégration<br/><i>à trancher</i>"]
+        CONF --> CONFLOC
+    end
+
+    CONTRACT -.->|"implémenté par"| CCP
+    CONTRACT -.->|"implémenté par"| MOD
+    CONTRACT -.->|"implémenté par"| NAT
+    CONTRACT -.->|"implémenté par"| CDX
+    CONTRACT -.->|"implémenté par"| OPC
+    CONTRACT -.->|"implémenté par"| FP
+    NAT -.->|"s'appuie sur"| MOD
+    CONF -.->|"rejoué contre"| CCP
+    CONF -.->|"rejoué contre"| MOD
+    CONF -.->|"rejoué contre"| NAT
+    CONF -.->|"rejoué contre"| CDX
+    CONF -.->|"rejoué contre"| OPC
+    CONF -.->|"rejoué contre"| FP
+    FAKE -.->|"nourrit"| CONF
+    MOCK -.->|"remplacé par"| FP
+    CDX -.->|"faux exécutable + transcription d'abord"| FAKE
+    OPC -.->|"faux exécutable + transcription d'abord"| FAKE

@@ -1,0 +1,85 @@
+%% name: nexus-agent-contract
+%% covers: docs/diagrams/nexus-agent-contract.mmd
+%% verified: 2026-10-05
+%% ---
+%% PROUVE : le contrat CIBLE `agent/` (RFC PO b53e11c7) et, pour chaque brique,
+%%   ce qui existe AUJOURD'HUI dans le dépôt qui s'en rapproche. Au 2026-10-05 le
+%%   module `agent/` n'existe pas : tout nœud 🟠 est une cible, tout nœud ✅ est le
+%%   code actuel que la cible remplacera ou enveloppera. `covers` pointe sur ce
+%%   fichier (le gate refuse un glob sans fichier) ; quand claude-code-sdk-rs/src/agent/*.rs
+%%   existera, le remplacer par ce glob.
+%% ---
+%% SOURCES LUES (2026-10-05, branche main @ 58e27e6) :
+%%   grep -rnE 'AgentProvider|AgentSession|AgentEvent|ToolPolicy|ResumeToken|ProviderError|ProviderRegistry|struct Capabilities' --include=*.rs . → 0 résultat
+%%   claude-code-sdk-rs/src/lib.rs        — `mod` list : aucun `agent`
+%%   claude-code-sdk-rs/src/interactive.rs — InteractiveClient : connect, send_message(_blocks), send_and_receive_stream,
+%%                                          send_blocks_and_receive_stream, subscribe_messages, set_permission_mode(&str),
+%%                                          interrupt, build_interrupt_json, disconnect, from_transport
+%%   claude-code-sdk-rs/src/types.rs      — Message (User/Assistant/System/Result/StreamEvent), ContentBlock,
+%%                                          PermissionMode (Default/AcceptEdits/Plan/BypassPermissions),
+%%                                          ClaudeCodeOptions (allowed_tools, disallowed_tools, permission_mode, resume,
+%%                                          mcp_servers, hooks, can_use_tool, cwd, model…)
+%%   claude-code-sdk-rs/src/errors.rs     — SdkError (CliNotFound, ConnectionError, Timeout, SessionNotFound, ProcessExited, NotSupported…)
+%%   claude-code-api/src/core/model_registry.rs — ModelRegistry::get_models/refresh (catalogue Anthropic seulement)
+%% ---
+%% NON ETABLI :
+%%   - `ResumeToken` et `ProviderRegistry` ne figurent PAS dans le texte de la RFC b53e11c7
+%%     (elle a `resume(spec, provider_session_id: &str)` et un choix par `CHAT_PROVIDER`) : ces deux types sont ajoutés ici, à trancher.
+%%   - `Capabilities` n'a dans la RFC que cinq axes cités en prose, pas de champs.
+%% ---
+%% LEGENDE
+%%   ✅ vérifié (le nœud dit comment)  🟠 décidé, non écrit  🔴 défaut constaté  ⚪ hors dépôt / autre diagramme
+
+flowchart TD
+    subgraph legend["Légende"]
+        direction LR
+        L1["✅ existe, vérifié par grep nommé"]
+        L2["🟠 cible, non écrit"]
+        L3["🔴 écart code ↔ RFC"]
+        L4["⚪ hors dépôt"]
+    end
+
+    BACKEND["⚪ backend PO : ChatManager (po-chat-manager)"]
+
+    subgraph target["🟠 Cible — claude-code-sdk-rs/src/agent/"]
+        direction TB
+        REG["🟠 ProviderRegistry : id → Arc dyn AgentProvider, défaut, repli si health() échoue<br/><i>vérifié absent : grep ProviderRegistry → 0</i>"]
+        PROV["🟠 trait AgentProvider : id, health, catalog, open, resume, capabilities<br/><i>vérifié absent : grep AgentProvider → 0</i>"]
+        SESS["🟠 trait AgentSession : send_turn, answer_permission, answer_question,<br/>interrupt, set_model, set_policy, out_of_band, close<br/><i>vérifié absent : grep AgentSession → 0</i>"]
+        EVT["🟠 enum AgentEvent : SessionStarted, Text, Thinking, Delta, ToolCall, ToolResult,<br/>PermissionAsk, Question, Compaction, Done, Error, ProviderNotice<br/><i>vérifié absent : grep AgentEvent → 0</i>"]
+        POL["🟠 ToolPolicy { mode: Ask|AutoEdits|PlanOnly|Trust, allow, deny }<br/><i>vérifié absent : grep ToolPolicy → 0</i>"]
+        CAP["🟠 Capabilities : hooks, permissions interactives, compaction, sous-agents, mcp, images<br/><i>vérifié absent : grep 'struct Capabilities' → 0</i>"]
+        RES["🔴 ResumeToken : absent de la RFC b53e11c7 (qui passe un &str provider_session_id)<br/><i>à trancher : type opaque par provider, sérialisable, persisté par ChatSession</i>"]
+        ERR["🟠 ProviderError : CliNotFound/AuthRequired/Timeout/ProcessExited/Protocol/Unsupported<br/><i>vérifié absent : grep ProviderError → 0</i>"]
+        REG --> PROV
+        PROV -->|"open / resume(ResumeToken)"| SESS
+        PROV --> CAP
+        PROV --> ERR
+        SESS --> EVT
+        SESS --> POL
+        SESS --> ERR
+        EVT --> ERR
+        SESS -.-> RES
+    end
+
+    BACKEND -.->|"cible : Arc dyn AgentSession"| SESS
+    BACKEND -.->|"CHAT_PROVIDER"| REG
+
+    subgraph today["Code actuel que la cible remplace ou enveloppe"]
+        direction TB
+        IC["✅ InteractiveClient : connect, send_message, send_message_blocks,<br/>send_and_receive_stream, send_blocks_and_receive_stream, subscribe_messages, interrupt, disconnect<br/><i>vérifié : grep 'pub async fn' src/interactive.rs ; tests/interactive_client_fake_cli.rs</i>"]
+        MSG["✅ Message / ContentBlock / StreamEventData : base de AgentEvent (texte, thinking, tool use/result, stream, result+coût)<br/><i>vérifié : types.rs, nexus-sdk-types (parseur rejoué)</i>"]
+        PM["✅ PermissionMode (4 noms CLI) + allowed_tools / disallowed_tools (syntaxe Bash(git *)) : base de ToolPolicy<br/><i>vérifié : types.rs ClaudeCodeOptions</i>"]
+        SE["✅ SdkError : base de ProviderError (CliNotFound, Timeout, ProcessExited, NotSupported…)<br/><i>vérifié : errors.rs</i>"]
+        OPT["✅ ClaudeCodeOptions.resume: Option String : seul embryon de reprise (id de session CLI nu)<br/><i>vérifié : types.rs</i>"]
+        MR["✅ ModelRegistry::get_models : catalogue Anthropic seulement, dans claude-code-api (autre crate)<br/><i>vérifié : core/model_registry.rs</i>"]
+        SPM["🔴 set_permission_mode prend &str (nom CLI brut), pas un type neutre<br/><i>vérifié : interactive.rs set_permission_mode(&mut self, mode: &str)</i>"]
+    end
+
+    MSG -.->|"généralisé en"| EVT
+    PM -.->|"mappé depuis/vers"| POL
+    SE -.->|"converti en"| ERR
+    OPT -.->|"remplacé par"| RES
+    MR -.->|"absorbé par catalog()"| PROV
+    IC -.->|"enveloppé par ClaudeCodeProvider"| SESS
+    SPM -.->|"à fermer"| POL
