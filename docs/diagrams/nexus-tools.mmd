@@ -1,5 +1,5 @@
 %% name: nexus-tools
-%% covers: nexus-tools/src/*.rs, nexus-tools/src/files/*.rs, nexus-tools/src/shell/*.rs, nexus-tools/tests/*.rs, nexus-tools/tests/golden_grep/*.txt, docs/agent-tools-parity.md
+%% covers: nexus-tools/src/*.rs, nexus-tools/src/files/*.rs, nexus-tools/src/shell/*.rs, nexus-tools/src/web/*.rs, nexus-tools/tests/data/html/*.html, nexus-tools/tests/*.rs, nexus-tools/tests/golden_grep/*.txt, docs/agent-tools-parity.md
 %% verified: 2026-10-05
 flowchart TD
     subgraph legend["Légende"]
@@ -47,11 +47,21 @@ flowchart TD
         NOSANDBOX["🟠 Bash n'est PAS un bac à sable : il lit tout ce que l'utilisateur système peut lire ;<br/>la protection est la politique du harnais et l'environnement vierge"]
     end
 
+    subgraph web["WebFetch — web/*.rs (N21)"]
+        direction TB
+        SSRF["✅ garde SSRF : privé, loopback, link-local (métadonnées cloud), CGNAT, multicast, réservé ;<br/>IPv6 : mappé, compatible, NAT64, 6to4, Teredo, ULA ; toutes les écritures numériques d'IPv4<br/><i>vérifié : un test rouge par vecteur, zéro connexion tentée ; 5 mutations rouges</i>"]
+        PIN["✅ résolution : TOUTES les adresses d'un nom sont contrôlées, la connexion va à l'adresse contrôlée<br/>(épinglée), chaque redirection est résolue et contrôlée de nouveau<br/><i>vérifié : rebinding DNS refusé au second saut</i>"]
+        REDIR["✅ redirections : même hôte suivi (www. ignoré, http vers https accepté), autre hôte ou retour à http<br/>signalé avec l'URL cible, boucle bornée<br/><i>vérifié : tests/web.rs</i>"]
+        CONV["✅ HTML vers Markdown (htmd, mesuré sur un corpus de 5 pages contre 4 autres crates) :<br/>titres, listes, tableaux, code avec langage, liens et images rendus absolus ;<br/>scripts, styles, svg, iframe jamais dans le texte ; décodage du charset<br/><i>vérifié : tests/web_convert.rs</i>"]
+        CAPS["✅ plafonds : 5 Mio téléchargés, 100 000 caractères rendus, coupe annoncée ;<br/>binaire refusé (erreur typée) ; cache 15 min à horloge injectée ; aucun appel de modèle caché"]
+        TLS["🟠 https : AUCUN moteur TLS dans ce build, échec typé « no TLS support » (jamais en clair) —<br/>décision à prendre : rustls+ring (compilateur C requis) ou fournisseur pur Rust non audité"]
+    end
+
     subgraph suite["Politique de dépendances — tests/dependency_policy.rs"]
         DEPS["✅ la fermeture de nexus-tools se compile avec Rust seul :<br/>pas de links, pas de cc/cmake/bindgen, -sys limités aux liaisons de plateforme<br/><i>vérifié : cinq cas factices rouges, puis la vraie fermeture</i>"]
     end
 
-    LATER["🟠 N21 WebFetch · N22 WebSearch · N23 Obscura (MCP externe)"]
+    LATER["🟠 N22 WebSearch · N23 Obscura (MCP externe)"]
 
     HARNESS --> RPC
     RPC --> STDIO
@@ -70,6 +80,12 @@ flowchart TD
     STATE --> NB
     READ --> STATE
     SCOPE --> SEARCH
+    PROFILE --> SSRF
+    SSRF --> PIN
+    PIN --> REDIR
+    REDIR --> CONV
+    CONV --> CAPS
+    CAPS -.-> TLS
     PROFILE --> BASH
     BASH --> GROUP
     BASH --> ENV

@@ -80,11 +80,10 @@ fn violations(metadata: &Value, root: &str) -> Vec<String> {
             continue;
         }
         for dep in nodes[id]["deps"].as_array().into_iter().flatten() {
-            let ships = dep["dep_kinds"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .any(|k| k["kind"].is_null() || k["kind"] == "build");
+            let ships =
+                dep["dep_kinds"].as_array().into_iter().flatten().any(|k| {
+                    (k["kind"].is_null() || k["kind"] == "build") && !wasm_only(&k["target"])
+                });
             if ships {
                 stack.push(dep["pkg"].as_str().expect("pkg"));
             }
@@ -110,14 +109,29 @@ fn violations(metadata: &Value, root: &str) -> Vec<String> {
     found
 }
 
+/// A dependency that exists only for WebAssembly targets (`cfg(target_arch = "wasm32")`…) is
+/// not compiled on any platform this tool supports (unix, windows). A negated condition
+/// (`not(…wasm…)`) is the opposite and does count.
+fn wasm_only(target: &Value) -> bool {
+    target.as_str().is_some_and(|cfg| {
+        (cfg.contains("wasm32") || cfg.contains("wasm64") || cfg.contains("\"wasm\""))
+            && !cfg.contains("not(")
+    })
+}
+
 fn package(name: &str, links: Option<&str>) -> Value {
     json!({"id": name, "name": name, "links": links})
 }
 
 fn node(name: &str, deps: &[(&str, Option<&str>)]) -> Value {
     json!({"id": name, "deps": deps.iter().map(|(d, kind)| json!({
-        "pkg": d, "dep_kinds": [{"kind": kind}]
+        "pkg": d, "dep_kinds": [{"kind": kind, "target": null}]
     })).collect::<Vec<_>>()})
+}
+
+/// A node whose only edge is restricted to the platforms matching `target`.
+fn node_for_target(name: &str, dep: &str, target: &str) -> Value {
+    json!({"id": name, "deps": [{"pkg": dep, "dep_kinds": [{"kind": null, "target": target}]}]})
 }
 
 fn synthetic(packages: &[Value], nodes: &[Value]) -> Value {
@@ -185,6 +199,50 @@ fn an_unlisted_sys_crate_is_refused_but_a_platform_binding_is_not() {
         violations(&meta, "nexus-tools"),
         ["openssl-sys is a -sys crate outside the allowed bindings"]
     );
+}
+
+#[test]
+fn a_dependency_only_for_webassembly_is_not_judged_but_other_platforms_are() {
+    let wasm = synthetic(
+        &[package("nexus-tools", None), package("js-sys", None)],
+        &[
+            node_for_target(
+                "nexus-tools",
+                "js-sys",
+                "cfg(all(any(target_arch = \"wasm32\", target_arch = \"wasm64\"), target_os = \"unknown\"))",
+            ),
+            node("js-sys", &[]),
+        ],
+    );
+    assert!(
+        violations(&wasm, "nexus-tools").is_empty(),
+        "wasm-only edges are not compiled here"
+    );
+    // The same crate behind a Windows-only edge IS compiled for Windows users.
+    let windows = synthetic(
+        &[package("nexus-tools", None), package("js-sys", None)],
+        &[
+            node_for_target("nexus-tools", "js-sys", "cfg(windows)"),
+            node("js-sys", &[]),
+        ],
+    );
+    assert_eq!(
+        violations(&windows, "nexus-tools"),
+        ["js-sys is a -sys crate outside the allowed bindings"]
+    );
+    // `not(wasm)` means every other platform: it counts.
+    let not_wasm = synthetic(
+        &[package("nexus-tools", None), package("js-sys", None)],
+        &[
+            node_for_target(
+                "nexus-tools",
+                "js-sys",
+                "cfg(not(target_arch = \"wasm32\"))",
+            ),
+            node("js-sys", &[]),
+        ],
+    );
+    assert_eq!(violations(&not_wasm, "nexus-tools").len(), 1);
 }
 
 #[test]

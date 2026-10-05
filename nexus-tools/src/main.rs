@@ -117,6 +117,10 @@ fn registry(options: &Options) -> Result<ToolRegistry, String> {
             .with(nexus_tools::testing::EchoTool)
             .with(nexus_tools::testing::WriteTool);
     }
+    // WebFetch: strict by construction (public addresses only, http upgraded to https). This
+    // build has no TLS backend yet, so https fetches fail with a typed error (N21).
+    registry =
+        nexus_tools::web::register(registry, nexus_tools::web::Fetcher::new(Default::default()));
     Ok(registry)
 }
 

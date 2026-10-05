@@ -272,3 +272,47 @@ La protection est la politique d'approbation du harnais (motifs `Bash(git *)`, �
 l'environnement vierge. Un vrai bac à sable est une capacité distincte.
 
 Non relevé : `Monitor` et `TaskStop` (processus longs) ; leurs formats sont les nôtres.
+
+## 6. WebFetch (N21)
+
+### Choix du convertisseur HTML vers Markdown : mesure
+
+Corpus : `nexus-tools/tests/data/html/` (article avec liens relatifs et bruit, tableau, code, HTML cassé,
+page entière dans un `<form>`). Contrôles : 36 assertions (structure conservée, code de la page et décor
+absents, entités décodées). Mesuré le 05/10/2026 avec un binaire jetable hors dépôt, sur sortie normalisée
+(espaces et tirets répétés réduits) :
+
+| Crate | Réussi | Échecs notables |
+|---|---|---|
+| `htmd` 0.2 + `skip_tags` | **34/36** | liens perdus dans les cellules de tableau |
+| `htmd` 0.2 sans `skip_tags` | 30/36 | texte de `<script>`/`<style>` dans la sortie |
+| `mdka` 1 | 29/36 | listes ordonnées, entités dans le code, liste après élément mal fermé |
+| `html2text` 0.14 | 28/36 | pas de liens ni d'images en Markdown, pas de code clôturé, tableaux en texte |
+| `html2md` 0.2 | 24/36 | pas de titres `#`, tableaux perdus, `<script>` injecté dans le texte |
+
+Retenu : **`htmd`**, avec `script style noscript iframe svg head template` ignorés. **Pas** `form` : en
+l'ignorant, une page ASP.NET entière (enveloppée dans un `<form>`) disparaissait ; sonde faite et test de
+non-régression `a_page_wrapped_in_a_form_is_not_lost`. Ajouts : liens et images rendus absolus (une ancre `#x` ou
+une URL `javascript:` devient du texte), décodage du charset (`encoding_rs`).
+Limite connue : `htmd` perd les liens à l'intérieur des cellules de tableau.
+
+### Écarts volontaires avec Claude Code
+
+- **Pas de petit modèle** : Claude Code applique la consigne (`prompt`) par un second modèle ; ici l'outil rend le
+  Markdown et la consigne est appliquée par le modèle de la session. Aucun appel de modèle caché.
+- Redirection vers un autre hôte (ou retour de https à http) : **signalée** avec l'URL cible, comme Claude Code ;
+  `http` vers `https` du même hôte est suivi.
+- Garde SSRF : toutes les adresses d'un nom contrôlées, connexion épinglée, chaque saut recontrôlé — plus
+  strict que ce qui est documenté pour Claude Code.
+- **https : pas de moteur TLS dans ce build** (décision en attente, voir ci-dessous). `http` est réécrit en
+  `https` comme Claude Code, donc tout échoue pour l'instant avec `connect_failed … no TLS support`, jamais en
+  clair.
+- Non fait : PDF (voir N19b), contenu compressé (on envoie `Accept-Encoding: identity`).
+
+### Décision en attente : TLS
+
+Aucun moteur TLS n'est « compilable en Rust seul » sans réserve : `rustls` s'appuie sur `ring` (ou `aws-lc`),
+qui compile du C et de l'assembleur à la construction (déjà le cas, via `reqwest`, pour le harnais natif et
+`provider-native`). L'alternative pure Rust (`rustls` + fournisseur RustCrypto) est expérimentale et non auditée.
+Choisir entre : (a) `rustls`+`ring` derrière une feature `tls` désactivée par défaut, exception à la politique
+justifiée ; (b) fournisseur pur Rust ; (c) pas de https tant que la politique n'est pas assouplie.

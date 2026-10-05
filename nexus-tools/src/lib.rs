@@ -24,6 +24,7 @@ pub mod shell;
 pub mod testing;
 pub mod token;
 pub mod tool;
+pub mod web;
 
 pub use profile::{Profile, ToolSet};
 pub use registry::ToolRegistry;
