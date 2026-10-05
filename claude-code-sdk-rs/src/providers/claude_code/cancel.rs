@@ -173,30 +173,78 @@ pub fn signal_pid(_pid: u32, _signal: i32) -> bool {
     false
 }
 
+/// The pids of `seen` that are still the same process in `fresh`, and still
+/// descendants of `root`: the guard against a **recycled pid**.
+///
+/// A process counts as the same when `fresh` holds its pid with the same
+/// parent and an age (`etime`) that has not gone back: a process that died and
+/// whose pid the kernel gave to a newcomer shows another parent or a younger
+/// age. With `include_root`, `root` itself is one of the candidates (it must be
+/// in `seen`) and is checked the same way, minus the descent.
+///
+/// Residual window, by construction: `etime` has a one-second resolution and
+/// the table is a snapshot, so a pid recycled between the fresh reading and the
+/// `kill` call (a few microseconds), or recycled into a process of the same
+/// parent started within the same second, can still take the signal. Closing it
+/// entirely needs a process group or a pidfd created at spawn time.
+pub fn still_the_same(
+    seen: &[ProcessRow],
+    fresh: &[ProcessRow],
+    root: u32,
+    include_root: bool,
+) -> Vec<u32> {
+    let descendants = descendants_in(fresh, root);
+    seen.iter()
+        .filter(|before| {
+            let now = if before.pid == root {
+                include_root
+                    .then(|| fresh.iter().find(|row| row.pid == root))
+                    .flatten()
+            } else {
+                descendants.iter().find(|row| row.pid == before.pid)
+            };
+            now.is_some_and(|now| {
+                now.ppid == before.ppid && now.elapsed_secs >= before.elapsed_secs
+            })
+        })
+        .map(|row| row.pid)
+        .collect()
+}
+
 /// Sends `signal` to every descendant of `root` — **not** to `root` itself, the
-/// CLI, whose turn must go on. Returns the pids that took the signal.
+/// CLI, whose turn must go on. The tree is read, then read again just before the
+/// signals ([`still_the_same`]), so a pid recycled in between is left alone.
+/// Returns the pids that took the signal.
 pub async fn signal_descendants(root: u32, signal: i32) -> Vec<u32> {
-    descendant_pids(root)
-        .await
+    let seen = descendant_rows(root).await;
+    if seen.is_empty() {
+        return Vec::new();
+    }
+    let fresh = process_table().await;
+    still_the_same(&seen, &fresh, root, false)
         .into_iter()
         .filter(|pid| signal_pid(*pid, signal))
         .collect()
 }
 
 /// Sends `SIGINT` to `root` **and** its descendants: the subtree of one
-/// background task. Returns the pids that took the signal.
+/// background task. Same guard against a recycled pid as
+/// [`signal_descendants`]; `root` that is no longer in the table is not
+/// signalled. Returns the pids that took the signal.
 pub async fn signal_subtree(root: u32) -> Vec<u32> {
-    let descendants = descendant_pids(root).await;
-    let mut killed = Vec::with_capacity(descendants.len() + 1);
-    if signal_pid(root, SIGINT) {
-        killed.push(root);
+    let table = process_table().await;
+    let mut seen = descendants_in(&table, root);
+    seen.extend(table.iter().copied().filter(|row| row.pid == root));
+    if seen.is_empty() {
+        return Vec::new();
     }
-    killed.extend(
-        descendants
-            .into_iter()
-            .filter(|pid| signal_pid(*pid, SIGINT)),
-    );
-    killed
+    let fresh = process_table().await;
+    // Root first, as before.
+    let mut pids = still_the_same(&seen, &fresh, root, true);
+    pids.sort_by_key(|pid| *pid != root);
+    pids.into_iter()
+        .filter(|pid| signal_pid(*pid, SIGINT))
+        .collect()
 }
 
 #[cfg(test)]
@@ -268,6 +316,44 @@ mod tests {
         assert_eq!(claim_pid(&[], &[]), None);
         // Same age: the smaller pid, so the choice is deterministic.
         assert_eq!(claim_pid(&[], &[row(7, 1, 1), row(5, 1, 1)]), Some(5));
+    }
+
+    #[test]
+    fn a_pid_that_vanished_or_changed_parent_or_got_younger_is_not_signalled() {
+        let seen = [
+            row(10, 1, 100),
+            row(11, 10, 50),
+            row(12, 10, 50),
+            row(13, 10, 50),
+        ];
+        let fresh = [
+            row(1, 0, 900),
+            row(10, 1, 101),
+            // Still there, same parent, older: the same process.
+            row(11, 10, 51),
+            // 12 died and its pid went to a younger process of the same parent.
+            row(12, 10, 0),
+            // 13 died and its pid went to a process of another parent.
+            row(13, 77, 60),
+        ];
+        assert_eq!(still_the_same(&seen, &fresh, 10, false), [11]);
+        // A process that vanished altogether is not signalled either.
+        assert!(still_the_same(&seen, &[row(10, 1, 101)], 10, false).is_empty());
+    }
+
+    #[test]
+    fn the_root_is_a_candidate_only_on_request_and_must_be_unchanged() {
+        let seen = [row(10, 1, 100), row(11, 10, 50)];
+        let fresh = [row(10, 1, 100), row(11, 10, 50)];
+        assert_eq!(still_the_same(&seen, &fresh, 10, false), [11]);
+        assert_eq!(still_the_same(&seen, &fresh, 10, true), [10, 11]);
+        // The root pid was recycled by a younger process: nothing is signalled
+        // for it, and its former children are no longer under it.
+        let recycled = [row(10, 1, 2), row(11, 5, 50)];
+        assert!(still_the_same(&seen, &recycled, 10, true).is_empty());
+        // A descendant that moved elsewhere in the tree stops being one.
+        let moved = [row(10, 1, 100), row(11, 1, 50)];
+        assert_eq!(still_the_same(&seen, &moved, 10, true), [10]);
     }
 
     #[cfg(unix)]

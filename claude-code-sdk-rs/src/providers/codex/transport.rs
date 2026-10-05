@@ -279,15 +279,15 @@ impl Process {
         if let Some(pid) = self.pid {
             // Read the tree before touching anything: killing the root first would
             // re-parent the children and hide them.
-            let descendants = cancel::descendant_pids(pid).await;
-            for descendant in descendants {
-                #[cfg(unix)]
-                cancel::signal_pid(descendant, libc::SIGKILL);
-                #[cfg(not(unix))]
-                let _ = descendant;
-            }
+            // A descendant is signalled only if it is still the same process when the
+            // tree is read again (`cancel::still_the_same`): a recycled pid is left alone.
             #[cfg(unix)]
-            if let Ok(group) = i32::try_from(pid)
+            cancel::signal_descendants(pid, libc::SIGKILL).await;
+            // The group is signalled only while the child has not been reaped: once it
+            // has, its pid may belong to a stranger who leads a group of its own.
+            #[cfg(unix)]
+            if self.death().is_none()
+                && let Ok(group) = i32::try_from(pid)
                 && group > 1
             {
                 // SAFETY: `killpg` takes two integers; `group` is the pid of our own
