@@ -18,7 +18,7 @@
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
@@ -36,6 +36,7 @@ use super::{
     ChatMessage, CompletionChunk, CompletionRequest, CompletionStream, EndpointProbe,
     ModelEndpoint, ToolSpec,
 };
+use crate::agent::credentials::WipedText;
 use crate::agent::{
     ContextWindow, ContextWindowSource, CredentialRef, CredentialResolver, ModelInfo,
     ProviderError, ProviderHealth, Secret, redact_with,
@@ -89,6 +90,13 @@ impl OpenAiEndpointConfig {
 
 type SharedField = Arc<Mutex<Option<&'static str>>>;
 
+/// Locks, taking the data over when a panicking holder poisoned the mutex: these
+/// caches hold plain values, a half-finished update is at worst a stale entry,
+/// and a panic elsewhere must not take every later request down with it.
+fn locked<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
 /// An OpenAI-compatible model endpoint.
 pub struct OpenAiEndpoint {
     config: OpenAiEndpointConfig,
@@ -133,7 +141,7 @@ impl OpenAiEndpoint {
 
     async fn prepare(&self) -> Result<(CheckedEndpoint, Client), ProviderError> {
         let checked = self.guard.check(&self.config.base_url).await?;
-        if let Some((host, addrs, client)) = self.client.lock().unwrap().as_ref()
+        if let Some((host, addrs, client)) = locked(&self.client).as_ref()
             && *host == checked.host
             && *addrs == checked.addrs
         {
@@ -151,8 +159,7 @@ impl OpenAiEndpoint {
         let client = builder
             .build()
             .map_err(|_| ProviderError::unreachable("HTTP client could not be built"))?;
-        *self.client.lock().unwrap() =
-            Some((checked.host.clone(), checked.addrs.clone(), client.clone()));
+        *locked(&self.client) = Some((checked.host.clone(), checked.addrs.clone(), client.clone()));
         Ok((checked, client))
     }
 
@@ -177,7 +184,9 @@ impl OpenAiEndpoint {
         let Some(secret) = secret else {
             return Ok((builder, None));
         };
-        let mut value = HeaderValue::from_str(&format!("Bearer {}", secret.expose()))
+        // The `Bearer <key>` text is wiped as soon as the header value is built.
+        let bearer = WipedText::bearer(&secret);
+        let mut value = HeaderValue::from_bytes(bearer.as_bytes())
             .map_err(|_| ProviderError::invalid("credential cannot be sent as an HTTP header"))?;
         value.set_sensitive(true);
         Ok((builder.header(AUTHORIZATION, value), Some(secret)))
@@ -239,7 +248,7 @@ impl OpenAiEndpoint {
     }
 
     fn cached_probe(&self, model: &str) -> Option<EndpointProbe> {
-        let probes = self.probes.lock().unwrap();
+        let probes = locked(&self.probes);
         let (at, probe) = probes.get(model)?;
         (at.elapsed() < self.config.probe_ttl).then(|| probe.clone())
     }
@@ -321,14 +330,11 @@ impl ModelEndpoint for OpenAiEndpoint {
         let probe = EndpointProbe {
             tools: true,
             parallel_tools: self.config.quirks.explicit_parallel_tool_calls,
-            reasoning_field: field.lock().unwrap().map(str::to_string),
+            reasoning_field: locked(&field).map(str::to_string),
             context_window,
             checked_at_ms: crate::agent::now_ms(),
         };
-        self.probes
-            .lock()
-            .unwrap()
-            .insert(model.to_string(), (Instant::now(), probe.clone()));
+        locked(&self.probes).insert(model.to_string(), (Instant::now(), probe.clone()));
         Ok(probe)
     }
 }
@@ -521,7 +527,7 @@ fn chunk_stream(
             for event in events {
                 match parser.feed(&event.data) {
                     Ok(chunks) => {
-                        *shared.lock().unwrap() = parser.reasoning_field_seen;
+                        *locked(&shared) = parser.reasoning_field_seen;
                         for chunk in chunks { yield Ok(chunk); }
                     }
                     Err(error) => { yield Err(scrub(error, secret.as_ref())); return; }
@@ -542,6 +548,34 @@ fn chunk_stream(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn poison<T: Send>(mutex: &Mutex<T>) {
+        std::thread::scope(|scope| {
+            let _ = scope
+                .spawn(|| {
+                    let _guard = mutex.lock().unwrap();
+                    panic!("poisoning the mutex on purpose");
+                })
+                .join();
+        });
+        assert!(mutex.is_poisoned());
+    }
+
+    #[tokio::test]
+    async fn a_poisoned_cache_does_not_take_the_endpoint_down() {
+        let mut config = OpenAiEndpointConfig::new("poisoned", "http://127.0.0.1:9/v1");
+        config.allow_private_network = true;
+        let endpoint = OpenAiEndpoint::new(config, Arc::new(crate::agent::EnvCredentialResolver));
+        poison(&endpoint.client);
+        poison(&endpoint.probes);
+        // Reading and filling both caches goes on, on the data the panic left.
+        assert!(endpoint.cached_probe("m").is_none());
+        let (_checked, _client) = endpoint.prepare().await.expect("prepare after poison");
+        let (_checked, _client) = endpoint.prepare().await.expect("the cache is reused");
+        let field: SharedField = Arc::new(Mutex::new(None));
+        poison(&field);
+        assert_eq!(locked(&field).map(str::to_string), None);
+    }
 
     #[test]
     fn http_statuses_are_classified() {

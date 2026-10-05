@@ -65,6 +65,47 @@ impl Drop for Secret {
     }
 }
 
+/// A derived text that embeds a credential (`Bearer <key>`), overwritten when
+/// dropped, so the intermediate copy a header is built from does not linger in
+/// freed memory. Best effort, like [`Secret`]: the header value an HTTP client
+/// keeps afterwards is outside this crate's reach. No `Debug`, no `Display`.
+#[cfg_attr(not(feature = "provider-native"), allow(dead_code))]
+pub(crate) struct WipedText(Vec<u8>);
+
+#[cfg_attr(not(feature = "provider-native"), allow(dead_code))]
+impl WipedText {
+    /// `Bearer <secret>`, in one allocation sized up front (no reallocation that
+    /// would leave a copy of the key behind).
+    pub(crate) fn bearer(secret: &Secret) -> Self {
+        const SCHEME: &[u8] = b"Bearer ";
+        let mut bytes = Vec::with_capacity(SCHEME.len() + secret.len());
+        bytes.extend_from_slice(SCHEME);
+        bytes.extend_from_slice(secret.expose().as_bytes());
+        Self(bytes)
+    }
+
+    /// The bytes, for building a header value. Do not store the result.
+    pub(crate) fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
+
+    /// Overwrites the content with zeros, keeping its length.
+    pub(crate) fn wipe(&mut self) {
+        // Volatile so the writes are not optimised away as "dead" stores.
+        for byte in &mut self.0 {
+            // SAFETY: `byte` is a valid, aligned, exclusive reference.
+            unsafe { std::ptr::write_volatile(byte, 0) };
+        }
+        std::sync::atomic::compiler_fence(std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+impl Drop for WipedText {
+    fn drop(&mut self) {
+        self.wipe();
+    }
+}
+
 /// Where a credential lives. Serialised as `vault:<name>`, `env:<VAR>` or `none`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
 #[non_exhaustive]
@@ -210,7 +251,7 @@ pub(crate) fn is_sensitive_name(name: &str) -> bool {
 }
 
 /// Word-by-word masking. A "word" is delimited by whitespace; inside a word the
-/// separators `=`, `:` and quotes are honoured so both `api_key=abc` and
+/// separators `=`, `:`, `,`, `;` and quotes are honoured so both `api_key=abc` and
 /// `"api_key":"abc"` lose their value.
 fn mask_tokens(text: &str) -> String {
     let mut result = String::with_capacity(text.len());
@@ -235,9 +276,28 @@ fn mask_tokens(text: &str) -> String {
             result.push_str("<redacted>");
             continue;
         }
-        result.push_str(&mask_word(word, &mut mask_next));
+        result.push_str(&mask_fields(word, &mut mask_next));
     }
     result
+}
+
+/// Masks one space-delimited word that may glue several fields with `,` or `;`
+/// (`a=1;token=x`, `{"a":1,"api_key":"x"}`): each field is judged on its own, so
+/// a sensitive name that is not the first one of the word is still caught. The
+/// separators are kept. A URL is left to [`mask_word`], which knows its shape.
+fn mask_fields(word: &str, mask_next: &mut bool) -> String {
+    if word.contains("://") {
+        return mask_word(word, mask_next);
+    }
+    let mut out = String::with_capacity(word.len());
+    let mut start = 0;
+    for (index, separator) in word.match_indices([',', ';']) {
+        out.push_str(&mask_word(&word[start..index], mask_next));
+        out.push_str(separator);
+        start = index + separator.len();
+    }
+    out.push_str(&mask_word(&word[start..], mask_next));
+    out
 }
 
 fn mask_word(word: &str, mask_next: &mut bool) -> String {
@@ -371,6 +431,57 @@ mod tests {
             redact("GET https://host/v1/models?limit=3"),
             "GET https://host/v1/models?limit=3"
         );
+    }
+
+    #[test]
+    fn a_wiped_bearer_text_holds_the_header_and_is_zeroed_by_wipe_and_drop() {
+        let secret = Secret::new("sk-test-0123456789");
+        let mut text = WipedText::bearer(&secret);
+        assert_eq!(text.as_bytes(), b"Bearer sk-test-0123456789");
+        assert_eq!(text.0.capacity(), text.0.len(), "built in one allocation");
+        text.wipe();
+        assert_eq!(text.as_bytes().len(), 25, "the length is kept");
+        assert!(text.as_bytes().iter().all(|byte| *byte == 0));
+        // The destructor does the same job (checked through the type, as reading
+        // freed memory would be undefined behaviour).
+        assert!(std::mem::needs_drop::<WipedText>());
+    }
+
+    #[test]
+    fn redact_cuts_on_commas_and_semicolons_not_only_on_spaces() {
+        let secret = Secret::new("regkey-4f9a1c7e");
+        let cases = [
+            // JSON without any space: the sensitive name is not the first one.
+            ("{\"model\":\"m\",\"api_key\":\"leakvalue1\"}", "leakvalue1"),
+            (
+                "{\"a\":1,\"b\":2,\"password\":\"leakvalue2\",\"c\":3}",
+                "leakvalue2",
+            ),
+            // Query/cookie style assignments glued with `;` or `,`.
+            ("a=1;token=leakvalue3;b=2", "leakvalue3"),
+            ("x=1,secret=leakvalue4,y=2", "leakvalue4"),
+            ("cookie: a=1;session_token=leakvalue5", "leakvalue5"),
+            // A header after a comma.
+            ("accept=json,authorization=leakvalue6", "leakvalue6"),
+            // A registered key inside every one of those shapes.
+            (
+                "{\"model\":\"m\",\"x\":\"regkey-4f9a1c7e\"}",
+                "regkey-4f9a1c7e",
+            ),
+            ("a=1;k=regkey-4f9a1c7e;b=2", "regkey-4f9a1c7e"),
+            ("GET /v1?x=1&k=regkey-4f9a1c7e,z", "regkey-4f9a1c7e"),
+        ];
+        for (input, leak) in cases {
+            let output = redact_with(input, &[&secret]);
+            assert!(!output.contains(leak), "{input:?} leaked into {output:?}");
+            assert!(output.contains("<redacted>"), "{input:?} -> {output:?}");
+        }
+        // The harmless neighbours and the separators survive.
+        assert_eq!(
+            redact("{\"model\":\"m\",\"api_key\":\"leakvalue1\",\"n\":3}"),
+            "{\"model\":\"m\",\"api_key\":<redacted>,\"n\":3}"
+        );
+        assert_eq!(redact("a=1;b=2,c=3"), "a=1;b=2,c=3");
     }
 
     #[test]
