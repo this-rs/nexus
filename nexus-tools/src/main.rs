@@ -21,7 +21,7 @@ use nexus_tools::{Profile, Server, Session, SigningKey, ToolRegistry, serve_line
 use tokio::io::BufReader;
 
 const USAGE: &str = "usage: nexus-tools [--listen ADDR] [--allow-origin ORIGIN]... \
-[--max-output-chars N] [--cwd DIR] [--add-dir DIR]... [--backup-dir DIR] [--unrestricted]\n\
+[--max-output-chars N] [--cwd DIR] [--add-dir DIR]... [--backup-dir DIR] [--search-engine SPEC]... [--search-allow-private] [--brave-endpoint URL] [--unrestricted]\n\
 environment: NEXUS_TOOLS_KEY (signing key, >= 32 bytes), NEXUS_TOOLS_PROFILE (stdio token), \
 NEXUS_TOOLS_LOG";
 
@@ -33,6 +33,10 @@ struct Options {
     cwd: Option<std::path::PathBuf>,
     add_dirs: Vec<std::path::PathBuf>,
     backup_dir: Option<std::path::PathBuf>,
+    /// `brave:ENVVAR`, `searxng:URL` or `html`, in the order they are tried.
+    search_engines: Vec<String>,
+    search_allow_private: bool,
+    brave_endpoint: Option<String>,
 }
 
 fn fail(message: &str) -> ExitCode {
@@ -49,6 +53,9 @@ fn parse_args() -> Result<Options, String> {
         cwd: None,
         add_dirs: Vec::new(),
         backup_dir: None,
+        search_engines: Vec::new(),
+        search_allow_private: false,
+        brave_endpoint: None,
     };
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -70,6 +77,9 @@ fn parse_args() -> Result<Options, String> {
             "--cwd" => options.cwd = Some(value("--cwd")?.into()),
             "--add-dir" => options.add_dirs.push(value("--add-dir")?.into()),
             "--backup-dir" => options.backup_dir = Some(value("--backup-dir")?.into()),
+            "--search-engine" => options.search_engines.push(value("--search-engine")?),
+            "--search-allow-private" => options.search_allow_private = true,
+            "--brave-endpoint" => options.brave_endpoint = Some(value("--brave-endpoint")?),
             "--unrestricted" => options.unrestricted = true,
             "--version" => {
                 println!("nexus-tools {}", env!("CARGO_PKG_VERSION"));
@@ -121,7 +131,73 @@ fn registry(options: &Options) -> Result<ToolRegistry, String> {
     // build has no TLS backend yet, so https fetches fail with a typed error (N21).
     registry =
         nexus_tools::web::register(registry, nexus_tools::web::Fetcher::new(Default::default()));
+    registry = nexus_tools::search::register(registry, search_engine(options)?);
     Ok(registry)
+}
+
+/// An environment variable name: letters, digits and underscores, not starting with a digit. A
+/// secret pasted here by mistake (`sk-live-…` has dashes) is refused without being echoed.
+fn is_variable_name(text: &str) -> bool {
+    !text.is_empty()
+        && !text.starts_with(|c: char| c.is_ascii_digit())
+        && text.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// The search engines asked for on the command line. A key is never given here, only the NAME of
+/// the environment variable that holds it. `html` (a keyless, fragile scraper) is built only
+/// because it was named.
+fn search_engine(options: &Options) -> Result<nexus_tools::search::Engine, String> {
+    use nexus_tools::search::{
+        BRAVE_ENDPOINT, DDG_HTML_ENDPOINT, Engine, HtmlBackend, KeySource, KeyedApiBackend,
+        Protection, SearxngBackend,
+    };
+    use nexus_tools::web::{FetchConfig, Fetcher, SystemClock};
+    let fetcher = || {
+        Arc::new(Fetcher::new(FetchConfig {
+            allow_private_network: options.search_allow_private,
+            // The operator wrote the scheme; do not rewrite it.
+            upgrade_http: false,
+            ..FetchConfig::default()
+        }))
+    };
+    let mut engine = Engine::new(Arc::new(SystemClock::default()));
+    for spec in &options.search_engines {
+        let protection = Protection::default();
+        engine = match spec.split_once(':') {
+            Some(("brave", variable)) if is_variable_name(variable) => engine.with_backend(
+                KeyedApiBackend::new(
+                    "brave",
+                    options
+                        .brave_endpoint
+                        .clone()
+                        .unwrap_or_else(|| BRAVE_ENDPOINT.to_owned()),
+                    KeySource::Env(variable.to_owned()),
+                    fetcher(),
+                ),
+                protection,
+            ),
+            Some(("searxng", url)) if !url.is_empty() => {
+                engine.with_backend(SearxngBackend::new(url, fetcher()), protection)
+            },
+            None if spec == "html" => {
+                eprintln!(
+                    "nexus-tools: WARNING: the html search engine scrapes a page meant for people; it is fragile and the engine's terms may not allow it"
+                );
+                engine.with_backend(
+                    HtmlBackend::explicitly_enabled(DDG_HTML_ENDPOINT, fetcher()),
+                    protection,
+                )
+            },
+            _ => {
+                // The spec is NOT echoed: a key pasted by mistake must not reach a log.
+                return Err(
+                    "--search-engine takes brave:ENVVAR, searxng:URL or html (a key is never given here, only the NAME of the environment variable that holds it)"
+                        .to_owned(),
+                );
+            },
+        };
+    }
+    Ok(engine)
 }
 
 /// The signing key from the environment. The value is never printed, not even on failure.

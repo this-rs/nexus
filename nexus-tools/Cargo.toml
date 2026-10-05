@@ -17,6 +17,11 @@ path = "src/lib.rs"
 name = "nexus-tools"
 path = "src/main.rs"
 
+[[bin]]
+name = "fake_search"
+path = "src/bin/fake_search.rs"
+required-features = ["test-tools"]
+
 [features]
 default = []
 # `echo` and `write` tools, to exercise the server end to end without the real tools.

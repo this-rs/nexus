@@ -100,10 +100,9 @@ async fn run(tool: &WebSearchTool, args: Value) -> ToolResult {
     .await
 }
 
-fn tool_with(
-    clock: &Arc<Clk>,
-    backends: Vec<(Box<dyn FnOnce(Engine) -> Engine>,)>,
-) -> WebSearchTool {
+type Adder = Box<dyn FnOnce(Engine) -> Engine>;
+
+fn tool_with(clock: &Arc<Clk>, backends: Vec<(Adder,)>) -> WebSearchTool {
     let mut engine = Engine::new(Arc::clone(clock) as Arc<dyn Clock>);
     for (add,) in backends {
         engine = add(engine);

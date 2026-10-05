@@ -47,6 +47,26 @@ pub fn canonical(url: &str) -> Option<String> {
     Some(out)
 }
 
+/// `url` as shown to the model: the same address without the fragment and the tracking
+/// parameters (they identify a visit, not a page, and cost tokens). Anything else is untouched.
+pub fn tidy(url: &str) -> String {
+    let Ok(mut parsed) = Url::parse(url.trim()) else {
+        return url.trim().to_owned();
+    };
+    parsed.set_fragment(None);
+    let kept: Vec<(String, String)> = parsed
+        .query_pairs()
+        .filter(|(name, _)| !is_tracking(name))
+        .map(|(n, v)| (n.into_owned(), v.into_owned()))
+        .collect();
+    if kept.is_empty() {
+        parsed.set_query(None);
+    } else {
+        parsed.query_pairs_mut().clear().extend_pairs(kept);
+    }
+    parsed.to_string()
+}
+
 /// The host of `url`, lowercased, without `www.`.
 fn host_of(url: &str) -> Option<String> {
     let parsed = Url::parse(url.trim()).ok()?;
@@ -135,6 +155,23 @@ mod tests {
         ] {
             assert_eq!(canonical(url), None, "{url}");
         }
+    }
+
+    #[test]
+    fn a_displayed_address_loses_tracking_and_the_fragment_and_nothing_else() {
+        assert_eq!(
+            tidy("https://www.example.com/a?utm_source=x&id=7&fbclid=z#top"),
+            "https://www.example.com/a?id=7"
+        );
+        assert_eq!(
+            tidy("http://example.com/a/?utm_medium=m"),
+            "http://example.com/a/"
+        );
+        assert_eq!(
+            tidy("https://example.com/p?q=a+b&x=1"),
+            "https://example.com/p?q=a+b&x=1"
+        );
+        assert_eq!(tidy("not a url"), "not a url");
     }
 
     #[test]

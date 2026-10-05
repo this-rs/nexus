@@ -231,14 +231,22 @@ impl Fetcher {
 
     /// Fetches `url`, following redirects within the same host.
     pub async fn fetch(&self, url: &str) -> Result<Outcome, WebError> {
+        self.get(url, &[]).await
+    }
+
+    /// Like [`fetch`](Self::fetch), with extra request headers. Values are marked sensitive
+    /// (hyper never prints them) and go only to the host that was asked: a redirect to another
+    /// host is not followed, so a key in a header cannot be carried away by one.
+    pub async fn get(&self, url: &str, headers: &[(&str, &str)]) -> Result<Outcome, WebError> {
         let mut current = parse(url)?;
         if self.config.upgrade_http && current.scheme() == "http" {
             let _ = current.set_scheme("https");
         }
         for _ in 0..=self.config.max_redirects {
-            let hop = tokio::time::timeout(self.config.request_timeout, self.hop(&current))
-                .await
-                .map_err(|_| WebError::Timeout)??;
+            let hop =
+                tokio::time::timeout(self.config.request_timeout, self.hop(&current, headers))
+                    .await
+                    .map_err(|_| WebError::Timeout)??;
             match hop {
                 Hop::Page(page) => return Ok(Outcome::Page(page)),
                 Hop::Redirect { status, location } => {
@@ -299,7 +307,7 @@ impl Fetcher {
             .collect())
     }
 
-    async fn hop(&self, url: &Url) -> Result<Hop, WebError> {
+    async fn hop(&self, url: &Url, extra: &[(&str, &str)]) -> Result<Hop, WebError> {
         let addresses = self.guarded_addresses(url).await?;
         let host = url.host_str().unwrap_or_default().to_owned();
         let tls = url.scheme() == "https";
@@ -338,15 +346,30 @@ impl Fetcher {
             Some(port) => format!("{host}:{port}"),
             None => host.clone(),
         };
-        let request = Request::builder()
+        let mut builder = Request::builder()
             .method(Method::GET)
             .uri(target)
             .header(HOST, host_header)
             .header(USER_AGENT, concat!("nexus-tools/", env!("CARGO_PKG_VERSION")))
-            .header(ACCEPT, "text/markdown, text/html, text/plain, application/json, */*;q=0.1")
             // No compression: a decompressor is attack surface, and pages are small.
             .header(ACCEPT_ENCODING, "identity")
-            .header(CONNECTION, "close")
+            .header(CONNECTION, "close");
+        if !extra
+            .iter()
+            .any(|(name, _)| name.eq_ignore_ascii_case("accept"))
+        {
+            builder = builder.header(
+                ACCEPT,
+                "text/markdown, text/html, text/plain, application/json, */*;q=0.1",
+            );
+        }
+        for (name, value) in extra {
+            let mut value = hyper::header::HeaderValue::from_str(value)
+                .map_err(|_| WebError::Protocol(format!("header `{name}` has an invalid value")))?;
+            value.set_sensitive(true);
+            builder = builder.header(*name, value);
+        }
+        let request = builder
             .body(Empty::<Bytes>::new())
             .map_err(|e| WebError::Protocol(e.to_string()))?;
         let response = sender

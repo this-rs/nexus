@@ -11,6 +11,8 @@
 //! signed token that carries it, output caps that always say when they cut, and the two
 //! transports (stdio, streamable HTTP).
 
+#[cfg(feature = "test-tools")]
+pub mod fake_search;
 pub mod files;
 pub mod http;
 pub mod limits;

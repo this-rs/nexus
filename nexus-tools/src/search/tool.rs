@@ -9,7 +9,7 @@ use serde_json::{Value, json};
 use tokio::task::JoinSet;
 
 use super::backend::{SearchHit, SearchQuery};
-use super::canon::{canonical, permitted};
+use super::canon::{canonical, permitted, tidy};
 use super::engine::Engine;
 use crate::tool::{Annotations, CallContext, Tool, ToolResult};
 use crate::web::PageCache;
@@ -313,7 +313,7 @@ fn render(query: &str, backends: &[String], hits: &[SearchHit], filtered: bool) 
             "\n\n{}. {}\n   {}",
             index + 1,
             clean(&hit.title, TITLE_CHARS),
-            clean(&hit.url, URL_CHARS)
+            clean(&tidy(&hit.url), URL_CHARS)
         ));
         if let Some(snippet) = hit
             .snippet

@@ -316,3 +316,25 @@ qui compile du C et de l'assembleur à la construction (déjà le cas, via `reqw
 `provider-native`). L'alternative pure Rust (`rustls` + fournisseur RustCrypto) est expérimentale et non auditée.
 Choisir entre : (a) `rustls`+`ring` derrière une feature `tls` désactivée par défaut, exception à la politique
 justifiée ; (b) fournisseur pur Rust ; (c) pas de https tant que la politique n'est pas assouplie.
+
+## 7. WebSearch (N22)
+
+Claude Code s'appuie sur un service de recherche de son éditeur ; il n'y en a pas ici. La recherche est donc
+un **trait** (`SearchBackend`) avec plusieurs moteurs, essayés dans l'ordre configuré (`--search-engine`, répétable) :
+
+| Moteur | Réglage | Remarque |
+|---|---|---|
+| API à clé (forme Brave) | `brave:NOM_DE_VARIABLE` | la clé est lue dans l'environnement du serveur ; seul le **nom** est configuré |
+| SearXNG auto-hébergé | `searxng:URL` | le format JSON doit être activé dans l'instance ; adresse privée : `--search-allow-private` |
+| HTML d'un moteur sans clé | `html` | **fragile**, désactivé par défaut, avertissement au démarrage, conditions du moteur à respecter |
+| Navigateur MCP externe | N23 | pour les pages qui exigent du JavaScript |
+
+Garanties : domaines autorisés/bloqués appliqués **après** le moteur ; URL équivalentes fusionnées ; repli,
+disjoncteur et limitation de débit par moteur ; clé refusée ou quota épuisé = erreur typée qui ne casse pas le
+disjoncteur ; mode `standard` = une requête, `extended` = plusieurs variantes (celles du modèle dans
+`additional_queries`, sinon mots-clés et phrase exacte) fusionnées par rang réciproque ; résultats étiquetés
+**données non fiables**. Aucun appel de modèle caché. L'outil n'est enregistré que si un moteur est configuré.
+
+Écarts avec Claude Code : pas de synthèse par un second modèle (le modèle de la session lit les résultats) ;
+pas de moteur par défaut ; https dépend de la décision TLS en attente (§6), donc pour l'instant seuls les
+moteurs en `http` (SearXNG sur un réseau privé) fonctionnent de bout en bout.

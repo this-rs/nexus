@@ -167,3 +167,144 @@ fn listening_without_a_long_enough_key_refuses_to_start() {
         assert!(!stderr.contains("short"), "the key is not echoed: {stderr}");
     }
 }
+
+// ---------------------------------------------------------------------------
+// WebSearch is configured, never assumed (N22)
+// ---------------------------------------------------------------------------
+
+fn names(answer: &Value) -> Vec<String> {
+    answer["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["name"].as_str().unwrap().to_owned())
+        .collect()
+}
+
+/// Starts the `fake_search` binary and returns it with its address.
+fn fake_search(key: &str) -> (Child, String) {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_fake_search"))
+        .args(["127.0.0.1:0", key])
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut line = String::new();
+    BufReader::new(child.stdout.as_mut().unwrap())
+        .read_line(&mut line)
+        .unwrap();
+    let addr = line
+        .trim()
+        .strip_prefix("listening on ")
+        .expect("the fake says where it listens")
+        .to_owned();
+    (child, addr)
+}
+
+#[test]
+fn web_search_is_absent_until_an_engine_is_configured() {
+    let child = binary().arg("--unrestricted").spawn().unwrap();
+    let (answers, _) = talk(
+        child,
+        &[json!({"jsonrpc":"2.0","id":1,"method":"tools/list"})],
+        1,
+    );
+    let tools = names(&answers[0]);
+    assert!(!tools.contains(&"WebSearch".to_owned()), "{tools:?}");
+    for expected in [
+        "Read",
+        "Write",
+        "Edit",
+        "Glob",
+        "Grep",
+        "NotebookEdit",
+        "Bash",
+        "TaskStop",
+        "Monitor",
+        "WebFetch",
+    ] {
+        assert!(
+            tools.contains(&expected.to_owned()),
+            "{expected} missing from {tools:?}"
+        );
+    }
+}
+
+#[test]
+fn a_keyed_engine_works_end_to_end_and_its_key_stays_in_the_environment() {
+    let key = "sk-binary-search-key-91e7";
+    let (mut fake, addr) = fake_search(key);
+    let child = binary()
+        .args([
+            "--unrestricted",
+            "--search-engine",
+            "brave:MY_SEARCH_KEY",
+            "--search-allow-private",
+        ])
+        .args(["--brave-endpoint", &format!("http://{addr}/brave")])
+        .env("MY_SEARCH_KEY", key)
+        .spawn()
+        .unwrap();
+    let (answers, stderr) = talk(
+        child,
+        &[
+            json!({"jsonrpc":"2.0","id":1,"method":"tools/list"}),
+            json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"WebSearch","arguments":{"query":"end to end search","blocked_domains":["blocked.test"]}}}),
+        ],
+        2,
+    );
+    fake.kill().ok();
+    assert!(names(&answers[0]).contains(&"WebSearch".to_owned()));
+    let text = answers[1]["result"]["content"][0]["text"].as_str().unwrap();
+    assert_eq!(answers[1]["result"]["isError"], false, "{text}");
+    assert!(
+        text.contains("(via brave)") && text.contains("Result 1 for end to end search"),
+        "{text}"
+    );
+    assert!(!text.contains("blocked.test"), "{text}");
+    assert!(
+        !text.contains(key) && !stderr.contains(key),
+        "the key leaked:\n{text}\n{stderr}"
+    );
+}
+
+#[test]
+fn a_key_pasted_where_a_variable_name_belongs_is_refused_without_being_echoed() {
+    let pasted = "sk-live-abcdef-0123456789";
+    let output = binary()
+        .args([
+            "--unrestricted",
+            "--search-engine",
+            &format!("brave:{pasted}"),
+        ])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("NAME of the environment variable"),
+        "{stderr}"
+    );
+    assert!(
+        !stderr.contains(pasted),
+        "the pasted key was echoed: {stderr}"
+    );
+    assert!(output.stdout.is_empty());
+}
+
+#[test]
+fn the_html_engine_needs_its_name_and_says_what_it_is() {
+    let child = binary()
+        .args(["--unrestricted", "--search-engine", "html"])
+        .spawn()
+        .unwrap();
+    let (answers, stderr) = talk(
+        child,
+        &[json!({"jsonrpc":"2.0","id":1,"method":"tools/list"})],
+        1,
+    );
+    assert!(names(&answers[0]).contains(&"WebSearch".to_owned()));
+    assert!(
+        stderr.contains("fragile"),
+        "the operator is warned: {stderr}"
+    );
+}

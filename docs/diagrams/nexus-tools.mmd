@@ -1,5 +1,5 @@
 %% name: nexus-tools
-%% covers: nexus-tools/src/*.rs, nexus-tools/src/files/*.rs, nexus-tools/src/shell/*.rs, nexus-tools/src/web/*.rs, nexus-tools/tests/data/html/*.html, nexus-tools/tests/*.rs, nexus-tools/tests/golden_grep/*.txt, docs/agent-tools-parity.md
+%% covers: nexus-tools/src/*.rs, nexus-tools/src/files/*.rs, nexus-tools/src/shell/*.rs, nexus-tools/src/web/*.rs, nexus-tools/src/search/*.rs, nexus-tools/src/fake_search.rs, nexus-tools/src/bin/fake_search.rs, nexus-tools/tests/data/html/*.html, nexus-tools/tests/*.rs, nexus-tools/tests/golden_grep/*.txt, docs/agent-tools-parity.md
 %% verified: 2026-10-05
 flowchart TD
     subgraph legend["Légende"]
@@ -57,11 +57,21 @@ flowchart TD
         TLS["🟠 https : AUCUN moteur TLS dans ce build, échec typé « no TLS support » (jamais en clair) —<br/>décision à prendre : rustls+ring (compilateur C requis) ou fournisseur pur Rust non audité"]
     end
 
+    subgraph search["WebSearch — search/*.rs (N22)"]
+        direction TB
+        TRAIT["✅ trait SearchBackend + moteurs essayés dans l'ordre : repli sur panne,<br/>disjoncteur (N échecs consécutifs, demi-ouvert, une sonde), limitation de débit,<br/>quota et clé refusée ne comptent pas comme panne<br/><i>vérifié : tests/search_core.rs, horloge injectée ; 4 mutations rouges</i>"]
+        FILTER["✅ domaines autorisés/bloqués appliqués APRÈS le moteur (un moteur qui renvoie un domaine bloqué<br/>est démenti) ; URL canoniques fusionnées (schéma, www, fragment, paramètres de suivi) ;<br/>mode étendu : plusieurs requêtes fusionnées par rang réciproque, standard : une seule"]
+        UNTRUSTED["✅ résultats = données non fiables : étiquetés, une ligne par champ, longueurs bornées,<br/>jamais d'instruction ; aucun appel de modèle caché"]
+        ENGINES["✅ trois moteurs, une même suite contre fake_search : API à clé (forme Brave),<br/>SearXNG auto-hébergé, HTML sans clé (fragile, désactivé par défaut, nommé explicitement)<br/><i>vérifié : tests/search_conformance.rs</i>"]
+        KEYS["✅ clé par RÉFÉRENCE (variable d'environnement ou fichier), jamais en clair : en-tête seulement,<br/>absente de l'URL, du Debug, des erreurs, de la sortie et de stderr ; une clé collée à la place<br/>d'un nom est refusée sans être répétée<br/><i>vérifié : mutations « clé dans l'URL » et « Debug affiche la clé » rouges</i>"]
+        STLS["🟠 https des moteurs : même décision TLS en attente que WebFetch"]
+    end
+
     subgraph suite["Politique de dépendances — tests/dependency_policy.rs"]
         DEPS["✅ la fermeture de nexus-tools se compile avec Rust seul :<br/>pas de links, pas de cc/cmake/bindgen, -sys limités aux liaisons de plateforme<br/><i>vérifié : cinq cas factices rouges, puis la vraie fermeture</i>"]
     end
 
-    LATER["🟠 N22 WebSearch · N23 Obscura (MCP externe)"]
+    LATER["🟠 N23 Obscura (MCP externe)"]
 
     HARNESS --> RPC
     RPC --> STDIO
@@ -80,6 +90,12 @@ flowchart TD
     STATE --> NB
     READ --> STATE
     SCOPE --> SEARCH
+    PROFILE --> TRAIT
+    TRAIT --> FILTER
+    FILTER --> UNTRUSTED
+    TRAIT --> ENGINES
+    ENGINES --> KEYS
+    ENGINES -.-> STLS
     PROFILE --> SSRF
     SSRF --> PIN
     PIN --> REDIR
