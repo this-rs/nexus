@@ -233,5 +233,15 @@ atomique — chacune fait échouer des tests.
 - Un chemin hors périmètre est refusé (`Path is outside the directories this session may access`) ; Claude
   Code demande une permission à la place.
 
-Restent pour N19 : images et PDF dans `Read` (blocs image : `ToolResult` ne porte que du texte pour
-l'instant), `Glob`, `Grep`, `NotebookEdit`.
+`NotebookEdit` : un type JSON ordonné local conserve l'ordre des clés (la feature `preserve_order` de
+`serde_json` est inutilisable : Cargo l'unifie sur tout le workspace et réordonne les messages de contrôle
+octet pour octet du harnais). Une cellule de code remplacée voit ses `outputs` vidés et son
+`execution_count` remis à `null` (non relevé).
+
+`Glob` et `Grep` (crates `ignore`, `globset`, `regex`, sans binaire `rg`) : `claude -p` 2.1.287 n'expose pas ces
+outils, donc **aucun relevé** ; la référence est un vrai ripgrep 15.2 (`tests/search.rs` compare les sorties,
+goldens `tests/golden_grep/` quand `rg` est absent). Étiquettes de sortie (`Found N files`, pied du mode count,
+`No files found`) d'après le comportement documenté de Claude Code, non relevées. Fichiers cachés inclus, dossiers
+VCS exclus, liens symboliques non suivis (jamais d'évasion du périmètre).
+
+Restent pour N19 : images et PDF dans `Read` (blocs image : `ToolResult` ne porte que du texte pour l'instant).

@@ -8,7 +8,7 @@
 # than implicit; binaries, `mod.rs` and re-exporting `lib.rs`
 # files legitimately live there.
 #
-# 18 diagrams, 264/161 source files claimed, 4 unclaimed.
+# 18 diagrams, 281/162 source files claimed, 4 unclaimed.
 
 diagrams:
   - name: nexus-agent-contract
@@ -155,6 +155,7 @@ diagrams:
       - nexus-tools/src/*.rs
       - nexus-tools/src/files/*.rs
       - nexus-tools/tests/*.rs
+      - nexus-tools/tests/golden_grep/*.txt
       - docs/agent-tools-parity.md
   - name: nexus-xtask
     file: nexus-xtask.mmd

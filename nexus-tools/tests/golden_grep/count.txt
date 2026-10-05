@@ -1,0 +1,6 @@
+.hidden/secret.txt:1
+README.md:1
+docs/guide.md:1
+script.py:1
+src/lib.rs:1
+src/main.rs:1

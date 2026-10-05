@@ -1,0 +1,6 @@
+multi.txt:1:start
+multi.txt:2:middle one
+multi.txt:3:middle two
+multi.txt:4:end
+multi.txt:5:start
+multi.txt:6:not the end
