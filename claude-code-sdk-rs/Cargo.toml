@@ -83,3 +83,11 @@ required-features = ["testkit"]
 [[test]]
 name = "model_openai_endpoint"
 required-features = ["provider-native"]
+
+[[test]]
+name = "native_conformance"
+required-features = ["testkit", "provider-native"]
+
+[[test]]
+name = "native_harness"
+required-features = ["provider-native"]

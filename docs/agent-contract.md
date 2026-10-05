@@ -273,6 +273,59 @@ Valeurs de référence (v1, à confirmer par la conformité de chaque adaptateur
 | resume | oui | oui (transcript) | oui | selon `loadSession` |
 | cost | reported (subscription si OAuth) | priced / free / unknown | unknown (tokens seuls, A40) | reported si `Cost` présent, sinon unknown |
 
+Écarts constatés à l'implémentation du natif (`claude-code-sdk-rs/src/providers/native/`, feature
+`provider-native`, `NativeProvider` / `NativeConfig`) :
+
+- **`hooks` = `none`**, pas `in_protocol` comme la table de référence : `SessionSpec::hooks` est ignoré
+  et `provider_notice { kind: "hooks_not_supported" }` ouvre `out_of_band()` ; `before_tool`,
+  `after_tool` et `before_compaction` ne sont jamais appelés (le repli est celui du backend, A7).
+- **`capabilities(model)` est synchrone** : il lit ce qui a été sondé. Tant qu'un modèle n'est pas sondé
+  (`refresh_capabilities(model)`, ou `open`, qui sonde), `tools` est `false`, `thinking` `false`,
+  `context_window` `None` ; rien n'est affirmé sans preuve. `thinking` = la sonde a vu un champ de
+  raisonnement. `context_window` : configuré, sinon `probed`, sinon `catalog` ; `None` ⇒ aucune
+  compaction automatique (l'erreur typée `context_too_small` sort quand l'endpoint refuse).
+  `cost` : `free` si configuré, `priced` si le modèle a un prix, sinon `unknown`.
+- **Portées** : `once` et `session` (`always` n'a nulle part où être gardé) ; `always` répond
+  `Unsupported { permission_scope }`. `native_question`, `background_tasks`, `subagents`, `images`,
+  `sandbox` : absents ; `cancel_tools(task)` → `Unsupported { background_tasks }`,
+  `answer_question` → `Unsupported { native_question }`, mode `trust` → `Unsupported { sandbox }`
+  à l'ouverture et à chaud.
+- **Outils** : uniquement ceux des serveurs MCP de la session, offerts sous le nom
+  `mcp__<serveur>__<outil>` (caractères hors `[A-Za-z0-9_-]` remplacés par `_`, 64 caractères au plus) ;
+  `category: mcp`, `canonical` = ce nom. Règle d'exposition : un outil n'est pas offert si un `deny`
+  sans argument le vise, si le mode est `plan_only` et qu'il n'est pas `readOnlyHint: true`, ou — en
+  exposition stricte (défaut) — si `allow` n'est pas vide et ne le nomme pas (**une liste `allow` est une
+  liste d'exposition**). Un appel à un outil non offert reçoit un `tool_result` en erreur, sans
+  demande de permission. `readOnlyHint: true` compte comme une lecture pour `decide` (donc exécuté sans
+  demande en mode `ask`). `auto_edits` se comporte comme `ask` pour MCP. Transports MCP : stdio
+  (`isolated_command`, HOME dédié par instance) et HTTP streamable ; le transport HTTP+SSE historique
+  (`McpServerSpec::Sse`) est refusé (`Unsupported { mcp_sse }`).
+- **Budgets** : `limits.max_tokens` est un budget de **session**, compté sur l'usage rapporté (estimé à
+  4 caractères par jeton si l'endpoint n'en rapporte pas) ; il fonctionne sans fenêtre de contexte
+  connue (écart à la ligne `context_window` du tableau). `limits.max_cost_usd` sans prix pour le modèle
+  → `Unsupported { cost }` à l'ouverture (A21) ; avec prix, ou endpoint `free`, il est tenu. Dépassement
+  → `done { stop_reason: budget_exceeded }`, contrôlé avant chaque requête et avant d'exécuter les
+  outils d'une réponse. `max_turns` / `limits.max_tool_iterations` bornent les allers-retours modèle d'un
+  tour (`max_turns`).
+- **Fin de tour** : une erreur d'endpoint classée est un `done { is_error, error }` (usage et coût
+  gardés) et le transcript revient à l'état d'avant le tour ; `error { process_exited }` terminal
+  seulement quand un serveur MCP stdio meurt (la session est alors morte : `send_turn` rend la même
+  erreur) ; un délai de tour (`turn_timeout_ms`) est un `done { error: timeout }`.
+  `done.provider_session_id` = identifiant du transcript. Les `tool_result` sont émis à leur fin ; le
+  modèle les reçoit dans l'ordre des appels.
+- **Transcript** : `ResumeToken { transcript_id }` ; stockage mémoire par défaut, fichiers JSON `0600`
+  (répertoire `0700`) en option ; le fichier est expurgé (`agent::redact` par tronçons) : un identifiant
+  collé dans un message n'est pas persisté, donc le texte rechargé peut différer du texte envoyé. Le
+  raisonnement est conservé (A39), y compris par la compaction (les derniers messages gardés sont
+  intacts). Pas de compaction manuelle (le contrat n'en prévoit pas pour le natif).
+- **Hors tour** : le natif émet `session_started` (et la notice `hooks_not_supported`) sur `out_of_band()`
+  dès l'ouverture ; un flux de tour lâché envoie le reste du tour (permissions comprises) hors tour.
+  La conformité de `permission_hors_tour` est montée ainsi (`DetachedTurn` dans
+  `tests/native_conformance.rs`).
+- **Non prouvé** : épinglage DNS des serveurs MCP HTTP (même réserve que `model/`) ; `Mcp-Session-Id`
+  expiré (404) n'est pas rejoué ; un serveur MCP qui renvoie des requêtes (`sampling`, `roots`) reçoit
+  `method not found`.
+
 ## 6. `ToolPolicy` (A8)
 
 ```rust
