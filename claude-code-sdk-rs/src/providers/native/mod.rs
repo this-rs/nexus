@@ -63,6 +63,7 @@ use crate::agent::{
 };
 use crate::model::{ChatMessage, EndpointProbe, ModelEndpoint, PriceTable};
 
+pub mod browser;
 pub mod cancel;
 pub mod compaction;
 pub mod r#loop;
@@ -72,6 +73,7 @@ pub mod session;
 pub mod tools;
 pub mod transcript;
 
+pub use browser::{BROWSER_SERVER, BrowserTools};
 pub use cancel::CancelToken;
 pub use compaction::CompactionConfig;
 pub use mcp::{McpClient, McpConfig, McpError, McpLaunch, McpTool};
@@ -172,6 +174,9 @@ pub struct NativeConfig {
     pub mcp: McpConfig,
     /// The tools every session has unless it names its own `nexus` server. `None`: none.
     pub default_tools: Option<DefaultTools>,
+    /// The optional browser (N23). Configuring it is the operator's authorisation; without the
+    /// executable installed there is no `browser_*` tool and a `browser_unavailable` notice.
+    pub browser: Option<BrowserTools>,
 }
 
 impl NativeConfig {
@@ -191,6 +196,7 @@ impl NativeConfig {
             compaction: CompactionConfig::default(),
             mcp: McpConfig::default(),
             default_tools: None,
+            browser: None,
         }
     }
 }
@@ -341,6 +347,23 @@ impl NativeProvider {
         // and only to a model that can call tools: a chat-only model keeps working as chat.
         let mut servers = spec.mcp_servers.clone();
         let mut notices = Vec::new();
+        if let Some(browser) = &self.config.browser
+            && !servers.contains_key(BROWSER_SERVER)
+        {
+            if !browser.is_installed() {
+                notices.push(AgentEvent::ProviderNotice {
+                    kind: "browser_unavailable".to_owned(),
+                    data: serde_json::json!({ "reason": "executable_not_found" }),
+                });
+            } else if capabilities.tools {
+                servers.insert(BROWSER_SERVER.to_owned(), browser.server());
+            } else {
+                notices.push(AgentEvent::ProviderNotice {
+                    kind: "browser_unavailable".to_owned(),
+                    data: serde_json::json!({ "reason": "model_no_tools" }),
+                });
+            }
+        }
         if let Some(default) = &self.config.default_tools
             && !servers.contains_key(NEXUS_TOOLS_SERVER)
         {

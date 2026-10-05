@@ -835,6 +835,21 @@ leur laisse pas cette chance (limite).
 
 **`WebSearch`** n'existe que si le serveur a au moins un moteur configuré (`args: ["--search-engine", …]`).
 
+**Navigateur optionnel (N23).** `extensions.browser` = `true` (cherche `obscura` dans le `PATH`) ou
+`{"program": "...", "args": [...]}` : Obscura est **attaché** comme serveur MCP externe `browser` (`obscura mcp`),
+jamais compilé chez nous (V8 en C++, hors règle « Rust seul » ; V8 hors de notre processus). Configurer
+l'instance vaut autorisation. Exécutable absent : aucun outil `browser_*`, `provider_notice { browser_unavailable }`,
+et un appel direct est refusé (`unknown tool`). Jamais `--stealth` ni `--allow-private-network` (refusés à la
+configuration), `OBSCURA_ALLOW_PRIVATE_NETWORK=0` posé et non modifiable. Les outils, relevés dans la documentation
+d'Obscura (non annotés par le serveur), sont classés par leur nom : lecture (`browser_snapshot`, `_markdown`,
+`_links`, `_extract`, `_get_cookies`…) en lecture seule, sans approbation et offerts en `plan_only` ; navigation
+(`browser_navigate`, `_back`, `_tab_new`…) en catégorie web, qui demande ; tout le reste (clic, saisie,
+`browser_evaluate`, écriture de cookies) demande, et un `browser_*` inconnu est traité en interaction. Une
+destination de `browser_navigate`/`browser_tab_new` est jugée **avant** toute demande : schéma autre que http(s),
+nom local (`localhost`, `.local`, `.internal`, sans point), adresse IP littérale hors des plages publiques
+(boucle locale comprise). La protection SSRF d'Obscura reste la seconde ligne. Non établi : la liste d'outils vient de
+la documentation, aucun Obscura n'est installé ici ; le test réel (`#[ignore]`, `NEXUS_REAL_OBSCURA`) n'a pas été joué.
+
 ## 14. Table `Message` (SDK) → `AgentEvent` → `ChatEvent` (backend)
 
 Relevée le 2026-10-05 sur `claude-code-sdk-rs/src/types.rs` (`Message`, `ContentBlock`,

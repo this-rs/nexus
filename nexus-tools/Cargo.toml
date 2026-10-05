@@ -18,6 +18,11 @@ name = "nexus-tools"
 path = "src/main.rs"
 
 [[bin]]
+name = "fake_obscura"
+path = "src/bin/fake_obscura.rs"
+required-features = ["test-tools"]
+
+[[bin]]
 name = "fake_search"
 path = "src/bin/fake_search.rs"
 required-features = ["test-tools"]
@@ -74,4 +79,8 @@ required-features = ["test-tools"]
 
 [[test]]
 name = "native_e2e"
+required-features = ["test-tools"]
+
+[[test]]
+name = "native_browser"
 required-features = ["test-tools"]

@@ -107,6 +107,10 @@ impl ToolEntry {
         let profile = (server == NEXUS_TOOLS_SERVER)
             .then(|| canonical_profile(tool))
             .flatten();
+        // The optional browser (N23): classified by name, since its server does not annotate.
+        let browser = (server == super::browser::BROWSER_SERVER && tool.starts_with("browser_"))
+            .then(|| super::browser::profile(tool));
+        let read_only = read_only || browser.is_some_and(|(_, reads)| reads);
         Self {
             name: exposed_name(server, tool),
             server: server.to_owned(),
@@ -115,10 +119,11 @@ impl ToolEntry {
             schema,
             read_only,
             canonical: profile.map(|_| tool.to_owned()),
-            category: match profile {
-                Some((category, _)) => category,
-                None if read_only => ToolCategory::Read,
-                None => ToolCategory::Mcp,
+            category: match (profile, browser) {
+                (Some((category, _)), _) => category,
+                (None, Some((category, _))) => category,
+                (None, None) if read_only => ToolCategory::Read,
+                (None, None) => ToolCategory::Mcp,
             },
         }
     }

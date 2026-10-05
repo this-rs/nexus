@@ -1,5 +1,5 @@
 %% name: nexus-tools
-%% covers: nexus-tools/src/*.rs, nexus-tools/src/files/*.rs, nexus-tools/src/shell/*.rs, nexus-tools/src/web/*.rs, nexus-tools/src/search/*.rs, nexus-tools/src/fake_search.rs, nexus-tools/src/bin/fake_search.rs, nexus-tools/tests/data/html/*.html, nexus-tools/tests/*.rs, nexus-tools/tests/golden_grep/*.txt, claude-code-sdk-rs/tests/parity/claude-code-2.1.287/*.json, docs/agent-tools-parity.md
+%% covers: nexus-tools/src/*.rs, nexus-tools/src/files/*.rs, nexus-tools/src/shell/*.rs, nexus-tools/src/web/*.rs, nexus-tools/src/search/*.rs, nexus-tools/src/fake_search.rs, nexus-tools/src/bin/fake_search.rs, nexus-tools/src/bin/fake_obscura.rs, nexus-tools/tests/data/html/*.html, nexus-tools/tests/*.rs, nexus-tools/tests/golden_grep/*.txt, claude-code-sdk-rs/tests/parity/claude-code-2.1.287/*.json, docs/agent-tools-parity.md
 %% verified: 2026-10-05
 flowchart TD
     subgraph legend["Légende"]
@@ -75,6 +75,10 @@ flowchart TD
         WIRED["✅ chaque outil traverse le vrai NativeProvider : Write, Read, Edit, Glob, Grep, NotebookEdit, Bash, WebFetch (SSRF refusée de bout en bout), WebSearch ;<br/>événements au nom canonique ; politique par motifs à la Claude Code ; outil hors profil jamais exécuté ; aucune variable de l'hôte dans une commande ; fin de session = commandes arrêtées<br/><i>vérifié : tests/native_e2e.rs (10 tests)</i>"]
     end
 
+    subgraph browser["Navigateur optionnel — N23 (attaché, jamais compilé)"]
+        OBSCURA["✅ Obscura = serveur MCP externe `obscura mcp` (V8/C++ hors de notre build et de notre processus) : absent → aucun outil browser_*, notice, appel refusé ;<br/>jamais --stealth ni --allow-private-network, OBSCURA_ALLOW_PRIVATE_NETWORK=0 ; lectures sans approbation, navigation et interactions demandent ; destination privée refusée avant toute demande<br/><i>vérifié : tests/native_browser.rs contre fake_obscura (liste d'outils de la documentation) ; 3 mutations rouges</i><br/>🟠 jamais joué contre un vrai Obscura (test #[ignore] écrit, binaire absent)"]
+    end
+
     subgraph suite["Politique de dépendances — tests/dependency_policy.rs"]
         DEPS["✅ la fermeture de nexus-tools se compile avec Rust seul :<br/>pas de links, pas de cc/cmake/bindgen, -sys limités aux liaisons de plateforme<br/><i>vérifié : cinq cas factices rouges, puis la vraie fermeture</i>"]
     end
@@ -98,6 +102,7 @@ flowchart TD
     STATE --> NB
     READ --> STATE
     SCOPE --> SEARCH
+    WIRED --> OBSCURA
     PROFILE --> WIRED
     BASH --> WIRED
     READ --> REPLAY

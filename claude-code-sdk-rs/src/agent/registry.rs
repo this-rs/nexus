@@ -1131,6 +1131,7 @@ impl ProviderRegistry {
             native.compaction.keep_recent = usize::try_from(keep).unwrap_or(usize::MAX);
         }
         native.default_tools = default_tools_of(config)?;
+        native.browser = browser_of(config)?;
         let mut provider = NativeProvider::new(native, endpoint);
         if let Some(store) = self
             .transcripts
@@ -1192,6 +1193,46 @@ fn default_tools_of(
         },
         _ => Err(ProviderError::invalid(
             "extensions.nexus_tools must be true, false or an object",
+        )),
+    }
+}
+
+/// The `browser` extension of a native instance: `true` (find `obscura` in the `PATH`) or
+/// `{"program": "...", "args": [...]}`; absent or `false`: no browser. A missing executable is
+/// not an error here: the session says so (`browser_unavailable`).
+#[cfg(feature = "provider-native")]
+fn browser_of(
+    config: &ProviderInstanceConfig,
+) -> Result<Option<crate::providers::native::BrowserTools>, ProviderError> {
+    use crate::providers::native::BrowserTools;
+    let Some(value) = config.extensions.get("browser") else {
+        return Ok(None);
+    };
+    match value {
+        Value::Bool(false) | Value::Null => Ok(None),
+        Value::Bool(true) => Ok(Some(
+            BrowserTools::locate().unwrap_or_else(|| BrowserTools::new("obscura")),
+        )),
+        Value::Object(object) => {
+            let program = object
+                .get("program")
+                .and_then(Value::as_str)
+                .filter(|p| !p.is_empty())
+                .ok_or_else(|| ProviderError::invalid("extensions.browser.program is required"))?;
+            let args: Vec<String> = object
+                .get("args")
+                .and_then(Value::as_array)
+                .map(|a| {
+                    a.iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_owned)
+                        .collect()
+                })
+                .unwrap_or_default();
+            Ok(Some(BrowserTools::new(program).with_args(args)?))
+        },
+        _ => Err(ProviderError::invalid(
+            "extensions.browser must be true, false or an object",
         )),
     }
 }

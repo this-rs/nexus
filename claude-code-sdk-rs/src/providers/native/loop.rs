@@ -695,6 +695,12 @@ async fn execute(
     let Ok(mut input) = parse_arguments(&call.arguments) else {
         return fail("the tool arguments are not a JSON object");
     };
+    // The browser's destinations are judged before anyone is asked about them (N23).
+    if entry.server == super::browser::BROWSER_SERVER
+        && let Err(reason) = super::browser::guard_call(&entry.tool, &input)
+    {
+        return fail(&reason);
+    }
     match core.decide(entry, &input) {
         PolicyDecision::Allow => {},
         PolicyDecision::Ask if core.capabilities.interactive_permissions => {
