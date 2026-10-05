@@ -1,6 +1,6 @@
 %% name: nexus-sdk-types
 %% covers: claude-code-sdk-rs/src/types.rs, claude-code-sdk-rs/src/message_parser.rs, claude-code-sdk-rs/src/errors.rs
-%% verified: 2026-10-01
+%% verified: 2026-10-05
 flowchart TD
     subgraph legend["Légende"]
         direction LR
@@ -91,10 +91,10 @@ flowchart TD
         t_mcp -->|"type inconnu, ex. websocket"| t_mcp_no["✅ refusé, aucun repli silencieux"]
 
         t_redact["✅ RedactedValues — Debug qui montre les noms<br/>jamais les valeurs, clés triées pour un log stable<br/><i>vérifié : map vide, ordre imposé, secret absent</i>"]
-        t_dbg["✅ Debug de ClaudeCodeOptions<br/>env via RedactedValues ; hooks, can_use_tool et<br/>debug_stderr réduits à un booléen<br/>stderr_callback N'APPARAÎT PAS du tout"]
+        t_dbg["✅ Debug de ClaudeCodeOptions<br/>env via RedactedValues ; hooks, can_use_tool et<br/>debug_stderr réduits à un booléen ; env_policy et mcp_config_via_file affichés<br/>stderr_callback N'APPARAÎT PAS du tout"]
         t_dbg --> t_redact
 
-        t_builder["✅ ClaudeCodeOptionsBuilder — 52 méthodes publiques<br/>51 setters consommants plus build"]
+        t_builder["✅ ClaudeCodeOptionsBuilder — 54 méthodes publiques<br/>53 setters consommants plus build ; ajoutés le 2026-10-05 : env_policy (défaut InheritAll)<br/>et mcp_config_via_file (défaut false) — effet décrit et vérifié dans nexus-sdk-transport"]
         t_builder --> t_hooks["✅ hooks REMPLACE la map entière<br/>add_hook crée la map puis empile dans l'ordre<br/><i>vérifié : le callback sorti du builder est appelé</i>"]
         t_builder --> t_stderr["✅ stderr_callback stocke la closure vivante<br/><i>vérifié : lignes capturées dans l'ordre</i>"]
         t_builder --> t_clamp["✅ max_output_tokens borné de 1 à 32000<br/>0 devient 1 : demander aucune sortie en demande une"]

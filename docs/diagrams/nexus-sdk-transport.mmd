@@ -1,6 +1,6 @@
 %% name: nexus-sdk-transport
 %% covers: claude-code-sdk-rs/src/transport/*.rs
-%% verified: 2026-10-01
+%% verified: 2026-10-05
 flowchart TD
     subgraph legend["Légende"]
         direction LR
@@ -98,6 +98,13 @@ flowchart TD
     subgraph cmd["Ligne de commande — build_command, build_settings_value"]
         direction TB
         ALWAYS["✅ toujours : --output-format stream-json,<br/>--input-format stream-json, --verbose,<br/>--setting-sources avec une valeur vide<br/>quand aucune source n’est choisie<br/><i>vérifié : argv relu sans lancer de processus</i>"]
+        ENVPOL["✅ transport/spawn.rs : isolated_command + EnvPolicy<br/>Allowlist → env_clear PUIS liste blanche de base (PATH, HOME, locale, certificats, proxy)<br/>+ préfixes ANTHROPIC_ et CLAUDE_ pour Claude Code + noms ajoutés ; options.env par-dessus<br/><i>vérifié : tests/transport_env_allowlist.rs — le faux CLI ne voit aucune variable hors liste<br/>(rouge constaté sans l’appel dans build_command : « CARGO_MANIFEST_DIR leaked into the child »)</i>"]
+        ENVDEF["🟠 ClaudeCodeOptions::env_policy vaut InheritAll par défaut (comportement historique) ;<br/>la liste blanche devient le défaut par ClaudeCodeProvider (façade agent), pas ici<br/><i>vérifié : default_policy_still_inherits_the_host_environment</i>"]
+        MCPFILE["✅ mcp_config_via_file : la config MCP (identifiants des serveurs) va dans un fichier 0600<br/>d’un répertoire 0700 (SecretFile), --mcp-config reçoit le chemin ; supprimé à disconnect et au Drop ;<br/>échec d’écriture = erreur, jamais de repli sur argv<br/><i>vérifié : tests/transport_env_allowlist.rs (3 tests, dont le témoin « inline par défaut »)</i>"]
+        VERPROBE["🔴 get_cli_version_with_policy : la sonde --version suit la même politique d’environnement —<br/>écrit, SANS test (le faux CLI répond à --version avant d’enregistrer son environnement)"]
+        ENVPOL --- ENVDEF
+        ENVPOL --- MCPFILE
+        ENVPOL --- VERPROBE
         PROMPT["✅ system_prompt_v2 l’emporte sur les champs dépréciés<br/>String → --system-prompt ;<br/>Preset avec append → --append-system-prompt seul ;<br/>Preset sans append → AUCUN drapeau de prompt ;<br/>sans v2 → --system-prompt vide même si rien n’est défini<br/><i>vérifié : argv relu, les trois formes comparées</i>"]
         PRESETDROP["🔴 le nom du preset est jeté<br/>tout ToolsConfig::Preset devient --tools default,<br/>claude_code compris"]
         TOKENS["✅ max_output_tokens passe par l’ENVIRONNEMENT,<br/>borné entre 1 et 32000 ; sinon la variable ambiante<br/>CLAUDE_CODE_MAX_OUTPUT_TOKENS est policée :<br/>trop grande → 32000, illisible → 8192, correcte → intacte<br/><i>vérifié : variable restaurée par un garde, test serial</i>"]

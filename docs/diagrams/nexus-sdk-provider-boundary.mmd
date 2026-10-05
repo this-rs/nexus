@@ -1,6 +1,6 @@
 %% name: nexus-sdk-provider-boundary
 %% covers: claude-code-sdk-rs/src/lib.rs, claude-code-sdk-rs/src/bin/fake_claude.rs
-%% verified: 2026-10-02
+%% verified: 2026-10-05
 %% ---
 %% PROUVE : où passe la frontière entre « un agent quelconque » et « Claude Code »
 %%   dans ce dépôt, au sha 443a2a0 (relu le 2026-10-02). Ce diagramme possède la
@@ -119,8 +119,8 @@ flowchart TD
 
     subgraph target["🟠 Cible — RFC PO « harness multi-provider » (décidé, non écrit)"]
         direction TB
-        T1["🟠 trait AgentSession générique au-dessus de la couture :<br/>send_turn, events (G1→G7), answer_permission, interrupt, set_model, close —<br/>sans serde_json::Value ni stdin brut dans la signature"]
-        T2["🟠 ClaudeCodeProvider = SubprocessTransport + message_parser + protocole de contrôle<br/>(C1→C7 déplacés derrière l'adaptateur, un seul constructeur de commande)"]
+        T1["✅ `pub mod agent` : traits AgentProvider / AgentSession et types neutres (AgentEvent, ToolPolicy, Capabilities,<br/>ProviderError, ResumeToken, SessionSpec) — sans serde_json::Value de protocole ni stdin brut dans les signatures ;<br/>AUCUN provider ne les implémente encore<br/><i>vérifié : tests/agent_contract_snapshots.rs, cargo test --lib agent:: ; détail dans nexus-agent-contract</i>"]
+        T2["🟠 ClaudeCodeProvider = SubprocessTransport + message_parser + protocole de contrôle<br/>(C1→C7 déplacés derrière l'adaptateur) — non écrit. Déjà là : le lanceur unique `transport::spawn`<br/>et `pub use transport::EnvPolicy` (environnement en liste blanche, voir nexus-sdk-transport)"]
         T3["🟠 autres adaptateurs : un CLI d'agent (Codex, Gemini CLI) ou l'API Messages directe ;<br/>chacun avec son faux exécutable (F3) et ses conformance tests"]
         T1 --> T2
         T1 --> T3

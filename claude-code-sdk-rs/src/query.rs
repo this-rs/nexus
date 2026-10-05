@@ -177,7 +177,6 @@ async fn query_print_mode(
 ) -> Result<impl Stream<Item = Result<Message>>> {
     use std::sync::Arc;
     use tokio::io::{AsyncBufReadExt, BufReader};
-    use tokio::process::Command;
     use tokio::sync::Mutex;
 
     // `options.cli_path` used to be ignored here: print mode always searched the
@@ -192,7 +191,9 @@ async fn query_print_mode(
         },
         None => crate::transport::subprocess::find_claude_cli()?,
     };
-    let mut cmd = Command::new(&cli_path);
+    // Same launcher as the streaming transport: `options.env_policy` decides what
+    // the child inherits (first thing done to the command, `env_clear` drops the rest).
+    let mut cmd = crate::transport::spawn::isolated_command(&cli_path, &options.env_policy);
 
     // Build command with --print mode
     cmd.arg("--output-format").arg("stream-json");

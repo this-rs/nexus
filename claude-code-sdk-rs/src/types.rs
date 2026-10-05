@@ -1089,6 +1089,25 @@ pub struct ClaudeCodeOptions {
     /// Limits the total size of injected context to avoid overwhelming the prompt.
     /// Default: 2000
     pub memory_token_budget: Option<usize>,
+
+    // ========== Process isolation ==========
+    /// What the CLI process inherits from this process's environment.
+    ///
+    /// Default: [`EnvPolicy::InheritAll`], the historical behaviour. Set
+    /// [`EnvPolicy::claude_code`] to start the CLI from an empty environment plus an
+    /// allowlist, so it cannot read the host's secrets. Variables in `env` are always
+    /// added on top.
+    pub env_policy: crate::transport::spawn::EnvPolicy,
+
+    /// Pass the MCP configuration as an owner-only file instead of a command-line
+    /// argument.
+    ///
+    /// The MCP configuration carries every MCP server's environment, credentials
+    /// included, and a command line is readable by any local user. When `true` the
+    /// JSON is written to a `0600` file in a fresh `0700` directory, `--mcp-config`
+    /// receives its path, and the file is deleted when the transport disconnects.
+    /// Default: false (inline JSON, the historical behaviour).
+    pub mcp_config_via_file: bool,
 }
 
 impl std::fmt::Debug for ClaudeCodeOptions {
@@ -1122,6 +1141,8 @@ impl std::fmt::Debug for ClaudeCodeOptions {
             .field("can_use_tool", &self.can_use_tool.is_some())
             .field("hooks", &self.hooks.is_some())
             .field("control_protocol_format", &self.control_protocol_format)
+            .field("env_policy", &self.env_policy)
+            .field("mcp_config_via_file", &self.mcp_config_via_file)
             .finish()
     }
 }
@@ -1582,6 +1603,22 @@ impl ClaudeCodeOptionsBuilder {
     /// ```
     pub fn cli_path(mut self, path: impl Into<PathBuf>) -> Self {
         self.options.cli_path = Some(path.into());
+        self
+    }
+
+    /// Set what the CLI process inherits from this process's environment.
+    ///
+    /// See [`ClaudeCodeOptions::env_policy`].
+    pub fn env_policy(mut self, policy: crate::transport::spawn::EnvPolicy) -> Self {
+        self.options.env_policy = policy;
+        self
+    }
+
+    /// Pass the MCP configuration as an owner-only file instead of on the command line.
+    ///
+    /// See [`ClaudeCodeOptions::mcp_config_via_file`].
+    pub fn mcp_config_via_file(mut self, via_file: bool) -> Self {
+        self.options.mcp_config_via_file = via_file;
         self
     }
 

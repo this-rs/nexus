@@ -129,9 +129,18 @@ impl SemVer {
 /// # }
 /// ```
 pub async fn get_cli_version(cli_path: &std::path::Path) -> Option<SemVer> {
+    get_cli_version_with_policy(cli_path, &super::spawn::EnvPolicy::InheritAll).await
+}
+
+/// [`get_cli_version`] with the environment policy of the session about to start:
+/// the version probe runs the same executable, so it gets the same isolation.
+pub(crate) async fn get_cli_version_with_policy(
+    cli_path: &std::path::Path,
+    policy: &super::spawn::EnvPolicy,
+) -> Option<SemVer> {
     let output = tokio::time::timeout(
         std::time::Duration::from_secs(5),
-        tokio::process::Command::new(cli_path)
+        super::spawn::isolated_command(cli_path, policy)
             .arg("--version")
             .stderr(std::process::Stdio::null())
             .output(),
@@ -202,6 +211,10 @@ pub struct SubprocessTransport {
     /// Whether to close stdin after initial prompt
     #[allow(dead_code)]
     close_stdin_after_prompt: bool,
+    /// Owner-only file holding the MCP configuration when
+    /// `ClaudeCodeOptions::mcp_config_via_file` is set. Lives as long as the child;
+    /// dropped (and deleted) on disconnect.
+    mcp_config_file: Option<super::spawn::SecretFile>,
 }
 
 impl SubprocessTransport {
@@ -225,6 +238,7 @@ impl SubprocessTransport {
             state: TransportState::Disconnected,
             request_counter: 0,
             close_stdin_after_prompt: false,
+            mcp_config_file: None,
         })
     }
 
@@ -259,6 +273,7 @@ impl SubprocessTransport {
             state: TransportState::Disconnected,
             request_counter: 0,
             close_stdin_after_prompt: false,
+            mcp_config_file: None,
         })
     }
 
@@ -392,6 +407,7 @@ impl SubprocessTransport {
             state: TransportState::Disconnected,
             request_counter: 0,
             close_stdin_after_prompt: false,
+            mcp_config_file: None,
         }
     }
 
@@ -428,12 +444,16 @@ impl SubprocessTransport {
             state: TransportState::Disconnected,
             request_counter: 0,
             close_stdin_after_prompt: true,
+            mcp_config_file: None,
         })
     }
 
     /// Build the command with all necessary arguments
     fn build_command(&self) -> Command {
-        let mut cmd = Command::new(&self.cli_path);
+        // The single launcher: with an allowlist policy the child starts from an
+        // EMPTY environment. This must stay the first thing done to the command —
+        // `env_clear` also drops every variable set before it.
+        let mut cmd = super::spawn::isolated_command(&self.cli_path, &self.options.env_policy);
 
         // Always use output-format stream-json and verbose (like Python SDK)
         cmd.arg("--output-format").arg("stream-json");
@@ -575,10 +595,16 @@ impl SubprocessTransport {
 
         // MCP servers - use --mcp-config with JSON format like Python SDK
         if !self.options.mcp_servers.is_empty() {
-            let mcp_config = serde_json::json!({
-                "mcpServers": self.options.mcp_servers
-            });
-            cmd.arg("--mcp-config").arg(mcp_config.to_string());
+            match &self.mcp_config_file {
+                // Owner-only file written by `spawn_process`: the credentials of the
+                // MCP servers never reach the command line.
+                Some(file) => {
+                    cmd.arg("--mcp-config").arg(file.path());
+                },
+                None => {
+                    cmd.arg("--mcp-config").arg(self.mcp_config_json());
+                },
+            }
         }
 
         // Continue/resume
@@ -741,9 +767,16 @@ impl SubprocessTransport {
         cmd
     }
 
+    /// The `--mcp-config` payload: every MCP server with its environment.
+    fn mcp_config_json(&self) -> String {
+        serde_json::json!({ "mcpServers": self.options.mcp_servers }).to_string()
+    }
+
     /// Check CLI version and warn if below minimum required version
     async fn check_cli_version(&self) -> Result<()> {
-        if let Some(semver) = get_cli_version(&self.cli_path).await {
+        if let Some(semver) =
+            get_cli_version_with_policy(&self.cli_path, &self.options.env_policy).await
+        {
             let min_version = SemVer::new(MIN_CLI_VERSION.0, MIN_CLI_VERSION.1, MIN_CLI_VERSION.2);
 
             if semver < min_version {
@@ -770,6 +803,17 @@ impl SubprocessTransport {
     /// Spawn the process and set up communication channels
     async fn spawn_process(&mut self) -> Result<()> {
         self.state = TransportState::Connecting;
+
+        if self.options.mcp_config_via_file && !self.options.mcp_servers.is_empty() {
+            // A failure here is an error, never a fallback to the command line:
+            // the caller asked for the secrets to stay off argv.
+            let file = super::spawn::SecretFile::create(
+                "mcp-config.json",
+                self.mcp_config_json().as_bytes(),
+            )
+            .map_err(SdkError::ProcessError)?;
+            self.mcp_config_file = Some(file);
+        }
 
         let mut cmd = self.build_command();
         // Never `{:?}` the Command itself: its Debug prints every env value and
@@ -1254,6 +1298,10 @@ impl Transport for SubprocessTransport {
         }
 
         self.state = TransportState::Disconnecting;
+
+        // The CLI read its MCP configuration at start-up: delete the secret file now
+        // rather than at the end of the shutdown escalation below.
+        self.mcp_config_file.take();
 
         // Close stdin channel — signals EOF to the CLI process
         self.stdin_tx.take();
