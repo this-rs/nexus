@@ -198,8 +198,8 @@ pub struct InitializeResult {
 }
 
 /// `approvalPolicy` values this adapter sends (contract §6). Spelling from the task
-/// brief (`on-request`, `never`); the README example of `turn/start` also shows a
-/// camelCase `unlessTrusted`, so the spelling of the *accepted* set is NOT VERIFIED.
+/// brief (`on-request`, `never`). **VERIFIED on 0.160.0**: the real schema's enum is
+/// `untrusted`, `on-request`, `never` (kebab-case) and both values we send are in it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ApprovalPolicy {
     /// The model decides when to ask.
@@ -210,15 +210,20 @@ pub enum ApprovalPolicy {
     Never,
 }
 
-/// `sandbox` of `thread/start` / `thread/resume`. `dangerFullAccess` is never sent
+/// `sandbox` of `thread/start` / `thread/resume`. `danger-full-access` is never sent
 /// in v1 (contract §6).
+///
+/// **kebab-case**, unlike [`SandboxPolicy`] (`turn/start`), which is a tagged object in
+/// camelCase. The documentation-derived schema of 0.130.0 had both camelCase; a real
+/// `app-server` 0.160.0 refuses `workspaceWrite` here (`-32600`, "expected one of
+/// `read-only`, `workspace-write`, `danger-full-access`"). Found by `tests/codex_real.rs`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SandboxMode {
     /// Nothing is written.
-    #[serde(rename = "readOnly")]
+    #[serde(rename = "read-only")]
     ReadOnly,
     /// Writes confined to the workspace.
-    #[serde(rename = "workspaceWrite")]
+    #[serde(rename = "workspace-write")]
     WorkspaceWrite,
 }
 
@@ -1084,11 +1089,11 @@ mod tests {
         );
         assert_eq!(
             serde_json::to_value(SandboxMode::WorkspaceWrite).unwrap(),
-            "workspaceWrite"
+            "workspace-write"
         );
         assert_eq!(
             serde_json::to_value(SandboxMode::ReadOnly).unwrap(),
-            "readOnly"
+            "read-only"
         );
         assert_eq!(
             serde_json::to_value(SandboxPolicy::WorkspaceWrite {

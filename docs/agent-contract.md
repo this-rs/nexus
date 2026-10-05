@@ -327,10 +327,16 @@ Valeurs de référence (v1, à confirmer par la conformité de chaque adaptateur
   `method not found`.
 
 Écarts constatés à l'implémentation de Codex (`claude-code-sdk-rs/src/providers/codex/`, feature
-`provider-codex`, `CodexProvider` / `CodexConfig`) ; **aucune session réelle** : le `codex` installé est
-0.38.0, sans `app-server`, tout est joué contre `fake_codex` et des transcriptions écrites depuis le README
-de `codex-rs/app-server` au tag `rust-v0.130.0` (`tests/transcripts/codex/0.130.0/schema/PROVENANCE.md` liste
-ce qui n'est PAS établi) :
+`provider-codex`, `CodexProvider` / `CodexConfig`) ; **vérifié sur un vrai `codex-cli` 0.160.0 jusqu'à la
+création d'un thread** (poignée de main `initialize`, `initialized` et `thread/start`, dans un `CODEX_HOME`
+jetable, sans connexion ni appel de modèle : `tests/codex_real.rs`, ignoré, `NEXUS_REAL_CODEX` ;
+`tests/codex_real_schema.rs`, hors ligne ; fichiers réels sous `tests/transcripts/codex/0.160.0/`, dont
+`PROVENANCE.md`). Cela a trouvé un bug que le faux exécutable cachait : `sandbox` de `thread/start` est en
+**kebab-case** (`workspace-write`), le serveur refusait `workspaceWrite` (`-32600`) ; `turn/start` garde son
+objet `sandboxPolicy` en camelCase. **Aucun tour réel, aucun appel d'outil réel, aucune approbation réelle** :
+cela exige une connexion dans le `CODEX_HOME` propre à l'instance, qu'un humain fait (A27) ; le reste est joué
+contre `fake_codex` et des transcriptions écrites depuis le README de `codex-rs/app-server` au tag
+`rust-v0.130.0` (`tests/transcripts/codex/0.130.0/schema/PROVENANCE.md` liste ce qui n'est PAS établi) :
 
 - **`hooks` = `none`**, pas `command` comme la table de référence : pas d'exécutable relais en v1 (A40) ;
   `SessionHooks` ignoré, `provider_notice { hooks_not_supported }` en tête d'`out_of_band()`.

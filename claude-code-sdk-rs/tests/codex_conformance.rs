@@ -1026,20 +1026,20 @@ async fn the_policy_modes_map_to_the_two_codex_axes_and_never_to_full_access() {
         (
             PolicyMode::Ask,
             "on-request",
-            "workspaceWrite",
+            "workspace-write",
             "workspaceWrite",
         ),
         (
             PolicyMode::AutoEdits,
             "on-request",
-            "workspaceWrite",
+            "workspace-write",
             "workspaceWrite",
         ),
-        (PolicyMode::PlanOnly, "on-request", "readOnly", "readOnly"),
+        (PolicyMode::PlanOnly, "on-request", "read-only", "readOnly"),
         (
             PolicyMode::Trust,
             "never",
-            "workspaceWrite",
+            "workspace-write",
             "workspaceWrite",
         ),
     ] {
@@ -1321,7 +1321,7 @@ async fn a_started_session_says_what_it_is_and_what_it_ignores() {
     assert_eq!(provider_session_id.as_deref(), Some("thr_fake1"));
     assert_eq!(model.as_deref(), Some(MODEL));
     assert_eq!(policy_mode, Some(PolicyMode::Ask));
-    assert_eq!(native_mode.as_deref(), Some("on-request/workspaceWrite"));
+    assert_eq!(native_mode.as_deref(), Some("on-request/workspace-write"));
     let caps = session.capabilities();
     assert_eq!(caps, &provider.capabilities(Some(MODEL)));
     assert!(

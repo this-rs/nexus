@@ -21,9 +21,11 @@
 //! (`tests/transcripts/codex/<version>/`). Marked **NOT VERIFIED** where they occur
 //! (source comments, schema, fixtures) and listed here:
 //!
-//! - the exact spelling of `approvalPolicy` (`on-request`) and `sandbox`
-//!   (`workspaceWrite`) accepted by `thread/start` (the README shows both camelCase
-//!   and the task brief says kebab-case for the policy);
+//! - ~~the exact spelling of `approvalPolicy` and `sandbox` accepted by `thread/start`~~:
+//!   **VERIFIED on codex-cli 0.160.0** by `tests/codex_real.rs` (the real server answered
+//!   the question the fakes could not): `approvalPolicy` `on-request` / `never`, and
+//!   `sandbox` in **kebab-case** (`workspace-write`, `read-only`); `turn/start`'s
+//!   `sandboxPolicy` stays a camelCase tagged object;
 //! - the fields of `thread/tokenUsage/updated` (`total`, `last`, `modelContextWindow`);
 //! - `thread/start.baseInstructions` / `developerInstructions` (system prompt);
 //! - the `_meta` of an MCP approval elicitation (`tool_name`/`tool_title`,
@@ -39,7 +41,7 @@
 //! | Field | Value |
 //! |---|---|
 //! | `interactive_permissions` | yes; scopes `once`, `session`, `always` (a request offers the ones the server advertises: command/file approvals `once` + `session`, MCP elicitations `persist`) |
-//! | `sandbox` | `workspace` (`workspaceWrite`; `plan_only` is `readOnly`; `dangerFullAccess` is never sent) |
+//! | `sandbox` | `workspace` (`workspace-write` on `thread/start`, `{"type":"workspaceWrite"}` on `turn/start`; `plan_only` is `read-only` / `readOnly`; full access is never sent) |
 //! | `secret_isolation` | yes: allowlisted environment, MCP credentials by variable *name* (`env_vars`, `bearer_token_env_var`, `env_http_headers`), never on argv |
 //! | `per_session_mcp` | yes: one process per session, servers given by `-c mcp_servers.<name>.…` |
 //! | `hooks` | `none`: Codex hooks are command files, v1 has no relay executable (A40); `SessionSpec::hooks` is ignored with `provider_notice { hooks_not_supported }` first on `out_of_band()` |

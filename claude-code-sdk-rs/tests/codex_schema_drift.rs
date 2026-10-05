@@ -154,7 +154,7 @@ fn the_types_refuse_what_is_not_the_documented_shape() {
     assert!(refused("turn/start.params", serde_json::json!({})));
     assert!(refused(
         "thread/start.params",
-        serde_json::json!({"cwd": "/w", "approvalPolicy": "nope", "sandbox": "workspaceWrite"})
+        serde_json::json!({"cwd": "/w", "approvalPolicy": "nope", "sandbox": "workspace-write"})
     ));
     assert!(refused(
         "item/started",

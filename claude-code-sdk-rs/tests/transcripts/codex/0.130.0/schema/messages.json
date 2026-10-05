@@ -33,7 +33,7 @@
         "cwd": "/work",
         "model": "gpt-5.1-codex",
         "approvalPolicy": "on-request",
-        "sandbox": "workspaceWrite",
+        "sandbox": "workspace-write",
         "baseInstructions": "You are terse.",
         "developerInstructions": "Prefer small diffs."
       }
@@ -43,7 +43,7 @@
       "required": ["threadId"],
       "conditional": [],
       "optional": ["cwd", "model", "approvalPolicy", "sandbox"],
-      "example": { "threadId": "thr_123", "cwd": "/work", "model": "gpt-5.1-codex", "approvalPolicy": "never", "sandbox": "readOnly" }
+      "example": { "threadId": "thr_123", "cwd": "/work", "model": "gpt-5.1-codex", "approvalPolicy": "never", "sandbox": "read-only" }
     },
     "thread/start.result": {
       "direction": "server_to_client",

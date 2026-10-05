@@ -58,8 +58,8 @@ pub(crate) const OUT_OF_BAND_CAPACITY: usize = 1024;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Maps a neutral policy mode to the two Codex axes (contract §6): `ask` and
-/// `auto_edits` → `on-request` + `workspaceWrite`; `plan_only` → `on-request` +
-/// `readOnly`; `trust` → `never` + `workspaceWrite` (never `dangerFullAccess`).
+/// `auto_edits` → `on-request` + `workspace-write`; `plan_only` → `on-request` +
+/// `read-only`; `trust` → `never` + `workspace-write` (never `danger-full-access`).
 pub fn policy_axes(mode: PolicyMode) -> (ApprovalPolicy, SandboxMode) {
     match mode {
         PolicyMode::PlanOnly => (ApprovalPolicy::OnRequest, SandboxMode::ReadOnly),

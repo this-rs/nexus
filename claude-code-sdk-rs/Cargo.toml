@@ -116,6 +116,16 @@ required-features = ["provider-native"]
 name = "codex_conformance"
 required-features = ["testkit", "provider-codex"]
 
+# What the adapter sends, checked offline against the real 0.160.0 schema and answers.
+[[test]]
+name = "codex_real_schema"
+required-features = ["provider-codex"]
+
+# The adapter against a REAL codex app-server; ignored unless NEXUS_REAL_CODEX is set.
+[[test]]
+name = "codex_real"
+required-features = ["provider-codex"]
+
 [[test]]
 name = "codex_schema_drift"
 required-features = ["provider-codex"]
