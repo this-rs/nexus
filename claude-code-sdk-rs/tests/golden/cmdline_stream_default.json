@@ -1,0 +1,13 @@
+[
+  "--output-format",
+  "stream-json",
+  "--verbose",
+  "--input-format",
+  "stream-json",
+  "--system-prompt",
+  "",
+  "--permission-mode",
+  "default",
+  "--setting-sources",
+  ""
+]
