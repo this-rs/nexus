@@ -148,7 +148,9 @@ fn forms(entry: &ToolEntry, input: &Value, cwd: &Path) -> Forms {
 /// `path` lexically normalised: made relative to `cwd` when it is inside it, with `.` and `..`
 /// resolved. `..` above the root of a relative path is kept (it is outside).
 pub(crate) fn normalise(path: &str, cwd: &Path) -> String {
-    let absolute = if Path::new(path).is_absolute() {
+    // A leading `/` is rooted on every platform: `Path::is_absolute` says no on Windows (no
+    // drive letter), and the path would then be glued to the session directory.
+    let absolute = if Path::new(path).is_absolute() || path.starts_with('/') {
         PathBuf::from(path)
     } else {
         cwd.join(path)
@@ -163,10 +165,21 @@ pub(crate) fn normalise(path: &str, cwd: &Path) -> String {
             other => out.push(other.as_os_str()),
         }
     }
+    // The policy patterns use `/` whatever the platform: a `\` in the normal form would let
+    // `Edit(secrets/*)` miss `secrets\key.pem` on Windows.
+    // (On Unix a backslash is an ordinary filename character: leave it alone there.)
+    let slashed = |p: &Path| {
+        let shown = p.display().to_string();
+        if cfg!(windows) {
+            shown.replace('\\', "/")
+        } else {
+            shown
+        }
+    };
     match out.strip_prefix(cwd) {
         Ok(relative) if relative.as_os_str().is_empty() => ".".to_owned(),
-        Ok(relative) => relative.display().to_string(),
-        Err(_) => out.display().to_string(),
+        Ok(relative) => slashed(relative),
+        Err(_) => slashed(&out),
     }
 }
 
@@ -519,6 +532,21 @@ mod tests {
     }
 
     // ----- paths ------------------------------------------------------------
+
+    // Windows paths: the normal form uses `/` like the policy patterns, and a rooted `/x/y`
+    // is not glued to the session directory.
+    #[cfg(windows)]
+    #[test]
+    fn a_windows_path_is_normalised_to_forward_slashes() {
+        let cwd = Path::new(r"C:\work\project");
+        assert_eq!(normalise(r"secrets\key.pem", cwd), "secrets/key.pem");
+        assert_eq!(
+            normalise(r"C:\work\project\secrets\key.pem", cwd),
+            "secrets/key.pem"
+        );
+        assert_eq!(normalise(r"src\..\.env", cwd), ".env");
+        assert_eq!(normalise(r"C:\work\project", cwd), ".");
+    }
 
     // POSIX paths (`/work/project`): not absolute on Windows, where the harness paths are untested.
     #[cfg(unix)]
