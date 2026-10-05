@@ -264,6 +264,11 @@ Valeurs de référence (v1, à confirmer par la conformité de chaque adaptateur
 | compaction_signal | oui | oui | oui | non |
 | thinking | oui | selon modèle | oui | oui |
 | images | non en v1 (A12) | non | non | non |
+
+Règle `images` par moteur (A12) : `images` est `false` pour TOUS les moteurs en v1, quoi que le moteur annonce
+(`promptCapabilities.image` d'ACP, `supports_images` d'un modèle, entrée image de Codex, `ModelInfo.supports_images`).
+Un bloc `image` dans `send_turn` rend `Unsupported { capability: "images" }` ; une capacité réelle d'un moteur ne
+bascule `images` à `true` qu'avec une décision de contrat et un scénario `message_images` joué (et non replié).
 | tools | oui | selon modèle (sonde) | oui | oui |
 | context_window | reported | configured / probed | configured | None |
 | set_model_live | oui | oui (entre deux tours) | oui (par tour) | non |
@@ -681,7 +686,9 @@ instance intégrée, toujours présente.
 - `ProviderInstanceConfig` est `#[non_exhaustive]` (constructeurs `new`, `claude_code`, `native`, `with_*`),
   désérialisé avec champs inconnus refusés (une clé collée sous `api_key` échoue au lieu d'être jetée) ;
   `from_json` renvoie `invalid_request` à message fixe (mauvaise référence d'identifiant, kind inconnu).
-- `SecurityGate` ne se construit que par `SecurityGate::attest(&'static str /* lot */)`. L'activation est
+- `SecurityGate` ne se construit que par `SecurityGate::attest(&'static str /* lot */)`. `attest` est une
+  **simple déclaration de l'hôte** : rien dans nexus ne vérifie que le lot de sécurité du backend existe ni
+  qu'il est actif ; la sûreté repose sur l'hôte. L'activation est
   irréversible. La porte garde aussi `test_connection` ; `list()` n'est jamais gardée.
 - `remove(id)` rend `false` pour `claude-code` (refus) et pour un id inconnu. `claude-code` peut être
   reconfigurée (même kind), pas remplacée par un autre kind.

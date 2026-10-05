@@ -2,13 +2,13 @@
 %% covers: claude-code-sdk-rs/src/agent/*.rs, docs/agent-contract.md, claude-code-sdk-rs/tests/agent_contract_snapshots.rs, claude-code-sdk-rs/tests/agent_registry.rs
 %% verified: 2026-10-05
 %% ---
-%% ETAT au palier 2 : `claude-code-sdk-rs/src/agent/` existe (types et traits, SANS implémentation de provider).
-%%   Vérifié par : cargo test -p nexus-claude --lib agent:: (24 tests) ; cargo test -p nexus-claude --test agent_contract_snapshots (5 tests,
-%%   instantané tests/snapshots/agent_contract_v2.json) ; cargo test -p nexus-claude --doc agent (Secret sans Debug ni Display : compile_fail).
-%%   Les lignes « PROUVE » et « SOURCES LUES » ci-dessous décrivent l'état AVANT (58e27e6) et restent pour la partie « code actuel ».
+%% ETAT (HEAD de la branche d'intégration, 2026-10-05) : `claude-code-sdk-rs/src/agent/` existe : types, traits ET registre (registry.rs) ;
+%%   des providers l'implémentent (claude_code, native, codex, acp : voir nexus-agent-providers). Vérifié par : cargo test -p nexus-claude --lib agent:: ;
+%%   cargo test -p nexus-claude --test agent_contract_snapshots (instantané tests/snapshots/agent_contract_v2.json) ; cargo test -p nexus-claude --doc agent.
+%%   Les lignes « PROUVE » et « SOURCES LUES » ci-dessous décrivent l'état AVANT (58e27e6) et restent pour la partie « code antérieur au module agent/ ».
 %% PROUVE : le contrat CIBLE `agent/` (RFC PO b53e11c7) et, pour chaque brique,
-%%   ce qui existe AUJOURD'HUI dans le dépôt qui s'en rapproche. Au 2026-10-05 le
-%%   module `agent/` n'existe pas : tout nœud 🟠 est une cible, tout nœud ✅ est le
+%%   ce qui existe AUJOURD'HUI dans le dépôt qui s'en rapproche. Au 58e27e6 (avant la
+%%   branche d'intégration) le module `agent/` n'existait pas : tout nœud 🟠 était est une cible, tout nœud ✅ est le
 %%   code actuel que la cible remplacera ou enveloppera. `covers` pointe sur ce
 %%   fichier (le gate refuse un glob sans fichier) ; quand claude-code-sdk-rs/src/agent/*.rs
 %%   existera, le remplacer par ce glob.
