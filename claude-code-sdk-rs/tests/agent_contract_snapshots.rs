@@ -311,6 +311,29 @@ fn current_snapshot() -> Value {
             pricing: Some(ModelPrice { input_per_mtok: 0.28, output_per_mtok: 0.42, cache_read_per_mtok: Some(0.028), cache_write_per_mtok: None }),
         },
         "turn_input": TurnInput::text("hello"),
+        // A snapshot entry only: the shape was already part of contract v2 (the
+        // registry has always serialised it), the fixture just never froze it.
+        "provider_instance_config": {
+            "native": ProviderInstanceConfig::native("deepseek", "https://api.deepseek.com/v1")
+                .with_credential_ref("vault:deepseek")
+                .unwrap()
+                .with_preset("deepseek")
+                .with_default_model("deepseek-chat")
+                .with_alias("fast", "deepseek-chat")
+                .with_context_window(64_000)
+                .with_cost_source(CostBasis::Priced)
+                .with_price("deepseek-chat", ModelPrice {
+                    input_per_mtok: 0.28, output_per_mtok: 0.42,
+                    cache_read_per_mtok: Some(0.028), cache_write_per_mtok: None,
+                })
+                .with_extension("max_turns", json!(25)),
+            "acp": ProviderInstanceConfig::new("opencode", ProviderKind::Acp)
+                .with_command(["opencode", "acp"])
+                .with_env_inherit(["AWS_REGION"])
+                .with_credential_ref("env:OPENCODE_KEY")
+                .unwrap(),
+            "claude_code": ProviderInstanceConfig::claude_code("claude-code"),
+        },
     })
 }
 

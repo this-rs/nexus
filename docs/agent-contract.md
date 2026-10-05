@@ -820,7 +820,9 @@ jeton, `add_dirs` ← `extra_dirs`, `env` ← `EnvSpec.set`, `cli_path` ← exte
 ## 16. Versionnement et features cargo (A12, A14)
 
 - Historique : v1 (e15cd6e, 81ad207) ; **v2** = v1 + champ optionnel `done.error` (ajout compatible :
-  un pair v1 qui l'ignore reste correct).
+  un pair v1 qui l'ignore reste correct). L'instantané v2 porte aussi `provider_instance_config`
+  (natif avec préréglage, prix et extension ; ACP ; Claude Code) : une entrée d'instantané ajoutée pour une
+  forme que le registre sérialisait déjà, **sans changement de forme ni de `CONTRACT_VERSION`**.
 - `agent::CONTRACT_VERSION: u32`. Monte de 1 à chaque changement d'une forme sérialisée
   (`AgentEvent`, `Capabilities`, `ProviderError`, `ToolPolicy`, `ResumeToken`) ou d'une signature de
   trait. Les instantanés JSON de `tests/agent_contract_snapshots.rs` portent la version : changer
