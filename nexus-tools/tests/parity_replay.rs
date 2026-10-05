@@ -198,7 +198,16 @@ async fn replay(scenario: &str) -> Vec<Difference> {
             .any(|(s, i)| *s == scenario && *i == index);
         match call["result"].as_str() {
             Some(recorded) if machine_dependent => {
-                let first = |t: &str| t.lines().next().unwrap_or_default().to_owned();
+                // The wording and the exit code of `ls` differ by system (BSD 1, GNU 2): only
+                // "an error with an exit code" is compared.
+                let first = |t: &str| {
+                    let line = t.lines().next().unwrap_or_default();
+                    if line.starts_with("Exit code ") {
+                        "Exit code N".to_owned()
+                    } else {
+                        line.to_owned()
+                    }
+                };
                 if first(&text) != first(recorded) {
                     diff(format!(
                         "first line:\n  recorded: {:?}\n  ours:     {:?}",

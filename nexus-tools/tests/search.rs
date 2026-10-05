@@ -5,6 +5,7 @@
 //! (`tests/golden_grep/`) is compared instead; when it is installed the goldens are also
 //! checked against it, so they cannot drift. Regenerate with
 //! `NEXUS_UPDATE_GOLDENS=1 cargo test -p nexus-tools --test search`.
+#![cfg(unix)]
 
 use std::path::{Path, PathBuf};
 use std::process::Command;

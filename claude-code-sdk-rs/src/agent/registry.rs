@@ -1391,7 +1391,7 @@ impl ProviderRegistry {
 
     /// Opens a session on a harness instance, over the model provider the spec names.
     ///
-    /// Without a [`ModelBinding`] this is `get(harness).open(spec)`, unchanged. With one,
+    /// Without a [`ModelBinding`](super::ModelBinding) this is `get(harness).open(spec)`, unchanged. With one,
     /// **before anything starts**: the harness and the model provider are looked up, the
     /// pair is checked against the protocols the harness consumes (a mismatch is
     /// [`ProviderError::ModelProtocolMismatch`], naming both), then the binding is

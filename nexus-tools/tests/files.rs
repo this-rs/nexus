@@ -3,6 +3,7 @@
 //!
 //! Expected texts are the ones in `claude-code-sdk-rs/tests/parity/claude-code-2.1.287/`;
 //! the full replay of those recordings is N25.
+#![cfg(unix)]
 
 use std::path::Path;
 use std::sync::Arc;

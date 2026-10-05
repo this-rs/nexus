@@ -1,6 +1,7 @@
 //! The real `nexus-tools` binary, over stdio: what an MCP client actually launches (N18).
 //!
 //! Built with `--features test-tools` (the production binary has no test tools).
+#![cfg(unix)]
 
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, Command, Stdio};
