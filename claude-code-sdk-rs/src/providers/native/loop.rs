@@ -371,8 +371,29 @@ struct Step {
     interrupted: bool,
 }
 
+/// Characters per token of the estimate made when an endpoint reports no usage.
+const CHARS_PER_TOKEN: u64 = 4;
+
+/// What a request is assumed to have cost when the endpoint reported no usage.
+struct Estimate {
+    prompt_tokens: u64,
+    completion_tokens: u64,
+}
+
 /// Records what a response cost against the session's budgets.
-fn spend(core: &Core, model: &str, reported: Option<&Usage>, estimated_tokens: u64) {
+///
+/// With a `reported` usage that is what counts. Without one, the budgets still
+/// have to bite: the tokens are `estimate` (about [`CHARS_PER_TOKEN`] characters
+/// per token, over the text sent and received; tool schemas and tokenizer quirks
+/// are not counted, so the real figure is higher) and, when the model has a
+/// price, the USD budget advances by the price of those tokens. The estimate is
+/// returned so the caller can say so (`usage_estimated` notice).
+fn spend(
+    core: &Core,
+    model: &str,
+    reported: Option<&Usage>,
+    estimate: Estimate,
+) -> Option<(u64, Option<f64>)> {
     let mut state = core.lock();
     match reported {
         Some(usage) => {
@@ -387,9 +408,39 @@ fn spend(core: &Core, model: &str, reported: Option<&Usage>, estimated_tokens: u
                 state.last_prompt_tokens =
                     Some(usage.input_tokens.unwrap_or(0) + usage.cache_read_tokens.unwrap_or(0));
             }
+            None
         },
-        // The endpoint did not report: a token budget still has to bite.
-        None => state.tokens_spent += estimated_tokens,
+        None => {
+            let tokens = estimate.prompt_tokens + estimate.completion_tokens;
+            state.tokens_spent += tokens;
+            let usd = core.settings.prices.cost_usd(
+                model,
+                &Usage {
+                    input_tokens: Some(estimate.prompt_tokens),
+                    output_tokens: Some(estimate.completion_tokens),
+                    ..Usage::default()
+                },
+            );
+            if let Some(usd) = usd {
+                state.usd_spent += usd;
+            }
+            Some((tokens, usd))
+        },
+    }
+}
+
+/// Tells the host that a request was counted on an estimate, not on a report.
+fn announce_estimate(core: &Core, estimated: Option<(u64, Option<f64>)>) {
+    if let Some((tokens, usd)) = estimated {
+        core.emit(AgentEvent::ProviderNotice {
+            kind: "usage_estimated".to_owned(),
+            data: json!({
+                "estimated": true,
+                "chars_per_token": CHARS_PER_TOKEN,
+                "tokens": tokens,
+                "usd": usd,
+            }),
+        });
     }
 }
 
@@ -456,18 +507,22 @@ async fn model_step(
     drop(stream);
     acc.api += started.elapsed();
     acc.requests += 1;
-    let completion_estimate = (step.text.len() + step.reasoning.len()) as u64 / 4
+    let completion_estimate = (step.text.len() + step.reasoning.len()) as u64 / CHARS_PER_TOKEN
         + step
             .tool_calls
             .iter()
-            .map(|c| (c.name.len() + c.arguments.len()) as u64 / 4)
+            .map(|c| (c.name.len() + c.arguments.len()) as u64 / CHARS_PER_TOKEN)
             .sum::<u64>();
-    spend(
+    let estimated = spend(
         core,
         model,
         usage.as_ref(),
-        prompt_estimate + completion_estimate,
+        Estimate {
+            prompt_tokens: prompt_estimate,
+            completion_tokens: completion_estimate,
+        },
     );
+    announce_estimate(core, estimated);
     if let Some(usage) = &usage {
         acc.add_usage(usage);
     }
@@ -519,6 +574,7 @@ async fn maybe_compact(
         pre_tokens: Some(size),
     });
     let request = summary_request(model, &messages[..split], None, &config);
+    let summary_prompt_estimate = estimate_tokens(&request.messages);
     let started = Instant::now();
     let summary = tokio::select! {
         summary = summarise(core.endpoint.as_ref(), request) => summary?,
@@ -526,7 +582,16 @@ async fn maybe_compact(
     };
     acc.api += started.elapsed();
     let (text, usage) = summary;
-    spend(core, model, usage.as_ref(), 0);
+    let estimated = spend(
+        core,
+        model,
+        usage.as_ref(),
+        Estimate {
+            prompt_tokens: summary_prompt_estimate,
+            completion_tokens: text.len() as u64 / CHARS_PER_TOKEN,
+        },
+    );
+    announce_estimate(core, estimated);
     if let Some(usage) = &usage {
         acc.add_usage(usage);
     }

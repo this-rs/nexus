@@ -23,17 +23,15 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use serde_json::Value;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::AsyncWriteExt;
 use tokio::process::{Child, ChildStdin, ChildStdout};
 use tokio::sync::{mpsc, oneshot};
 
 use super::wire::{self, Frame, RpcError};
 use crate::agent::{ProviderError, redact};
 use crate::providers::claude_code::cancel;
+use crate::providers::lines::{BoundedLines, Line, too_long_error};
 use crate::transport::spawn::{EnvPolicy, isolated_command};
-
-/// Longest line the reader accepts (a tool output can be large).
-const MAX_LINE_BYTES: usize = 16 * 1024 * 1024;
 
 /// What the reader hands the session.
 #[derive(Debug)]
@@ -310,13 +308,17 @@ async fn read_loop(
     stdout: ChildStdout,
     inbound: mpsc::UnboundedSender<Inbound>,
 ) {
-    let mut lines = BufReader::new(stdout).lines();
+    let mut lines = BoundedLines::new(stdout);
     while let Ok(Some(line)) = lines.next_line().await {
+        let line = match line {
+            Line::Text(line) => line,
+            // Typed `protocol`, nothing of the line kept (see `providers::lines`).
+            Line::TooLong => {
+                let _ = inbound.send(Inbound::Malformed(too_long_error().to_string()));
+                continue;
+            },
+        };
         if line.trim().is_empty() {
-            continue;
-        }
-        if line.len() > MAX_LINE_BYTES {
-            let _ = inbound.send(Inbound::Malformed("line too long".to_owned()));
             continue;
         }
         match Frame::parse(&line) {
@@ -354,5 +356,37 @@ async fn read_loop(
     process.fail_all(code);
     if !process.closing.load(Ordering::SeqCst) {
         let _ = inbound.send(Inbound::Closed { code });
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn a_line_over_the_bound_is_dropped_with_a_protocol_error_and_the_stream_goes_on() {
+        // 9 MiB of `a` on one line, then a well-formed notification.
+        let script = "head -c 9437184 /dev/zero | tr '\\000' a; echo; \
+                      echo '{\"jsonrpc\":\"2.0\",\"method\":\"after\",\"params\":{}}'; sleep 30";
+        let launch = Launch {
+            program: PathBuf::from("sh"),
+            args: vec!["-c".to_owned(), script.to_owned()],
+            env_policy: EnvPolicy::allowlist(),
+            env: Vec::new(),
+            cwd: std::env::temp_dir(),
+        };
+        let (process, mut inbound) = Process::spawn(&launch).unwrap();
+        let wait = Duration::from_secs(20);
+        match tokio::time::timeout(wait, inbound.recv()).await {
+            Ok(Some(Inbound::Malformed(reason))) => {
+                assert!(reason.contains("dropped"), "{reason}");
+            },
+            other => panic!("expected the over-long line to be reported, got {other:?}"),
+        }
+        match tokio::time::timeout(wait, inbound.recv()).await {
+            Ok(Some(Inbound::Notification { method, .. })) => assert_eq!(method, "after"),
+            other => panic!("expected the next line to be read, got {other:?}"),
+        }
+        process.shutdown().await;
     }
 }
