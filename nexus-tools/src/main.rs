@@ -90,14 +90,27 @@ fn registry(options: &Options) -> Result<ToolRegistry, String> {
         Some(dir) => dir.clone(),
         None => std::env::current_dir().map_err(|e| format!("no working directory: {e}"))?,
     };
-    let scope = Scope::new(&cwd, options.add_dirs.clone())
-        .map_err(|e| format!("cannot use the session directories: {e}"))?;
+    // Outputs of shell commands live here; it is part of the scope so that `Read` can open
+    // the output file of a background task.
+    let output_dir = std::env::temp_dir().join(format!("nexus-tools-{}", std::process::id()));
+    std::fs::create_dir_all(&output_dir)
+        .map_err(|e| format!("cannot create {}: {e}", output_dir.display()))?;
+    let mut extra = options.add_dirs.clone();
+    extra.push(output_dir.clone());
+    let scope =
+        Scope::new(&cwd, extra).map_err(|e| format!("cannot use the session directories: {e}"))?;
     let mut files = FileConfig::new(scope);
     if let Some(dir) = &options.backup_dir {
         files = files.with_backup_dir(dir);
     }
     #[allow(unused_mut)]
     let mut registry = nexus_tools::files::register(ToolRegistry::new(), &files);
+    #[cfg(unix)]
+    {
+        let shell = nexus_tools::shell::ShellConfig::new(files.scope(), &output_dir)
+            .map_err(|e| format!("cannot prepare the shell tools: {e}"))?;
+        registry = nexus_tools::shell::register(registry, &shell);
+    }
     #[cfg(feature = "test-tools")]
     {
         registry = registry
@@ -142,7 +155,12 @@ fn main() -> ExitCode {
         Ok(runtime) => runtime,
         Err(error) => return fail(&format!("cannot start the runtime: {error}")),
     };
-    runtime.block_on(run(options))
+    let code = runtime.block_on(run(options));
+    // Outputs of shell commands are scratch: they do not outlive the server.
+    let _ = std::fs::remove_dir_all(
+        std::env::temp_dir().join(format!("nexus-tools-{}", std::process::id())),
+    );
+    code
 }
 
 async fn run(options: Options) -> ExitCode {

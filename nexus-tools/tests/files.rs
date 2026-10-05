@@ -32,19 +32,13 @@ impl Fixture {
             dir,
             outside,
             registry,
-            context: CallContext {
-                session_id: "s".into(),
-                state: Arc::new(SessionState::default()),
-            },
+            context: CallContext::new("s", Arc::new(SessionState::default())),
         }
     }
 
     /// A second session over the same files: it has read nothing.
     fn another_session(&self) -> CallContext {
-        CallContext {
-            session_id: "other".into(),
-            state: Arc::new(SessionState::default()),
-        }
+        CallContext::new("other", Arc::new(SessionState::default()))
     }
 
     fn path(&self, name: &str) -> String {
@@ -545,10 +539,7 @@ async fn an_additional_directory_is_part_of_the_scope() {
     let scope = Scope::new(dir.path(), [extra.path().to_path_buf()]).unwrap();
     let registry = register(ToolRegistry::new(), &FileConfig::new(scope));
     let profile = nexus_tools::Profile::unrestricted("s");
-    let context = CallContext {
-        session_id: "s".into(),
-        state: Arc::new(SessionState::default()),
-    };
+    let context = CallContext::new("s", Arc::new(SessionState::default()));
     let r = registry
         .resolve(&profile, "Read")
         .unwrap()

@@ -1,5 +1,5 @@
 %% name: nexus-tools
-%% covers: nexus-tools/src/*.rs, nexus-tools/src/files/*.rs, nexus-tools/tests/*.rs, nexus-tools/tests/golden_grep/*.txt, docs/agent-tools-parity.md
+%% covers: nexus-tools/src/*.rs, nexus-tools/src/files/*.rs, nexus-tools/src/shell/*.rs, nexus-tools/tests/*.rs, nexus-tools/tests/golden_grep/*.txt, docs/agent-tools-parity.md
 %% verified: 2026-10-05
 flowchart TD
     subgraph legend["Légende"]
@@ -37,11 +37,21 @@ flowchart TD
         IMGPDF["🟠 images et PDF dans Read (bloc image, lecture de PDF en Rust pur)"]
     end
 
+    subgraph shell["Outils shell — shell/*.rs (N20)"]
+        direction TB
+        BASH["✅ Bash : sortie des deux flux fusionnée, codes de sortie, délai 120 s (max 600 s),<br/>au-delà de 30 000 octets sortie sur disque + aperçu de 2 Ko (formats du relevé 2.1.287),<br/>répertoire de travail persistant, un cd hors périmètre est annulé<br/><i>vérifié : tests/shell.rs, messages du relevé</i>"]
+        GROUP["✅ groupe de processus : timeout, appel abandonné, TaskStop et fin de session<br/>tuent la commande ET ses descendants (SIGTERM puis SIGKILL du groupe)<br/><i>vérifié : un petit-enfant sleep disparaît ; 3 mutations rouges</i>"]
+        BG["✅ arrière-plan : identifiant, sortie lisible pendant et après avec Read,<br/>TaskStop idempotent, tâches isolées par session<br/><i>vérifié : tests/shell.rs</i>"]
+        MON["✅ Monitor : une notification notifications/message par ligne, dans l'ordre,<br/>fin signalée avec le processus ; fin d'entrée stdio ne reste jamais suspendue<br/><i>vérifié : tests/monitor.rs (régression d'une suspension réelle)</i>"]
+        ENV["✅ environnement vierge : PATH LANG LC_* TZ seulement + ajouts explicites,<br/>HOME propre au serveur, texte de la commande hors argv<br/><i>vérifié : aucune variable CARGO_* ne passe</i>"]
+        NOSANDBOX["🟠 Bash n'est PAS un bac à sable : il lit tout ce que l'utilisateur système peut lire ;<br/>la protection est la politique du harnais et l'environnement vierge"]
+    end
+
     subgraph suite["Politique de dépendances — tests/dependency_policy.rs"]
         DEPS["✅ la fermeture de nexus-tools se compile avec Rust seul :<br/>pas de links, pas de cc/cmake/bindgen, -sys limités aux liaisons de plateforme<br/><i>vérifié : cinq cas factices rouges, puis la vraie fermeture</i>"]
     end
 
-    LATER["🟠 N20 Bash/Monitor · N21 WebFetch · N22 WebSearch · N23 Obscura (MCP externe)"]
+    LATER["🟠 N21 WebFetch · N22 WebSearch · N23 Obscura (MCP externe)"]
 
     HARNESS --> RPC
     RPC --> STDIO
@@ -60,4 +70,10 @@ flowchart TD
     STATE --> NB
     READ --> STATE
     SCOPE --> SEARCH
+    PROFILE --> BASH
+    BASH --> GROUP
+    BASH --> ENV
+    BASH --> BG
+    BG --> MON
+    BASH -.-> NOSANDBOX
     IMGPDF -.-> LATER

@@ -18,6 +18,8 @@ pub mod profile;
 pub mod protocol;
 pub mod registry;
 pub mod server;
+#[cfg(unix)]
+pub mod shell;
 #[cfg(feature = "test-tools")]
 pub mod testing;
 pub mod token;
@@ -27,4 +29,4 @@ pub use profile::{Profile, ToolSet};
 pub use registry::ToolRegistry;
 pub use server::{Server, Session, serve_lines};
 pub use token::{Claims, InvalidToken, SigningKey, issue, verify};
-pub use tool::{Annotations, CallContext, SessionState, Tool, ToolResult};
+pub use tool::{Annotations, CallContext, Notifier, SessionState, Tool, ToolResult};

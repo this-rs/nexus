@@ -87,6 +87,29 @@ impl std::fmt::Debug for SessionState {
     }
 }
 
+/// Sends a JSON-RPC notification to the client of the session (stdio only: an HTTP request
+/// has no channel back once it is answered).
+#[derive(Clone)]
+pub struct Notifier(Arc<dyn Fn(Value) + Send + Sync>);
+
+impl Notifier {
+    /// A notifier that calls `send` with each notification.
+    pub fn new(send: impl Fn(Value) + Send + Sync + 'static) -> Self {
+        Self(Arc::new(send))
+    }
+
+    /// Sends one notification.
+    pub fn notify(&self, notification: Value) {
+        (self.0)(notification);
+    }
+}
+
+impl std::fmt::Debug for Notifier {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Notifier")
+    }
+}
+
 /// What a call knows about its session.
 #[derive(Debug, Clone)]
 pub struct CallContext {
@@ -94,6 +117,19 @@ pub struct CallContext {
     pub session_id: String,
     /// The session's state.
     pub state: Arc<SessionState>,
+    /// Where to send notifications, when the transport has such a channel.
+    pub notifier: Option<Notifier>,
+}
+
+impl CallContext {
+    /// A context without a notification channel.
+    pub fn new(session_id: impl Into<String>, state: Arc<SessionState>) -> Self {
+        Self {
+            session_id: session_id.into(),
+            state,
+            notifier: None,
+        }
+    }
 }
 
 /// One tool.

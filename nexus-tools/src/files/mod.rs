@@ -44,6 +44,11 @@ impl FileConfig {
         }
     }
 
+    /// The scope, shared with the other tools of the session.
+    pub fn scope(&self) -> Arc<Scope> {
+        Arc::clone(&self.scope)
+    }
+
     /// Copies a file here before overwriting it.
     #[must_use]
     pub fn with_backup_dir(mut self, dir: impl Into<PathBuf>) -> Self {

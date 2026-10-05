@@ -64,10 +64,7 @@ fn tree() -> Tree {
     Tree {
         dir,
         registry,
-        context: CallContext {
-            session_id: "s".into(),
-            state: Arc::new(SessionState::default()),
-        },
+        context: CallContext::new("s", Arc::new(SessionState::default())),
     }
 }
 

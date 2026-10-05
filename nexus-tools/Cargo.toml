@@ -41,6 +41,9 @@ sha2 = "0.10"
 ignore = "0.4"
 globset = "0.4"
 regex = "1"
+# Signals to a whole process group, without `unsafe` and without a C compiler (N20). (rustix was
+# tried first: on Linux it brings linux-raw-sys, a -sys crate the dependency policy rightly flags.)
+nix = { version = "0.30", default-features = false, features = ["signal"] }
 
 [dev-dependencies]
 nexus-claude = { path = "../claude-code-sdk-rs", features = ["provider-native"] }

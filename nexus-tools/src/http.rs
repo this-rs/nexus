@@ -142,6 +142,8 @@ fn authenticate(state: &HttpState, headers: &HeaderMap) -> Result<Session, Box<R
     Ok(Session {
         profile,
         state: session_state,
+        // An HTTP request has no channel back once it is answered.
+        notifier: None,
     })
 }
 

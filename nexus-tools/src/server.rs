@@ -13,7 +13,7 @@ use crate::limits::{DEFAULT_MAX_OUTPUT_CHARS, truncate};
 use crate::profile::Profile;
 use crate::protocol::{self, code, error_response, id_key, result_response};
 use crate::registry::ToolRegistry;
-use crate::tool::{CallContext, SessionState, ToolResult};
+use crate::tool::{CallContext, Notifier, SessionState, ToolResult};
 
 /// One session on a server: who it is and its state.
 #[derive(Debug, Clone)]
@@ -22,6 +22,8 @@ pub struct Session {
     pub profile: Profile,
     /// Its state, shared by its calls.
     pub state: Arc<SessionState>,
+    /// Where tools may send notifications (set by transports that have a channel back).
+    pub notifier: Option<Notifier>,
 }
 
 impl Session {
@@ -30,6 +32,7 @@ impl Session {
         Self {
             profile,
             state: Arc::new(SessionState::default()),
+            notifier: None,
         }
     }
 }
@@ -151,6 +154,7 @@ impl Server {
         let context = CallContext {
             session_id: session.profile.session_id.clone(),
             state: Arc::clone(&session.state),
+            notifier: session.notifier.clone(),
         };
         let started = Instant::now();
         // In its own task: a tool that panics is one failed call, not a dead server.
@@ -211,6 +215,11 @@ where
     let writer_task = tokio::spawn(async move {
         let mut writer = writer;
         while let Some(line) = lines.recv().await {
+            // An empty line is the end marker: other holders of a sender (a notifier kept
+            // by a background task) must not keep the session open after its input ended.
+            if line.is_empty() {
+                break;
+            }
             if writer.write_all(line.as_bytes()).await.is_err()
                 || writer.write_all(b"\n").await.is_err()
                 || writer.flush().await.is_err()
@@ -219,6 +228,13 @@ where
             }
         }
     });
+    let notify_out = out.clone();
+    let session = Session {
+        notifier: Some(Notifier::new(move |notification| {
+            let _ = notify_out.send(notification.to_string());
+        })),
+        ..session
+    };
     let inflight: Arc<Mutex<HashMap<String, AbortHandle>>> = Arc::default();
     let mut reader = reader;
     let mut buffer = String::new();
@@ -286,6 +302,6 @@ where
     {
         handle.abort();
     }
-    drop(out);
+    let _ = out.send(String::new());
     let _ = writer_task.await;
 }

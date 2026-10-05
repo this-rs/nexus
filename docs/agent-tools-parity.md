@@ -215,7 +215,7 @@ par l'utilisateur**.
   rend le Markdown et la consigne est appliquée par le modèle de la session, ou par un modèle de
   résumé **optionnel** lié par `ModelBinding` ; jamais par un appel de modèle caché.
 
-## 5. État de la livraison (N19, en cours)
+## 5. État de la livraison (N19 terminé, N20 livré)
 
 Livrés dans `nexus-tools` (module `files`, tests `tests/files.rs`) : `Read` (texte, notebooks), `Write`,
 `Edit`, état « lu » par session, périmètre (`--cwd`, `--add-dir`, liens symboliques et `..` résolus
@@ -245,3 +245,30 @@ goldens `tests/golden_grep/` quand `rg` est absent). Étiquettes de sortie (`Fou
 VCS exclus, liens symboliques non suivis (jamais d'évasion du périmètre).
 
 Restent pour N19 : images et PDF dans `Read` (blocs image : `ToolResult` ne porte que du texte pour l'instant).
+
+### N20 : outils shell (`shell/`, tests `tests/shell.rs` et `tests/monitor.rs`)
+
+`Bash`, `TaskStop`, `Monitor`. Messages et seuils repris du relevé (`bash.json`, `bash_limits.json`) : fusion
+des deux flux, `Exit code N`, `Command timed out after Ns` (code 143), sortie au-delà de 30 000 octets
+persistée avec aperçu de 2 Ko coupé à une ligne, `(Bash completed with no output)`, répertoire persistant,
+tâche d'arrière-plan avec identifiant et fichier de sortie. Groupe de processus : timeout, appel abandonné,
+`TaskStop` et fin de session tuent la commande **et ses descendants** (ce que l'interruption de premier plan
+du SDK actuel ne faisait pas).
+
+Écarts **volontaires** :
+- **Pas de notification de fin de tâche** : Claude Code promet « You will be notified when it completes » ; un
+  serveur MCP sur stdio n'a pas ce canal pour `Bash`, le message dit donc d'utiliser `Read` sur le fichier et
+  `TaskStop`. `Monitor` envoie, lui, une notification `notifications/message` par ligne (stdio seulement ; en
+  HTTP, la sortie n'est lisible que dans son fichier).
+- **Environnement vierge** (PATH, LANG, LC_*, TZ + ajouts explicites) et `HOME` propre au serveur : Claude Code
+  hérite de l'environnement de l'utilisateur. Un `git` ou un `npm` qui lit `~/.gitconfig` ou `~/.npmrc` ne les
+  verra pas : à ouvrir par `--env`/`EnvPolicy` si voulu.
+- Un `cd` hors périmètre est **annulé** (`Shell cwd was reset to …`).
+- Délai plafonné à 600 s sans le dire (le relevé accepte 99 999 999 sans plafond signalé).
+- Unix seulement (groupes de processus) : le module est absent sous Windows.
+
+**Bash n'est pas un bac à sable.** Le périmètre confine les outils de fichiers, pas ce qu'un shell peut lire.
+La protection est la politique d'approbation du harnais (motifs `Bash(git *)`, évalués côté harnais, N24) et
+l'environnement vierge. Un vrai bac à sable est une capacité distincte.
+
+Non relevé : `Monitor` et `TaskStop` (processus longs) ; leurs formats sont les nôtres.
