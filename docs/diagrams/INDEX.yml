@@ -8,7 +8,7 @@
 # than implicit; binaries, `mod.rs` and re-exporting `lib.rs`
 # files legitimately live there.
 #
-# 17 diagrams, 96/94 source files claimed, 4 unclaimed.
+# 17 diagrams, 101/98 source files claimed, 4 unclaimed.
 
 diagrams:
   - name: nexus-agent-contract
@@ -24,6 +24,8 @@ diagrams:
     covers:
       - docs/diagrams/nexus-agent-providers.mmd
       - docs/harness-consolidation-2026-10-05.md
+      - claude-code-sdk-rs/src/testkit/*.rs
+      - claude-code-sdk-rs/tests/agent_conformance.rs
   - name: nexus-api-core
     file: nexus-api-core.mmd
     verified: 2026-10-02

@@ -1093,8 +1093,9 @@ pub struct ClaudeCodeOptions {
     // ========== Process isolation ==========
     /// What the CLI process inherits from this process's environment.
     ///
-    /// Default: [`EnvPolicy::InheritAll`], the historical behaviour. Set
-    /// [`EnvPolicy::claude_code`] to start the CLI from an empty environment plus an
+    /// Default: [`EnvPolicy::InheritAll`](crate::transport::spawn::EnvPolicy::InheritAll), the
+    /// historical behaviour. Set
+    /// [`EnvPolicy::claude_code`](crate::transport::spawn::EnvPolicy::claude_code) to start the CLI from an empty environment plus an
     /// allowlist, so it cannot read the host's secrets. Variables in `env` are always
     /// added on top.
     pub env_policy: crate::transport::spawn::EnvPolicy,

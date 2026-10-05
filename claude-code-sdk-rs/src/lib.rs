@@ -48,6 +48,8 @@ mod optimized_client;
 mod perf_utils;
 mod query;
 mod sdk_mcp;
+#[cfg(feature = "testkit")]
+pub mod testkit;
 pub mod token_tracker;
 pub mod transport;
 mod types;

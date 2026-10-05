@@ -52,6 +52,9 @@ default = ["auto-download"]
 auto-download = ["reqwest"]
 # Enable persistent memory system (Meilisearch-based)
 memory = ["meilisearch-sdk", "chrono"]
+# Test kit of the agent contract: ScriptedProvider, transcripts, conformance suite.
+# Meant for the dev-dependencies of a host; not built by default.
+testkit = []
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
@@ -65,3 +68,7 @@ chrono = "0.4"
 regex = "1.10"
 axum = "0.6"
 tower-http = { version = "0.4", features = ["cors"] }
+
+[[test]]
+name = "agent_conformance"
+required-features = ["testkit"]
