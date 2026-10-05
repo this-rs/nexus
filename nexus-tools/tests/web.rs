@@ -584,6 +584,7 @@ async fn an_upgrade_to_https_on_the_same_host_is_followed_and_a_downgrade_is_rep
     assert!(r.text.contains("http://site.test/plain"), "{}", r.text);
 }
 
+#[cfg(not(feature = "tls"))]
 #[tokio::test]
 async fn without_a_tls_backend_https_fails_with_a_typed_error_before_any_data_moves() {
     let tool = WebFetchTool::new(Fetcher::new(FetchConfig::default()).with_resolver(names()));

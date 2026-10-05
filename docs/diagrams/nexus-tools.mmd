@@ -54,7 +54,7 @@ flowchart TD
         REDIR["✅ redirections : même hôte suivi (www. ignoré, http vers https accepté), autre hôte ou retour à http<br/>signalé avec l'URL cible, boucle bornée<br/><i>vérifié : tests/web.rs</i>"]
         CONV["✅ HTML vers Markdown (htmd, mesuré sur un corpus de 5 pages contre 4 autres crates) :<br/>titres, listes, tableaux, code avec langage, liens et images rendus absolus ;<br/>scripts, styles, svg, iframe jamais dans le texte ; décodage du charset<br/><i>vérifié : tests/web_convert.rs</i>"]
         CAPS["✅ plafonds : 5 Mio téléchargés, 100 000 caractères rendus, coupe annoncée ;<br/>binaire refusé (erreur typée) ; cache 15 min à horloge injectée ; aucun appel de modèle caché"]
-        TLS["🟠 https : AUCUN moteur TLS dans ce build, échec typé « no TLS support » (jamais en clair) —<br/>décision à prendre : rustls+ring (compilateur C requis) ou fournisseur pur Rust non audité"]
+        TLS["✅ https : rustls + ring + racines Mozilla derrière la feature `tls` (désactivée par défaut) ; nom vérifié contre l'URL ; exception à la règle « Rust seul » limitée à ring et cc, vérifiée par le test de politique<br/><i>vérifié : tests/tls.rs (de confiance, non fiable, autre nom, upgrade http)</i>"]
     end
 
     subgraph search["WebSearch — search/*.rs (N22)"]
@@ -64,7 +64,7 @@ flowchart TD
         UNTRUSTED["✅ résultats = données non fiables : étiquetés, une ligne par champ, longueurs bornées,<br/>jamais d'instruction ; aucun appel de modèle caché"]
         ENGINES["✅ trois moteurs, une même suite contre fake_search : API à clé (forme Brave),<br/>SearXNG auto-hébergé, HTML sans clé (fragile, désactivé par défaut, nommé explicitement)<br/><i>vérifié : tests/search_conformance.rs</i>"]
         KEYS["✅ clé par RÉFÉRENCE (variable d'environnement ou fichier), jamais en clair : en-tête seulement,<br/>absente de l'URL, du Debug, des erreurs, de la sortie et de stderr ; une clé collée à la place<br/>d'un nom est refusée sans être répétée<br/><i>vérifié : mutations « clé dans l'URL » et « Debug affiche la clé » rouges</i>"]
-        STLS["🟠 https des moteurs : même décision TLS en attente que WebFetch"]
+        STLS["✅ les moteurs en https passent par le même connecteur"]
     end
 
     subgraph bench["Banc de parité — tests/parity_replay.rs (N25)"]

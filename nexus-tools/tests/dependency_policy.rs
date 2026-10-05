@@ -258,10 +258,10 @@ fn a_dev_dependency_does_not_ship_and_is_not_judged() {
 // The real closure
 // ---------------------------------------------------------------------------
 
-#[test]
-fn nexus_tools_compiles_with_the_rust_toolchain_alone() {
+fn closure_violations(features: &[&str]) -> Vec<String> {
     let output = Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".into()))
         .args(["metadata", "--format-version", "1"])
+        .args(features.iter().flat_map(|f| ["--features", f]))
         .arg("--manifest-path")
         .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml"))
         .output()
@@ -272,7 +272,43 @@ fn nexus_tools_compiles_with_the_rust_toolchain_alone() {
         String::from_utf8_lossy(&output.stderr)
     );
     let metadata: Value = serde_json::from_slice(&output.stdout).expect("metadata is JSON");
-    let found = violations(&metadata, "nexus-tools");
+    violations(&metadata, "nexus-tools")
+}
+
+/// The exceptions the `tls` feature brings, and nothing else: `ring` compiles C and assembly
+/// (decision 91083af7). A second entry here is a new dependency that needs its own decision.
+const TLS_EXCEPTIONS: &[&str] = &[
+    "ring links its native library",
+    "cc drives a native toolchain (ring's build dependency)",
+];
+
+#[test]
+fn with_tls_the_only_exceptions_are_the_documented_ones() {
+    let found = closure_violations(&["tls"]);
+    // Compare by crate name so a patch release of ring does not break the test.
+    let names: Vec<String> = found
+        .iter()
+        .map(|v| v.split_whitespace().next().unwrap_or_default().to_owned())
+        .collect();
+    let allowed: Vec<String> = TLS_EXCEPTIONS
+        .iter()
+        .map(|v| v.split_whitespace().next().unwrap_or_default().to_owned())
+        .collect();
+    for name in &names {
+        assert!(
+            allowed.contains(name),
+            "`{name}` is a new non-Rust dependency behind `tls`: {found:?}"
+        );
+    }
+    assert!(
+        !names.is_empty(),
+        "the exception list is stale: ring no longer shows up"
+    );
+}
+
+#[test]
+fn nexus_tools_compiles_with_the_rust_toolchain_alone() {
+    let found = closure_violations(&[]);
     assert!(
         found.is_empty(),
         "nexus-tools must compile with Rust alone (docs/agent-tools-parity.md §4):\n  {}",

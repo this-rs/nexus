@@ -13,6 +13,8 @@ mod cache;
 mod convert;
 mod fetch;
 mod ssrf;
+#[cfg(feature = "tls")]
+mod tls;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -27,6 +29,8 @@ pub use fetch::{
     Target, WebError,
 };
 pub use ssrf::blocked_reason;
+#[cfg(feature = "tls")]
+pub use tls::TlsConnector;
 
 use crate::limits::truncate;
 use crate::registry::ToolRegistry;

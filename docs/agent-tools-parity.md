@@ -304,18 +304,22 @@ Limite connue : `htmd` perd les liens à l'intérieur des cellules de tableau.
   `http` vers `https` du même hôte est suivi.
 - Garde SSRF : toutes les adresses d'un nom contrôlées, connexion épinglée, chaque saut recontrôlé — plus
   strict que ce qui est documenté pour Claude Code.
-- **https : pas de moteur TLS dans ce build** (décision en attente, voir ci-dessous). `http` est réécrit en
-  `https` comme Claude Code, donc tout échoue pour l'instant avec `connect_failed … no TLS support`, jamais en
-  clair.
+- **https : feature `tls`** (voir ci-dessous). Sans elle, `http` est réécrit en `https` comme Claude Code et tout
+  échoue avec `connect_failed … no TLS support`, jamais en clair.
 - Non fait : PDF (voir N19b), contenu compressé (on envoie `Accept-Encoding: identity`).
 
-### Décision en attente : TLS
+### TLS (décision `91083af7`, prise par défaut le 05/10/2026)
 
-Aucun moteur TLS n'est « compilable en Rust seul » sans réserve : `rustls` s'appuie sur `ring` (ou `aws-lc`),
-qui compile du C et de l'assembleur à la construction (déjà le cas, via `reqwest`, pour le harnais natif et
-`provider-native`). L'alternative pure Rust (`rustls` + fournisseur RustCrypto) est expérimentale et non auditée.
-Choisir entre : (a) `rustls`+`ring` derrière une feature `tls` désactivée par défaut, exception à la politique
-justifiée ; (b) fournisseur pur Rust ; (c) pas de https tant que la politique n'est pas assouplie.
+Aucun moteur TLS n'est « compilable en Rust seul » sans réserve : `rustls` s'appuie sur `ring`, qui compile du C et de
+l'assembleur à la construction (`cc`, bibliothèque native). Retenu, faute de réponse de l'utilisateur et parce qu'il
+demandait d'aller au bout : **`rustls` + `ring` + racines Mozilla (`webpki-roots`), derrière la feature `tls`,
+désactivée par défaut**. Le build par défaut reste Rust seul ; le binaire livré se construit avec `--features tls`.
+`tests/dependency_policy.rs` vérifie les deux côtés : sans `tls`, aucune exception ; avec `tls`, **seuls** `ring` et `cc`
+(sa dépendance de construction) sortent de la règle, toute autre entrée est refusée. Aucun magasin de confiance système
+n'est lu. Le certificat est vérifié contre le nom de l'URL, jamais contre l'adresse épinglée (`tests/tls.rs` : certificat
+de confiance accepté, non fiable refusé, autre nom refusé, `http` réécrit en `https`). Réversible : retirer la feature
+ramène à « https échoue avec une erreur typée ». L'utilisateur peut trancher autrement : fournisseur pur Rust non audité,
+ou pas de https.
 
 ## 7. WebSearch (N22)
 
@@ -336,8 +340,7 @@ disjoncteur ; mode `standard` = une requête, `extended` = plusieurs variantes (
 **données non fiables**. Aucun appel de modèle caché. L'outil n'est enregistré que si un moteur est configuré.
 
 Écarts avec Claude Code : pas de synthèse par un second modèle (le modèle de la session lit les résultats) ;
-pas de moteur par défaut ; https dépend de la décision TLS en attente (§6), donc pour l'instant seuls les
-moteurs en `http` (SearXNG sur un réseau privé) fonctionnent de bout en bout.
+pas de moteur par défaut ; https passe par la feature `tls` (§6) ; sans elle seuls les moteurs en `http` (SearXNG sur un réseau privé) fonctionnent.
 
 ## 8. Le banc de parité rejoué (N25)
 
