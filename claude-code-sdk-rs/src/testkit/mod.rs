@@ -1,6 +1,6 @@
 //! Test kit of the agent contract (feature `testkit`).
 //!
-//! Four pieces, usable from another crate with `features = ["testkit"]`:
+//! Five pieces, usable from another crate with `features = ["testkit"]`:
 //!
 //! - [`claude_replay`]: [`claude_code_replay`], the **real** Claude Code provider
 //!   on an in-memory replay transport that plays a list of messages and captures
@@ -15,10 +15,14 @@
 //! - [`conformance`]: the conformance suite. The **same** scenarios run against every
 //!   provider through a [`ConformanceTarget`]; an absent capability does not skip a
 //!   scenario, the suite then verifies the fallback written in §5.
+//! - [`security`]: the mandatory security scenarios (A32, A33, A35). Unlike the
+//!   conformance suite they are conditioned by no capability, and each one is
+//!   proven red against a deliberately faulty provider before it counts.
 
 pub mod claude_replay;
 pub mod conformance;
 pub mod scripted;
+pub mod security;
 pub mod transcript;
 
 pub use claude_replay::{
@@ -31,6 +35,10 @@ pub use conformance::{
 };
 pub use scripted::{
     RecordedCall, Script, ScriptBuilder, ScriptedProvider, Step, done_event, steps,
+};
+pub use security::{
+    HOST_VARIABLE, LaunchObservation, SECRET_SENTINEL, SecurityReport, SecurityScenario,
+    SecurityStaging, SecurityTarget, SecurityVerdict, ToolProfileProbe, Violation,
 };
 pub use transcript::{Recorder, Transcript, normalize, normalize_with_cwd, record_turn};
 

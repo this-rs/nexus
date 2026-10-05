@@ -500,6 +500,9 @@ fn main() {
         "codex_home": std::env::var("CODEX_HOME").ok(),
         "api_key_len": std::env::var("CODEX_API_KEY").ok().map(|key| key.len()),
         "canary_in_env_of": canary_in_env,
+        // The `HOME` the child was given: a third-party provider must not run with the
+        // host user's own (decision A33). Not a secret; it is a directory path.
+        "home": std::env::var("HOME").ok(),
         "cwd": std::env::current_dir().ok().map(|dir| dir.display().to_string()),
         "pid": std::process::id(),
     });

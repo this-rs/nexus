@@ -580,12 +580,47 @@ interdit dans `providers/`** (test de garde par recherche textuelle) :
   `CLAUDE_*`, `AWS_*`/`GOOGLE_*`/`VERTEX_*` listés nommément par l'instance (Bedrock/Vertex) ; plus
   `EnvSpec.inherit` ; puis `EnvSpec.set`.
 - `HOME` dédié par instance pour tout provider hors Claude Code (Claude garde le `HOME` réel : son
-  authentification y vit).
+  authentification y vit). Natif : un répertoire temporaire par serveur MCP. **Codex** :
+  `<CODEX_HOME>/home`, créé `0700` à l'ouverture. **ACP** : `AcpConfig::home` (défaut
+  `<répertoire de données>/nexus/acp/<instance>/home`, extension de registre `acp_home`), créé `0700`
+  avant le lancement ; un humain s'y connecte avec `HOME=<ce répertoire> <agent> login`. Avant le
+  05/10/2026, Codex et ACP tournaient avec le `HOME` réel : écart relevé par la suite de sécurité
+  (§11.1), pas par un test propre au provider.
+- `Debug` d'une configuration d'instance : les NOMS des variables d'environnement s'affichent, jamais
+  leurs valeurs (`CodexConfig::env_set`, `AcpConfig::env`) ; même règle que `EnvSpec`.
 - Secrets MCP hors argv : la configuration MCP est écrite dans un fichier `0600` d'un répertoire
   `0700`, passé par chemin (`--mcp-config <fichier>`), supprimé à la fermeture de la session.
 - Compatibilité : `ClaudeCodeOptions` (ancien chemin, clients directs) garde l'héritage complet
   **par défaut** tant que le backend n'a pas migré (`EnvPolicy::InheritAll`) ; `ClaudeCodeProvider`
   et tous les autres providers utilisent `EnvPolicy::Allowlist` par défaut.
+
+### 11.1 Scénarios de sécurité obligatoires (A32, A33, A35)
+
+`testkit::security` — derrière la feature `testkit`, joué par `tests/agent_security.rs` contre CHAQUE
+provider livré et contre un provider volontairement fautif. Contrairement à la suite de conformité
+(§5), **aucune capacité ne dispense d'un scénario** : une cible qui ne peut pas être montée est un
+échec, pas un succès.
+
+| Scénario | Règle |
+|---|---|
+| `trust_without_sandbox` | `trust` demandé à un tiers sans bac à sable est refusé à l'ouverture par `Unsupported { sandbox }`, jamais rétrogradé en silence |
+| `unknown_policy_refused` | un mode inconnu, un motif mal formé ou une politique au-dessus de son plafond sont refusés, jamais lus comme « autoriser » |
+| `isolation_env` | aucune variable de l'hôte n'atteint l'enfant ; un tiers a un `HOME` qui n'est pas celui de l'hôte |
+| `argv_sans_secret` | la valeur secrète n'est nulle part sur la ligne de commande |
+| `erreur_sans_identifiant` | la valeur secrète n'est dans aucun `Debug`, aucune erreur (`Display`, `Debug`, JSON), aucun événement |
+| `outil_hors_profil_refuse` | le harnais natif n'exécute jamais un outil hors du profil de la session (compteur du serveur MCP factice à 0) ; seul scénario qui peut valoir « sans objet », pour un provider qui n'exécute aucun outil lui-même |
+
+**Rouge d'abord.** `every_scenario_is_red_against_the_faulty_provider` exige une violation de
+chaque scénario contre un provider qui hérite l'environnement, écrit le secret sur argv, le laisse
+dans un `Debug` et dans une erreur, accepte `trust` sans bac à sable et ignore un plafond ;
+`each_scenario_names_the_fault_it_found` exige que chacun soit rouge pour SA raison (un premier jet
+passait pour une mauvaise raison : le provider fautif refusait les serveurs MCP et ne s'ouvrait
+jamais). Les constructeurs `ProviderError::invalid/protocol/unreachable` masquent déjà les valeurs de
+forme clé (A10) : la fuite d'erreur se simule en construisant la variante.
+
+**Ce que cela ne prouve pas** : rien n'a parlé à un vrai Codex, un vrai agent ACP ou un vrai
+endpoint de modèle ; chaque provider est observé par son faux exécutable, qui enregistre ce que
+l'enfant a reçu.
 
 ## 12. `ModelEndpoint` (A2)
 

@@ -526,6 +526,9 @@ fn main() {
         "canary_in_argv": seen_canary_in_argv,
         "env_names": env_names,
         "canary_in_env_of": canary_in_env,
+        // The `HOME` the child was given: a third-party provider must not run with the
+        // host user's own (decision A33). Not a secret; it is a directory path.
+        "home": std::env::var("HOME").ok(),
         "cwd": std::env::current_dir().ok().map(|dir| dir.display().to_string()),
         "pid": std::process::id(),
     });
