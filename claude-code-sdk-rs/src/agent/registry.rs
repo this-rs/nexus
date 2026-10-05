@@ -33,7 +33,7 @@
 //! | `claude_code` | `ClaudeCodeProvider` | nothing |
 //! | `native` | `NativeProvider` on an `OpenAiEndpoint` | `endpoint`; cargo feature `provider-native` (else `Unsupported { provider_native }`) |
 //! | `codex` | `CodexProvider` driving `codex app-server`; cargo feature `provider-codex` (else `Unsupported { provider_codex }`) | optional `command` (the program, nothing else), `cost_source`, `prices`, `context_window`, `default_model`, `env_inherit`, `credential` (`CODEX_API_KEY`), extension `codex_home` |
-//! | `acp` | not yet: `Unsupported { provider_acp }` | `command`; the `providers/acp` slice |
+//! | `acp` | `AcpProvider` driving any ACP agent; cargo feature `provider-acp` (else `Unsupported { provider_acp }`) | `command` (program + arguments, no secret), `cost_source`, `prices`, `context_window`, `default_model`, `env_inherit`, extensions `env` (object of non-secret variables), `thinking` (bool), `login_hint` (string) |
 //! | `scripted` | no built-in constructor: register a factory (tests) | |
 //!
 //! **Extension point**: [`ProviderRegistry::register_kind_factory`] installs the
@@ -47,7 +47,8 @@
 //! `allow_private_network` (bool, native: accept RFC 1918 / CGNAT endpoints),
 //! `cli_path` (string, claude_code: path of the CLI), `compaction_keep_recent`
 //! (unsigned integer, native), `codex_home` (string, codex: the instance's persistent
-//! `CODEX_HOME`). Their types are checked by
+//! `CODEX_HOME`), `env` (object of strings, acp), `thinking` (bool, acp), `login_hint`
+//! (string, acp). Their types are checked by
 //! [`ProviderInstanceConfig::validate`]; other keys are kept untouched for the
 //! factory of the kind to read. A key whose name looks like a credential is refused.
 //!
@@ -446,6 +447,11 @@ impl ProviderInstanceConfig {
                 "cli_path" => value.as_str().is_some_and(|path| !path.is_empty()),
                 "compaction_keep_recent" => value.is_u64(),
                 "codex_home" => value.as_str().is_some_and(|path| !path.is_empty()),
+                "env" => value
+                    .as_object()
+                    .is_some_and(|env| env.values().all(Value::is_string)),
+                "thinking" => value.is_boolean(),
+                "login_hint" => value.as_str().is_some_and(|hint| !hint.is_empty()),
                 _ => true,
             };
             if !well_typed {
@@ -959,7 +965,7 @@ impl ProviderRegistry {
             ProviderKind::ClaudeCode => Ok(build_claude_code(config)),
             ProviderKind::Native => self.build_native(config),
             ProviderKind::Codex => self.build_codex(config),
-            ProviderKind::Acp => Err(ProviderError::unsupported("provider_acp")),
+            ProviderKind::Acp => self.build_acp(config),
             ProviderKind::Scripted => Err(ProviderError::unsupported("provider_scripted")),
             #[allow(unreachable_patterns)]
             _ => Err(ProviderError::unsupported("provider_kind")),
@@ -1011,6 +1017,54 @@ impl ProviderRegistry {
         _config: &ProviderInstanceConfig,
     ) -> Result<BuiltProvider, ProviderError> {
         Err(ProviderError::unsupported("provider_codex"))
+    }
+
+    #[cfg(feature = "provider-acp")]
+    fn build_acp(&self, config: &ProviderInstanceConfig) -> Result<BuiltProvider, ProviderError> {
+        use crate::providers::acp::{AcpConfig, AcpProvider};
+
+        let command = config
+            .command
+            .clone()
+            .ok_or_else(|| ProviderError::invalid("acp requires a command"))?;
+        let mut acp = AcpConfig::new(&config.id, command);
+        acp.env_inherit = config.env_inherit.clone();
+        if let Some(Value::Object(env)) = config.extensions.get("env") {
+            acp.env = env
+                .iter()
+                .filter_map(|(name, value)| Some((name.clone(), value.as_str()?.to_owned())))
+                .collect();
+        }
+        acp.thinking = config
+            .extensions
+            .get("thinking")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        acp.login_hint = config
+            .extensions
+            .get("login_hint")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        acp.default_model = config.default_model.clone();
+        acp.context_window = config.context_window;
+        acp.cost_basis = config.cost_source;
+        acp.prices = price_table_of(config);
+        let mut models: Vec<String> = config
+            .prices
+            .keys()
+            .chain(config.model_aliases.values())
+            .cloned()
+            .collect();
+        models.sort();
+        models.dedup();
+        acp.models = models;
+        acp.validate()?;
+        Ok(BuiltProvider::new(Arc::new(AcpProvider::new(acp))))
+    }
+
+    #[cfg(not(feature = "provider-acp"))]
+    fn build_acp(&self, _config: &ProviderInstanceConfig) -> Result<BuiltProvider, ProviderError> {
+        Err(ProviderError::unsupported("provider_acp"))
     }
 
     #[cfg(feature = "provider-native")]
@@ -1634,8 +1688,13 @@ mod tests {
             let error = built.err().expect("no constructor");
             assert!(unsupported(&error, "provider_codex"), "{error:?}");
         }
-        let error = registry.get("agent").err().expect("no constructor");
-        assert!(unsupported(&error, "provider_acp"), "{error:?}");
+        let built = registry.get("agent");
+        if cfg!(feature = "provider-acp") {
+            assert!(built.is_ok(), "{:?}", built.err());
+        } else {
+            let error = built.err().expect("no constructor");
+            assert!(unsupported(&error, "provider_acp"), "{error:?}");
+        }
     }
 
     // -- aliases --------------------------------------------------------------------

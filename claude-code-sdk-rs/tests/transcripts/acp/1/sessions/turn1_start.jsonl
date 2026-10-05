@@ -1,0 +1,2 @@
+# The prompt is answered after its updates: the request is read, its answer deferred.
+{"op":"expect","method":"session/prompt","defer":"p1"}

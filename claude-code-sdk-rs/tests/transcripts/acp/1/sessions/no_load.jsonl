@@ -1,0 +1,4 @@
+# An agent without loadSession.
+{"op":"expect","method":"initialize","reply":{"protocolVersion":1,"agentCapabilities":{"loadSession":false,"mcpCapabilities":{"http":false,"sse":false}},"authMethods":[]}}
+{"op":"expect","method":"session/new","reply":{"sessionId":"sess_fake1"}}
+{"op":"wait_eof"}

@@ -1,0 +1,3 @@
+# initialize. Shapes from agentclientprotocol.com/protocol/initialization (protocol version 1);
+# NOT recorded from a real agent.
+{"op":"expect","method":"initialize","reply":{"protocolVersion":1,"agentCapabilities":{"loadSession":true,"promptCapabilities":{"image":false,"audio":false,"embeddedContext":false},"mcpCapabilities":{"http":true,"sse":false}},"agentInfo":{"name":"fake_acp","title":"Fake ACP agent","version":"1.0.0"},"authMethods":[]}}

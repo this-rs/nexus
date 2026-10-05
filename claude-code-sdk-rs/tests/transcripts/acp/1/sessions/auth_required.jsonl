@@ -1,0 +1,5 @@
+# The agent advertises an authentication method and refuses session/new with -32000
+# (auth_required). The code is from the specification's error table: NOT VERIFIED against an agent.
+{"op":"expect","method":"initialize","reply":{"protocolVersion":1,"agentCapabilities":{"loadSession":false},"agentInfo":{"name":"fake_acp","version":"1.0.0"},"authMethods":[{"id":"fake-login","name":"Log in to the fake agent","description":"Run `fake-agent login`"}]}}
+{"op":"expect","method":"session/new","error":{"code":-32000,"message":"Authentication required"}}
+{"op":"wait_eof"}

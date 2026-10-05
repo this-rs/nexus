@@ -376,6 +376,61 @@ ce qui n'est PAS établi) :
   et de `sandbox` à `thread/start`, la forme de `thread/tokenUsage/updated`, `_meta` de l'élicitation MCP et
   la réponse d'une approbation persistante, `-c` avant `app-server`, `CODEX_API_KEY` lue par `app-server`.
 
+Écarts constatés à l'implémentation d'ACP (`claude-code-sdk-rs/src/providers/acp/`, feature `provider-acp`,
+`AcpProvider` / `AcpConfig`, client générique de l'Agent Client Protocol, protocole version 1) ; **aucune session
+réelle** : opencode (`opencode acp`) et Gemini CLI n'ont PAS été exécutés, tout est joué contre `fake_acp` et des
+transcriptions écrites depuis les pages publiques d'`agentclientprotocol.com`
+(`tests/transcripts/acp/1/schema/PROVENANCE.md` liste ce qui n'est PAS établi) :
+
+- **`command` obligatoire** (programme + arguments) ; un argument qui ressemble à un secret est refusé
+  (`invalid_request`, rien de répété) ; `env_inherit` (noms) + `env` explicite de l'instance + `SessionSpec::env.set`
+  sur une liste blanche ; `cost_basis` `unknown` / `free` / `priced` (jamais `reported` : jetons seuls, quand l'agent
+  en donne, A40).
+- **`resume` = `agentCapabilities.loadSession`**, **appris** par `health()` (ou par le dernier `open`) : `capabilities()`
+  est synchrone et lit ce qui a été appris, `false` tant que rien ne l'a été (écart à la table, qui disait « selon
+  `loadSession` »). Sans `loadSession` : `resume()` → `Unsupported { resume }`. L'historique que l'agent rejoue à
+  `session/load` est écarté (`provider_notice { history_replayed }`).
+- **`images` = `false`** (A12) quoi que dise `promptCapabilities.image`. **`thinking`** = `AcpConfig::thinking` ou un
+  `agent_thought_chunk` déjà vu par ce provider (ACP n'a aucun indicateur de capacité pour cela) ; un chunk de
+  réflexion non déclaré est écarté avec `provider_notice { thinking_not_declared }`.
+- **`permission_scopes` = `once`, `always`** ; chaque `permission_ask` n'offre que les portées pour lesquelles l'agent
+  publie une option `allow_once` / `allow_always` ; `session` et une portée non offerte répondent `Unsupported
+  { permission_scope }`. Un refus choisit `reject_once`, sinon `reject_always`, sinon répond `cancelled`. `Allow` avec
+  `updated_input` → `Unsupported { permission_updated_input }`.
+- **`hooks` = `none`**, `subagents` = `none`, `compaction_signal`, `background_tasks`, `tool_cancel`, `native_question`
+  = non ; `sandbox` = `none` (`trust` refusé à l'ouverture et à chaud : `Unsupported { sandbox }`) ;
+  `per_session_mcp` / `tools` oui : `mcpServers` de `session/new` (env et en-têtes en tableaux `{name, value}`, dans
+  ce JSON seulement ; HTTP / SSE selon `mcpCapabilities`, sinon `Unsupported { mcp_http | mcp_sse }`).
+- **`context_window`** : celle de la configuration (`configured`), sinon `None`. **`set_model_live` = non** :
+  `session/set_model` est instable, `set_model` → `Unsupported { set_model_live }` ; `SessionSpec::model` n'est
+  qu'une étiquette de `done.model` et du prix (`provider_notice { model_not_applied }`).
+- **Politique** (§6) : `set_policy_mode` = `session/set_mode` quand l'agent publie un mode qui correspond
+  (`policy.native_mode` exact, sinon les ids conventionnels `plan` / `ask` / `acceptEdits` / `bypassPermissions`…),
+  sinon `Unsupported { set_policy_mode }` ; la politique neutre s'applique aussi localement aux demandes de permission
+  (`provider_notice { permission_allowed_by_policy | permission_denied_by_policy }`).
+- **Refusés à l'ouverture** : `limits.max_*` et `max_turns` (`Unsupported { limits }` ; `turn_timeout_ms` tenu),
+  `system_prompt` (`Unsupported { system_prompt }`), `extra_dirs` (`Unsupported { extra_dirs }`).
+- **Événements** : `kind` ACP → `category` (`read`→read, `edit`/`delete`/`move`→edit, `execute`→command, `search`→search,
+  `fetch`→web, autres→other) ; `canonical` = `mcp__<serveur>__<outil>` quand le titre est `<serveur>_<outil>` d'un serveur
+  MCP de la session (nommage d'opencode), sinon `Read` / `Edit` / `Bash` / `Grep` / `WebFetch` par `kind` ; `plan` →
+  `provider_notice { plan }` (aucun événement neutre de plan) ; `stopReason` : `end_turn` → `completed`, `max_tokens`,
+  `max_turn_requests` → `max_turns`, `refusal` → `done { refusal }` sans `is_error` (comme le natif), `cancelled` →
+  `interrupted` ; une erreur JSON-RPC de `session/prompt` → `done { is_error, error }` classé (`-32000` → `auth_required`,
+  message `rate limit` → `rate_limited`, `overloaded` → `overloaded`…) ; `error { process_exited }` terminal seulement
+  quand le processus meurt.
+- **Annulation** : `interrupt` répond `cancelled` à chaque permission en attente puis envoie la notification
+  `session/cancel` ; le tour finit quand l'agent répond `cancelled`. Le client n'annonce ni `fs` ni `terminal` : toute
+  requête `fs/*` / `terminal/*` de l'agent reçoit `-32601` (method not found).
+- **Authentification** : `authMethods` est lu, jamais utilisé (PO n'appelle jamais `authenticate`) ; `session/new` refusé
+  par `-32000` → `AuthRequired { login_hint }` (`login_hint` de la configuration, sinon une phrase nommant les méthodes) ;
+  `health()` n'essaie `session/new` que si `authMethods` n'est pas vide (il crée puis jette une session vide).
+- **Processus** : un agent par session, lancé par `isolated_command` ; `close` tue le processus **et ses descendants**
+  (groupe de processus et table des processus). Le transport est une copie adaptée de celui de Codex (non factorisée).
+- **Non vérifié** : tout le protocole (aucune session réelle) ; en particulier `usage` du résultat de prompt et
+  `usage_update` (instables), les ids de modes, `-32000` comme code d'`auth_required`, les arguments de lancement
+  d'opencode / Gemini CLI, `env` / `headers` en tableaux chez un agent réel, le nommage `serveur_outil` d'opencode.
+
+
 ## 6. `ToolPolicy` (A8)
 
 ```rust
@@ -623,16 +678,20 @@ instance intégrée, toujours présente.
 - `quirks` = préréglage ∪ surcharge : booléens en OU, `explicit_parallel_tool_calls` et `reasoning_field` pris
   de la surcharge quand elle les fixe. Une surcharge ne retire pas un drapeau du préréglage.
 - Clés d'`extensions` lues : `allow_private_network` (bool), `cli_path` (chaîne), `compaction_keep_recent`
-  (entier), `codex_home` (chaîne) ; une clé dont le nom évoque un identifiant est refusée.
-- Kinds : `claude_code`, `native` et `codex` construits ; `acp` / `scripted` sans constructeur répondent
-  `Unsupported { provider_acp | provider_scripted }` ; sans la feature `provider-native`, `native` répond
-  `Unsupported { provider_native }`, sans `provider-codex`, `codex` répond `Unsupported { provider_codex }`.
+  (entier), `codex_home` (chaîne), `env` (objet de chaînes, acp), `thinking` (bool, acp), `login_hint` (chaîne, acp) ; une clé dont le nom évoque un identifiant est refusée.
+- Kinds : `claude_code`, `native`, `codex` et `acp` construits ; `scripted` sans constructeur répond
+  `Unsupported { provider_scripted }` ; sans la feature `provider-native`, `native` répond
+  `Unsupported { provider_native }`, sans `provider-codex`, `codex` répond `Unsupported { provider_codex }`, sans `provider-acp`, `acp` répond `Unsupported { provider_acp }`.
   Une instance `codex` se décrit par `command` (le programme seul : des arguments en plus sont refusés,
   `invalid_request`, ils sont ceux de l'adaptateur), `credential` (résolu à chaque `open`, posé dans
   `CODEX_API_KEY` du seul processus), `cost_source` (`unknown`, `free`, `priced` ; `reported` est lu comme
   `unknown`), `prices`, `context_window`, `default_model`, `env_inherit` et l'extension `codex_home`. La porte
   A32 garde `codex` comme `native` : `upsert` répond `Unsupported { security_gate }` tant que le lot sécurité
   n'est pas actif.
+  Une instance `acp` se décrit par `command` (programme + arguments, sans secret : un argument qui ressemble à un secret
+  est refusé), `cost_source` (`unknown`, `free`, `priced`), `prices`, `context_window`, `default_model`, `env_inherit` et
+  les extensions `env` (objet de variables non secrètes ; un nom évoquant un identifiant est refusé), `thinking` (bool),
+  `login_hint` (chaîne) ; la porte A32 la garde comme `codex`.
 
 ## 14. Table `Message` (SDK) → `AgentEvent` → `ChatEvent` (backend)
 
@@ -760,13 +819,13 @@ jeton, `add_dirs` ← `extra_dirs`, `env` ← `EnvSpec.set`, `cli_path` ← exte
 | `testkit` | `testkit/` : conformité, `ScriptedProvider`, rejeu de transcriptions | non (`dev-dependencies` du backend) |
 | `provider-native` | EXISTE : client HTTP + SSE de `model/` (`reqwest` : `guard`, `sse`, `wire`, `openai`), `providers/native/` ; les types, `quirks` et `pricing` de `model/` sont toujours compilés (le registre les porte) | non |
 | `provider-codex` | EXISTE : `providers/codex/` (`CodexProvider` sur `codex app-server`, surface stable ; aucune dépendance de plus, le processus passe par `transport::spawn`) ; `src/bin/fake_codex.rs` ; schéma versionné et transcriptions dans `tests/transcripts/codex/<version>/` | non |
-| `provider-acp` | CIBLE (n'existe pas encore) : `providers/acp/` | non |
+| `provider-acp` | EXISTE : `providers/acp/` (`AcpProvider` client générique de l'Agent Client Protocol, JSON-RPC stdio ; aucune dépendance de plus, le processus passe par `transport::spawn`) ; `src/bin/fake_acp.rs` ; schéma versionné et transcriptions dans `tests/transcripts/acp/<version du protocole>/` | non |
 
 - Côté backend : `nexus-claude = { …, features = ["memory", "auto-download", "provider-native",
   "provider-codex", "provider-acp"] }` et `features = ["testkit"]` en `dev-dependencies`. Pendant
   l'intégration : surcharge locale non commitée `[patch]` vers le worktree nexus (B3) ; l'épingle
   `rev` n'est montée qu'à la fin, sur un sha poussé de `integration/harness-multi-provider`.
-- Faux exécutables (`fake_claude`, `fake_openai`, `fake_codex` (existe), `fake_acp`) : binaires du crate,
+- Faux exécutables (`fake_claude`, `fake_openai`, `fake_codex` (existe), `fake_acp` (existe)) : binaires du crate,
   non construits pour un crate dépendant. Le backend teste par `testkit::ScriptedProvider` et par
   `testkit::claude_code_replay(transcript)` (provider Claude monté sur un transport de rejeu, avec
   capture de stdin).

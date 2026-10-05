@@ -1,0 +1,5 @@
+# A permission request with no turn running.
+{"op":"include","file":"prelude.jsonl"}
+{"op":"server_request","id":"perm_9","method":"session/request_permission","params":{"sessionId":"sess_fake1","toolCall":{"toolCallId":"call_h","title":"Run ls","kind":"execute","status":"pending","rawInput":{"command":"ls"}},"options":[{"optionId":"allow-once","name":"Allow once","kind":"allow_once"},{"optionId":"reject-once","name":"Reject","kind":"reject_once"}]}}
+{"op":"await_response","id":"perm_9","expect":{"outcome":{"outcome":"selected","optionId":"allow-once"}}}
+{"op":"wait_eof"}

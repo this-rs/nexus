@@ -1,0 +1,3 @@
+# An agent that speaks another major version.
+{"op":"expect","method":"initialize","reply":{"protocolVersion":2,"agentCapabilities":{},"authMethods":[]}}
+{"op":"wait_eof"}

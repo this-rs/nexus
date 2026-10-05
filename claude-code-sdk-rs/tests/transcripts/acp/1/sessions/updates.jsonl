@@ -1,0 +1,16 @@
+# The updates that are not text: plan, commands, mode, usage, thought, an MCP tool named
+# `<server>_<tool>`, an edit and a search.
+{"op":"include","file":"prelude.jsonl"}
+{"op":"include","file":"turn1_start.jsonl"}
+{"op":"notify","method":"session/update","params":{"sessionId":"sess_fake1","update":{"sessionUpdate":"plan","entries":[{"content":"Check for syntax errors","priority":"high","status":"pending"}]}}}
+{"op":"notify","method":"session/update","params":{"sessionId":"sess_fake1","update":{"sessionUpdate":"available_commands_update","availableCommands":[{"name":"web","description":"Search the web"}]}}}
+{"op":"notify","method":"session/update","params":{"sessionId":"sess_fake1","update":{"sessionUpdate":"current_mode_update","currentModeId":"plan"}}}
+{"op":"notify","method":"session/update","params":{"sessionId":"sess_fake1","update":{"sessionUpdate":"usage_update","used":5000,"size":200000}}}
+{"op":"notify","method":"session/update","params":{"sessionId":"sess_fake1","update":{"sessionUpdate":"tool_call","toolCallId":"m1","title":"fake_write","kind":"other","status":"pending","rawInput":{"path":"a.txt"}}}}
+{"op":"notify","method":"session/update","params":{"sessionId":"sess_fake1","update":{"sessionUpdate":"tool_call_update","toolCallId":"m1","status":"completed","rawOutput":{"ok":true}}}}
+{"op":"notify","method":"session/update","params":{"sessionId":"sess_fake1","update":{"sessionUpdate":"tool_call","toolCallId":"e1","title":"Edit a.txt","kind":"edit","status":"pending","rawInput":{"path":"a.txt"}}}}
+{"op":"notify","method":"session/update","params":{"sessionId":"sess_fake1","update":{"sessionUpdate":"tool_call_update","toolCallId":"e1","status":"completed","content":[{"type":"diff","path":"a.txt","oldText":"a","newText":"b"}]}}}
+{"op":"notify","method":"session/update","params":{"sessionId":"sess_fake1","update":{"sessionUpdate":"tool_call","toolCallId":"s1","title":"Search TODO","kind":"search","status":"pending"}}}
+{"op":"notify","unsupported":true,"method":"session/update","params":{"sessionId":"sess_fake1","update":{"sessionUpdate":"brand_new_update","foo":1}}}
+{"op":"notify","method":"session/update","params":{"sessionId":"sess_fake1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"summary"}}}}
+{"op":"reply","to":"p1","result":{"stopReason":"end_turn"}}

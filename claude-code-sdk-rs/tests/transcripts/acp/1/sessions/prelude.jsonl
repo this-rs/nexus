@@ -1,0 +1,3 @@
+# session/new (agentclientprotocol.com/protocol/session-setup); modes from .../session-modes.
+{"op":"include","file":"handshake.jsonl"}
+{"op":"expect","method":"session/new","reply":{"sessionId":"sess_fake1","modes":{"currentModeId":"ask","availableModes":[{"id":"ask","name":"Ask","description":"Request permission before making any changes"},{"id":"plan","name":"Plan"},{"id":"acceptEdits","name":"Accept edits"}]}}}

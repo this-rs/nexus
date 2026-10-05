@@ -7,6 +7,8 @@
 //! (`tests/providers_spawn_guard.rs`) refuses any other spawn under this
 //! directory.
 
+#[cfg(feature = "provider-acp")]
+pub mod acp;
 pub mod claude_code;
 #[cfg(feature = "provider-codex")]
 pub mod codex;

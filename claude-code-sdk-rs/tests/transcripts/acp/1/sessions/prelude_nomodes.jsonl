@@ -1,0 +1,2 @@
+{"op":"include","file":"handshake.jsonl"}
+{"op":"expect","method":"session/new","reply":{"sessionId":"sess_fake1"}}

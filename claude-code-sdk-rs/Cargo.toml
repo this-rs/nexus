@@ -61,6 +61,9 @@ provider-native = ["reqwest"]
 # Codex `app-server` (JSON-RPC over stdio) behind the agent contract: `providers::codex`.
 # Needs no extra dependency (the process is launched through `transport::spawn`).
 provider-codex = []
+# Any ACP (Agent Client Protocol) agent over stdio behind the agent contract: `providers::acp`.
+# Needs no extra dependency (the process is launched through `transport::spawn`).
+provider-acp = []
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
@@ -110,3 +113,15 @@ required-features = ["provider-codex"]
 [[test]]
 name = "codex_registry"
 required-features = ["provider-codex"]
+
+[[test]]
+name = "acp_conformance"
+required-features = ["testkit", "provider-acp"]
+
+[[test]]
+name = "acp_schema_drift"
+required-features = ["provider-acp"]
+
+[[test]]
+name = "acp_registry"
+required-features = ["provider-acp"]

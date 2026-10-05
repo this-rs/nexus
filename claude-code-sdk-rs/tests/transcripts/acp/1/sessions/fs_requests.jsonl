@@ -1,0 +1,11 @@
+# The client announced no fs and no terminal: the agent's requests get -32601.
+{"op":"include","file":"prelude.jsonl"}
+{"op":"include","file":"turn1_start.jsonl"}
+{"op":"server_request","unsupported":true,"id":"fs_1","method":"fs/read_text_file","params":{"sessionId":"sess_fake1","path":"/work/a.txt"}}
+{"op":"await_response","id":"fs_1","expect_error_code":-32601}
+{"op":"server_request","unsupported":true,"id":"fs_2","method":"fs/write_text_file","params":{"sessionId":"sess_fake1","path":"/work/a.txt","content":"x"}}
+{"op":"await_response","id":"fs_2","expect_error_code":-32601}
+{"op":"server_request","unsupported":true,"id":"term_1","method":"terminal/create","params":{"sessionId":"sess_fake1","command":"ls"}}
+{"op":"await_response","id":"term_1","expect_error_code":-32601}
+{"op":"notify","method":"session/update","params":{"sessionId":"sess_fake1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"served nothing"}}}}
+{"op":"include","file":"turn1_end.jsonl"}

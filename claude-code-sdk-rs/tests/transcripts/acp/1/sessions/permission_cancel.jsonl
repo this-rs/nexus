@@ -1,0 +1,9 @@
+# A permission request is pending when the turn is cancelled: the client answers it
+# `cancelled` (the protocol requires it), then sends session/cancel.
+{"op":"include","file":"prelude.jsonl"}
+{"op":"include","file":"turn1_start.jsonl"}
+{"op":"notify","method":"session/update","params":{"sessionId":"sess_fake1","update":{"sessionUpdate":"tool_call","toolCallId":"call_1","title":"Run make","kind":"execute","status":"pending","rawInput":{"command":"make"}}}}
+{"op":"server_request","id":"perm_1","method":"session/request_permission","params":{"sessionId":"sess_fake1","toolCall":{"toolCallId":"call_1"},"options":[{"optionId":"allow-once","name":"Allow once","kind":"allow_once"},{"optionId":"reject-once","name":"Reject","kind":"reject_once"}]}}
+{"op":"await_response","id":"perm_1","expect":{"outcome":{"outcome":"cancelled"}}}
+{"op":"expect_notification","method":"session/cancel"}
+{"op":"reply","to":"p1","result":{"stopReason":"cancelled"}}

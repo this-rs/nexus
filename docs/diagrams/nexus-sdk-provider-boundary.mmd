@@ -123,16 +123,19 @@ flowchart TD
         T2["✅ partiel — `pub mod providers` dans lib.rs (toujours compilé) : providers::claude_code::ClaudeCodeProvider = façade sur<br/>InteractiveClient + message_parser + protocole de contrôle (control.rs), environnement en liste blanche par défaut<br/>(EnvPolicy::claude_code), config MCP par fichier. 🟠 reste : annulation d'outils, tâches de fond, six modes au lancement ;<br/>l'ancien chemin (InteractiveClient direct, C1→C7) reste public et inchangé (A14)<br/><i>vérifié : cargo test -p nexus-claude --features testkit --test claude_code_conformance ; détail dans nexus-agent-providers</i>"]
         T5["✅ feature cargo `provider-native` (non défaut, tire reqwest) : `pub mod model` dans lib.rs, TOUJOURS compilé depuis le registre (types, quirks, PriceTable) ; guard, sse, wire, openai de model/ restent derrière cfg feature provider-native —<br/>ModelEndpoint + OpenAiEndpoint (HTTP + SSE), quirks, PriceTable, garde d endpoint ; `pub mod native` de providers/mod.rs (NativeProvider : boucle d outils MCP, transcript, compaction) derrière la même feature ; absent du build par défaut<br/><i>vérifié : cargo test -p nexus-claude --features provider-native --test model_openai_endpoint ; cargo test -p nexus-claude --features "testkit provider-native" --test native_conformance ; cargo build -p nexus-claude (sans la feature) ; détail dans nexus-agent-providers</i>"]
         T6["✅ feature cargo `provider-codex` (non défaut, aucune dépendance de plus) : `pub mod codex` de providers/mod.rs derrière cfg feature provider-codex —<br/>CodexProvider sur `codex app-server` (JSON-RPC stdio, un processus par session, lanceur unique) ; faux exécutable src/bin/fake_codex.rs ; absent du build par défaut<br/><i>vérifié : cargo test -p nexus-claude --features "testkit provider-codex" --test codex_conformance ; cargo build -p nexus-claude --no-default-features (sans la feature) ; détail dans nexus-agent-providers. NON ÉTABLI : aucune session réelle, codex 0.38.0 local sans app-server</i>"]
-        T3["🟠 autres adaptateurs : un CLI d'agent (Gemini CLI, ACP générique) ou l'API Messages directe ;<br/>chacun avec son faux exécutable (F3) et ses conformance tests"]
+        T7["✅ feature cargo `provider-acp` (non défaut, aucune dépendance de plus) : `pub mod acp` de providers/mod.rs derrière cfg feature provider-acp —<br/>AcpProvider, client générique de l Agent Client Protocol (JSON-RPC stdio, un processus par session, lanceur unique) ; faux exécutable src/bin/fake_acp.rs ; absent du build par défaut<br/><i>vérifié : cargo test -p nexus-claude --features "testkit provider-acp" --test acp_conformance ; cargo build -p nexus-claude --no-default-features (sans la feature) ; détail dans nexus-agent-providers. NON ÉTABLI : aucune session réelle, opencode et Gemini CLI non exécutés</i>"]
+        T3["🟠 autres adaptateurs : un CLI d agent hors ACP ou l API Messages directe (Gemini CLI passe par ACP, noeud T7) ;<br/>chacun avec son faux exécutable (F3) et ses conformance tests"]
         T4["✅ feature cargo `testkit` (non défaut) : `pub mod testkit` dans lib.rs, derrière cfg feature testkit —<br/>ScriptedProvider (provider en mémoire, ProviderKind::Scripted) + transcriptions + suite de conformité ;<br/>utilisable par un autre crate en dev-dependency, absent du build par défaut<br/><i>vérifié : cargo test -p nexus-claude --features testkit --test agent_conformance ; cargo build -p nexus-claude (sans la feature) ; détail dans nexus-agent-providers</i>"]
         T1 --> T2
         T1 --> T3
         T1 --> T4
         T1 --> T5
         T1 --> T6
+        T1 --> T7
         T4 -.->|"même suite rejouée contre"| T2
         T4 -.->|"même suite rejouée contre"| T3
         T4 -.->|"même suite rejouée contre"| T6
+        T4 -.->|"même suite rejouée contre"| T7
     end
 
     S2 -.->|"à fermer"| T1

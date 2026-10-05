@@ -1,0 +1,3 @@
+# An agent that publishes no mode: set_policy_mode has nothing to call.
+{"op":"include","file":"prelude_nomodes.jsonl"}
+{"op":"include","file":"turn1_text.jsonl"}

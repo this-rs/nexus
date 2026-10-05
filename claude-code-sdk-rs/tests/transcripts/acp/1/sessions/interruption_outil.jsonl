@@ -1,0 +1,6 @@
+{"op":"include","file":"prelude.jsonl"}
+{"op":"include","file":"turn1_start.jsonl"}
+{"op":"notify","method":"session/update","params":{"sessionId":"sess_fake1","update":{"sessionUpdate":"tool_call","toolCallId":"call_1","title":"Run sleep 600","kind":"execute","status":"in_progress","rawInput":{"command":"sleep 600"}}}}
+{"op":"expect_notification","method":"session/cancel"}
+{"op":"notify","method":"session/update","params":{"sessionId":"sess_fake1","update":{"sessionUpdate":"tool_call_update","toolCallId":"call_1","status":"failed"}}}
+{"op":"reply","to":"p1","result":{"stopReason":"cancelled"}}
