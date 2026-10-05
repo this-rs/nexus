@@ -288,8 +288,10 @@ pub struct ToolPattern { pub tool: String, pub arg: Option<String> } // glob `*`
 - Décision locale (`policy.decide(tool, arg) -> allow | ask | deny`), utilisée par le harness natif
   et par les replis : `deny` l'emporte toujours ; puis `allow` ; puis le mode — `trust` → allow ;
   `auto_edits` → allow pour les catégories `read | search | edit`, ask sinon ; `ask` → allow pour
-  `read | search`, ask sinon ; `plan_only` → allow pour `read | search`, deny sinon. **Motif
-  malformé, mode inconnu, catégorie inconnue → deny** (refus par défaut, jamais ouvert).
+  `read | search`, ask sinon ; `plan_only` → allow pour `read | search`, deny sinon (une entrée `allow` ne lève pas le mode plan). **Motif malformé ou
+  mode inconnu → erreur à la construction (`invalid_request`), jamais ignoré** : une entrée `deny`
+  perdue élargirait la politique en silence. Un `deny` à argument face à un appel dont l'argument
+  est inconnu s'applique (échec fermé).
 - `child.restrict(&parent)` est monotone (A17) : mode = le moins permissif des deux ; `deny` =
   union ; `allow` = motifs de l'enfant couverts par un motif du parent (tous si le parent est
   `trust`). `restrict` est idempotent et `a.restrict(&p).is_within(&p)` est toujours vrai.

@@ -32,6 +32,7 @@
 #![warn(missing_docs)]
 #![warn(rustdoc::missing_crate_level_docs)]
 
+pub mod agent;
 /// CLI download and management utilities
 pub mod cli_download;
 mod client;
