@@ -1,0 +1,6 @@
+.hidden/secret.txt:a hidden TODO
+README.md:A TODO list lives here.
+docs/guide.md:seventh TODO
+script.py:    return 1  # TODO later
+src/lib.rs:// TODO: document add
+src/main.rs:// TODO: refactor main

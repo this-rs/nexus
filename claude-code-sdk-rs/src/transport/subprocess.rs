@@ -129,9 +129,24 @@ impl SemVer {
 /// # }
 /// ```
 pub async fn get_cli_version(cli_path: &std::path::Path) -> Option<SemVer> {
+    get_cli_version_with_policy(cli_path, &super::spawn::EnvPolicy::InheritAll).await
+}
+
+/// The oldest CLI version this SDK is known to work with ([`MIN_CLI_VERSION`]),
+/// for a caller that reports a health check rather than a warning.
+pub(crate) fn min_cli_version() -> SemVer {
+    SemVer::new(MIN_CLI_VERSION.0, MIN_CLI_VERSION.1, MIN_CLI_VERSION.2)
+}
+
+/// [`get_cli_version`] with the environment policy of the session about to start:
+/// the version probe runs the same executable, so it gets the same isolation.
+pub(crate) async fn get_cli_version_with_policy(
+    cli_path: &std::path::Path,
+    policy: &super::spawn::EnvPolicy,
+) -> Option<SemVer> {
     let output = tokio::time::timeout(
         std::time::Duration::from_secs(5),
-        tokio::process::Command::new(cli_path)
+        super::spawn::isolated_command(cli_path, policy)
             .arg("--version")
             .stderr(std::process::Stdio::null())
             .output(),
@@ -142,6 +157,436 @@ pub async fn get_cli_version(cli_path: &std::path::Path) -> Option<SemVer> {
 
     let version_str = String::from_utf8_lossy(&output.stdout);
     SemVer::parse(version_str.trim())
+}
+
+fn settings_value_for(options: &ClaudeCodeOptions) -> Option<String> {
+    let has_settings = options.settings.is_some();
+    let has_sandbox = options.sandbox.is_some();
+
+    if !has_settings && !has_sandbox {
+        return None;
+    }
+
+    // If only settings path and no sandbox, pass through as-is
+    if has_settings && !has_sandbox {
+        return options.settings.clone();
+    }
+
+    // If we have sandbox settings, merge into a JSON object (Python parity)
+    let mut settings_obj = serde_json::Map::new();
+
+    if let Some(ref settings) = options.settings {
+        let settings_str = settings.trim();
+
+        let load_as_json_string = |s: &str| -> Option<serde_json::Map<String, serde_json::Value>> {
+            match serde_json::from_str::<serde_json::Value>(s) {
+                Ok(serde_json::Value::Object(map)) => Some(map),
+                Ok(_) => {
+                    warn!("Settings JSON must be an object; ignoring provided JSON settings");
+                    None
+                },
+                Err(_) => None,
+            }
+        };
+
+        let load_from_file = |path: &Path| -> Option<serde_json::Map<String, serde_json::Value>> {
+            let content = std::fs::read_to_string(path).ok()?;
+            match serde_json::from_str::<serde_json::Value>(&content) {
+                Ok(serde_json::Value::Object(map)) => Some(map),
+                Ok(_) => {
+                    warn!("Settings file JSON must be an object: {}", path.display());
+                    None
+                },
+                Err(e) => {
+                    warn!("Failed to parse settings file {}: {}", path.display(), e);
+                    None
+                },
+            }
+        };
+
+        if settings_str.starts_with('{') && settings_str.ends_with('}') {
+            if let Some(map) = load_as_json_string(settings_str) {
+                settings_obj = map;
+            } else {
+                warn!(
+                    "Failed to parse settings as JSON, treating as file path: {}",
+                    settings_str
+                );
+                let settings_path = Path::new(settings_str);
+                if settings_path.exists() {
+                    if let Some(map) = load_from_file(settings_path) {
+                        settings_obj = map;
+                    }
+                } else {
+                    warn!("Settings file not found: {}", settings_path.display());
+                }
+            }
+        } else {
+            let settings_path = Path::new(settings_str);
+            if settings_path.exists() {
+                if let Some(map) = load_from_file(settings_path) {
+                    settings_obj = map;
+                }
+            } else {
+                warn!("Settings file not found: {}", settings_path.display());
+            }
+        }
+    }
+
+    if let Some(ref sandbox) = options.sandbox {
+        match serde_json::to_value(sandbox) {
+            Ok(value) => {
+                settings_obj.insert("sandbox".to_string(), value);
+            },
+            Err(e) => {
+                warn!("Failed to serialize sandbox settings: {}", e);
+            },
+        }
+    }
+
+    Some(serde_json::Value::Object(settings_obj).to_string())
+}
+
+/// Which entry point is building the command line.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum CommandMode<'a> {
+    /// Long-lived stream-json session over stdin/stdout.
+    Stream,
+    /// One-shot `--print` query; the prompt is the last argument.
+    Print {
+        /// The prompt, passed after `--`.
+        prompt: &'a str,
+    },
+}
+
+/// The `--mcp-config` payload: every MCP server with its environment.
+fn mcp_config_json(options: &ClaudeCodeOptions) -> String {
+    serde_json::json!({ "mcpServers": options.mcp_servers }).to_string()
+}
+
+/// Write the MCP configuration to an owner-only file when the options ask for it.
+///
+/// A failure is an error, never a fallback to the command line: the caller asked
+/// for the secrets to stay off `argv`. The returned file must outlive the child.
+pub(crate) fn mcp_secret_file(
+    options: &ClaudeCodeOptions,
+) -> Result<Option<super::spawn::SecretFile>> {
+    if !options.mcp_config_via_file || options.mcp_servers.is_empty() {
+        return Ok(None);
+    }
+    super::spawn::SecretFile::create("mcp-config.json", mcp_config_json(options).as_bytes())
+        .map(Some)
+        .map_err(SdkError::ProcessError)
+}
+
+/// The one place a `claude` command line is built: arguments, working directory
+/// and environment, through the single launcher of `spawn.rs`. Stdio, process
+/// group and the SDK markers stay with the caller because they differ per entry
+/// point.
+pub(crate) fn build_cli_command(
+    cli_path: &Path,
+    options: &ClaudeCodeOptions,
+    mode: CommandMode<'_>,
+    mcp_config_file: Option<&Path>,
+) -> Command {
+    // The single launcher: with an allowlist policy the child starts from an
+    // EMPTY environment. This must stay the first thing done to the command —
+    // `env_clear` also drops every variable set before it.
+    let mut cmd = super::spawn::isolated_command(cli_path, &options.env_policy);
+
+    // Always use output-format stream-json and verbose (like Python SDK)
+    cmd.arg("--output-format").arg("stream-json");
+    cmd.arg("--verbose");
+
+    // For streaming/interactive mode, also add input-format stream-json
+    if matches!(mode, CommandMode::Stream) {
+        cmd.arg("--input-format").arg("stream-json");
+    }
+
+    // Include partial messages if requested
+    if options.include_partial_messages {
+        cmd.arg("--include-partial-messages");
+    }
+
+    // Add debug-to-stderr flag if debug_stderr is set
+    if options.debug_stderr.is_some() {
+        cmd.arg("--debug-to-stderr");
+    }
+
+    // Handle max_output_tokens (priority: option > env var)
+    // Maximum safe value is 32000, values above this may cause issues
+    if let Some(max_tokens) = options.max_output_tokens {
+        // Option takes priority - validate and cap at 32000
+        let capped = max_tokens.clamp(1, 32000);
+        cmd.env("CLAUDE_CODE_MAX_OUTPUT_TOKENS", capped.to_string());
+        debug!("Setting max_output_tokens from option: {}", capped);
+    } else {
+        // Fall back to environment variable handling
+        if let Ok(current_value) = std::env::var("CLAUDE_CODE_MAX_OUTPUT_TOKENS") {
+            if let Ok(tokens) = current_value.parse::<u32>() {
+                if tokens > 32000 {
+                    warn!(
+                        "CLAUDE_CODE_MAX_OUTPUT_TOKENS={} exceeds maximum safe value of 32000, overriding to 32000",
+                        tokens
+                    );
+                    cmd.env("CLAUDE_CODE_MAX_OUTPUT_TOKENS", "32000");
+                }
+                // If it's <= 32000, leave it as is
+            } else {
+                // Invalid value, set to safe default
+                warn!(
+                    "Invalid CLAUDE_CODE_MAX_OUTPUT_TOKENS value: {}, setting to 8192",
+                    current_value
+                );
+                cmd.env("CLAUDE_CODE_MAX_OUTPUT_TOKENS", "8192");
+            }
+        }
+    }
+
+    // System prompts (match Python SDK behavior)
+    //
+    // Python always passes `--system-prompt ""` when `system_prompt` is None.
+    if let Some(ref prompt_v2) = options.system_prompt_v2 {
+        match prompt_v2 {
+            crate::types::SystemPrompt::String(s) => {
+                cmd.arg("--system-prompt").arg(s);
+            },
+            crate::types::SystemPrompt::Preset { append, .. } => {
+                // Python only uses preset prompts to optionally append to the default preset.
+                // It does not pass a preset selector flag to the CLI.
+                if let Some(append_text) = append {
+                    cmd.arg("--append-system-prompt").arg(append_text);
+                }
+            },
+        }
+    } else {
+        // Fallback to deprecated fields for backward compatibility
+        #[allow(deprecated)]
+        match options.system_prompt.as_deref() {
+            Some(prompt) => {
+                cmd.arg("--system-prompt").arg(prompt);
+            },
+            None => {
+                cmd.arg("--system-prompt").arg("");
+            },
+        }
+        #[allow(deprecated)]
+        if let Some(ref prompt) = options.append_system_prompt {
+            cmd.arg("--append-system-prompt").arg(prompt);
+        }
+    }
+
+    // Tool configuration
+    if !options.allowed_tools.is_empty() {
+        cmd.arg("--allowedTools")
+            .arg(options.allowed_tools.join(","));
+    }
+    if !options.disallowed_tools.is_empty() {
+        cmd.arg("--disallowedTools")
+            .arg(options.disallowed_tools.join(","));
+    }
+
+    // Permission mode. A native string (one of the CLI's modes the enum
+    // cannot name: `auto`, `dontAsk`, `manual`) is written verbatim and
+    // replaces the enum; without one the enum is rendered as always.
+    if let Some(native) = &options.permission_mode_native {
+        cmd.arg("--permission-mode").arg(native);
+    } else {
+        match options.permission_mode {
+            PermissionMode::Default => {
+                cmd.arg("--permission-mode").arg("default");
+            },
+            PermissionMode::AcceptEdits => {
+                cmd.arg("--permission-mode").arg("acceptEdits");
+            },
+            PermissionMode::Plan => {
+                cmd.arg("--permission-mode").arg("plan");
+            },
+            PermissionMode::BypassPermissions => {
+                cmd.arg("--permission-mode").arg("bypassPermissions");
+            },
+        }
+    }
+
+    // Model
+    if let Some(ref model) = options.model {
+        cmd.arg("--model").arg(model);
+    }
+
+    // Permission prompt tool
+    if let Some(ref tool_name) = options.permission_prompt_tool_name {
+        cmd.arg("--permission-prompt-tool").arg(tool_name);
+    }
+
+    // Max turns
+    if let Some(max_turns) = options.max_turns {
+        cmd.arg("--max-turns").arg(max_turns.to_string());
+    }
+
+    // Max thinking tokens (extended thinking budget)
+    // Only pass if non-zero to match Python SDK behavior
+    if options.max_thinking_tokens > 0 {
+        cmd.arg("--max-thinking-tokens")
+            .arg(options.max_thinking_tokens.to_string());
+    }
+
+    // Working directory
+    if let Some(ref cwd) = options.cwd {
+        cmd.current_dir(cwd);
+    }
+
+    // Add environment variables
+    for (key, value) in &options.env {
+        cmd.env(key, value);
+    }
+
+    // MCP servers - use --mcp-config with JSON format like Python SDK
+    if !options.mcp_servers.is_empty() {
+        match mcp_config_file {
+            // Owner-only file written by the caller: the credentials of the
+            // MCP servers never reach the command line.
+            Some(path) => {
+                cmd.arg("--mcp-config").arg(path);
+            },
+            None => {
+                cmd.arg("--mcp-config").arg(mcp_config_json(options));
+            },
+        }
+    }
+
+    // Continue/resume
+    if options.continue_conversation {
+        cmd.arg("--continue");
+    }
+    if let Some(ref resume_id) = options.resume {
+        cmd.arg("--resume").arg(resume_id);
+    }
+
+    // Settings value (merge sandbox into settings if provided)
+    if let Some(settings_value) = settings_value_for(options) {
+        cmd.arg("--settings").arg(settings_value);
+    }
+
+    // Additional directories
+    for dir in &options.add_dirs {
+        cmd.arg("--add-dir").arg(dir);
+    }
+
+    // Fork session if requested
+    if options.fork_session {
+        cmd.arg("--fork-session");
+    }
+
+    // ========== Phase 3 CLI args (Python SDK v0.1.12+ sync) ==========
+
+    // Tools configuration (base set of tools)
+    if let Some(ref tools) = options.tools {
+        match tools {
+            crate::types::ToolsConfig::List(list) => {
+                if list.is_empty() {
+                    cmd.arg("--tools").arg("");
+                } else {
+                    cmd.arg("--tools").arg(list.join(","));
+                }
+            },
+            crate::types::ToolsConfig::Preset(_preset) => {
+                // Preset object - 'claude_code' preset maps to 'default'
+                cmd.arg("--tools").arg("default");
+            },
+        }
+    }
+
+    // SDK betas
+    if !options.betas.is_empty() {
+        let betas: Vec<String> = options.betas.iter().map(|b| b.to_string()).collect();
+        cmd.arg("--betas").arg(betas.join(","));
+    }
+
+    // Max budget USD
+    if let Some(budget) = options.max_budget_usd {
+        cmd.arg("--max-budget-usd").arg(budget.to_string());
+    }
+
+    // Fallback model
+    if let Some(ref fallback) = options.fallback_model {
+        cmd.arg("--fallback-model").arg(fallback);
+    }
+
+    // File checkpointing
+    if options.enable_file_checkpointing {
+        cmd.env("CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING", "true");
+    }
+
+    // Output format for structured outputs (json_schema only)
+    if let Some(ref format) = options.output_format
+        && format.get("type").and_then(|v| v.as_str()) == Some("json_schema")
+        && let Some(schema) = format.get("schema")
+        && let Ok(schema_json) = serde_json::to_string(schema)
+    {
+        cmd.arg("--json-schema").arg(schema_json);
+    }
+
+    // Plugin directories
+    for plugin in &options.plugins {
+        match plugin {
+            crate::types::SdkPluginConfig::Local { path } => {
+                cmd.arg("--plugin-dir").arg(path);
+            },
+        }
+    }
+
+    // Programmatic agents
+    if let Some(ref agents) = options.agents
+        && !agents.is_empty()
+        && let Ok(json_str) = serde_json::to_string(agents)
+    {
+        cmd.arg("--agents").arg(json_str);
+    }
+
+    // Setting sources (comma-separated). Always pass a value for SDK parity with Python.
+    let sources_value = options
+        .setting_sources
+        .as_ref()
+        .map(|sources| {
+            sources
+                .iter()
+                .map(|s| match s {
+                    crate::types::SettingSource::User => "user",
+                    crate::types::SettingSource::Project => "project",
+                    crate::types::SettingSource::Local => "local",
+                })
+                .collect::<Vec<_>>()
+                .join(",")
+        })
+        .unwrap_or_default();
+    //
+    // Print mode used to send no `--setting-sources` at all, which lets the CLI
+    // load its default sources; forcing an empty value there would silently
+    // switch every user/project setting off. It is sent in print mode only when
+    // the caller chose sources.
+    if matches!(mode, CommandMode::Stream) || options.setting_sources.is_some() {
+        cmd.arg("--setting-sources").arg(sources_value);
+    }
+
+    // Extra arguments
+    for (key, value) in &options.extra_args {
+        let flag = if key.starts_with("--") || key.starts_with("-") {
+            key.clone()
+        } else {
+            format!("--{key}")
+        };
+        cmd.arg(&flag);
+        if let Some(val) = value {
+            cmd.arg(val);
+        }
+    }
+
+    // The prompt closes the line in print mode: `--print -- <prompt>`.
+    if let CommandMode::Print { prompt } = mode {
+        cmd.arg("--print").arg("--").arg(prompt);
+    }
+
+    cmd
 }
 
 /// Wrap a broadcast subscription in the stream the `Transport` trait hands out.
@@ -202,6 +647,10 @@ pub struct SubprocessTransport {
     /// Whether to close stdin after initial prompt
     #[allow(dead_code)]
     close_stdin_after_prompt: bool,
+    /// Owner-only file holding the MCP configuration when
+    /// `ClaudeCodeOptions::mcp_config_via_file` is set. Lives as long as the child;
+    /// dropped (and deleted) on disconnect.
+    mcp_config_file: Option<super::spawn::SecretFile>,
 }
 
 impl SubprocessTransport {
@@ -225,6 +674,7 @@ impl SubprocessTransport {
             state: TransportState::Disconnected,
             request_counter: 0,
             close_stdin_after_prompt: false,
+            mcp_config_file: None,
         })
     }
 
@@ -259,99 +709,8 @@ impl SubprocessTransport {
             state: TransportState::Disconnected,
             request_counter: 0,
             close_stdin_after_prompt: false,
+            mcp_config_file: None,
         })
-    }
-
-    fn build_settings_value(&self) -> Option<String> {
-        let has_settings = self.options.settings.is_some();
-        let has_sandbox = self.options.sandbox.is_some();
-
-        if !has_settings && !has_sandbox {
-            return None;
-        }
-
-        // If only settings path and no sandbox, pass through as-is
-        if has_settings && !has_sandbox {
-            return self.options.settings.clone();
-        }
-
-        // If we have sandbox settings, merge into a JSON object (Python parity)
-        let mut settings_obj = serde_json::Map::new();
-
-        if let Some(ref settings) = self.options.settings {
-            let settings_str = settings.trim();
-
-            let load_as_json_string =
-                |s: &str| -> Option<serde_json::Map<String, serde_json::Value>> {
-                    match serde_json::from_str::<serde_json::Value>(s) {
-                        Ok(serde_json::Value::Object(map)) => Some(map),
-                        Ok(_) => {
-                            warn!(
-                                "Settings JSON must be an object; ignoring provided JSON settings"
-                            );
-                            None
-                        },
-                        Err(_) => None,
-                    }
-                };
-
-            let load_from_file =
-                |path: &Path| -> Option<serde_json::Map<String, serde_json::Value>> {
-                    let content = std::fs::read_to_string(path).ok()?;
-                    match serde_json::from_str::<serde_json::Value>(&content) {
-                        Ok(serde_json::Value::Object(map)) => Some(map),
-                        Ok(_) => {
-                            warn!("Settings file JSON must be an object: {}", path.display());
-                            None
-                        },
-                        Err(e) => {
-                            warn!("Failed to parse settings file {}: {}", path.display(), e);
-                            None
-                        },
-                    }
-                };
-
-            if settings_str.starts_with('{') && settings_str.ends_with('}') {
-                if let Some(map) = load_as_json_string(settings_str) {
-                    settings_obj = map;
-                } else {
-                    warn!(
-                        "Failed to parse settings as JSON, treating as file path: {}",
-                        settings_str
-                    );
-                    let settings_path = Path::new(settings_str);
-                    if settings_path.exists() {
-                        if let Some(map) = load_from_file(settings_path) {
-                            settings_obj = map;
-                        }
-                    } else {
-                        warn!("Settings file not found: {}", settings_path.display());
-                    }
-                }
-            } else {
-                let settings_path = Path::new(settings_str);
-                if settings_path.exists() {
-                    if let Some(map) = load_from_file(settings_path) {
-                        settings_obj = map;
-                    }
-                } else {
-                    warn!("Settings file not found: {}", settings_path.display());
-                }
-            }
-        }
-
-        if let Some(ref sandbox) = self.options.sandbox {
-            match serde_json::to_value(sandbox) {
-                Ok(value) => {
-                    settings_obj.insert("sandbox".to_string(), value);
-                },
-                Err(e) => {
-                    warn!("Failed to serialize sandbox settings: {}", e);
-                },
-            }
-        }
-
-        Some(serde_json::Value::Object(settings_obj).to_string())
     }
 
     /// Subscribe to messages without borrowing self (for lock-free consumption)
@@ -392,6 +751,7 @@ impl SubprocessTransport {
             state: TransportState::Disconnected,
             request_counter: 0,
             close_stdin_after_prompt: false,
+            mcp_config_file: None,
         }
     }
 
@@ -428,279 +788,18 @@ impl SubprocessTransport {
             state: TransportState::Disconnected,
             request_counter: 0,
             close_stdin_after_prompt: true,
+            mcp_config_file: None,
         })
     }
 
     /// Build the command with all necessary arguments
     fn build_command(&self) -> Command {
-        let mut cmd = Command::new(&self.cli_path);
-
-        // Always use output-format stream-json and verbose (like Python SDK)
-        cmd.arg("--output-format").arg("stream-json");
-        cmd.arg("--verbose");
-
-        // For streaming/interactive mode, also add input-format stream-json
-        cmd.arg("--input-format").arg("stream-json");
-
-        // Include partial messages if requested
-        if self.options.include_partial_messages {
-            cmd.arg("--include-partial-messages");
-        }
-
-        // Add debug-to-stderr flag if debug_stderr is set
-        if self.options.debug_stderr.is_some() {
-            cmd.arg("--debug-to-stderr");
-        }
-
-        // Handle max_output_tokens (priority: option > env var)
-        // Maximum safe value is 32000, values above this may cause issues
-        if let Some(max_tokens) = self.options.max_output_tokens {
-            // Option takes priority - validate and cap at 32000
-            let capped = max_tokens.clamp(1, 32000);
-            cmd.env("CLAUDE_CODE_MAX_OUTPUT_TOKENS", capped.to_string());
-            debug!("Setting max_output_tokens from option: {}", capped);
-        } else {
-            // Fall back to environment variable handling
-            if let Ok(current_value) = std::env::var("CLAUDE_CODE_MAX_OUTPUT_TOKENS") {
-                if let Ok(tokens) = current_value.parse::<u32>() {
-                    if tokens > 32000 {
-                        warn!(
-                            "CLAUDE_CODE_MAX_OUTPUT_TOKENS={} exceeds maximum safe value of 32000, overriding to 32000",
-                            tokens
-                        );
-                        cmd.env("CLAUDE_CODE_MAX_OUTPUT_TOKENS", "32000");
-                    }
-                    // If it's <= 32000, leave it as is
-                } else {
-                    // Invalid value, set to safe default
-                    warn!(
-                        "Invalid CLAUDE_CODE_MAX_OUTPUT_TOKENS value: {}, setting to 8192",
-                        current_value
-                    );
-                    cmd.env("CLAUDE_CODE_MAX_OUTPUT_TOKENS", "8192");
-                }
-            }
-        }
-
-        // System prompts (match Python SDK behavior)
-        //
-        // Python always passes `--system-prompt ""` when `system_prompt` is None.
-        if let Some(ref prompt_v2) = self.options.system_prompt_v2 {
-            match prompt_v2 {
-                crate::types::SystemPrompt::String(s) => {
-                    cmd.arg("--system-prompt").arg(s);
-                },
-                crate::types::SystemPrompt::Preset { append, .. } => {
-                    // Python only uses preset prompts to optionally append to the default preset.
-                    // It does not pass a preset selector flag to the CLI.
-                    if let Some(append_text) = append {
-                        cmd.arg("--append-system-prompt").arg(append_text);
-                    }
-                },
-            }
-        } else {
-            // Fallback to deprecated fields for backward compatibility
-            #[allow(deprecated)]
-            match self.options.system_prompt.as_deref() {
-                Some(prompt) => {
-                    cmd.arg("--system-prompt").arg(prompt);
-                },
-                None => {
-                    cmd.arg("--system-prompt").arg("");
-                },
-            }
-            #[allow(deprecated)]
-            if let Some(ref prompt) = self.options.append_system_prompt {
-                cmd.arg("--append-system-prompt").arg(prompt);
-            }
-        }
-
-        // Tool configuration
-        if !self.options.allowed_tools.is_empty() {
-            cmd.arg("--allowedTools")
-                .arg(self.options.allowed_tools.join(","));
-        }
-        if !self.options.disallowed_tools.is_empty() {
-            cmd.arg("--disallowedTools")
-                .arg(self.options.disallowed_tools.join(","));
-        }
-
-        // Permission mode
-        match self.options.permission_mode {
-            PermissionMode::Default => {
-                cmd.arg("--permission-mode").arg("default");
-            },
-            PermissionMode::AcceptEdits => {
-                cmd.arg("--permission-mode").arg("acceptEdits");
-            },
-            PermissionMode::Plan => {
-                cmd.arg("--permission-mode").arg("plan");
-            },
-            PermissionMode::BypassPermissions => {
-                cmd.arg("--permission-mode").arg("bypassPermissions");
-            },
-        }
-
-        // Model
-        if let Some(ref model) = self.options.model {
-            cmd.arg("--model").arg(model);
-        }
-
-        // Permission prompt tool
-        if let Some(ref tool_name) = self.options.permission_prompt_tool_name {
-            cmd.arg("--permission-prompt-tool").arg(tool_name);
-        }
-
-        // Max turns
-        if let Some(max_turns) = self.options.max_turns {
-            cmd.arg("--max-turns").arg(max_turns.to_string());
-        }
-
-        // Max thinking tokens (extended thinking budget)
-        // Only pass if non-zero to match Python SDK behavior
-        if self.options.max_thinking_tokens > 0 {
-            cmd.arg("--max-thinking-tokens")
-                .arg(self.options.max_thinking_tokens.to_string());
-        }
-
-        // Working directory
-        if let Some(ref cwd) = self.options.cwd {
-            cmd.current_dir(cwd);
-        }
-
-        // Add environment variables
-        for (key, value) in &self.options.env {
-            cmd.env(key, value);
-        }
-
-        // MCP servers - use --mcp-config with JSON format like Python SDK
-        if !self.options.mcp_servers.is_empty() {
-            let mcp_config = serde_json::json!({
-                "mcpServers": self.options.mcp_servers
-            });
-            cmd.arg("--mcp-config").arg(mcp_config.to_string());
-        }
-
-        // Continue/resume
-        if self.options.continue_conversation {
-            cmd.arg("--continue");
-        }
-        if let Some(ref resume_id) = self.options.resume {
-            cmd.arg("--resume").arg(resume_id);
-        }
-
-        // Settings value (merge sandbox into settings if provided)
-        if let Some(settings_value) = self.build_settings_value() {
-            cmd.arg("--settings").arg(settings_value);
-        }
-
-        // Additional directories
-        for dir in &self.options.add_dirs {
-            cmd.arg("--add-dir").arg(dir);
-        }
-
-        // Fork session if requested
-        if self.options.fork_session {
-            cmd.arg("--fork-session");
-        }
-
-        // ========== Phase 3 CLI args (Python SDK v0.1.12+ sync) ==========
-
-        // Tools configuration (base set of tools)
-        if let Some(ref tools) = self.options.tools {
-            match tools {
-                crate::types::ToolsConfig::List(list) => {
-                    if list.is_empty() {
-                        cmd.arg("--tools").arg("");
-                    } else {
-                        cmd.arg("--tools").arg(list.join(","));
-                    }
-                },
-                crate::types::ToolsConfig::Preset(_preset) => {
-                    // Preset object - 'claude_code' preset maps to 'default'
-                    cmd.arg("--tools").arg("default");
-                },
-            }
-        }
-
-        // SDK betas
-        if !self.options.betas.is_empty() {
-            let betas: Vec<String> = self.options.betas.iter().map(|b| b.to_string()).collect();
-            cmd.arg("--betas").arg(betas.join(","));
-        }
-
-        // Max budget USD
-        if let Some(budget) = self.options.max_budget_usd {
-            cmd.arg("--max-budget-usd").arg(budget.to_string());
-        }
-
-        // Fallback model
-        if let Some(ref fallback) = self.options.fallback_model {
-            cmd.arg("--fallback-model").arg(fallback);
-        }
-
-        // File checkpointing
-        if self.options.enable_file_checkpointing {
-            cmd.env("CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING", "true");
-        }
-
-        // Output format for structured outputs (json_schema only)
-        if let Some(ref format) = self.options.output_format
-            && format.get("type").and_then(|v| v.as_str()) == Some("json_schema")
-            && let Some(schema) = format.get("schema")
-            && let Ok(schema_json) = serde_json::to_string(schema)
-        {
-            cmd.arg("--json-schema").arg(schema_json);
-        }
-
-        // Plugin directories
-        for plugin in &self.options.plugins {
-            match plugin {
-                crate::types::SdkPluginConfig::Local { path } => {
-                    cmd.arg("--plugin-dir").arg(path);
-                },
-            }
-        }
-
-        // Programmatic agents
-        if let Some(ref agents) = self.options.agents
-            && !agents.is_empty()
-            && let Ok(json_str) = serde_json::to_string(agents)
-        {
-            cmd.arg("--agents").arg(json_str);
-        }
-
-        // Setting sources (comma-separated). Always pass a value for SDK parity with Python.
-        let sources_value = self
-            .options
-            .setting_sources
-            .as_ref()
-            .map(|sources| {
-                sources
-                    .iter()
-                    .map(|s| match s {
-                        crate::types::SettingSource::User => "user",
-                        crate::types::SettingSource::Project => "project",
-                        crate::types::SettingSource::Local => "local",
-                    })
-                    .collect::<Vec<_>>()
-                    .join(",")
-            })
-            .unwrap_or_default();
-        cmd.arg("--setting-sources").arg(sources_value);
-
-        // Extra arguments
-        for (key, value) in &self.options.extra_args {
-            let flag = if key.starts_with("--") || key.starts_with("-") {
-                key.clone()
-            } else {
-                format!("--{key}")
-            };
-            cmd.arg(&flag);
-            if let Some(val) = value {
-                cmd.arg(val);
-            }
-        }
+        let mut cmd = build_cli_command(
+            &self.cli_path,
+            &self.options,
+            CommandMode::Stream,
+            self.mcp_config_file.as_ref().map(|f| f.path()),
+        );
 
         // Set up process pipes
         cmd.stdin(Stdio::piped())
@@ -743,7 +842,9 @@ impl SubprocessTransport {
 
     /// Check CLI version and warn if below minimum required version
     async fn check_cli_version(&self) -> Result<()> {
-        if let Some(semver) = get_cli_version(&self.cli_path).await {
+        if let Some(semver) =
+            get_cli_version_with_policy(&self.cli_path, &self.options.env_policy).await
+        {
             let min_version = SemVer::new(MIN_CLI_VERSION.0, MIN_CLI_VERSION.1, MIN_CLI_VERSION.2);
 
             if semver < min_version {
@@ -770,6 +871,8 @@ impl SubprocessTransport {
     /// Spawn the process and set up communication channels
     async fn spawn_process(&mut self) -> Result<()> {
         self.state = TransportState::Connecting;
+
+        self.mcp_config_file = mcp_secret_file(&self.options)?;
 
         let mut cmd = self.build_command();
         // Never `{:?}` the Command itself: its Debug prints every env value and
@@ -1254,6 +1357,10 @@ impl Transport for SubprocessTransport {
         }
 
         self.state = TransportState::Disconnecting;
+
+        // The CLI read its MCP configuration at start-up: delete the secret file now
+        // rather than at the end of the shutdown escalation below.
+        self.mcp_config_file.take();
 
         // Close stdin channel — signals EOF to the CLI process
         self.stdin_tx.take();
@@ -2026,6 +2133,36 @@ mod tests {
         }
     }
 
+    /// A native mode string is written verbatim to `--permission-mode` and
+    /// replaces the enum; `None` leaves the enum rendering untouched.
+    #[test]
+    fn build_command_writes_a_native_permission_mode_verbatim() {
+        for native in ["auto", "dontAsk", "manual"] {
+            let args = args_for(
+                ClaudeCodeOptions::builder()
+                    .permission_mode(PermissionMode::AcceptEdits)
+                    .permission_mode_native(native)
+                    .build(),
+            );
+            assert_eq!(value_after(&args, "--permission-mode"), Some(native));
+            assert_eq!(
+                occurrences(&args, "--permission-mode"),
+                1,
+                "the native string replaces the enum, it is not added to it"
+            );
+        }
+        let witness = args_for(
+            ClaudeCodeOptions::builder()
+                .permission_mode(PermissionMode::AcceptEdits)
+                .build(),
+        );
+        assert_eq!(
+            value_after(&witness, "--permission-mode"),
+            Some("acceptEdits"),
+            "without a native string the enum is rendered as before"
+        );
+    }
+
     /// `system_prompt_v2` replaces the deprecated pair outright: when it is set
     /// the old fields are not consulted at all, and a `Preset` with nothing to
     /// append passes **no** system-prompt flag — not even the empty one the
@@ -2498,7 +2635,7 @@ mod tests {
     // =====================================================================
 
     fn settings_value(options: ClaudeCodeOptions) -> Option<String> {
-        described(options).build_settings_value()
+        settings_value_for(&options)
     }
 
     fn sandbox_enabled() -> crate::types::SandboxSettings {

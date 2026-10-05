@@ -1,0 +1,87 @@
+{
+ "scenario": "read_limits",
+ "claude_code_version": "2.1.287",
+ "calls": [
+  {
+   "tool": "Read",
+   "input": {
+    "file_path": "<FIXTURE>/a3000.txt"
+   },
+   "is_error": false,
+   "result": null,
+   "result_len": 39791,
+   "result_head": "1\trow 1\n2\trow 2\n3\trow 3\n4\trow 4\n5\trow 5\n6\trow 6\n7\trow 7\n8\trow 8\n9\trow 9\n10\trow 10\n11\trow 11\n12\trow 12\n13\trow 13\n14\trow 14\n15\trow 15\n16\trow 16\n17\trow 17\n18\trow 18\n19\trow 19\n20\trow 20\n21\trow 21\n22\trow 22\n23\trow 23\n24\trow 24\n25\trow 25\n26\trow 26\n27\trow 27\n28\trow 28\n29\trow 29\n30\trow 30\n31\trow 31\n32\trow 32\n33\trow 33\n34\trow 34\n35\trow 35\n36\trow 36\n37\trow 37\n38\trow 38\n39\trow 39\n40\trow 40\n41\trow 41\n42\trow 42\n43\trow 43\n44\trow 44\n45\trow 45\n46\trow 46\n47\trow 47\n48\trow 48\n49\trow 49\n50\trow 50\n51\trow 51\n52\trow 52\n53\trow 53\n54\trow 54\n55\trow 55\n56\trow 56\n57\trow 57\n58\trow 58\n59\trow 59\n60\trow 60\n61\trow 61\n62\trow 62\n63\trow 63\n64\trow 64\n65\trow 65\n66\trow 66\n67\trow 67\n68\trow 68\n69\trow 69\n70\trow 70\n71\trow 71\n72\trow 72\n73\trow 73\n74\trow 74\n75\trow 75\n76\trow 76\n77\trow 77\n78\trow 78\n79\trow 79\n80\trow 80\n81\trow 81\n82\trow 8",
+   "result_tail": "72\n2973\trow 2973\n2974\trow 2974\n2975\trow 2975\n2976\trow 2976\n2977\trow 2977\n2978\trow 2978\n2979\trow 2979\n2980\trow 2980\n2981\trow 2981\n2982\trow 2982\n2983\trow 2983\n2984\trow 2984\n2985\trow 2985\n2986\trow 2986\n2987\trow 2987\n2988\trow 2988\n2989\trow 2989\n2990\trow 2990\n2991\trow 2991\n2992\trow 2992\n2993\trow 2993\n2994\trow 2994\n2995\trow 2995\n2996\trow 2996\n2997\trow 2997\n2998\trow 2998\n2999\trow 2999\n3000\trow 3000\n3001\t"
+  },
+  {
+   "tool": "Read",
+   "input": {
+    "file_path": "<FIXTURE>/a3000.txt",
+    "offset": 2999
+   },
+   "is_error": false,
+   "result": "2999\trow 2999\n3000\trow 3000\n3001\t"
+  },
+  {
+   "tool": "Read",
+   "input": {
+    "file_path": "<FIXTURE>/a3000.txt",
+    "offset": 5000
+   },
+   "is_error": false,
+   "result": "<system-reminder>Warning: the file exists but is shorter than the provided offset (5000). The file has 3001 lines.</system-reminder>"
+  },
+  {
+   "tool": "Read",
+   "input": {
+    "file_path": "<FIXTURE>/line60k.txt"
+   },
+   "is_error": false,
+   "result": null,
+   "result_len": 60005,
+   "result_head": "1\tyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy",
+   "result_tail": "yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy\n2\t"
+  },
+  {
+   "tool": "Read",
+   "input": {
+    "file_path": "<FIXTURE>/big.txt"
+   },
+   "is_error": false,
+   "result": null,
+   "result_len": 56392,
+   "result_head": "1\tword00000 word00000 word00000 word00000 \n2\tword00001 word00001 word00001 word00001 \n3\tword00002 word00002 word00002 word00002 \n4\tword00003 word00003 word00003 word00003 \n5\tword00004 word00004 word00004 word00004 \n6\tword00005 word00005 word00005 word00005 \n7\tword00006 word00006 word00006 word00006 \n8\tword00007 word00007 word00007 word00007 \n9\tword00008 word00008 word00008 word00008 \n10\tword00009 word00009 word00009 word00009 \n11\tword00010 word00010 word00010 word00010 \n12\tword00011 word00011 word00011 word00011 \n13\tword00012 word00012 word00012 word00012 \n14\tword00013 word00013 word00013 word00013 \n15\tword00014 word00014 word00014 word00014 \n16\tword00015 word00015 word00015 word00015 \n17\tword00016 word00016 word00016 word00016 \n18\tword00017 word00017 word00017 word00017 \n19\tword00018 word",
+   "result_tail": "1 word01241 word01241 word01241 \n1243\tword01242 word01242 word01242 word01242 \n1244\tword01243 word01243 word01243 word01243 \n1245\tword01244 word01244 word01244 word01244 \n1246\tword01245 word01245 word01245 word01245 \n1247\tword01246 word01246 word01246 word01246 \n1248\tword01247 word01247 word01247 word01247 \n1249\tword01248 word01248 word01248 word01248 \n1250\tword01249 word01249 word01249 word01249 "
+  },
+  {
+   "tool": "Read",
+   "input": {
+    "file_path": "<FIXTURE>/a.txt",
+    "offset": 0,
+    "limit": 3
+   },
+   "is_error": false,
+   "result": "0\tline 1\n1\tline 2\n2\tline 3"
+  },
+  {
+   "tool": "Read",
+   "input": {
+    "file_path": "<FIXTURE>/a.txt",
+    "limit": 3
+   },
+   "is_error": false,
+   "result": "1\tline 1\n2\tline 2\n3\tline 3"
+  },
+  {
+   "tool": "Read",
+   "input": {
+    "file_path": "<FIXTURE>/a.txt",
+    "offset": 11,
+    "limit": 100
+   },
+   "is_error": false,
+   "result": "11\tline 11\n12\tline 12\n13\t"
+  }
+ ],
+ "final_files": {}
+}

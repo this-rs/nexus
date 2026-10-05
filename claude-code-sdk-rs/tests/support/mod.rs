@@ -133,6 +133,11 @@ impl Transcript {
         self
     }
 
+    /// An arbitrary directive of the fake, for the ones no helper spells.
+    pub fn directive(self, directive: Value) -> Self {
+        self.push(directive)
+    }
+
     // ----- raw directives -------------------------------------------------
 
     /// Emit `line` on stdout verbatim. Use it for noise and malformed JSON.
@@ -235,6 +240,32 @@ impl Transcript {
         self.push(json!({"op": "reply_control", "match_request_id": request_id.into()}))
     }
 
+    /// Wait for the SDK's `initialize` request, remember the hook callback ids it
+    /// registers and acknowledge it. Needed before [`Transcript::emit_hook`]: the
+    /// ids are minted at run time, a transcript cannot spell them.
+    pub fn capture_hooks(self) -> Self {
+        self.push(json!({"op": "capture_hooks"}))
+    }
+
+    /// A `hook_callback` request for the callback the SDK registered for `event`
+    /// (`PreToolUse`, `PostToolUse`, `PreCompact`), then wait for its response.
+    pub fn emit_hook(
+        self,
+        event: &str,
+        request_id: &str,
+        input: Value,
+        tool_use_id: Option<&str>,
+    ) -> Self {
+        self.push(json!({
+            "op": "emit_hook",
+            "event": event,
+            "request_id": request_id,
+            "input": input,
+            "tool_use_id": tool_use_id,
+            "await_response": true,
+        }))
+    }
+
     /// Stay alive until the SDK closes stdin (`end_input` / `disconnect`).
     pub fn wait_eof(self) -> Self {
         self.push(json!({"op": "wait_eof"}))
@@ -243,6 +274,16 @@ impl Transcript {
     /// Stay alive until stdin closes, but give up after `ms`.
     pub fn wait_eof_for(self, ms: u64) -> Self {
         self.push(json!({"op": "wait_eof", "timeout_ms": ms, "optional": true}))
+    }
+
+    /// Start a real child process (the fake's own "tool"); default `sleep 120`.
+    pub fn spawn_child(self) -> Self {
+        self.push(json!({"op": "spawn_child", "program": "sleep", "args": ["120"]}))
+    }
+
+    /// Block until every spawned child has exited (been signalled), or `ms`.
+    pub fn wait_children_exit(self, ms: u64) -> Self {
+        self.push(json!({"op": "wait_children_exit", "timeout_ms": ms, "optional": true}))
     }
 
     /// Exit with `code`, immediately.

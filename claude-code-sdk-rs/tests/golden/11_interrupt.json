@@ -1,0 +1,60 @@
+{
+  "control_requests_from_cli": [
+    {
+      "request_id": "<REQ1>",
+      "success": true,
+      "type": "interruptack"
+    }
+  ],
+  "lines_sent_to_cli": [
+    {
+      "request": {
+        "request_id": "<REQ1>",
+        "type": "interrupt"
+      },
+      "type": "control_request"
+    }
+  ],
+  "messages": [
+    {
+      "data": {
+        "apiKeySource": "none",
+        "cwd": ".",
+        "model": "fake-claude",
+        "permissionMode": "default",
+        "session_id": "<SESSION1>",
+        "tools": [
+          "Bash",
+          "Read"
+        ]
+      },
+      "subtype": "init",
+      "type": "system"
+    },
+    {
+      "message": {
+        "content": [
+          {
+            "text": "Working on it"
+          }
+        ]
+      },
+      "type": "assistant"
+    },
+    {
+      "duration_api_ms": "<MS>",
+      "duration_ms": "<MS>",
+      "is_error": true,
+      "num_turns": 1,
+      "result": "interrupted",
+      "session_id": "<SESSION2>",
+      "subtype": "error_during_execution",
+      "total_cost_usd": 0.0001,
+      "type": "result",
+      "usage": {
+        "input_tokens": 3,
+        "output_tokens": 5
+      }
+    }
+  ]
+}

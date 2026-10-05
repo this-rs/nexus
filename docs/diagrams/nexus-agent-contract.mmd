@@ -1,0 +1,97 @@
+%% name: nexus-agent-contract
+%% covers: claude-code-sdk-rs/src/agent/*.rs, docs/agent-contract.md, claude-code-sdk-rs/tests/agent_contract_snapshots.rs, claude-code-sdk-rs/tests/agent_registry.rs
+%% verified: 2026-10-05
+%% ---
+%% ETAT (HEAD de la branche d'intégration, 2026-10-05) : `claude-code-sdk-rs/src/agent/` existe : types, traits ET registre (registry.rs) ;
+%%   des providers l'implémentent (claude_code, native, codex, acp : voir nexus-agent-providers). Vérifié par : cargo test -p nexus-claude --lib agent:: ;
+%%   cargo test -p nexus-claude --test agent_contract_snapshots (instantané tests/snapshots/agent_contract_v2.json) ; cargo test -p nexus-claude --doc agent.
+%%   Les lignes « PROUVE » et « SOURCES LUES » ci-dessous décrivent l'état AVANT (58e27e6) et restent pour la partie « code antérieur au module agent/ ».
+%% PROUVE : le contrat CIBLE `agent/` (RFC PO b53e11c7) et, pour chaque brique,
+%%   ce qui existe AUJOURD'HUI dans le dépôt qui s'en rapproche. Au 58e27e6 (avant la
+%%   branche d'intégration) le module `agent/` n'existait pas : tout nœud 🟠 était une cible, tout nœud ✅ est le
+%%   code actuel que la cible remplacera ou enveloppera. `covers` pointe sur ce
+%%   fichier (le gate refuse un glob sans fichier) ; quand claude-code-sdk-rs/src/agent/*.rs
+%%   existera, le remplacer par ce glob.
+%% ---
+%% SOURCES LUES (2026-10-05, branche main @ 58e27e6) :
+%%   grep -rnE 'AgentProvider|AgentSession|AgentEvent|ToolPolicy|ResumeToken|ProviderError|ProviderRegistry|struct Capabilities' --include=*.rs . → 0 résultat
+%%   claude-code-sdk-rs/src/lib.rs        — `mod` list : aucun `agent`
+%%   claude-code-sdk-rs/src/interactive.rs — InteractiveClient : connect, send_message(_blocks), send_and_receive_stream,
+%%                                          send_blocks_and_receive_stream, subscribe_messages, set_permission_mode(&str),
+%%                                          interrupt, build_interrupt_json, disconnect, from_transport
+%%   claude-code-sdk-rs/src/types.rs      — Message (User/Assistant/System/Result/StreamEvent), ContentBlock,
+%%                                          PermissionMode (Default/AcceptEdits/Plan/BypassPermissions),
+%%                                          ClaudeCodeOptions (allowed_tools, disallowed_tools, permission_mode, resume,
+%%                                          mcp_servers, hooks, can_use_tool, cwd, model…)
+%%   claude-code-sdk-rs/src/errors.rs     — SdkError (CliNotFound, ConnectionError, Timeout, SessionNotFound, ProcessExited, NotSupported…)
+%%   claude-code-api/src/core/model_registry.rs — ModelRegistry::get_models/refresh (catalogue Anthropic seulement)
+%% ---
+%% TRANCHE (docs/agent-contract.md, spécification gelée CONTRACT_VERSION = 2, décisions A1–A14 de docs/harness-consolidation-2026-10-05.md) :
+%%   - ResumeToken opaque {kind, version, data} (A3, spec §8) ; ProviderRegistry unique dans nexus (A1, spec §13).
+%%   - Capabilities : 18 champs PAR MODELE, un repli écrit par champ (A4, spec §5).
+%%   - Annulation : interrupt(scope) + cancel_tools(scope) qui préserve le tour (A6, spec §10).
+%%   - Concurrence : un tour à la fois, hors tour par out_of_band() (A13, spec §9).
+%% ---
+%% LEGENDE
+%%   ✅ vérifié (le nœud dit comment)  🟠 décidé, non écrit  🔴 défaut constaté  ⚪ hors dépôt / autre diagramme
+
+flowchart TD
+    subgraph legend["Légende"]
+        direction LR
+        L1["✅ existe, vérifié par le test nommé (ou par grep nommé pour le code actuel)"]
+        L2["🟠 cible, non écrit"]
+        L3["🔴 écart code ↔ RFC"]
+        L4["⚪ hors dépôt"]
+    end
+
+    BACKEND["⚪ backend PO : ChatManager (po-chat-manager)"]
+
+    subgraph target["🟠 Cible — claude-code-sdk-rs/src/agent/"]
+        direction TB
+        REG["✅ ProviderRegistry UNIQUE (nexus, agent/registry.rs) : id d'instance → Arc dyn AgentProvider construit à la demande et mis en cache ; ProviderInstanceConfig sans secret (référence vault:|env:|none seule, JSON à champs inconnus refusés) ; claude-code intégrée, non supprimable ; rechargement à chaud (les sessions ouvertes gardent l'ancien Arc) ; resolve_alias ; PriceBook (prix par instance, pas de mélange) ; test_connection sans enregistrement (A30) ; porte de sécurité A32 : toute instance hors claude_code/scripted refusée par upsert, get et test_connection (Unsupported security_gate) tant que SecurityGate::attest n'a pas activé la porte, irréversible ; codex : CodexProvider construit (feature provider-codex, `command` = programme seul, credential résolu à chaque open et posé dans CODEX_API_KEY du seul processus, extension codex_home ; sans la feature : Unsupported provider_codex) et gardé par la même porte A32 ; acp : AcpProvider construit (feature provider-acp, `command` = programme + arguments sans secret, extensions env / thinking / login_hint, coût de la configuration ; sans la feature : Unsupported provider_acp) et gardé par la même porte A32<br/><i>vérifié : cargo test -p nexus-claude --all-features --lib agent::registry (18 tests, dont registry_refuses_third_party_instance_without_security_gate) ; cargo test -p nexus-claude --features provider-native --test agent_registry (7 tests contre fake_openai : clé présente dans Authorization, jamais dans une erreur ni un Debug, vault verrouillé sans requête ni repli) ; cargo test -p nexus-claude --all-features --test native_conformance (suite de conformité rejouée sur une instance native obtenue par le registre). cargo test -p nexus-claude --features provider-codex --test codex_registry (4 tests : porte A32 sur codex, construction depuis la configuration, clé dans CODEX_API_KEY seulement, test_connection sans enregistrement ; contre fake_codex). --test acp_registry (3 tests : porte A32 sur acp, construction depuis la configuration, extensions typées, tour joué contre fake_acp). Rejoué SANS le correctif : porte désactivée → 2 tests rouges ; erreur de référence d'identifiant qui répète la valeur → 1 rouge ; URL à identifiants acceptée → 1 rouge. NON ÉTABLI : le lot sécurité du backend n'existe pas, l'attestation est une déclaration de l'hôte</i>"]
+        PROV["✅ trait AgentProvider : id, kind, health, catalog, capabilities(model), open, resume(ResumeToken)<br/><i>agent/mod.rs ; signature seule, aucune implémentation encore</i>"]
+        SESS["✅ trait AgentSession (&self partout) : send_turn, answer_permission, answer_question, interrupt(scope),<br/>cancel_tools(scope), set_model, set_policy_mode, out_of_band, resume_token, capabilities, close<br/><i>agent/mod.rs ; signature seule, aucune implémentation encore ; run_turn agrège un tour</i>"]
+        EVT["✅ enum AgentEvent (17 variantes, non_exhaustive) + Usage, Cost, StopReason, BackgroundTask…<br/><i>agent/event.rs ; vérifié : tests/agent_contract_snapshots.rs (aller-retour, champs optionnels absents, instantané v2)</i>"]
+        POL["✅ ToolPolicy { mode, native_mode, allow, deny }, ToolPattern, decide() en refus par défaut, restrict(parent) monotone<br/><i>agent/policy.rs ; vérifié : tests unitaires agent::policy (10 tests : deny l'emporte, restrict idempotent, motif malformé = erreur)</i>"]
+        CAP["✅ Capabilities par modèle, 18 champs, Capabilities::none() ; fenêtre inconnue = absente, jamais 200000<br/><i>agent/capabilities.rs ; vérifié : tests unitaires agent::capabilities ; les replis ne seront vérifiés que par testkit (palier 4)</i>"]
+        RES["✅ ResumeToken opaque { k, v, d }, to_wire / from_wire, expect_kind refuse le jeton d'un autre provider<br/><i>agent/resume.rs ; vérifié : tests unitaires agent::resume</i>"]
+        ERR["✅ ProviderError (17 variantes, retryable(), kind(), http_status_hint()), détails expurgés par credentials::redact (mots délimités par espace, puis champs par `,` et `;` : un nom sensible qui n'est pas le premier du mot est vu, ex. JSON compact ; WipedText : texte dérivé d'une clé, écrasé au drop)<br/><i>agent/error.rs, agent/credentials.rs (Secret, CredentialRef, CredentialResolver) ; vérifié : instantané + tests agent::credentials (redact_cuts_on_commas_and_semicolons_not_only_on_spaces : rouge avant, JSON compact et assignations collées par `;` fuyaient ; a_wiped_bearer_text_…)</i>"]
+        DONEERR["✅ done.error (contrat v2) : cause classée portée par `done` (usage et coût conservés) ; épinglée par l'instantané tests/snapshots/agent_contract_v2.json, entrée done_with_error<br/><i>vérifié : cargo test -p nexus-claude --test agent_contract_snapshots (rouge avant l'ajout de l'entrée ; un renommage serde du champ casse l'instantané) ; le même instantané épingle ProviderInstanceConfig (entrée provider_instance_config : natif avec préréglage/prix/extension, ACP, Claude Code, sans secret ; entrée ajoutée sans changer CONTRACT_VERSION)</i>"]
+        MODELP["✅ fournisseur de modèle APART du harnais (agent/model_provider.rs) : ModelProtocol (anthropic_messages, openai_chat, openai_responses), ModelProviderConfig (sans secret, champ inconnu refusé), ModelBinding sur SessionSpec ; chaque harnais déclare les protocoles qu il consomme (ProviderKind::model_protocols) ; contrat v3, instantané tests/snapshots/agent_contract_v3.json<br/><i>vérifié : tests unitaires agent::model_provider (7) ; tests/model_binding.rs (11, trois mutations jouées : sans masquage de la clé de l hôte, identifiant résolu au nom du harnais, sans vérification de paire — chacune attrapée)</i>"]
+        OPEN["✅ ProviderRegistry::open_session(harnais, spec) : paire vérifiée AVANT tout lancement (ModelProtocolMismatch nomme les deux côtés, HTTP 422) ; natif = provider composé, identifiant résolu pour le fournisseur de modèle ; Claude Code = ANTHROPIC_BASE_URL + clé, l autre variable d authentification posée VIDE (le CLI envoie sinon les deux en-têtes : mesuré sur la version 2.1.287)<br/><i>vérifié : tests/model_binding.rs ; tests/real_claude_gateway.rs (ignoré par défaut, vrai CLI)</i>"]
+        OPENGAP["🟠 non appliqué : Codex (Unsupported model_binding : sa configuration de fournisseur personnalisé n est pas vérifiée contre un vrai app-server), ACP (l agent choisit son modèle) ; aucune passerelle réelle essayée"]
+        REG --> MODELP
+        MODELP --> OPEN
+        OPEN --- OPENGAP
+        REG --> PROV
+        PROV -->|"open / resume(ResumeToken)"| SESS
+        PROV --> CAP
+        PROV --> ERR
+        SESS --> EVT
+        SESS --> POL
+        SESS --> ERR
+        EVT --> ERR
+        SESS -.-> RES
+    end
+
+    BACKEND -.->|"cible : Arc dyn AgentSession"| SESS
+    BACKEND -.->|"CHAT_PROVIDER"| REG
+
+    subgraph today["Code actuel que la cible remplace ou enveloppe"]
+        direction TB
+        IC["✅ InteractiveClient : connect, send_message, send_message_blocks,<br/>send_and_receive_stream, send_blocks_and_receive_stream, subscribe_messages, interrupt, disconnect<br/><i>vérifié : grep 'pub async fn' src/interactive.rs ; tests/interactive_client_fake_cli.rs</i>"]
+        MSG["✅ Message / ContentBlock / StreamEventData : base de AgentEvent (texte, thinking, tool use/result, stream, result+coût)<br/><i>vérifié : types.rs, nexus-sdk-types (parseur rejoué)</i>"]
+        PM["✅ PermissionMode (4 noms CLI) + allowed_tools / disallowed_tools (syntaxe Bash(git *)) : base de ToolPolicy<br/><i>vérifié : types.rs ClaudeCodeOptions</i>"]
+        SE["✅ SdkError : base de ProviderError (CliNotFound, Timeout, ProcessExited, NotSupported…)<br/><i>vérifié : errors.rs</i>"]
+        OPT["✅ ClaudeCodeOptions.resume: Option String : seul embryon de reprise (id de session CLI nu)<br/><i>vérifié : types.rs</i>"]
+        MR["✅ ModelRegistry::get_models : catalogue Anthropic seulement, dans claude-code-api (autre crate)<br/><i>vérifié : core/model_registry.rs</i>"]
+        SPM["🔴 set_permission_mode prend &str (nom CLI brut), pas un type neutre<br/><i>vérifié : interactive.rs set_permission_mode(&mut self, mode: &str)</i>"]
+    end
+
+    MSG -.->|"généralisé en"| EVT
+    PM -.->|"mappé depuis/vers"| POL
+    SE -.->|"converti en"| ERR
+    OPT -.->|"remplacé par"| RES
+    MR -.->|"absorbé par catalog()"| PROV
+    IC -.->|"enveloppé par ClaudeCodeProvider"| SESS
+    SPM -.->|"à fermer"| POL

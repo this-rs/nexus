@@ -1,0 +1,4 @@
+# set_policy_mode(auto_edits) → session/set_mode with the published `acceptEdits` mode.
+{"op":"include","file":"prelude.jsonl"}
+{"op":"expect","method":"session/set_mode","reply":{}}
+{"op":"include","file":"turn1_text.jsonl"}

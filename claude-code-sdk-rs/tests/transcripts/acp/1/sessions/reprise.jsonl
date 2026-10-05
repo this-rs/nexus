@@ -1,0 +1,9 @@
+# session/load: the agent replays the history as session/update before it answers.
+{"op":"include","file":"handshake.jsonl"}
+{"op":"expect","method":"session/load","defer":"l"}
+{"op":"notify","method":"session/update","params":{"sessionId":"sess_prev","update":{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"earlier question"}}}}
+{"op":"notify","method":"session/update","params":{"sessionId":"sess_prev","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"earlier answer"}}}}
+{"op":"reply","to":"l","result":null}
+{"op":"expect","method":"session/prompt","defer":"p1"}
+{"op":"notify","method":"session/update","params":{"sessionId":"sess_prev","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"resumed"}}}}
+{"op":"include","file":"turn1_end.jsonl"}

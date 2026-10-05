@@ -1,0 +1,6 @@
+{"op":"include","file":"prelude.jsonl"}
+{"op":"include","file":"turn1_start.jsonl"}
+{"op":"notify","method":"session/update","params":{"sessionId":"sess_fake1","update":{"sessionUpdate":"agent_thought_chunk","content":{"type":"text","text":"Let me think. "}}}}
+{"op":"notify","method":"session/update","params":{"sessionId":"sess_fake1","update":{"sessionUpdate":"agent_thought_chunk","content":{"type":"text","text":"Done thinking."}}}}
+{"op":"notify","method":"session/update","params":{"sessionId":"sess_fake1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"The answer."}}}}
+{"op":"include","file":"turn1_end.jsonl"}

@@ -6,7 +6,7 @@
 use crate::{
     errors::Result,
     transport::InputMessage,
-    types::{ClaudeCodeOptions, Message, PermissionMode},
+    types::{ClaudeCodeOptions, Message},
 };
 use futures::stream::Stream;
 use std::pin::Pin;
@@ -177,7 +177,6 @@ async fn query_print_mode(
 ) -> Result<impl Stream<Item = Result<Message>>> {
     use std::sync::Arc;
     use tokio::io::{AsyncBufReadExt, BufReader};
-    use tokio::process::Command;
     use tokio::sync::Mutex;
 
     // `options.cli_path` used to be ignored here: print mode always searched the
@@ -192,161 +191,21 @@ async fn query_print_mode(
         },
         None => crate::transport::subprocess::find_claude_cli()?,
     };
-    let mut cmd = Command::new(&cli_path);
+    // One builder for every entry point: flags, working directory, environment
+    // (`options.env`, `options.env_policy`) and the MCP secret file come from the
+    // same function the streaming transport uses.
+    let mcp_file = crate::transport::subprocess::mcp_secret_file(&options)?;
+    let mut cmd = crate::transport::subprocess::build_cli_command(
+        &cli_path,
+        &options,
+        crate::transport::subprocess::CommandMode::Print { prompt: &prompt },
+        mcp_file.as_ref().map(|f| f.path()),
+    );
 
-    // Build command with --print mode
-    cmd.arg("--output-format").arg("stream-json");
-    cmd.arg("--verbose");
-
-    // System prompts (match Python SDK behavior)
-    //
-    // Python always passes `--system-prompt ""` when `system_prompt` is None.
-    if let Some(ref prompt_v2) = options.system_prompt_v2 {
-        match prompt_v2 {
-            crate::types::SystemPrompt::String(s) => {
-                cmd.arg("--system-prompt").arg(s);
-            },
-            crate::types::SystemPrompt::Preset { append, .. } => {
-                if let Some(append_text) = append {
-                    cmd.arg("--append-system-prompt").arg(append_text);
-                }
-            },
-        }
-    } else {
-        #[allow(deprecated)]
-        match options.system_prompt.as_deref() {
-            Some(prompt) => {
-                cmd.arg("--system-prompt").arg(prompt);
-            },
-            None => {
-                cmd.arg("--system-prompt").arg("");
-            },
-        }
-
-        #[allow(deprecated)]
-        if let Some(ref append_prompt) = options.append_system_prompt {
-            cmd.arg("--append-system-prompt").arg(append_prompt);
-        }
-    }
-
-    if !options.allowed_tools.is_empty() {
-        cmd.arg("--allowedTools")
-            .arg(options.allowed_tools.join(","));
-    }
-
-    if let Some(max_turns) = options.max_turns {
-        cmd.arg("--max-turns").arg(max_turns.to_string());
-    }
-
-    // Max thinking tokens (extended thinking budget)
-    // Only pass if non-zero to match Python SDK behavior
-    if options.max_thinking_tokens > 0 {
-        cmd.arg("--max-thinking-tokens")
-            .arg(options.max_thinking_tokens.to_string());
-    }
-
-    if !options.disallowed_tools.is_empty() {
-        cmd.arg("--disallowedTools")
-            .arg(options.disallowed_tools.join(","));
-    }
-
-    if let Some(ref model) = options.model {
-        cmd.arg("--model").arg(model);
-    }
-
-    if let Some(ref tool_name) = options.permission_prompt_tool_name {
-        cmd.arg("--permission-prompt-tool").arg(tool_name);
-    }
-
-    match options.permission_mode {
-        PermissionMode::Default => {
-            cmd.arg("--permission-mode").arg("default");
-        },
-        PermissionMode::AcceptEdits => {
-            cmd.arg("--permission-mode").arg("acceptEdits");
-        },
-        PermissionMode::Plan => {
-            cmd.arg("--permission-mode").arg("plan");
-        },
-        PermissionMode::BypassPermissions => {
-            cmd.arg("--permission-mode").arg("bypassPermissions");
-        },
-    }
-
-    if options.continue_conversation {
-        cmd.arg("--continue");
-    }
-
-    if let Some(ref resume_id) = options.resume {
-        cmd.arg("--resume").arg(resume_id);
-    }
-
-    if !options.mcp_servers.is_empty() {
-        let mcp_config = serde_json::json!({
-            "mcpServers": options.mcp_servers
-        });
-        cmd.arg("--mcp-config").arg(mcp_config.to_string());
-    }
-
-    // Extra arguments
-    for (key, value) in &options.extra_args {
-        let flag = if key.starts_with("--") || key.starts_with("-") {
-            key.clone()
-        } else {
-            format!("--{key}")
-        };
-        cmd.arg(&flag);
-        if let Some(val) = value {
-            cmd.arg(val);
-        }
-    }
-
-    // Add the prompt with --print
-    cmd.arg("--print").arg("--").arg(&prompt);
-
-    // Set up process pipes
+    // Set up process pipes. stdin is left alone on purpose: print mode never
+    // wrote to it, and a piped-but-never-closed stdin can make the CLI wait.
     cmd.stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
-
-    // Handle max_output_tokens (priority: option > env var)
-    // Maximum safe value is 32000, values above this may cause issues
-    if let Some(max_tokens) = options.max_output_tokens {
-        // Option takes priority - validate and cap at 32000
-        let capped = max_tokens.clamp(1, 32000);
-        cmd.env("CLAUDE_CODE_MAX_OUTPUT_TOKENS", capped.to_string());
-        debug!("Setting max_output_tokens from option: {}", capped);
-    } else {
-        // Fall back to environment variable handling
-        if let Ok(current_value) = std::env::var("CLAUDE_CODE_MAX_OUTPUT_TOKENS") {
-            if let Ok(tokens) = current_value.parse::<u32>() {
-                if tokens > 32000 {
-                    warn!(
-                        "CLAUDE_CODE_MAX_OUTPUT_TOKENS={} exceeds maximum safe value of 32000, overriding to 32000",
-                        tokens
-                    );
-                    cmd.env("CLAUDE_CODE_MAX_OUTPUT_TOKENS", "32000");
-                }
-            } else {
-                warn!(
-                    "Invalid CLAUDE_CODE_MAX_OUTPUT_TOKENS value: {}, setting to 8192",
-                    current_value
-                );
-                cmd.env("CLAUDE_CODE_MAX_OUTPUT_TOKENS", "8192");
-            }
-        }
-    }
-
-    // Working directory and caller-supplied environment, in the same order as
-    // `SubprocessTransport::build_command`: `options.env` is applied last, so a
-    // caller can deliberately override `CLAUDE_CODE_MAX_OUTPUT_TOKENS`. Print mode
-    // used to drop both on the floor, which made `options.env` a no-op for
-    // `query()` while it worked for every other entry point.
-    if let Some(ref cwd) = options.cwd {
-        cmd.current_dir(cwd);
-    }
-    for (key, value) in &options.env {
-        cmd.env(key, value);
-    }
 
     info!("Starting Claude CLI with --print mode");
     // Never `{:?}` a Command: its Debug prints every argument and every
@@ -395,6 +254,9 @@ async fn query_print_mode(
 
     // Spawn stdout handler
     tokio::spawn(async move {
+        // The private MCP config file lives exactly as long as the child's
+        // stdout does: it is deleted when this task ends.
+        let _mcp_file = mcp_file;
         let reader = BufReader::new(stdout);
         let mut lines = reader.lines();
 

@@ -143,15 +143,13 @@ fn parse_content_block(json: &Value) -> Result<Option<ContentBlock>> {
                             json.to_string(),
                         )
                     })?;
-                let signature =
-                    json.get("signature")
-                        .and_then(|v| v.as_str())
-                        .ok_or_else(|| {
-                            SdkError::parse_error(
-                                "Missing 'signature' field in thinking block",
-                                json.to_string(),
-                            )
-                        })?;
+                // An absent signature is an empty one: an Anthropic-compatible
+                // endpoint does not always sign its reasoning, and refusing the
+                // block lost the whole message, text included.
+                let signature = json
+                    .get("signature")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default();
                 Ok(Some(ContentBlock::Thinking(ThinkingContent {
                     thinking: thinking.to_string(),
                     signature: signature.to_string(),
@@ -493,6 +491,40 @@ mod tests {
         } else {
             panic!("Expected Assistant message");
         }
+    }
+
+    /// An Anthropic-compatible endpoint does not always sign its reasoning. The
+    /// block used to be refused, and with it the WHOLE assistant message — the
+    /// text beside the reasoning included.
+    #[test]
+    fn test_parse_assistant_message_keeps_a_thinking_block_without_signature() {
+        let json = json!({
+            "type": "assistant",
+            "message": {
+                "content": [
+                    {"type": "thinking", "thinking": "unsigned reasoning"},
+                    {"type": "text", "text": "the answer"}
+                ]
+            }
+        });
+
+        let message = parse_message(json)
+            .expect("a thinking block without signature must not fail the message")
+            .expect("an assistant message");
+        let Message::Assistant { message, .. } = message else {
+            panic!("Expected Assistant message");
+        };
+        assert_eq!(message.content.len(), 2);
+        match &message.content[0] {
+            ContentBlock::Thinking(thinking) => {
+                assert_eq!(thinking.thinking, "unsigned reasoning");
+                assert_eq!(thinking.signature, "", "an absent signature is empty");
+            },
+            other => panic!("Expected Thinking content block, got {other:?}"),
+        }
+        assert!(
+            matches!(&message.content[1], ContentBlock::Text(text) if text.text == "the answer")
+        );
     }
 
     #[test]
@@ -938,9 +970,15 @@ mod tests {
 
     #[test]
     fn test_parse_content_block_thinking_missing_signature() {
+        // Used to assert `is_err()`: that pinned the defect (the whole message
+        // was lost). An absent signature is now an empty one.
         let json = json!({"type": "thinking", "thinking": "hmm"});
-        let result = parse_content_block(&json);
-        assert!(result.is_err());
+        let result = parse_content_block(&json).unwrap();
+        assert!(matches!(
+            result,
+            Some(ContentBlock::Thinking(thinking))
+                if thinking.thinking == "hmm" && thinking.signature.is_empty()
+        ));
     }
 
     #[test]

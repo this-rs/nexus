@@ -1,0 +1,9 @@
+# A tool call: tool_call (pending), tool_call_update (in_progress, completed). Shapes from
+# agentclientprotocol.com/protocol/tool-calls and prompt-turn.
+{"op":"include","file":"prelude.jsonl"}
+{"op":"include","file":"turn1_start.jsonl"}
+{"op":"notify","method":"session/update","params":{"sessionId":"sess_fake1","update":{"sessionUpdate":"tool_call","toolCallId":"call_1","title":"Run ls","kind":"execute","status":"pending","rawInput":{"command":"ls"}}}}
+{"op":"notify","method":"session/update","params":{"sessionId":"sess_fake1","update":{"sessionUpdate":"tool_call_update","toolCallId":"call_1","status":"in_progress"}}}
+{"op":"notify","method":"session/update","params":{"sessionId":"sess_fake1","update":{"sessionUpdate":"tool_call_update","toolCallId":"call_1","status":"completed","content":[{"type":"content","content":{"type":"text","text":"a.txt"}}]}}}
+{"op":"notify","method":"session/update","params":{"sessionId":"sess_fake1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"Listed."}}}}
+{"op":"include","file":"turn1_end.jsonl"}

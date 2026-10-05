@@ -8,9 +8,50 @@
 # than implicit; binaries, `mod.rs` and re-exporting `lib.rs`
 # files legitimately live there.
 #
-# 15 diagrams, 83/85 source files claimed, 4 unclaimed.
+# 18 diagrams, 329/189 source files claimed, 4 unclaimed.
 
 diagrams:
+  - name: nexus-agent-contract
+    file: nexus-agent-contract.mmd
+    verified: 2026-10-05
+    covers:
+      - claude-code-sdk-rs/src/agent/*.rs
+      - docs/agent-contract.md
+      - claude-code-sdk-rs/tests/agent_contract_snapshots.rs
+      - claude-code-sdk-rs/tests/agent_registry.rs
+  - name: nexus-agent-providers
+    file: nexus-agent-providers.mmd
+    verified: 2026-10-05
+    covers:
+      - docs/diagrams/nexus-agent-providers.mmd
+      - docs/harness-consolidation-2026-10-05.md
+      - claude-code-sdk-rs/src/testkit/*.rs
+      - claude-code-sdk-rs/tests/agent_conformance.rs
+      - claude-code-sdk-rs/src/providers/claude_code/*.rs
+      - claude-code-sdk-rs/src/providers/mod.rs
+      - claude-code-sdk-rs/tests/claude_code_conformance.rs
+      - claude-code-sdk-rs/tests/providers_spawn_guard.rs
+      - claude-code-sdk-rs/src/model/*.rs
+      - claude-code-sdk-rs/src/bin/fake_openai.rs
+      - claude-code-sdk-rs/tests/model_openai_endpoint.rs
+      - claude-code-sdk-rs/tests/support/fake_openai.rs
+      - claude-code-sdk-rs/src/providers/native/*.rs
+      - claude-code-sdk-rs/src/bin/fake_mcp.rs
+      - claude-code-sdk-rs/tests/native_conformance.rs
+      - claude-code-sdk-rs/tests/native_harness.rs
+      - claude-code-sdk-rs/tests/support/native.rs
+      - claude-code-sdk-rs/src/providers/codex/*.rs
+      - claude-code-sdk-rs/src/bin/fake_codex.rs
+      - claude-code-sdk-rs/tests/codex_conformance.rs
+      - claude-code-sdk-rs/tests/codex_schema_drift.rs
+      - claude-code-sdk-rs/tests/codex_registry.rs
+      - claude-code-sdk-rs/tests/transcripts/codex/**
+      - claude-code-sdk-rs/src/providers/acp/*.rs
+      - claude-code-sdk-rs/src/bin/fake_acp.rs
+      - claude-code-sdk-rs/tests/acp_conformance.rs
+      - claude-code-sdk-rs/tests/acp_schema_drift.rs
+      - claude-code-sdk-rs/tests/acp_registry.rs
+      - claude-code-sdk-rs/tests/transcripts/acp/**
   - name: nexus-api-core
     file: nexus-api-core.mmd
     verified: 2026-10-02
@@ -82,18 +123,18 @@ diagrams:
       - claude-code-sdk-rs/src/memory/*.rs
   - name: nexus-sdk-provider-boundary
     file: nexus-sdk-provider-boundary.mmd
-    verified: 2026-10-02
+    verified: 2026-10-05
     covers:
       - claude-code-sdk-rs/src/lib.rs
       - claude-code-sdk-rs/src/bin/fake_claude.rs
   - name: nexus-sdk-transport
     file: nexus-sdk-transport.mmd
-    verified: 2026-10-01
+    verified: 2026-10-05
     covers:
       - claude-code-sdk-rs/src/transport/*.rs
   - name: nexus-sdk-types
     file: nexus-sdk-types.mmd
-    verified: 2026-10-01
+    verified: 2026-10-05
     covers:
       - claude-code-sdk-rs/src/types.rs
       - claude-code-sdk-rs/src/message_parser.rs
@@ -107,6 +148,23 @@ diagrams:
       - claude-code-sdk-rs/src/perf_utils.rs
       - claude-code-sdk-rs/src/sdk_mcp.rs
       - claude-code-sdk-rs/src/token_tracker.rs
+  - name: nexus-tools
+    file: nexus-tools.mmd
+    verified: 2026-10-05
+    covers:
+      - nexus-tools/src/*.rs
+      - nexus-tools/src/files/*.rs
+      - nexus-tools/src/shell/*.rs
+      - nexus-tools/src/web/*.rs
+      - nexus-tools/src/search/*.rs
+      - nexus-tools/src/fake_search.rs
+      - nexus-tools/src/bin/fake_search.rs
+      - nexus-tools/src/bin/fake_obscura.rs
+      - nexus-tools/tests/data/html/*.html
+      - nexus-tools/tests/*.rs
+      - nexus-tools/tests/golden_grep/*.txt
+      - claude-code-sdk-rs/tests/parity/claude-code-2.1.287/*.json
+      - docs/agent-tools-parity.md
   - name: nexus-xtask
     file: nexus-xtask.mmd
     verified: 2026-10-03

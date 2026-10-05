@@ -1,0 +1,68 @@
+{
+  "messages": [
+    {
+      "data": {
+        "apiKeySource": "none",
+        "cwd": ".",
+        "model": "fake-claude",
+        "permissionMode": "default",
+        "session_id": "<SESSION1>",
+        "tools": [
+          "Bash",
+          "Read"
+        ]
+      },
+      "subtype": "init",
+      "type": "system"
+    },
+    {
+      "event": {
+        "delta": {
+          "text": "Hel",
+          "type": "text_delta"
+        },
+        "index": 0,
+        "type": "content_block_delta"
+      },
+      "session_id": "<SESSION2>",
+      "type": "stream_event"
+    },
+    {
+      "event": {
+        "delta": {
+          "text": "lo",
+          "type": "text_delta"
+        },
+        "index": 0,
+        "type": "content_block_delta"
+      },
+      "session_id": "<SESSION2>",
+      "type": "stream_event"
+    },
+    {
+      "message": {
+        "content": [
+          {
+            "text": "Hello"
+          }
+        ]
+      },
+      "type": "assistant"
+    },
+    {
+      "duration_api_ms": "<MS>",
+      "duration_ms": "<MS>",
+      "is_error": false,
+      "num_turns": 1,
+      "result": "Hello",
+      "session_id": "<SESSION2>",
+      "subtype": "success",
+      "total_cost_usd": 0.0001,
+      "type": "result",
+      "usage": {
+        "input_tokens": 3,
+        "output_tokens": 5
+      }
+    }
+  ]
+}

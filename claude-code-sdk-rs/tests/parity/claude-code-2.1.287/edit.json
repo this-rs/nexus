@@ -1,0 +1,149 @@
+{
+ "scenario": "edit",
+ "claude_code_version": "2.1.287",
+ "calls": [
+  {
+   "tool": "Edit",
+   "input": {
+    "replace_all": false,
+    "file_path": "<FIXTURE>/unread.txt",
+    "old_string": "untouched",
+    "new_string": "changed"
+   },
+   "is_error": true,
+   "result": "<tool_use_error>File has not been read yet. Read it first before writing to it.</tool_use_error>"
+  },
+  {
+   "tool": "Read",
+   "input": {
+    "file_path": "<FIXTURE>/uniq.txt"
+   },
+   "is_error": false,
+   "result": "1\tone\n2\ttwo\n3\tthree\n4\t"
+  },
+  {
+   "tool": "Edit",
+   "input": {
+    "replace_all": false,
+    "file_path": "<FIXTURE>/uniq.txt",
+    "old_string": "two",
+    "new_string": "TWO"
+   },
+   "is_error": false,
+   "result": "The file <FIXTURE>/uniq.txt has been updated successfully. (file state is current in your context — no need to Read it back)"
+  },
+  {
+   "tool": "Read",
+   "input": {
+    "file_path": "<FIXTURE>/dup.txt"
+   },
+   "is_error": false,
+   "result": "1\talpha\n2\tbeta\n3\talpha\n4\tgamma\n5\talpha\n6\t"
+  },
+  {
+   "tool": "Edit",
+   "input": {
+    "replace_all": false,
+    "file_path": "<FIXTURE>/dup.txt",
+    "old_string": "alpha",
+    "new_string": "ALPHA"
+   },
+   "is_error": true,
+   "result": "<tool_use_error>Found 3 matches of the string to replace, but replace_all is false. To replace all occurrences, set replace_all to true. To replace only one occurrence, please provide more context to uniquely identify the instance.\nString: alpha</tool_use_error>"
+  },
+  {
+   "tool": "Edit",
+   "input": {
+    "replace_all": true,
+    "file_path": "<FIXTURE>/dup.txt",
+    "old_string": "alpha",
+    "new_string": "ALPHA"
+   },
+   "is_error": false,
+   "result": "The file <FIXTURE>/dup.txt has been updated. All occurrences were successfully replaced. (file state is current in your context — no need to Read it back)"
+  },
+  {
+   "tool": "Edit",
+   "input": {
+    "replace_all": false,
+    "file_path": "<FIXTURE>/uniq.txt",
+    "old_string": "one",
+    "new_string": "one"
+   },
+   "is_error": true,
+   "result": "<tool_use_error>No changes to make: old_string and new_string are exactly the same.</tool_use_error>"
+  },
+  {
+   "tool": "Edit",
+   "input": {
+    "replace_all": false,
+    "file_path": "<FIXTURE>/uniq.txt",
+    "old_string": "zzz",
+    "new_string": "yyy"
+   },
+   "is_error": true,
+   "result": "<tool_use_error>String to replace not found in file.\nString: zzz</tool_use_error>"
+  },
+  {
+   "tool": "Write",
+   "input": {
+    "file_path": "<FIXTURE>/unread.txt",
+    "content": "overwritten\n"
+   },
+   "is_error": true,
+   "result": "<tool_use_error>File has not been read yet. Read it first before writing to it.</tool_use_error>"
+  },
+  {
+   "tool": "Write",
+   "input": {
+    "file_path": "<FIXTURE>/new/dir/z.txt",
+    "content": "z\n"
+   },
+   "is_error": false,
+   "result": "File created successfully at: <FIXTURE>/new/dir/z.txt (file state is current in your context — no need to Read it back)"
+  },
+  {
+   "tool": "Read",
+   "input": {
+    "file_path": "<FIXTURE>/uniq.txt"
+   },
+   "is_error": false,
+   "result": "1\tone\n2\tTWO\n3\tthree\n4\t"
+  },
+  {
+   "tool": "Write",
+   "input": {
+    "file_path": "<FIXTURE>/uniq.txt",
+    "content": "rewritten\n"
+   },
+   "is_error": false,
+   "result": "The file <FIXTURE>/uniq.txt has been updated successfully. (file state is current in your context — no need to Read it back)"
+  },
+  {
+   "tool": "Read",
+   "input": {
+    "file_path": "<FIXTURE>/a.txt"
+   },
+   "is_error": false,
+   "result": "1\tline 1\n2\tline 2\n3\tline 3\n4\tline 4\n5\tline 5\n6\tline 6\n7\tline 7\n8\tline 8\n9\tline 9\n10\tline 10\n11\tline 11\n12\tline 12\n13\t"
+  },
+  {
+   "tool": "Edit",
+   "input": {
+    "replace_all": false,
+    "file_path": "<FIXTURE>/a.txt",
+    "old_string": "3\tline 3",
+    "new_string": "THREE"
+   },
+   "is_error": true,
+   "result": "<tool_use_error>String to replace not found in file.\nString: 3\tline 3</tool_use_error>"
+  }
+ ],
+ "final_files": {
+  "unread.txt": "untouched\n",
+  "uniq.txt": "rewritten\n",
+  "dup.txt": "ALPHA\nbeta\nALPHA\ngamma\nALPHA\n",
+  "new/dir/z.txt": "z\n",
+  "a.txt": "line 1\nline 2\nline 3\nline 4\nline 5\nline 6\nline 7\nline 8\nline 9\nline 10\nline 11\nline 12\n"
+ }
+}

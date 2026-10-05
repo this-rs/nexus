@@ -1,0 +1,5 @@
+{"op":"include","file":"prelude.jsonl"}
+{"op":"include","file":"turn1_start.jsonl"}
+{"op":"notify","method":"item/started","params":{"threadId":"thr_fake1","turnId":"turn_1","item":{"type":"agentMessage","id":"msg_1","text":""}}}
+{"op":"notify","method":"item/agentMessage/delta","params":{"threadId":"thr_fake1","turnId":"turn_1","itemId":"msg_1","delta":"busy"}}
+{"op":"wait_eof"}

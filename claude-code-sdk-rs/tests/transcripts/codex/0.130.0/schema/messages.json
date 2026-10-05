@@ -1,0 +1,306 @@
+{
+  "schema_version": 1,
+  "codex_version": "0.130.0",
+  "codex_tag": "rust-v0.130.0",
+  "derived_from": "documentation",
+  "generated_by_codex": false,
+  "provenance_file": "PROVENANCE.md",
+  "how_to_read": "Each message kind lists the dotted paths of its example. `required`: removing the path makes the adapter's types (providers/codex/wire.rs) refuse the message. `conditional`: required only when their parent object is present. `optional`: removing the path changes nothing for the adapter. tests/codex_schema_drift.rs fails when this file and wire.rs disagree, in either direction.",
+  "messages": {
+    "initialize.params": {
+      "direction": "client_to_server",
+      "required": ["clientInfo", "clientInfo.name", "clientInfo.version"],
+      "conditional": [],
+      "optional": ["clientInfo.title", "capabilities", "capabilities.optOutNotificationMethods"],
+      "example": {
+        "clientInfo": { "name": "nexus_po", "title": "Project Orchestrator", "version": "0.5.0" },
+        "capabilities": { "optOutNotificationMethods": ["thread/started"] }
+      }
+    },
+    "initialize.result": {
+      "direction": "server_to_client",
+      "required": ["userAgent"],
+      "conditional": [],
+      "optional": ["codexHome", "platformFamily", "platformOs"],
+      "example": { "userAgent": "codex/0.130.0", "codexHome": "/home/u/.codex", "platformFamily": "unix", "platformOs": "macos" }
+    },
+    "thread/start.params": {
+      "direction": "client_to_server",
+      "required": ["cwd", "approvalPolicy", "sandbox"],
+      "conditional": [],
+      "optional": ["model", "baseInstructions", "developerInstructions"],
+      "example": {
+        "cwd": "/work",
+        "model": "gpt-5.1-codex",
+        "approvalPolicy": "on-request",
+        "sandbox": "workspace-write",
+        "baseInstructions": "You are terse.",
+        "developerInstructions": "Prefer small diffs."
+      }
+    },
+    "thread/resume.params": {
+      "direction": "client_to_server",
+      "required": ["threadId"],
+      "conditional": [],
+      "optional": ["cwd", "model", "approvalPolicy", "sandbox"],
+      "example": { "threadId": "thr_123", "cwd": "/work", "model": "gpt-5.1-codex", "approvalPolicy": "never", "sandbox": "read-only" }
+    },
+    "thread/start.result": {
+      "direction": "server_to_client",
+      "required": ["thread", "thread.id"],
+      "conditional": [],
+      "optional": ["thread.preview", "thread.modelProvider", "thread.createdAt", "model"],
+      "example": { "thread": { "id": "thr_123", "preview": "", "modelProvider": "openai", "createdAt": 1730910000 }, "model": "gpt-5.1-codex" }
+    },
+    "thread/resume.result": {
+      "direction": "server_to_client",
+      "required": ["thread", "thread.id"],
+      "conditional": [],
+      "optional": ["thread.preview", "thread.modelProvider", "thread.createdAt", "model"],
+      "example": { "thread": { "id": "thr_123", "preview": "earlier", "modelProvider": "openai", "createdAt": 1730900000 }, "model": "gpt-5.1-codex" }
+    },
+    "turn/start.params": {
+      "direction": "client_to_server",
+      "required": ["threadId", "input"],
+      "conditional": ["sandboxPolicy.type"],
+      "optional": ["model", "approvalPolicy", "sandboxPolicy"],
+      "example": {
+        "threadId": "thr_123",
+        "input": [{ "type": "text", "text": "Run tests" }],
+        "model": "gpt-5.1-codex",
+        "approvalPolicy": "on-request",
+        "sandboxPolicy": { "type": "readOnly" }
+      }
+    },
+    "turn/start.result": {
+      "direction": "server_to_client",
+      "required": ["turn", "turn.id"],
+      "conditional": [],
+      "optional": ["turn.status", "turn.items", "turn.error"],
+      "example": { "turn": { "id": "turn_456", "status": "inProgress", "items": [], "error": null } }
+    },
+    "turn/interrupt.params": {
+      "direction": "client_to_server",
+      "required": ["threadId", "turnId"],
+      "conditional": [],
+      "optional": [],
+      "example": { "threadId": "thr_123", "turnId": "turn_456" }
+    },
+    "turn/interrupt.result": {
+      "direction": "server_to_client",
+      "required": [],
+      "conditional": [],
+      "optional": [],
+      "example": {}
+    },
+    "thread/started": {
+      "direction": "server_to_client",
+      "required": ["thread", "thread.id"],
+      "conditional": [],
+      "optional": ["thread.preview"],
+      "example": { "thread": { "id": "thr_123", "preview": "" } }
+    },
+    "turn/started": {
+      "direction": "server_to_client",
+      "required": ["turn", "turn.id"],
+      "conditional": [],
+      "optional": ["threadId", "turn.status", "turn.items", "turn.error"],
+      "example": { "threadId": "thr_123", "turn": { "id": "turn_456", "status": "inProgress", "items": [], "error": null } }
+    },
+    "turn/completed": {
+      "direction": "server_to_client",
+      "required": ["turn", "turn.id"],
+      "conditional": [],
+      "optional": ["threadId", "turn.status", "turn.items", "turn.error", "turn.error.message", "turn.error.codexErrorInfo", "turn.error.additionalDetails"],
+      "example": {
+        "threadId": "thr_123",
+        "turn": {
+          "id": "turn_456",
+          "status": "failed",
+          "items": [],
+          "error": { "message": "context too large", "codexErrorInfo": "ContextWindowExceeded", "additionalDetails": null }
+        }
+      }
+    },
+    "item/started": {
+      "direction": "server_to_client",
+      "required": ["item", "item.type", "item.id"],
+      "conditional": [],
+      "optional": ["threadId", "turnId", "item.text"],
+      "example": { "threadId": "thr_123", "turnId": "turn_456", "item": { "type": "agentMessage", "id": "msg_1", "text": "" } }
+    },
+    "item/completed": {
+      "direction": "server_to_client",
+      "required": ["item", "item.type", "item.id"],
+      "conditional": [],
+      "optional": ["threadId", "turnId", "item.text"],
+      "example": { "threadId": "thr_123", "turnId": "turn_456", "item": { "type": "agentMessage", "id": "msg_1", "text": "Hello" } }
+    },
+    "item/agentMessage/delta": {
+      "direction": "server_to_client",
+      "required": ["itemId", "delta"],
+      "conditional": [],
+      "optional": ["threadId", "turnId"],
+      "example": { "threadId": "thr_123", "turnId": "turn_456", "itemId": "msg_1", "delta": "Hel" }
+    },
+    "item/reasoning/summaryTextDelta": {
+      "direction": "server_to_client",
+      "required": ["itemId", "delta"],
+      "conditional": [],
+      "optional": ["threadId", "turnId", "summaryIndex"],
+      "example": { "threadId": "thr_123", "turnId": "turn_456", "itemId": "rs_1", "delta": "Let me", "summaryIndex": 0 }
+    },
+    "item/reasoning/textDelta": {
+      "direction": "server_to_client",
+      "required": ["itemId", "delta"],
+      "conditional": [],
+      "optional": ["threadId", "turnId", "contentIndex"],
+      "example": { "threadId": "thr_123", "turnId": "turn_456", "itemId": "rs_1", "delta": "raw", "contentIndex": 0 }
+    },
+    "item/commandExecution/outputDelta": {
+      "direction": "server_to_client",
+      "required": ["itemId", "delta"],
+      "conditional": [],
+      "optional": ["threadId", "turnId"],
+      "example": { "threadId": "thr_123", "turnId": "turn_456", "itemId": "cmd_1", "delta": "ok\n" }
+    },
+    "thread/tokenUsage/updated": {
+      "direction": "server_to_client",
+      "required": ["tokenUsage", "tokenUsage.total", "tokenUsage.total.inputTokens", "tokenUsage.total.outputTokens"],
+      "conditional": ["tokenUsage.last.inputTokens", "tokenUsage.last.outputTokens"],
+      "optional": [
+        "threadId", "turnId",
+        "tokenUsage.total.totalTokens", "tokenUsage.total.cachedInputTokens", "tokenUsage.total.reasoningOutputTokens",
+        "tokenUsage.last", "tokenUsage.last.totalTokens", "tokenUsage.last.cachedInputTokens", "tokenUsage.last.reasoningOutputTokens",
+        "tokenUsage.modelContextWindow"
+      ],
+      "not_verified": "The shape of this notification is from memory: the README of the tag only names it.",
+      "example": {
+        "threadId": "thr_123",
+        "turnId": "turn_456",
+        "tokenUsage": {
+          "total": { "totalTokens": 180, "inputTokens": 120, "cachedInputTokens": 20, "outputTokens": 60, "reasoningOutputTokens": 10 },
+          "last": { "totalTokens": 180, "inputTokens": 120, "cachedInputTokens": 20, "outputTokens": 60, "reasoningOutputTokens": 10 },
+          "modelContextWindow": 272000
+        }
+      }
+    },
+    "error": {
+      "direction": "server_to_client",
+      "required": ["error"],
+      "conditional": [],
+      "optional": ["threadId", "turnId", "willRetry", "error.message", "error.codexErrorInfo", "error.additionalDetails"],
+      "example": {
+        "threadId": "thr_123",
+        "turnId": "turn_456",
+        "error": { "message": "You have hit your usage limit", "codexErrorInfo": "UsageLimitExceeded", "additionalDetails": null },
+        "willRetry": false
+      }
+    },
+    "mcpServer/startupStatus/updated": {
+      "direction": "server_to_client",
+      "required": ["name", "status"],
+      "conditional": [],
+      "optional": ["error"],
+      "example": { "name": "po", "status": "ready", "error": null }
+    },
+    "serverRequest/resolved": {
+      "direction": "server_to_client",
+      "required": ["requestId"],
+      "conditional": [],
+      "optional": ["threadId"],
+      "example": { "threadId": "thr_123", "requestId": "srv_7" }
+    },
+    "model/rerouted": {
+      "direction": "server_to_client",
+      "required": ["toModel"],
+      "conditional": [],
+      "optional": ["threadId", "turnId", "fromModel", "reason"],
+      "example": { "threadId": "thr_123", "turnId": "turn_456", "fromModel": "gpt-a", "toModel": "gpt-b", "reason": "safety" }
+    },
+    "mcpServer/elicitation/request": {
+      "direction": "server_to_client_request",
+      "required": ["serverName"],
+      "conditional": [],
+      "optional": [
+        "threadId", "turnId", "mode", "message", "requestedSchema", "requestedSchema.type", "requestedSchema.properties",
+        "_meta", "_meta.codex_approval_kind", "_meta.persist", "_meta.tool_name", "_meta.tool_params", "_meta.tool_params.path"
+      ],
+      "not_verified": "The README names serverName, mode, message, requestedSchema, threadId, turnId, meta.codex_approval_kind and meta.persist; tool_name and tool_params are from memory.",
+      "example": {
+        "threadId": "thr_123",
+        "turnId": "turn_456",
+        "serverName": "po",
+        "mode": "form",
+        "message": "Allow the po MCP server to run the tool \"plan\"?",
+        "requestedSchema": { "type": "object", "properties": {} },
+        "_meta": { "codex_approval_kind": "mcp_tool_call", "persist": ["session", "always"], "tool_name": "plan", "tool_params": { "path": "a.txt" } }
+      }
+    },
+    "mcpServer/elicitation/request.response": {
+      "direction": "client_to_server_response",
+      "required": ["action", "content"],
+      "conditional": [],
+      "optional": ["_meta", "_meta.persist"],
+      "not_verified": "How a persistent approval is answered (_meta.persist) is from memory.",
+      "example": { "action": "accept", "content": null, "_meta": { "persist": "session" } }
+    },
+    "item/commandExecution/requestApproval": {
+      "direction": "server_to_client_request",
+      "required": ["itemId"],
+      "conditional": [],
+      "optional": ["threadId", "turnId", "reason", "command", "cwd", "availableDecisions"],
+      "example": {
+        "threadId": "thr_123",
+        "turnId": "turn_456",
+        "itemId": "cmd_1",
+        "reason": "writes outside the workspace",
+        "command": "git push",
+        "cwd": "/work",
+        "availableDecisions": ["accept", "acceptForSession", "decline", "cancel"]
+      }
+    },
+    "item/commandExecution/requestApproval.response": {
+      "direction": "client_to_server_response",
+      "required": ["decision"],
+      "conditional": [],
+      "optional": [],
+      "example": { "decision": "acceptForSession" }
+    },
+    "item/fileChange/requestApproval": {
+      "direction": "server_to_client_request",
+      "required": ["itemId"],
+      "conditional": [],
+      "optional": ["threadId", "turnId", "reason"],
+      "example": { "threadId": "thr_123", "turnId": "turn_456", "itemId": "fc_1", "reason": "adds a file" }
+    },
+    "item/fileChange/requestApproval.response": {
+      "direction": "client_to_server_response",
+      "required": ["decision"],
+      "conditional": [],
+      "optional": [],
+      "example": { "decision": "accept" }
+    },
+    "item/permissions/requestApproval": {
+      "direction": "server_to_client_request",
+      "required": ["itemId", "permissions"],
+      "conditional": [],
+      "optional": ["threadId", "turnId", "cwd", "reason", "permissions.fileSystem", "permissions.fileSystem.write"],
+      "example": {
+        "threadId": "thr_123",
+        "turnId": "turn_456",
+        "itemId": "call_123",
+        "cwd": "/work",
+        "reason": "Select a workspace root",
+        "permissions": { "fileSystem": { "write": ["/work", "/shared"] } }
+      }
+    },
+    "item/permissions/requestApproval.response": {
+      "direction": "client_to_server_response",
+      "required": ["permissions"],
+      "conditional": [],
+      "optional": ["scope", "permissions.fileSystem", "permissions.fileSystem.write"],
+      "example": { "scope": "session", "permissions": { "fileSystem": { "write": ["/work"] } } }
+    }
+  }
+}

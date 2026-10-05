@@ -1,0 +1,3 @@
+# What health() plays: the handshake, then the process is closed by the client.
+{"op":"include","file":"handshake.jsonl"}
+{"op":"wait_eof"}

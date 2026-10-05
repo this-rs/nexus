@@ -56,6 +56,19 @@
 //!   scripts a failure), `"timeout_ms":N`, `"optional":true`.
 //! * `{"op":"wait_eof"}` — block until stdin reaches EOF. Optional `"timeout_ms"`,
 //!   `"optional":true`. Use it to keep the child alive for `disconnect()` tests.
+//! * `{"op":"capture_hooks"}` — consume stdin until the SDK's `initialize`
+//!   control request, remember the hook callback ids it registers (they are minted
+//!   at run time, so a transcript cannot spell them), and acknowledge it like the
+//!   real CLI. Optional: `"timeout_ms":N`, `"optional":true`.
+//! * `{"op":"emit_hook","event":"PreToolUse","request_id":"h1","input":{...}}` —
+//!   emit a `hook_callback` control request for the first callback id captured for
+//!   that event. Optional: `"tool_use_id":"..."`, `"await_response":true` (then
+//!   block until a stdin line containing the `request_id` arrives), `"optional":true`
+//!   (do nothing, instead of failing, when no callback was captured for the event).
+//! * `{"op":"spawn_child","program":"sleep","args":["600"]}` — start a real child
+//!   process (the fake's "tool"), kept until it exits; default `sleep 600`.
+//! * `{"op":"wait_children_exit"}` — block until every spawned child has exited
+//!   (e.g. been signalled). Optional `"timeout_ms"`, `"optional":true`.
 //! * `{"op":"exit","code":N}` — flush and exit with that code (default 0).
 //!
 //! When the transcript runs out the fake exits 0, which closes stdout and ends the
@@ -130,6 +143,8 @@ fn main() {
         out: std::io::stdout(),
         rx,
         default_timeout: Duration::from_millis(env_u64("FAKE_CLAUDE_STDIN_TIMEOUT_MS", 10_000)),
+        hooks: BTreeMap::new(),
+        children: Vec::new(),
     };
 
     match std::env::var("FAKE_CLAUDE_TRANSCRIPT") {
@@ -147,6 +162,10 @@ fn main() {
         Err(_) => fake.replay(DEFAULT_TRANSCRIPT),
     }
 
+    for child in &mut fake.children {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
     let _ = fake.out.flush();
 }
 
@@ -279,6 +298,12 @@ struct Fake {
     out: std::io::Stdout,
     rx: Receiver<String>,
     default_timeout: Duration,
+    /// Hook callback ids registered by the SDK's `initialize` request, by event
+    /// name. Filled by the `capture_hooks` directive.
+    hooks: BTreeMap<String, Vec<String>>,
+    /// Processes started by `spawn_child`: the fake's own "tools", so a test can
+    /// signal them the way it signals a real CLI's.
+    children: Vec<std::process::Child>,
 }
 
 impl Fake {
@@ -336,6 +361,8 @@ impl Fake {
                 }
             },
             "reply_control" => self.reply_control(d, lineno),
+            "capture_hooks" => self.capture_hooks(d, lineno),
+            "emit_hook" => self.emit_hook(d, lineno),
             "wait_eof" => {
                 let deadline = std::time::Instant::now() + self.timeout(d);
                 loop {
@@ -353,6 +380,64 @@ impl Fake {
                             );
                         },
                     }
+                }
+            },
+            "spawn_child" => {
+                let program = d.get("program").and_then(Value::as_str).unwrap_or("sleep");
+                let args: Vec<String> = d
+                    .get("args")
+                    .and_then(Value::as_array)
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|v| v.as_str().map(str::to_owned))
+                            .collect()
+                    })
+                    .unwrap_or_else(|| vec!["600".to_owned()]);
+                let mut command = std::process::Command::new(program);
+                command
+                    .args(&args)
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null());
+                #[cfg(unix)]
+                {
+                    use std::os::unix::process::CommandExt;
+                    // A runner started in the background leaves SIGINT ignored, and an
+                    // ignored disposition is inherited: restore the default so a
+                    // signalled tool dies whatever launched the test.
+                    // SAFETY: only async-signal-safe `signal` between fork and exec.
+                    unsafe {
+                        command.pre_exec(|| {
+                            libc::signal(libc::SIGINT, libc::SIG_DFL);
+                            Ok(())
+                        });
+                    }
+                }
+                match command.spawn() {
+                    Ok(child) => self.children.push(child),
+                    Err(e) => die(
+                        EXIT_BAD_DIRECTIVE,
+                        &format!("transcript line {lineno}: spawn_child failed: {e}"),
+                    ),
+                }
+            },
+            "wait_children_exit" => {
+                let deadline = std::time::Instant::now() + self.timeout(d);
+                loop {
+                    self.children
+                        .retain_mut(|child| !matches!(child.try_wait(), Ok(Some(_))));
+                    if self.children.is_empty() {
+                        return;
+                    }
+                    if std::time::Instant::now() >= deadline {
+                        if optional(d) {
+                            return;
+                        }
+                        die(
+                            EXIT_STDIN_TIMEOUT,
+                            &format!("transcript line {lineno}: wait_children_exit timed out"),
+                        );
+                    }
+                    std::thread::sleep(Duration::from_millis(20));
                 }
             },
             "exit" => {
@@ -419,6 +504,88 @@ impl Fake {
             let response = json!({"type": "control_response", "response": Value::Object(inner)});
             self.write_line(&response.to_string());
             return;
+        }
+    }
+
+    /// Consume stdin until the SDK's `initialize` request, keep the callback ids
+    /// of its `hooks` map, and acknowledge the request.
+    fn capture_hooks(&mut self, d: &Value, lineno: usize) {
+        loop {
+            let Some(line) = self.next_line(d, None, lineno) else {
+                return;
+            };
+            let Ok(msg) = serde_json::from_str::<Value>(&line) else {
+                continue;
+            };
+            let request = msg.get("request").cloned().unwrap_or(Value::Null);
+            if msg.get("type").and_then(Value::as_str) != Some("control_request")
+                || request.get("subtype").and_then(Value::as_str) != Some("initialize")
+            {
+                continue;
+            }
+            if let Some(Value::Object(hooks)) = request.get("hooks") {
+                for (event, matchers) in hooks {
+                    let ids: Vec<String> = matchers
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|matcher| matcher.get("hookCallbackIds"))
+                        .filter_map(Value::as_array)
+                        .flatten()
+                        .filter_map(Value::as_str)
+                        .map(str::to_string)
+                        .collect();
+                    self.hooks.insert(event.clone(), ids);
+                }
+            }
+            let request_id = msg.get("request_id").cloned().unwrap_or(Value::Null);
+            let response = json!({
+                "type": "control_response",
+                "response": {"subtype": "success", "request_id": request_id},
+            });
+            self.write_line(&response.to_string());
+            return;
+        }
+    }
+
+    /// Emit a `hook_callback` request for a callback id captured by
+    /// `capture_hooks`, and optionally wait for its response.
+    fn emit_hook(&mut self, d: &Value, lineno: usize) {
+        let event = d.get("event").and_then(Value::as_str).unwrap_or_default();
+        let Some(callback_id) = self.hooks.get(event).and_then(|ids| ids.first()).cloned() else {
+            if optional(d) {
+                return;
+            }
+            die(
+                EXIT_BAD_DIRECTIVE,
+                &format!(
+                    "transcript line {lineno}: emit_hook for {event:?}, but no callback id was captured for it (missing capture_hooks?)"
+                ),
+            );
+        };
+        let request_id = d
+            .get("request_id")
+            .and_then(Value::as_str)
+            .unwrap_or("hook-request")
+            .to_string();
+        let mut request = serde_json::Map::new();
+        request.insert("subtype".to_string(), json!("hook_callback"));
+        request.insert("callback_id".to_string(), json!(callback_id));
+        request.insert(
+            "input".to_string(),
+            d.get("input").cloned().unwrap_or_else(|| json!({})),
+        );
+        if let Some(tool_use_id) = d.get("tool_use_id").filter(|v| !v.is_null()) {
+            request.insert("tool_use_id".to_string(), tool_use_id.clone());
+        }
+        let message = json!({
+            "type": "control_request",
+            "request_id": request_id,
+            "request": Value::Object(request),
+        });
+        self.write_line(&message.to_string());
+        if d.get("await_response").and_then(Value::as_bool) == Some(true) {
+            let _ = self.next_line(d, Some(&request_id), lineno);
         }
     }
 

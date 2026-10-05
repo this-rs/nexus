@@ -1,0 +1,5 @@
+# A JSON-RPC error answers the prompt (rate limit): classified from its message.
+{"op":"include","file":"prelude.jsonl"}
+{"op":"include","file":"turn1_start.jsonl"}
+{"op":"reply","to":"p1","error":{"code":-32603,"message":"Rate limit exceeded (429)"}}
+{"op":"include","file":"turn2_text.jsonl"}

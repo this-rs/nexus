@@ -1,0 +1,9 @@
+# The user cancels with interrupt: the adapter answers {action: cancel} and interrupts the turn.
+{"op":"include","file":"prelude.jsonl"}
+{"op":"include","file":"turn1_start.jsonl"}
+{"op":"notify","method":"item/started","params":{"threadId":"thr_fake1","turnId":"turn_1","item":{"type":"mcpToolCall","id":"call_1","server":"fake","tool":"write","status":"inProgress","arguments":{"path":"a.txt"}}}}
+{"op":"server_request","id":"srv_8","method":"mcpServer/elicitation/request","params":{"threadId":"thr_fake1","turnId":"turn_1","serverName":"fake","mode":"form","message":"Allow the tool?","requestedSchema":{"type":"object","properties":{}},"_meta":{"codex_approval_kind":"mcp_tool_call","persist":["session","always"],"tool_name":"write","tool_params":{"path":"a.txt"}}}}
+{"op":"await_response","id":"srv_8","expect":{"action":"cancel","content":null}}
+{"op":"expect","method":"turn/interrupt","reply":{}}
+{"op":"notify","method":"item/completed","params":{"threadId":"thr_fake1","turnId":"turn_1","item":{"type":"mcpToolCall","id":"call_1","server":"fake","tool":"write","status":"failed","arguments":{"path":"a.txt"},"error":{"message":"cancelled"}}}}
+{"op":"notify","method":"turn/completed","params":{"threadId":"thr_fake1","turn":{"id":"turn_1","status":"interrupted","items":[],"error":null}}}

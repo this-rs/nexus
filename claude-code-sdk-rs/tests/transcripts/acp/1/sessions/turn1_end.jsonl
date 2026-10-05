@@ -1,0 +1,2 @@
+# `usage` of a prompt result is unstable in the specification: NOT VERIFIED.
+{"op":"reply","to":"p1","result":{"stopReason":"end_turn","usage":{"inputTokens":120,"outputTokens":60,"totalTokens":180,"cachedReadTokens":20,"thoughtTokens":10}}}

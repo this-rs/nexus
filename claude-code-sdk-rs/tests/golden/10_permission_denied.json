@@ -1,0 +1,70 @@
+{
+  "control_requests_from_cli": [
+    {
+      "request": {
+        "input": {
+          "command": "rm -rf build"
+        },
+        "subtype": "can_use_tool",
+        "tool_name": "Bash"
+      },
+      "request_id": "<REQ1>",
+      "type": "control_request"
+    }
+  ],
+  "lines_sent_to_cli": [
+    {
+      "response": {
+        "request_id": "<REQ1>",
+        "response": {
+          "behavior": "deny",
+          "message": "not allowed"
+        },
+        "subtype": "success"
+      },
+      "type": "control_response"
+    }
+  ],
+  "messages": [
+    {
+      "data": {
+        "apiKeySource": "none",
+        "cwd": ".",
+        "model": "fake-claude",
+        "permissionMode": "default",
+        "session_id": "<SESSION1>",
+        "tools": [
+          "Bash",
+          "Read"
+        ]
+      },
+      "subtype": "init",
+      "type": "system"
+    },
+    {
+      "message": {
+        "content": [
+          {
+            "text": "I was refused."
+          }
+        ]
+      },
+      "type": "assistant"
+    },
+    {
+      "duration_api_ms": "<MS>",
+      "duration_ms": "<MS>",
+      "is_error": false,
+      "num_turns": 1,
+      "result": "I was refused.",
+      "session_id": "<SESSION2>",
+      "subtype": "success",
+      "total_cost_usd": 0.0001,
+      "type": "result",
+      "usage": {
+        "input_tokens": 3,
+        "output_tokens": 5
+      }
+    }
+  ]
+}

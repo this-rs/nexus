@@ -1,0 +1,29 @@
+{
+  "messages": [
+    {
+      "data": {
+        "apiKeySource": "none",
+        "cwd": ".",
+        "model": "fake-claude",
+        "permissionMode": "default",
+        "session_id": "<SESSION1>",
+        "tools": [
+          "Bash",
+          "Read"
+        ]
+      },
+      "subtype": "init",
+      "type": "system"
+    },
+    {
+      "message": {
+        "content": [
+          {
+            "text": "half an answer"
+          }
+        ]
+      },
+      "type": "assistant"
+    }
+  ]
+}

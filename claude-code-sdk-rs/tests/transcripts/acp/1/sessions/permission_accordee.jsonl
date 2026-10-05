@@ -1,0 +1,10 @@
+# session/request_permission (agentclientprotocol.com/protocol/tool-calls): the client answers
+# `{"outcome":{"outcome":"selected","optionId":…}}`.
+{"op":"include","file":"prelude.jsonl"}
+{"op":"include","file":"turn1_start.jsonl"}
+{"op":"notify","method":"session/update","params":{"sessionId":"sess_fake1","update":{"sessionUpdate":"tool_call","toolCallId":"call_1","title":"Run rm -rf build","kind":"execute","status":"pending","rawInput":{"command":"rm -rf build"}}}}
+{"op":"server_request","id":"perm_1","method":"session/request_permission","params":{"sessionId":"sess_fake1","toolCall":{"toolCallId":"call_1","title":"Run rm -rf build","kind":"execute","status":"pending","rawInput":{"command":"rm -rf build"}},"options":[{"optionId":"allow-once","name":"Allow once","kind":"allow_once"},{"optionId":"allow-always","name":"Always allow","kind":"allow_always"},{"optionId":"reject-once","name":"Reject","kind":"reject_once"}]}}
+{"op":"await_response","id":"perm_1","expect":{"outcome":{"outcome":"selected","optionId":"allow-once"}}}
+{"op":"notify","method":"session/update","params":{"sessionId":"sess_fake1","update":{"sessionUpdate":"tool_call_update","toolCallId":"call_1","status":"completed","content":[{"type":"content","content":{"type":"text","text":"removed"}}]}}}
+{"op":"notify","method":"session/update","params":{"sessionId":"sess_fake1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"Done."}}}}
+{"op":"include","file":"turn1_end.jsonl"}

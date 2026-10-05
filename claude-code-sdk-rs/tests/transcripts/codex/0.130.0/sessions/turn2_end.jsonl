@@ -1,0 +1,2 @@
+{"op":"notify","method":"thread/tokenUsage/updated","params":{"threadId":"thr_fake1","turnId":"turn_2","tokenUsage":{"total":{"totalTokens":420,"inputTokens":300,"cachedInputTokens":40,"outputTokens":120,"reasoningOutputTokens":15},"last":{"totalTokens":240,"inputTokens":180,"cachedInputTokens":20,"outputTokens":60,"reasoningOutputTokens":5},"modelContextWindow":272000}}}
+{"op":"notify","method":"turn/completed","params":{"threadId":"thr_fake1","turn":{"id":"turn_2","status":"completed","items":[],"error":null}}}

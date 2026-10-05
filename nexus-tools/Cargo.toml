@@ -1,0 +1,108 @@
+[package]
+name = "nexus-tools"
+description = "MCP server of the base tools of a Nexus agent harness (files, shell, web), in pure Rust."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+name = "nexus_tools"
+path = "src/lib.rs"
+
+[[bin]]
+name = "nexus-tools"
+path = "src/main.rs"
+
+[[bin]]
+name = "fake_obscura"
+path = "src/bin/fake_obscura.rs"
+required-features = ["test-tools"]
+
+[[bin]]
+name = "fake_search"
+path = "src/bin/fake_search.rs"
+required-features = ["test-tools"]
+
+[features]
+default = []
+# `echo` and `write` tools, to exercise the server end to end without the real tools.
+# Never in a release build of the harness.
+test-tools = []
+# https. rustls with the `ring` provider: the one dependency that compiles C and assembly at build
+# time, accepted as a documented exception (decision 91083af7) and therefore OFF by default; the
+# release binary is built with it. tests/dependency_policy.rs checks the closure without it is
+# Rust only and that with it `ring` is the only exception.
+tls = ["dep:tokio-rustls", "dep:rustls", "dep:webpki-roots"]
+
+# Rust only, by decision N17: nothing here may need a C or C++ toolchain, Node, Python or a
+# browser at build or run time.
+[dependencies]
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+async-trait = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "env-filter", "ansi"] }
+axum = { version = "0.7", default-features = false, features = ["http1", "tokio", "json"] }
+base64 = "0.22"
+hmac = "0.12"
+sha2 = "0.10"
+# Pure-Rust search stack of ripgrep (N19): gitignore-aware walking, globs, regex.
+ignore = "0.4"
+globset = "0.4"
+regex = "1"
+# Signals to a whole process group, without `unsafe` and without a C compiler (N20). (rustix was
+# tried first: on Linux it brings linux-raw-sys, a -sys crate the dependency policy rightly flags.)
+# WebFetch (N21): HTTP/1.1 over our own pinned connection (hyper), HTML to Markdown (htmd, on
+# html5ever), charset decoding. All pure Rust. TLS is a separate, pending decision.
+hyper = { version = "1", default-features = false, features = ["client", "http1"] }
+hyper-util = { version = "0.1", default-features = false, features = ["tokio"] }
+http-body-util = "0.1"
+bytes = "1"
+url = "2"
+htmd = "0.2"
+encoding_rs = "0.8"
+# PDF text extraction for Read (N19b), pure Rust.
+lopdf = { version = "0.34", default-features = false, features = ["nom_parser"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"], optional = true }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"], optional = true }
+webpki-roots = { version = "0.26", optional = true }
+
+# Signals to a process group: Unix only (the shell tools are).
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.30", default-features = false, features = ["signal"] }
+
+[dev-dependencies]
+nexus-claude = { path = "../claude-code-sdk-rs", features = ["provider-native"] }
+tempfile = "3"
+futures = "0.3"
+rcgen = { version = "0.13", default-features = false, features = ["ring", "pem"] }
+
+[[test]]
+name = "protocol"
+required-features = ["test-tools"]
+
+[[test]]
+name = "server_binary"
+required-features = ["test-tools"]
+
+[[test]]
+name = "native_e2e"
+required-features = ["test-tools"]
+
+[[test]]
+name = "native_browser"
+required-features = ["test-tools"]
+
+[[test]]
+name = "tls"
+required-features = ["tls", "test-tools"]
+
+[[test]]
+name = "search_conformance"
+required-features = ["test-tools"]

@@ -32,6 +32,7 @@
 #![warn(missing_docs)]
 #![warn(rustdoc::missing_crate_level_docs)]
 
+pub mod agent;
 /// CLI download and management utilities
 pub mod cli_download;
 mod client;
@@ -42,11 +43,15 @@ mod errors;
 mod interactive;
 mod internal_query;
 mod message_parser;
+pub mod model;
 pub mod model_recommendation;
 mod optimized_client;
 mod perf_utils;
+pub mod providers;
 mod query;
 mod sdk_mcp;
+#[cfg(feature = "testkit")]
+pub mod testkit;
 pub mod token_tracker;
 pub mod transport;
 mod types;
@@ -64,6 +69,7 @@ pub use interactive::InteractiveClient;
 pub use interactive::{build_hook_response_json, dispatch_hook_from_registry, is_hook_callback};
 pub use internal_query::Query;
 pub use query::query;
+pub use transport::EnvPolicy;
 pub use transport::SECRET_BEARING_ARGS;
 pub use transport::UserContentBlock;
 pub use transport::describe_command_redacted;

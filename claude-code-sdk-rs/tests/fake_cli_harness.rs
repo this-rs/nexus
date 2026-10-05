@@ -271,8 +271,10 @@ async fn stream_events_are_parsed_when_partial_messages_are_enabled() {
     );
 }
 
-/// A `thinking` block needs both `thinking` and `signature`; a block missing
-/// `signature` makes the whole line unparseable, so the SDK drops the message.
+/// A `thinking` block needs `thinking`; its `signature` may be absent (an
+/// Anthropic-compatible endpoint does not always sign its reasoning) and is then
+/// empty. This test used to pin the opposite — the signature-less message was
+/// dropped whole — which was the defect.
 #[tokio::test]
 async fn thinking_blocks_need_a_signature() {
     let fake = Transcript::new()
@@ -293,17 +295,20 @@ async fn thinking_blocks_need_a_signature() {
 
     assert_eq!(
         messages.len(),
-        2,
-        "the signature-less thinking message is dropped, got {messages:?}"
+        3,
+        "the signature-less thinking message is kept, got {messages:?}"
     );
-    match &messages[0] {
-        Message::Assistant { message, .. } => {
-            assert!(
-                matches!(&message.content[0], ContentBlock::Thinking(t) if t.signature == "sig-abc")
-            );
-        },
-        other => panic!("expected the well-formed thinking message, got {other:?}"),
-    }
+    let signatures: Vec<&str> = messages
+        .iter()
+        .filter_map(|message| match message {
+            Message::Assistant { message, .. } => match &message.content[0] {
+                ContentBlock::Thinking(thinking) => Some(thinking.signature.as_str()),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect();
+    assert_eq!(signatures, ["", "sig-abc"]);
 }
 
 // ===========================================================================

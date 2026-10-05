@@ -1,0 +1,6 @@
+# session/cancel (notification), then the prompt answers `cancelled`.
+{"op":"include","file":"prelude.jsonl"}
+{"op":"include","file":"turn1_start.jsonl"}
+{"op":"notify","method":"session/update","params":{"sessionId":"sess_fake1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"working"}}}}
+{"op":"expect_notification","method":"session/cancel"}
+{"op":"reply","to":"p1","result":{"stopReason":"cancelled"}}

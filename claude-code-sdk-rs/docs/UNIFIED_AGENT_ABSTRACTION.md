@@ -1,3 +1,7 @@
+> **ARCHIVÉ — remplacé.** Ce document est un ancien projet de conception. La couche d'abstraction existe
+> maintenant et fait autorité ailleurs : `docs/agent-contract.md` (contrat gelé), la RFC b53e11c7 (harness
+> multi-provider) et les diagrammes `docs/diagrams/nexus-agent-*.mmd`. Ne pas s'y fier pour les noms ni les types.
+
 # Unified Agent Abstraction Layer Design
 
 ## Overview

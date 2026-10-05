@@ -1,0 +1,6 @@
+{"op":"include","file":"prelude.jsonl"}
+{"op":"include","file":"turn1_start.jsonl"}
+{"op":"notify","method":"item/started","params":{"threadId":"thr_fake1","turnId":"turn_1","item":{"type":"mcpToolCall","id":"call_1","server":"fake","tool":"slow","status":"inProgress","arguments":{}}}}
+{"op":"expect","method":"turn/interrupt","reply":{}}
+{"op":"notify","method":"item/completed","params":{"threadId":"thr_fake1","turnId":"turn_1","item":{"type":"mcpToolCall","id":"call_1","server":"fake","tool":"slow","status":"failed","arguments":{},"error":{"message":"interrupted"}}}}
+{"op":"notify","method":"turn/completed","params":{"threadId":"thr_fake1","turn":{"id":"turn_1","status":"interrupted","items":[],"error":null}}}

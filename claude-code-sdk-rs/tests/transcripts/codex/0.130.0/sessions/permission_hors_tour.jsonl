@@ -1,0 +1,5 @@
+# An approval with no turn running (turnId is best effort, null here).
+{"op":"include","file":"prelude.jsonl"}
+{"op":"server_request","id":"srv_9","method":"mcpServer/elicitation/request","params":{"threadId":"thr_fake1","turnId":null,"serverName":"fake","mode":"form","message":"Allow?","requestedSchema":{"type":"object","properties":{}},"_meta":{"codex_approval_kind":"mcp_tool_call","persist":"session","tool_name":"write"}}}
+{"op":"await_response","id":"srv_9","expect":{"action":"accept","content":null}}
+{"op":"wait_eof"}

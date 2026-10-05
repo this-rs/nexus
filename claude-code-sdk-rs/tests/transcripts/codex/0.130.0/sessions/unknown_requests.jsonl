@@ -1,0 +1,9 @@
+# A server request the adapter does not serve, and an elicitation that is not a tool approval:
+# neither may hang the turn.
+{"op":"include","file":"prelude.jsonl"}
+{"op":"include","file":"turn1_start.jsonl"}
+{"op":"server_request","id":"srv_20","method":"mcpServer/elicitation/request","params":{"threadId":"thr_fake1","turnId":"turn_1","serverName":"fake","mode":"url","message":"Sign in","url":"https://example.com/login","elicitationId":"e1"}}
+{"op":"await_response","id":"srv_20","expect":{"action":"decline","content":null}}
+{"op":"server_request","unsupported":true,"id":"srv_21","method":"item/tool/call","params":{"tool":"lookup"}}
+{"op":"await_response","id":"srv_21"}
+{"op":"include","file":"turn1_end.jsonl"}

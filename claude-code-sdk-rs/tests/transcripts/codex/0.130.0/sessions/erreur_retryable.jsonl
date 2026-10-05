@@ -1,0 +1,6 @@
+# The usage limit: an error notification, then turn/completed failed carrying the same error.
+{"op":"include","file":"prelude.jsonl"}
+{"op":"include","file":"turn1_start.jsonl"}
+{"op":"notify","method":"error","params":{"threadId":"thr_fake1","turnId":"turn_1","error":{"message":"You have hit your usage limit","codexErrorInfo":"UsageLimitExceeded"},"willRetry":false}}
+{"op":"notify","method":"turn/completed","params":{"threadId":"thr_fake1","turn":{"id":"turn_1","status":"failed","items":[],"error":{"message":"You have hit your usage limit","codexErrorInfo":"UsageLimitExceeded","additionalDetails":null}}}}
+{"op":"include","file":"turn2_text.jsonl"}

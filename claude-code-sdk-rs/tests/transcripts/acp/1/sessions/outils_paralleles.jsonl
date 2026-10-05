@@ -1,0 +1,8 @@
+{"op":"include","file":"prelude.jsonl"}
+{"op":"include","file":"turn1_start.jsonl"}
+{"op":"notify","method":"session/update","params":{"sessionId":"sess_fake1","update":{"sessionUpdate":"tool_call","toolCallId":"call_a","title":"Read a.txt","kind":"read","status":"pending","rawInput":{"path":"a.txt"}}}}
+{"op":"notify","method":"session/update","params":{"sessionId":"sess_fake1","update":{"sessionUpdate":"tool_call","toolCallId":"call_b","title":"Read b.txt","kind":"read","status":"pending","rawInput":{"path":"b.txt"}}}}
+{"op":"notify","method":"session/update","params":{"sessionId":"sess_fake1","update":{"sessionUpdate":"tool_call_update","toolCallId":"call_a","status":"completed","content":[{"type":"content","content":{"type":"text","text":"A"}}]}}}
+{"op":"notify","method":"session/update","params":{"sessionId":"sess_fake1","update":{"sessionUpdate":"tool_call_update","toolCallId":"call_b","status":"completed","content":[{"type":"content","content":{"type":"text","text":"B"}}]}}}
+{"op":"notify","method":"session/update","params":{"sessionId":"sess_fake1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"Both read."}}}}
+{"op":"include","file":"turn1_end.jsonl"}

@@ -1,0 +1,8 @@
+# A command approval (README, "Command execution approvals"): answered with {decision}.
+{"op":"include","file":"prelude.jsonl"}
+{"op":"include","file":"turn1_start.jsonl"}
+{"op":"notify","method":"item/started","params":{"threadId":"thr_fake1","turnId":"turn_1","item":{"type":"commandExecution","id":"cmd_1","command":"git push","cwd":"/work","status":"inProgress","commandActions":[]}}}
+{"op":"server_request","id":11,"method":"item/commandExecution/requestApproval","params":{"threadId":"thr_fake1","turnId":"turn_1","itemId":"cmd_1","reason":"network access","command":"git push","cwd":"/work","availableDecisions":["accept","acceptForSession","decline","cancel"]}}
+{"op":"await_response","id":11,"expect":{"decision":"acceptForSession"}}
+{"op":"notify","method":"item/completed","params":{"threadId":"thr_fake1","turnId":"turn_1","item":{"type":"commandExecution","id":"cmd_1","command":"git push","cwd":"/work","status":"completed","aggregatedOutput":"ok\n","exitCode":0}}}
+{"op":"include","file":"turn1_end.jsonl"}

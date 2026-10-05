@@ -1,6 +1,6 @@
 %% name: nexus-sdk-provider-boundary
 %% covers: claude-code-sdk-rs/src/lib.rs, claude-code-sdk-rs/src/bin/fake_claude.rs
-%% verified: 2026-10-02
+%% verified: 2026-10-05
 %% ---
 %% PROUVE : où passe la frontière entre « un agent quelconque » et « Claude Code »
 %%   dans ce dépôt, au sha 443a2a0 (relu le 2026-10-02). Ce diagramme possède la
@@ -11,7 +11,7 @@
 %% SOURCES LUES :
 %%   claude-code-sdk-rs/src/lib.rs            — bloc `pub use` (clients, hooks, transport, types, memory)
 %%   claude-code-sdk-rs/src/bin/fake_claude.rs — directives emit, emit_json, emit_partial, stderr, sleep,
-%%                                               await_stdin, reply_control, wait_eof, exit ; --version
+%%                                               await_stdin, reply_control, wait_eof, exit, capture_hooks, emit_hook ; --version
 %%   claude-code-sdk-rs/src/transport/mod.rs  — trait Transport (signatures), InputMessage
 %%   claude-code-sdk-rs/src/transport/subprocess.rs — build_command, find_claude_cli, check_cli_version,
 %%                                               spawn_process (routage stdout)
@@ -109,7 +109,7 @@ flowchart TD
     subgraph fake["Le faux CLI — bin/fake_claude.rs : la spécification exécutable du contrat"]
         direction TB
         F1["✅ piloté par environnement : FAKE_CLAUDE_TRANSCRIPT, FAKE_CLAUDE_ARGS_OUT,<br/>FAKE_CLAUDE_STDIN_OUT, FAKE_CLAUDE_VERSION, FAKE_CLAUDE_MAX_RUNTIME_MS<br/><i>vérifié : tests/support/mod.rs fake_cli_path, 8 fichiers d'intégration</i>"]
-        F2["✅ directives : emit, emit_json, emit_partial, stderr, sleep, await_stdin,<br/>reply_control (répond à request.subtype ou request.type avec request_id),<br/>wait_eof, exit ; --version imprime 2.1.280 (Claude Code)<br/><i>vérifié : tests/interactive_client_fake_cli.rs, transport_subprocess_runtime.rs</i>"]
+        F2["✅ directives : emit, emit_json, emit_partial, stderr, sleep, await_stdin,<br/>reply_control (répond à request.subtype ou request.type avec request_id),<br/>wait_eof, exit ; --version imprime 2.1.280 (Claude Code) ;<br/>capture_hooks (retient les hookCallbackIds de la requête initialize, l'acquitte) et emit_hook (hook_callback pour l'id capturé,<br/>attend la réponse) : les ids sont tirés à l'exécution, une transcription ne peut pas les écrire<br/><i>vérifié : tests/interactive_client_fake_cli.rs, transport_subprocess_runtime.rs ;<br/>capture_hooks / emit_hook : tests/claude_code_conformance.rs the_neutral_hooks_are_called_and_their_verdicts_written_to_the_cli</i>"]
         F3["🟠 ce qu'un nouveau provider doit livrer d'abord : un faux exécutable<br/>+ une transcription, avant tout code de transport — décidé, non écrit (RFC PO)"]
         F1 --> F2 --> F3
     end
@@ -117,13 +117,25 @@ flowchart TD
     C3 -.->|"ce qu'il simule"| F2
     C4 -.-> F2
 
-    subgraph target["🟠 Cible — RFC PO « harness multi-provider » (décidé, non écrit)"]
+    subgraph target["Harness multi-provider (RFC PO) : écrit côté nexus ; AUCUN consommateur backend à ce jour (le backend ne consomme que ClaudeCodeProvider, au mieux, sur sa branche d'intégration non fusionnée ; Codex et ACP ne sont appelés que par les tests du SDK)"]
         direction TB
-        T1["🟠 trait AgentSession générique au-dessus de la couture :<br/>send_turn, events (G1→G7), answer_permission, interrupt, set_model, close —<br/>sans serde_json::Value ni stdin brut dans la signature"]
-        T2["🟠 ClaudeCodeProvider = SubprocessTransport + message_parser + protocole de contrôle<br/>(C1→C7 déplacés derrière l'adaptateur, un seul constructeur de commande)"]
-        T3["🟠 autres adaptateurs : un CLI d'agent (Codex, Gemini CLI) ou l'API Messages directe ;<br/>chacun avec son faux exécutable (F3) et ses conformance tests"]
+        T1["✅ `pub mod agent` : traits AgentProvider / AgentSession et types neutres (AgentEvent, ToolPolicy, Capabilities,<br/>ProviderError, ResumeToken, SessionSpec) — sans serde_json::Value de protocole ni stdin brut dans les signatures ;<br/>aucun provider RÉEL ne les implémente encore (seul le double de test T4)<br/><i>vérifié : tests/agent_contract_snapshots.rs, cargo test --lib agent:: ; détail dans nexus-agent-contract</i>"]
+        T2["✅ partiel — `pub mod providers` dans lib.rs (toujours compilé) : providers::claude_code::ClaudeCodeProvider = façade sur<br/>InteractiveClient + message_parser + protocole de contrôle (control.rs), environnement en liste blanche par défaut<br/>(EnvPolicy::claude_code), config MCP par fichier. 🟠 reste : annulation d'outils, tâches de fond, six modes au lancement ;<br/>l'ancien chemin (InteractiveClient direct, C1→C7) reste public et inchangé (A14)<br/><i>vérifié : cargo test -p nexus-claude --features testkit --test claude_code_conformance ; détail dans nexus-agent-providers</i>"]
+        T5["✅ feature cargo `provider-native` (non défaut, tire reqwest) : `pub mod model` dans lib.rs, TOUJOURS compilé depuis le registre (types, quirks, PriceTable) ; guard, sse, wire, openai de model/ restent derrière cfg feature provider-native —<br/>ModelEndpoint + OpenAiEndpoint (HTTP + SSE), quirks, PriceTable, garde d endpoint ; `pub mod native` de providers/mod.rs (NativeProvider : boucle d outils MCP, transcript, compaction) derrière la même feature ; absent du build par défaut<br/><i>vérifié : cargo test -p nexus-claude --features provider-native --test model_openai_endpoint ; cargo test -p nexus-claude --features testkit,provider-native --test native_conformance ; cargo build -p nexus-claude (sans la feature) ; détail dans nexus-agent-providers</i>"]
+        T6["✅ feature cargo `provider-codex` (non défaut, aucune dépendance de plus) : `pub mod codex` de providers/mod.rs derrière cfg feature provider-codex —<br/>CodexProvider sur `codex app-server` (JSON-RPC stdio, un processus par session, lanceur unique) ; faux exécutable src/bin/fake_codex.rs ; absent du build par défaut<br/><i>vérifié : cargo test -p nexus-claude --features testkit,provider-codex --test codex_conformance ; cargo build -p nexus-claude --no-default-features (sans la feature) ; détail dans nexus-agent-providers. NON ÉTABLI : aucune session réelle, codex 0.38.0 local sans app-server</i>"]
+        T7["✅ feature cargo `provider-acp` (non défaut, aucune dépendance de plus) : `pub mod acp` de providers/mod.rs derrière cfg feature provider-acp —<br/>AcpProvider, client générique de l Agent Client Protocol (JSON-RPC stdio, un processus par session, lanceur unique) ; faux exécutable src/bin/fake_acp.rs ; absent du build par défaut<br/><i>vérifié : cargo test -p nexus-claude --features testkit,provider-acp --test acp_conformance ; cargo build -p nexus-claude --no-default-features (sans la feature) ; détail dans nexus-agent-providers. NON ÉTABLI : aucune session réelle, opencode et Gemini CLI non exécutés</i>"]
+        T3["🟠 autres adaptateurs : un CLI d agent hors ACP ou l API Messages directe (Gemini CLI passe par ACP, noeud T7) ;<br/>chacun avec son faux exécutable (F3) et ses conformance tests"]
+        T4["✅ feature cargo `testkit` (non défaut) : `pub mod testkit` dans lib.rs, derrière cfg feature testkit —<br/>ScriptedProvider (provider en mémoire, ProviderKind::Scripted) + transcriptions + suite de conformité ;<br/>utilisable par un autre crate en dev-dependency, absent du build par défaut<br/><i>vérifié : cargo test -p nexus-claude --features testkit --test agent_conformance ; cargo build -p nexus-claude (sans la feature) ; détail dans nexus-agent-providers</i>"]
         T1 --> T2
         T1 --> T3
+        T1 --> T4
+        T1 --> T5
+        T1 --> T6
+        T1 --> T7
+        T4 -.->|"même suite rejouée contre"| T2
+        T4 -.->|"même suite rejouée contre"| T3
+        T4 -.->|"même suite rejouée contre"| T6
+        T4 -.->|"même suite rejouée contre"| T7
     end
 
     S2 -.->|"à fermer"| T1

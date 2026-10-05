@@ -1,0 +1,504 @@
+{
+  "cancel_scopes": [
+    {
+      "scope": "all"
+    },
+    {
+      "id": "bg-1",
+      "scope": "task"
+    }
+  ],
+  "capabilities": {
+    "claude_code_like": {
+      "background_tasks": true,
+      "compaction_signal": true,
+      "context_window": {
+        "source": "reported",
+        "value": 200000
+      },
+      "cost": "reported",
+      "hooks": "in_protocol",
+      "images": false,
+      "interactive_permissions": true,
+      "native_question": true,
+      "per_session_mcp": true,
+      "permission_scopes": [
+        "once",
+        "session",
+        "always"
+      ],
+      "resume": true,
+      "sandbox": "none",
+      "secret_isolation": true,
+      "set_model_live": true,
+      "subagents": "nested",
+      "thinking": true,
+      "tool_cancel": true,
+      "tools": true
+    },
+    "none": {
+      "background_tasks": false,
+      "compaction_signal": false,
+      "cost": "unknown",
+      "hooks": "none",
+      "images": false,
+      "interactive_permissions": false,
+      "native_question": false,
+      "per_session_mcp": false,
+      "permission_scopes": [],
+      "resume": false,
+      "sandbox": "none",
+      "secret_isolation": false,
+      "set_model_live": false,
+      "subagents": "none",
+      "thinking": false,
+      "tool_cancel": false,
+      "tools": false
+    }
+  },
+  "contract_version": 3,
+  "errors": {
+    "auth_required": {
+      "kind": "auth_required",
+      "login_hint": "claude login"
+    },
+    "cli_not_found": {
+      "kind": "cli_not_found",
+      "program": "claude"
+    },
+    "closed": {
+      "kind": "closed"
+    },
+    "context_too_small": {
+      "available": 32768,
+      "kind": "context_too_small",
+      "needed": 40000
+    },
+    "credentials_locked": {
+      "kind": "credentials_locked"
+    },
+    "endpoint_unreachable": {
+      "detail": "connection refused",
+      "kind": "endpoint_unreachable"
+    },
+    "invalid_request": {
+      "detail": "unknown request id",
+      "kind": "invalid_request"
+    },
+    "model_no_tools": {
+      "kind": "model_no_tools",
+      "model": "tiny"
+    },
+    "model_protocol_mismatch": {
+      "accepts": [
+        "openai_responses"
+      ],
+      "harness": "codex-main",
+      "kind": "model_protocol_mismatch",
+      "protocol": "openai_chat",
+      "provider": "deepseek"
+    },
+    "overloaded": {
+      "kind": "overloaded"
+    },
+    "process_exited": {
+      "code": 1,
+      "kind": "process_exited"
+    },
+    "protocol": {
+      "detail": "unexpected frame",
+      "kind": "protocol"
+    },
+    "rate_limited": {
+      "kind": "rate_limited"
+    },
+    "timeout": {
+      "after_ms": 30000,
+      "kind": "timeout"
+    },
+    "turn_in_progress": {
+      "kind": "turn_in_progress"
+    },
+    "unauthorized": {
+      "kind": "unauthorized"
+    },
+    "unsupported": {
+      "capability": "images",
+      "kind": "unsupported"
+    }
+  },
+  "events": {
+    "background_tasks": {
+      "tasks": [
+        {
+          "description": "cargo watch",
+          "id": "bg-1",
+          "kind": "shell",
+          "pid": 4242,
+          "started_at_ms": 1700000000000,
+          "status": "running",
+          "tool_call_id": "toolu_4"
+        }
+      ],
+      "type": "background_tasks"
+    },
+    "compaction": {
+      "phase": "completed",
+      "pre_tokens": 150000,
+      "trigger": "auto",
+      "type": "compaction"
+    },
+    "delta": {
+      "index": 1,
+      "kind": "tool_input",
+      "text": "{\"a\":",
+      "tool_call_id": "toolu_1",
+      "type": "delta"
+    },
+    "done": {
+      "cost": {
+        "basis": "reported",
+        "usd": 0.0004
+      },
+      "duration_api_ms": 640,
+      "duration_ms": 812,
+      "is_error": true,
+      "model": "model-a",
+      "num_turns": 50,
+      "provider_session_id": "sess-1",
+      "result_text": "stopped",
+      "stop_reason": "max_turns",
+      "subtype": "error_max_turns",
+      "type": "done",
+      "usage": {
+        "by_model": [
+          {
+            "cache_read_tokens": 100,
+            "context_window": 200000,
+            "cost_usd": 0.0004,
+            "input_tokens": 12,
+            "model": "model-a",
+            "output_tokens": 3
+          }
+        ],
+        "cache_read_tokens": 100,
+        "context_tokens": 115,
+        "input_tokens": 12,
+        "output_tokens": 3
+      }
+    },
+    "done_with_error": {
+      "cost": {
+        "basis": "reported",
+        "usd": 0.0004
+      },
+      "duration_api_ms": 640,
+      "duration_ms": 812,
+      "error": {
+        "kind": "overloaded"
+      },
+      "is_error": true,
+      "model": "model-a",
+      "num_turns": 50,
+      "provider_session_id": "sess-1",
+      "result_text": "stopped",
+      "stop_reason": "max_turns",
+      "subtype": "error_max_turns",
+      "type": "done",
+      "usage": {
+        "by_model": [
+          {
+            "cache_read_tokens": 100,
+            "context_window": 200000,
+            "cost_usd": 0.0004,
+            "input_tokens": 12,
+            "model": "model-a",
+            "output_tokens": 3
+          }
+        ],
+        "cache_read_tokens": 100,
+        "context_tokens": 115,
+        "input_tokens": 12,
+        "output_tokens": 3
+      }
+    },
+    "error": {
+      "error": {
+        "kind": "rate_limited",
+        "retry_after_ms": 1500
+      },
+      "type": "error"
+    },
+    "model_changed": {
+      "model": "model-b",
+      "type": "model_changed"
+    },
+    "permission_ask": {
+      "canonical": "Bash",
+      "category": "command",
+      "input": {
+        "command": "rm x"
+      },
+      "request_id": "req-1",
+      "scopes": [
+        "once",
+        "session"
+      ],
+      "tool_call_id": "toolu_2",
+      "tool_name": "Bash",
+      "type": "permission_ask"
+    },
+    "policy_mode_changed": {
+      "mode": "plan_only",
+      "native_mode": "plan",
+      "type": "policy_mode_changed"
+    },
+    "provider_notice": {
+      "data": {
+        "status": "compacting"
+      },
+      "kind": "status",
+      "type": "provider_notice"
+    },
+    "question": {
+      "input": {
+        "questions": []
+      },
+      "question_id": "req-2",
+      "questions": [
+        {
+          "header": "Choice",
+          "multi_select": false,
+          "options": [
+            {
+              "description": "the first",
+              "label": "A"
+            }
+          ],
+          "question": "Which one?"
+        }
+      ],
+      "reply": "turn",
+      "tool_call_id": "toolu_3",
+      "type": "question"
+    },
+    "session_started": {
+      "cwd": "/work",
+      "mcp_servers": [
+        {
+          "name": "po",
+          "status": "connected"
+        }
+      ],
+      "model": "model-a",
+      "native_mode": "acceptEdits",
+      "policy_mode": "auto_edits",
+      "provider_session_id": "sess-1",
+      "tools": [
+        "Read",
+        "mcp__po__plan"
+      ],
+      "type": "session_started"
+    },
+    "task_update": {
+      "data": {
+        "uuid": "uuid-1"
+      },
+      "description": "explore",
+      "event_id": "uuid-1",
+      "phase": "progress",
+      "status": "running",
+      "task_id": "task-1",
+      "tool_call_id": "toolu_5",
+      "type": "task_update"
+    },
+    "text": {
+      "parent": "toolu_parent",
+      "seq": 2,
+      "text": "hi",
+      "type": "text"
+    },
+    "thinking": {
+      "seq": 2,
+      "signature": "sig",
+      "text": "hmm",
+      "type": "thinking"
+    },
+    "tool_call": {
+      "canonical": "Bash",
+      "category": "command",
+      "id": "toolu_1",
+      "input": {
+        "command": "ls"
+      },
+      "input_complete": true,
+      "name": "Bash",
+      "seq": 2,
+      "type": "tool_call"
+    },
+    "tool_result": {
+      "id": "toolu_1",
+      "is_error": false,
+      "output": "a.txt",
+      "seq": 3,
+      "type": "tool_result"
+    },
+    "user_echo": {
+      "seq": 1,
+      "text": "hello",
+      "type": "user_echo"
+    }
+  },
+  "interrupt_outcome": {
+    "diagnostic": {
+      "killed_pids": [
+        11,
+        12
+      ],
+      "pid": 10
+    },
+    "tools_cancelled": 2,
+    "turn_interrupted": true
+  },
+  "interrupt_scopes": [
+    "turn_and_tools",
+    "turn_only"
+  ],
+  "model_info": {
+    "context_window": {
+      "source": "configured",
+      "value": 32768
+    },
+    "display_name": "Model A",
+    "id": "model-a",
+    "is_default": true,
+    "pricing": {
+      "cache_read_per_mtok": 0.028,
+      "input_per_mtok": 0.28,
+      "output_per_mtok": 0.42
+    },
+    "supports_images": false,
+    "supports_tools": true
+  },
+  "permission_decisions": [
+    {
+      "decision": "allow",
+      "scope": "once"
+    },
+    {
+      "decision": "allow",
+      "scope": "session",
+      "updated_input": {
+        "command": "ls"
+      }
+    },
+    {
+      "decision": "deny",
+      "interrupt": true,
+      "message": "no"
+    }
+  ],
+  "policy_modes": [
+    "plan_only",
+    "ask",
+    "auto_edits",
+    "trust"
+  ],
+  "provider_health": {
+    "checked_at_ms": 1700000000000,
+    "detail": "app-server requires a newer codex",
+    "error": {
+      "kind": "auth_required",
+      "login_hint": "codex login"
+    },
+    "login_hint": "codex login",
+    "status": "unavailable",
+    "version": "0.38.0"
+  },
+  "provider_instance_config": {
+    "acp": {
+      "command": [
+        "opencode",
+        "acp"
+      ],
+      "cost_source": "unknown",
+      "credential": "env:OPENCODE_KEY",
+      "env_inherit": [
+        "AWS_REGION"
+      ],
+      "id": "opencode",
+      "kind": "acp"
+    },
+    "claude_code": {
+      "cost_source": "reported",
+      "credential": "none",
+      "id": "claude-code",
+      "kind": "claude_code"
+    },
+    "native": {
+      "context_window": 64000,
+      "cost_source": "priced",
+      "credential": "vault:deepseek",
+      "default_model": "deepseek-chat",
+      "endpoint": "https://api.deepseek.com/v1",
+      "extensions": {
+        "max_turns": 25
+      },
+      "id": "deepseek",
+      "kind": "native",
+      "model_aliases": {
+        "fast": "deepseek-chat"
+      },
+      "preset": "deepseek",
+      "prices": {
+        "deepseek-chat": {
+          "cache_read_per_mtok": 0.028,
+          "input_per_mtok": 0.28,
+          "output_per_mtok": 0.42
+        }
+      }
+    }
+  },
+  "question_answers": [
+    {
+      "answers": [
+        {
+          "question": "Which one?",
+          "selected": [
+            "A"
+          ]
+        }
+      ],
+      "outcome": "answered"
+    },
+    {
+      "outcome": "cancelled"
+    }
+  ],
+  "resume_token": {
+    "d": {
+      "session_id": "sess-1"
+    },
+    "k": "claude_code",
+    "v": 1
+  },
+  "tool_policy": {
+    "allow": [
+      "Read",
+      "Bash(git *)"
+    ],
+    "deny": [
+      "mcp__po__admin"
+    ],
+    "mode": "auto_edits",
+    "native_mode": "acceptEdits"
+  },
+  "turn_input": {
+    "blocks": [
+      {
+        "text": "hello",
+        "type": "text"
+      }
+    ]
+  }
+}
