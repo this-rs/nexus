@@ -244,7 +244,7 @@ goldens `tests/golden_grep/` quand `rg` est absent). Étiquettes de sortie (`Fou
 `No files found`) d'après le comportement documenté de Claude Code, non relevées. Fichiers cachés inclus, dossiers
 VCS exclus, liens symboliques non suivis (jamais d'évasion du périmètre).
 
-Restent pour N19 : images et PDF dans `Read` (blocs image : `ToolResult` ne porte que du texte pour l'instant).
+`Read` d'une image (png, jpg, gif, webp, type vérifié sur les premiers octets, 5 Mio max) : bloc image MCP plus une ligne de texte `[image: …]` qui le remplace là où l'image ne peut pas être montrée (le harnais natif n'a pas d'images en v1, décision A12). Non relevé chez Claude Code. Reste : PDF (N19b).
 
 ### N20 : outils shell (`shell/`, tests `tests/shell.rs` et `tests/monitor.rs`)
 

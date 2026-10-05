@@ -1,6 +1,7 @@
 //! `Read`: numbered lines, as `cat -n`.
 
 use async_trait::async_trait;
+use base64::Engine as _;
 use serde_json::{Value, json};
 
 use super::{FileConfig, file_state};
@@ -11,6 +12,34 @@ use crate::tool::{Annotations, CallContext, Tool, ToolResult};
 /// (1 250 lines / 56 392 characters were returned, the next line was not). Unlike Claude
 /// Code, a cut is **announced**.
 pub const MAX_OUTPUT_CHARS: usize = 56_400;
+
+/// Largest picture returned as an image block.
+pub const MAX_IMAGE_BYTES: u64 = 5 * 1024 * 1024;
+
+fn image_type(path: &std::path::Path) -> Option<&'static str> {
+    match path.extension()?.to_str()?.to_ascii_lowercase().as_str() {
+        "png" => Some("image/png"),
+        "jpg" | "jpeg" => Some("image/jpeg"),
+        "gif" => Some("image/gif"),
+        "webp" => Some("image/webp"),
+        _ => None,
+    }
+}
+
+/// The type the bytes really are: an extension is a claim, the first bytes are the fact.
+fn sniff(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        Some("image/png")
+    } else if bytes.starts_with(&[0xff, 0xd8, 0xff]) {
+        Some("image/jpeg")
+    } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        Some("image/gif")
+    } else if bytes.len() > 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        Some("image/webp")
+    } else {
+        None
+    }
+}
 
 /// The `Read` tool.
 #[derive(Debug)]
@@ -76,6 +105,20 @@ impl Tool for ReadTool {
             return ToolResult::error(format!(
                 "EISDIR: illegal operation on a directory, read '{given}'"
             ));
+        }
+        // A picture comes back as an image block, with a text line that stands in for it where the
+        // consumer cannot show images (the native harness has none in v1).
+        if let Some(mime) = image_type(&path)
+            && meta.len() <= MAX_IMAGE_BYTES
+            && let Ok(bytes) = std::fs::read(&path)
+            && sniff(&bytes) == Some(mime)
+        {
+            file_state(context).record(&path);
+            return ToolResult::ok(format!("[image: {given}, {mime}, {} bytes]", bytes.len()))
+                .with_image(crate::tool::ImageBlock {
+                    mime_type: mime.to_owned(),
+                    data: base64::engine::general_purpose::STANDARD.encode(&bytes),
+                });
         }
         let bytes = match std::fs::read(&path) {
             Ok(bytes) => bytes,

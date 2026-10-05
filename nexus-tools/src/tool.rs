@@ -41,6 +41,17 @@ pub struct ToolResult {
     pub text: String,
     /// Whether the call failed from the tool's point of view.
     pub is_error: bool,
+    /// Images that go with the text (`Read` of a picture): MCP image content blocks.
+    pub images: Vec<ImageBlock>,
+}
+
+/// An image result: base64 data and its media type.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImageBlock {
+    /// `image/png`, `image/jpeg`, `image/gif` or `image/webp`.
+    pub mime_type: String,
+    /// The bytes, base64 (standard alphabet).
+    pub data: String,
 }
 
 impl ToolResult {
@@ -49,7 +60,15 @@ impl ToolResult {
         Self {
             text: text.into(),
             is_error: false,
+            images: Vec::new(),
         }
+    }
+
+    /// Adds an image to the result.
+    #[must_use]
+    pub fn with_image(mut self, image: ImageBlock) -> Self {
+        self.images.push(image);
+        self
     }
 
     /// A failed result.
@@ -57,6 +76,7 @@ impl ToolResult {
         Self {
             text: text.into(),
             is_error: true,
+            images: Vec::new(),
         }
     }
 }

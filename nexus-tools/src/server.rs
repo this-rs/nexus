@@ -176,10 +176,15 @@ impl Server {
             ms = started.elapsed().as_millis() as u64,
             "tool call"
         );
-        Ok(json!({
-            "content": [{"type": "text", "text": truncate(&result.text, self.max_output_chars)}],
-            "isError": result.is_error,
-        }))
+        let mut content =
+            vec![json!({"type": "text", "text": truncate(&result.text, self.max_output_chars)})];
+        content.extend(
+            result
+                .images
+                .iter()
+                .map(|i| json!({"type": "image", "data": i.data, "mimeType": i.mime_type})),
+        );
+        Ok(json!({"content": content, "isError": result.is_error}))
     }
 }
 

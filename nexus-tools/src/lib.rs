@@ -33,4 +33,4 @@ pub use profile::{Profile, ToolSet};
 pub use registry::ToolRegistry;
 pub use server::{Server, Session, serve_lines};
 pub use token::{Claims, InvalidToken, SigningKey, issue, verify};
-pub use tool::{Annotations, CallContext, Notifier, SessionState, Tool, ToolResult};
+pub use tool::{Annotations, CallContext, ImageBlock, Notifier, SessionState, Tool, ToolResult};

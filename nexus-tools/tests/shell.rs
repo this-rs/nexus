@@ -342,7 +342,7 @@ async fn a_background_task_has_an_id_and_its_output_is_readable_during_and_after
     let r = f
         .call(
             "Bash",
-            json!({"command": "echo one; sleep 1; echo two", "run_in_background": true}),
+            json!({"command": "echo one; sleep 3; echo two", "run_in_background": true}),
         )
         .await;
     assert!(!r.is_error, "{}", r.text);

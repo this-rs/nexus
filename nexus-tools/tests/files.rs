@@ -815,3 +815,55 @@ async fn notebook_edit_inserts_first_without_a_cell_id_and_is_in_scope() {
     );
     assert_eq!(std::fs::read_to_string(outside).unwrap(), NOTEBOOK);
 }
+
+// ---------------------------------------------------------------------------
+// Pictures (N19b)
+// ---------------------------------------------------------------------------
+
+const PNG_1X1: &[u8] = &[
+    0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0x0d, b'I', b'H', b'D', b'R', 0, 0, 0,
+    1, 0, 0, 0, 1, 8, 6, 0, 0, 0, 0x1f, 0x15, 0xc4, 0x89,
+];
+
+#[tokio::test]
+async fn read_returns_a_picture_as_an_image_block_with_a_text_stand_in() {
+    use base64::Engine as _;
+    let f = Fixture::new();
+    std::fs::write(f.dir.path().join("p.png"), PNG_1X1).unwrap();
+    let r = f.read("p.png").await;
+    assert!(!r.is_error, "{}", r.text);
+    assert_eq!(
+        r.text,
+        format!(
+            "[image: {}, image/png, {} bytes]",
+            f.path("p.png"),
+            PNG_1X1.len()
+        )
+    );
+    assert_eq!(r.images.len(), 1);
+    assert_eq!(r.images[0].mime_type, "image/png");
+    assert_eq!(
+        base64::engine::general_purpose::STANDARD
+            .decode(&r.images[0].data)
+            .unwrap(),
+        PNG_1X1
+    );
+    // Reading it made it known to the session, like any read.
+    assert!(
+        !f.call(
+            "Write",
+            json!({"file_path": f.path("p.png"), "content": "x"})
+        )
+        .await
+        .is_error
+    );
+}
+
+#[tokio::test]
+async fn a_file_that_claims_to_be_a_picture_but_is_not_is_read_as_what_it_is() {
+    let f = Fixture::new();
+    f.put("fake.png", "just text\n");
+    let r = f.read("fake.png").await;
+    assert!(r.images.is_empty());
+    assert_eq!(r.text, "1\tjust text\n2\t");
+}
