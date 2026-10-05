@@ -1,9 +1,10 @@
 # Outils livrés avec nexus : matrice de parité avec Claude Code (N17)
 
-**Statut : brouillon du 2026-10-05.** Source : la liste d'outils réelle de la session Claude Code
-2.1.287 qui a produit ce document (schémas lus dans la session, pas de mémoire). Là où le schéma d'un
-outil n'était pas visible, la case dit **« à relever »** : elle se remplit par l'étape 2 de N17 ou par
-le banc de N25, jamais par supposition.
+**Statut : brouillon du 2026-10-05, corrigé le même jour par un relevé sur le vrai CLI.** Sources :
+(1) la liste d'outils de la session Claude Code 2.1.287 qui a produit ce document (schémas lus dans la
+session) ; (2) le message d'initialisation du vrai `claude -p` 2.1.287, qui liste ses outils (§2.1).
+Là où le schéma d'un outil n'était pas visible, la case dit **« à relever »** : elle se remplit par
+l'étape 2 de N17 ou par le banc de N25, jamais par supposition.
 
 Consigne de l'utilisateur : les outils MCP sont livrés **au minimum à équivalence** de ceux de Claude
 Code, de façon **exhaustive**, recherche internet comprise, **sans autre dépendance que ce qui se
@@ -19,6 +20,36 @@ compile en Rust**.
 | **D** | à construire plus tard | délégation parallèle de type Fusion |
 | **E** | hors périmètre, avec la raison | propre au produit Claude |
 
+## 2.1 Relevé réel : l'initialisation de `claude -p` 2.1.287
+
+`claude -p … --output-format stream-json --verbose` émet un message `system/init` qui liste les
+outils. Relevé le 2026-10-05 (modèle `claude-haiku-4-5`, un tour, 0,022 $) : **40 entrées**.
+
+`Task`, `Artifact`, `ArtifactComments`, `ArtifactData`, `Bash`, `CronCreate`, `CronDelete`,
+`CronList`, `DesignSync`, `Edit`, `EnterWorktree`, `ExitWorktree`, `ListAgents`, `LSP`, `Monitor`,
+`NotebookEdit`, `PushNotification`, `Read`, `RemoteTrigger`, `ReportFindings`, `ScheduleWakeup`,
+`SendMessage`, `Skill`, `TaskCreate`, `TaskGet`, `TaskList`, `TaskStop`, `TaskUpdate`, `ToolSearch`,
+`WebSearch`, `Workflow`, `Write`, et huit outils `mcp__claude_ai_Claude_Docs__*`.
+
+Ce que ce relevé corrige dans l'inventaire écrit de mémoire :
+
+- **`Glob` et `Grep` n'existent PAS dans Claude Code 2.1.287** : il passe par `Bash`. Ils restent
+  dans notre plan (N19) comme **extras** utiles à un harnais qui n'a pas de shell, avec la
+  sémantique de ripgrep et de `.gitignore`, **sans référence Claude Code à égaler**.
+- L'outil de sous-agent s'appelle **`Task`** dans cette version (il s'appelait `Agent` dans la session
+  qui a servi à écrire la première version de ce document : le nom change d'une version à l'autre).
+- **`LSP`** existe : il parle à des serveurs de langage externes (rust-analyzer…), donc une
+  dépendance d'exécution non Rust. Classe D, hors du premier périmètre.
+- **`TaskCreate`, `TaskGet`, `TaskList`, `TaskUpdate`** sont le suivi de tâches de Claude Code
+  (successeur de `TodoWrite`) : classe C, couverts par les tâches et étapes du PO.
+- **`WebFetch`, `AskUserQuestion`, `EnterPlanMode`, `ExitPlanMode` n'apparaissent pas** dans cette
+  initialisation non interactive : ils dépendent du mode (interactif ou `-p`) et des outils chargés
+  à la demande. Ils figuraient dans la liste de la session interactive : on les garde, en notant que
+  leur disponibilité dépend du mode.
+- Coût d'un tour trivial : environ 32 000 jetons de contexte (9 258 écrits en cache, 22 376 lus),
+  soit 0,022 $ avec le modèle le moins cher. Le prix d'un enregistrement de parité (N25) se calcule
+  sur cette base.
+
 ## 2. Inventaire
 
 ### Outils chargés d'emblée dans la session
@@ -30,12 +61,14 @@ compile en Rust**.
 | `Edit` | **A** (N19) | |
 | `Bash` | **A** (N20) | |
 | `AskUserQuestion` | B | événement `question` et capacité `native_question` |
-| `Agent` | B / D | capacité `subagents` ; la délégation parallèle est la classe D |
+| `Agent` (nommé `Task` dans 2.1.287) | B / D | capacité `subagents` ; la délégation parallèle est la classe D |
 | `Skill` | B | chargement d'instructions : à porter au niveau du harnais, pas en outil MCP |
 | `ToolSearch` | B | chargement différé d'outils : utile dès que le catalogue grossit (coût de contexte), voir §5 |
 | `ScheduleWakeup` | C | déclencheurs de plans du PO |
 | `Workflow` | D | orchestration multi-agents |
 | `ListAgents`, `SendMessage` | C | communication entre sessions : MCP du PO |
+| `TaskCreate`, `TaskGet`, `TaskList`, `TaskUpdate` | C | suivi de tâches : tâches et étapes du PO |
+| `LSP` | D | serveurs de langage externes : dépendance d'exécution non Rust |
 | `Artifact` | E | produit Claude (pages hébergées) |
 | `ReportFindings` | E | produit Claude (revue de code) |
 
@@ -59,10 +92,10 @@ compile en Rust**.
 
 | Outil | Classe | Note |
 |---|---|---|
-| `Glob` | **A** (N19) | cette session passe par `Bash` ; ajouté par exhaustivité, **à confirmer** par un relevé |
-| `Grep` | **A** (N19) | idem ; sémantique de ripgrep |
-| `TodoWrite` | C | tâches et étapes du PO |
-| `MultiEdit` | **A** ou refusé | non présent ici ; à relever |
+| `Glob` | **A, extra** (N19) | **absent de 2.1.287** (relevé §2.1) : Claude Code passe par `Bash`. Extra de nexus, sémantique de `.gitignore` et du motif ; aucune référence Claude Code à égaler |
+| `Grep` | **A, extra** (N19) | idem ; sémantique de ripgrep |
+| `TodoWrite` | C | remplacé par `TaskCreate` et suivants dans 2.1.287 ; tâches et étapes du PO |
+| `MultiEdit` | non | absent de 2.1.287 |
 
 ## 3. Ce que « équivalence » veut dire, outil par outil
 
@@ -112,9 +145,9 @@ comportement** : la preuve, c'est le banc de N25.
 
 ### À relever
 
-`WebFetch`, `NotebookEdit`, `TaskStop`, `Glob`, `Grep`, `EnterWorktree` / `ExitWorktree` :
-schémas absents de la session. Étape 2 de N17, par exécution du vrai `claude` sur des fichiers de
-test, ou par N25.
+`WebFetch`, `NotebookEdit`, `TaskStop`, `EnterWorktree` / `ExitWorktree` : schémas absents de la
+session. Étape 2 de N17, par exécution du vrai `claude` sur des fichiers de test, ou par N25.
+(`Glob` et `Grep` n'ont pas de référence : voir §2.1.)
 
 ## 4. Politique de dépendances
 
