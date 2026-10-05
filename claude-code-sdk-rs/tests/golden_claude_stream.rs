@@ -131,12 +131,15 @@ fn check_golden(name: &str, actual: &Value) {
         std::fs::write(&path, &rendered).unwrap();
         return;
     }
-    let expected = std::fs::read_to_string(&path).unwrap_or_else(|_| {
-        panic!(
-            "missing golden {}; record it with UPDATE_GOLDEN=1",
-            path.display()
-        )
-    });
+    // A Windows checkout may turn the golden files into CRLF (core.autocrlf): compare the content.
+    let expected = std::fs::read_to_string(&path)
+        .unwrap_or_else(|_| {
+            panic!(
+                "missing golden {}; record it with UPDATE_GOLDEN=1",
+                path.display()
+            )
+        })
+        .replace("\r\n", "\n");
     assert_eq!(
         expected, rendered,
         "golden `{name}` drifted (UPDATE_GOLDEN=1 to re-record after reviewing the diff)"
