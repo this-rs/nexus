@@ -14,13 +14,14 @@ use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use nexus_tools::files::{FileConfig, Scope};
 use nexus_tools::http;
 use nexus_tools::limits::DEFAULT_MAX_OUTPUT_CHARS;
 use nexus_tools::{Profile, Server, Session, SigningKey, ToolRegistry, serve_lines, verify};
 use tokio::io::BufReader;
 
 const USAGE: &str = "usage: nexus-tools [--listen ADDR] [--allow-origin ORIGIN]... \
-[--max-output-chars N] [--unrestricted]\n\
+[--max-output-chars N] [--cwd DIR] [--add-dir DIR]... [--backup-dir DIR] [--unrestricted]\n\
 environment: NEXUS_TOOLS_KEY (signing key, >= 32 bytes), NEXUS_TOOLS_PROFILE (stdio token), \
 NEXUS_TOOLS_LOG";
 
@@ -29,6 +30,9 @@ struct Options {
     allow_origins: Vec<String>,
     max_output_chars: usize,
     unrestricted: bool,
+    cwd: Option<std::path::PathBuf>,
+    add_dirs: Vec<std::path::PathBuf>,
+    backup_dir: Option<std::path::PathBuf>,
 }
 
 fn fail(message: &str) -> ExitCode {
@@ -42,6 +46,9 @@ fn parse_args() -> Result<Options, String> {
         allow_origins: Vec::new(),
         max_output_chars: DEFAULT_MAX_OUTPUT_CHARS,
         unrestricted: false,
+        cwd: None,
+        add_dirs: Vec::new(),
+        backup_dir: None,
     };
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -60,6 +67,9 @@ fn parse_args() -> Result<Options, String> {
                     .parse()
                     .map_err(|_| "--max-output-chars takes a number")?;
             },
+            "--cwd" => options.cwd = Some(value("--cwd")?.into()),
+            "--add-dir" => options.add_dirs.push(value("--add-dir")?.into()),
+            "--backup-dir" => options.backup_dir = Some(value("--backup-dir")?.into()),
             "--unrestricted" => options.unrestricted = true,
             "--version" => {
                 println!("nexus-tools {}", env!("CARGO_PKG_VERSION"));
@@ -75,16 +85,26 @@ fn parse_args() -> Result<Options, String> {
     Ok(options)
 }
 
-fn registry() -> ToolRegistry {
+fn registry(options: &Options) -> Result<ToolRegistry, String> {
+    let cwd = match &options.cwd {
+        Some(dir) => dir.clone(),
+        None => std::env::current_dir().map_err(|e| format!("no working directory: {e}"))?,
+    };
+    let scope = Scope::new(&cwd, options.add_dirs.clone())
+        .map_err(|e| format!("cannot use the session directories: {e}"))?;
+    let mut files = FileConfig::new(scope);
+    if let Some(dir) = &options.backup_dir {
+        files = files.with_backup_dir(dir);
+    }
     #[allow(unused_mut)]
-    let mut registry = ToolRegistry::new();
+    let mut registry = nexus_tools::files::register(ToolRegistry::new(), &files);
     #[cfg(feature = "test-tools")]
     {
         registry = registry
             .with(nexus_tools::testing::EchoTool)
             .with(nexus_tools::testing::WriteTool);
     }
-    registry
+    Ok(registry)
 }
 
 /// The signing key from the environment. The value is never printed, not even on failure.
@@ -126,7 +146,11 @@ fn main() -> ExitCode {
 }
 
 async fn run(options: Options) -> ExitCode {
-    let server = Arc::new(Server::new(registry()).with_max_output_chars(options.max_output_chars));
+    let registry = match registry(&options) {
+        Ok(registry) => registry,
+        Err(message) => return fail(&message),
+    };
+    let server = Arc::new(Server::new(registry).with_max_output_chars(options.max_output_chars));
     if let Some(address) = options.listen {
         // HTTP always needs the key: without it the server could not tell a session from a
         // stranger, on a loopback address as much as on a public one.

@@ -214,3 +214,24 @@ par l'utilisateur**.
 - `WebFetch` applique chez Claude Code une consigne d'extraction avec un petit modèle. Ici l'outil
   rend le Markdown et la consigne est appliquée par le modèle de la session, ou par un modèle de
   résumé **optionnel** lié par `ModelBinding` ; jamais par un appel de modèle caché.
+
+## 5. État de la livraison (N19, en cours)
+
+Livrés dans `nexus-tools` (module `files`, tests `tests/files.rs`) : `Read` (texte, notebooks), `Write`,
+`Edit`, état « lu » par session, périmètre (`--cwd`, `--add-dir`, liens symboliques et `..` résolus
+composant par composant), écriture atomique (fichier temporaire voisin, `fsync`, `rename`), sauvegarde
+optionnelle (`--backup-dir`). Mutations jouées : état « lu » ignoré, symlinks non suivis, écriture non
+atomique — chacune fait échouer des tests.
+
+Écarts **volontaires** avec le vrai Claude Code :
+- Plafond de `Read` en **caractères** (56 400, calé sur le relevé : 1 250 lignes / 56 392 caractères) et
+  non en jetons ; une coupe est **annoncée** (`[output truncated: … offset N …]`), là où Claude Code coupe en
+  silence. Une ligne seule est toujours rendue entière : le fichier d'une ligne de 60 000 caractères perd
+  donc sa dernière ligne vide, remplacée par l'annonce.
+- `Write`/`Edit` refusent un fichier **modifié depuis sa lecture** (`File has been modified since read…`) :
+  règle de Claude Code, non enregistrée (texte du message à confirmer par un relevé).
+- Un chemin hors périmètre est refusé (`Path is outside the directories this session may access`) ; Claude
+  Code demande une permission à la place.
+
+Restent pour N19 : images et PDF dans `Read` (blocs image : `ToolResult` ne porte que du texte pour
+l'instant), `Glob`, `Grep`, `NotebookEdit`.

@@ -11,6 +11,7 @@
 //! signed token that carries it, output caps that always say when they cut, and the two
 //! transports (stdio, streamable HTTP).
 
+pub mod files;
 pub mod http;
 pub mod limits;
 pub mod profile;
