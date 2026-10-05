@@ -22,9 +22,15 @@ const WAIT: Duration = Duration::from_secs(5);
 const CANARY: &str = "CARGO_MANIFEST_DIR";
 const MCP_SECRET: &str = "s3cr3t-db-password-0123456789";
 
-/// Names the operating system or the loader injects into a child no matter what
-/// the parent passes.
-const OS_INJECTED: &[&str] = &["__CF_USER_TEXT_ENCODING", "__CFBundleIdentifier"];
+/// Names the operating system, the loader or the coverage runtime inject into a child no
+/// matter what the parent passes. `__LLVM_PROFILE_RT_INIT_ONCE` is set by the LLVM profiling
+/// runtime of every instrumented process (the fake CLI under `cargo llvm-cov`) in its own
+/// environment: it is not a variable of the host that leaked.
+const OS_INJECTED: &[&str] = &[
+    "__CF_USER_TEXT_ENCODING",
+    "__CFBundleIdentifier",
+    "__LLVM_PROFILE_RT_INIT_ONCE",
+];
 
 fn idle_session() -> FakeCli {
     Transcript::new().wait_eof().build()
