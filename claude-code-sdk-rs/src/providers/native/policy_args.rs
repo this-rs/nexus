@@ -520,6 +520,8 @@ mod tests {
 
     // ----- paths ------------------------------------------------------------
 
+    // POSIX paths (`/work/project`): not absolute on Windows, where the harness paths are untested.
+    #[cfg(unix)]
     #[test]
     fn a_path_is_normalised_against_the_session_directory() {
         let n = |p: &str| normalise(p, Path::new(CWD));
@@ -535,6 +537,8 @@ mod tests {
         assert_eq!(n("a//b/./c"), "a/b/c");
     }
 
+    // POSIX paths (`/work/project`): not absolute on Windows, where the harness paths are untested.
+    #[cfg(unix)]
     #[test]
     fn a_denied_path_is_denied_however_it_is_written() {
         let p = policy(PolicyMode::Ask, &[], &["Read(.env*)", "Edit(secrets/*)"]);
@@ -576,6 +580,8 @@ mod tests {
         }
     }
 
+    // POSIX paths (`/work/project`): not absolute on Windows, where the harness paths are untested.
+    #[cfg(unix)]
     #[test]
     fn an_allowed_path_covers_only_its_normal_form() {
         let p = policy(PolicyMode::Ask, &["Edit(src/*)"], &[]);
