@@ -27,7 +27,7 @@
 //! | `resume`, `set_model_live`, `per_session_mcp`, `compaction_signal`, `tool_cancel` | yes |
 //! | `secret_isolation` | yes: stdio servers get an allowlisted environment, credentials are resolved per request and never stored |
 //! | `sandbox` | none: information for the user, not a gate: `trust` opens like on every provider |
-//! | `hooks` | none: `SessionSpec::hooks` is ignored, with `provider_notice { hooks_not_supported }` first on `out_of_band()` — so `before_compaction` is never called |
+//! | `hooks` | `in_protocol`: `before_tool` (after the exposure check, before the policy, so a replaced input is judged too), `after_tool` (only for a call that ran; its text reaches the model, not the `tool_result` event) and `before_compaction` (its text joins the summary instructions). A hook that does not answer within `NativeConfig::hook_timeout` is skipped with `provider_notice { hook_timeout }` |
 //! | `subagents`, `background_tasks`, `native_question`, `images` | no |
 //!
 //! `capabilities()` is synchronous: it reads what was probed. Call
@@ -57,9 +57,9 @@ use async_trait::async_trait;
 
 use crate::agent::{
     AgentEvent, AgentProvider, AgentSession, Capabilities, ContextWindow, ContextWindowSource,
-    CostBasis, McpServerSpec, McpServerStatus, ModelInfo, PermissionScope, ProviderError,
-    ProviderHealth, ProviderKind, ResumeToken, SandboxLevel, SessionLimits, SessionSpec,
-    SystemPromptSpec,
+    CostBasis, HookSupport, McpServerSpec, McpServerStatus, ModelInfo, PermissionScope,
+    ProviderError, ProviderHealth, ProviderKind, ResumeToken, SandboxLevel, SessionLimits,
+    SessionSpec, SystemPromptSpec,
 };
 use crate::model::{ChatMessage, EndpointProbe, ModelEndpoint, PriceTable};
 
@@ -196,11 +196,15 @@ pub struct NativeConfig {
     /// The optional browser (N23). Configuring it is the operator's authorisation; without the
     /// executable installed there is no `browser_*` tool and a `browser_unavailable` notice.
     pub browser: Option<BrowserTools>,
+    /// How long a host hook may take before the harness goes on without it.
+    pub hook_timeout: std::time::Duration,
 }
 
 impl NativeConfig {
     /// Default bound on the model round trips of a turn (a runaway tool loop).
     pub const DEFAULT_MAX_TURNS: u32 = 50;
+    /// A hook that has not answered by then is skipped.
+    pub const DEFAULT_HOOK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
     /// Default longest a turn may run: 30 minutes.
     pub const DEFAULT_TURN_TIMEOUT_MS: u64 = 30 * 60 * 1000;
     /// Default token budget of a session (input + output, reported or estimated).
@@ -229,6 +233,7 @@ impl NativeConfig {
             mcp: McpConfig::default(),
             default_tools: None,
             browser: None,
+            hook_timeout: Self::DEFAULT_HOOK_TIMEOUT,
         }
     }
 }
@@ -469,12 +474,6 @@ impl NativeProvider {
             None => (new_transcript_id(), Vec::new()),
         };
         let mut initial_events = notices;
-        if spec.hooks.is_some() {
-            initial_events.push(AgentEvent::ProviderNotice {
-                kind: "hooks_not_supported".to_owned(),
-                data: serde_json::json!({ "provider": "native" }),
-            });
-        }
         initial_events.push(AgentEvent::SessionStarted {
             provider_session_id: Some(transcript_id.clone()),
             model: Some(model.clone()),
@@ -495,6 +494,7 @@ impl NativeProvider {
             policy_ceiling,
             max_turns,
             deltas,
+            hooks,
             ..
         } = spec;
         let max_turns = max_turns.or(self.config.max_turns);
@@ -510,6 +510,7 @@ impl NativeProvider {
             limits,
             ceiling: policy_ceiling,
             cwd,
+            hooks,
             transcript_id,
             store: Arc::clone(&self.store),
             policy,
@@ -556,6 +557,7 @@ impl AgentProvider for NativeProvider {
         capabilities.set_model_live = true;
         capabilities.tool_cancel = true;
         capabilities.resume = true;
+        capabilities.hooks = HookSupport::InProtocol;
         let Some(model) = model.or(self.config.default_model.as_deref()) else {
             return capabilities;
         };

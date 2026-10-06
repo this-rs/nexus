@@ -38,9 +38,9 @@ use super::mcp::McpError;
 use super::session::{Core, PendingAsk, StopCause, TurnSignal};
 use super::tools::{ToolEntry, ToolRegistry};
 use crate::agent::{
-    AgentEvent, CompactionPhase, CompactionTrigger, Cost, CostBasis, DeltaKind, ModelUsage,
-    PermissionDecision, PolicyDecision, ProviderError, StopReason, ToolCategory, ToolOutput,
-    TurnInput, Usage,
+    AgentEvent, CompactionInfo, CompactionPhase, CompactionTrigger, Cost, CostBasis, DeltaKind,
+    HookVerdict, ModelUsage, PermissionDecision, PolicyDecision, ProviderError, StopReason,
+    ToolCallInfo, ToolCategory, ToolOutput, ToolResultInfo, TurnInput, Usage,
 };
 use crate::model::{
     ChatMessage, CompletionChunk, CompletionRequest, FinishReason, Role, ToolCallChunk,
@@ -323,7 +323,7 @@ async fn iterate(
         messages.push(assistant(&step.text, &step.reasoning, calls.clone()));
         let ran = run_tools(core, signal, &calls).await;
         for (call, run) in calls.iter().zip(&ran) {
-            messages.push(ChatMessage::tool(call.id.clone(), run.content.clone()));
+            messages.push(ChatMessage::tool(call.id.clone(), with_context(run)));
         }
         if let Some(fatal) = ran.into_iter().find_map(|run| run.fatal) {
             core.mark_dead(fatal.clone());
@@ -573,7 +573,24 @@ async fn maybe_compact(
         trigger: Some(CompactionTrigger::Auto),
         pre_tokens: Some(size),
     });
-    let request = summary_request(model, &messages[..split], None, &config);
+    let instructions = match &core.hooks {
+        Some(hooks) => {
+            let info = CompactionInfo {
+                trigger: "auto".to_owned(),
+                custom_instructions: None,
+            };
+            hook_call(
+                core,
+                signal,
+                "before_compaction",
+                hooks.before_compaction(&info),
+            )
+            .await
+            .flatten()
+        },
+        None => None,
+    };
+    let request = summary_request(model, &messages[..split], instructions.as_deref(), &config);
     let summary_prompt_estimate = estimate_tokens(&request.messages);
     let started = Instant::now();
     let summary = tokio::select! {
@@ -613,6 +630,9 @@ async fn maybe_compact(
 
 struct Run {
     content: String,
+    /// Text a hook asked to put in front of the model with this result. It is not part of the
+    /// `tool_result` event: the host that wrote the hook already has it.
+    context: Vec<String>,
     fatal: Option<ProviderError>,
 }
 
@@ -662,7 +682,8 @@ async fn run_one(
     call: &ToolCallChunk,
     token: CancelToken,
 ) -> Run {
-    let (content, is_error, fatal) = execute(core, signal, call, &token).await;
+    let mut context = Vec::new();
+    let (content, is_error, fatal) = execute(core, signal, call, &token, &mut context).await;
     core.end_tool(&call.id);
     core.emit(AgentEvent::ToolResult {
         id: call.id.clone(),
@@ -671,7 +692,11 @@ async fn run_one(
         seq: None,
         parent: None,
     });
-    Run { content, fatal }
+    Run {
+        content,
+        context,
+        fatal,
+    }
 }
 
 fn stopped_message(signal: &TurnSignal, token: &CancelToken) -> String {
@@ -748,6 +773,7 @@ async fn execute(
     signal: &TurnSignal,
     call: &ToolCallChunk,
     token: &CancelToken,
+    context: &mut Vec<String>,
 ) -> (String, bool, Option<ProviderError>) {
     let fail = |message: &str| (message.to_owned(), true, None);
     let Some(entry) = core.registry.get(&call.name) else {
@@ -765,6 +791,32 @@ async fn execute(
         && let Err(reason) = super::browser::guard_call(&entry.tool, &input)
     {
         return fail(&reason);
+    }
+    // The host's say comes first, and what it changes is judged by the policy like anything else.
+    if let Some(hooks) = &core.hooks {
+        let info = ToolCallInfo {
+            id: Some(call.id.clone()),
+            name: call.name.clone(),
+            canonical: entry.canonical.clone(),
+            category: entry.category,
+            input: input.clone(),
+        };
+        match hook_call(core, signal, "before_tool", hooks.before_tool(&info)).await {
+            Some(HookVerdict::Deny { reason }) => return (reason, true, None),
+            Some(HookVerdict::ReplaceInput(replaced)) => {
+                if !replaced.is_object() {
+                    return fail(
+                        "a hook replaced the tool input with something that is not a JSON object",
+                    );
+                }
+                input = replaced;
+            },
+            Some(HookVerdict::AddContext(text)) => context.push(text),
+            _ => {},
+        }
+        if signal.token.is_cancelled() || token.is_cancelled() {
+            return (stopped_message(signal, token), true, None);
+        }
     }
     match core.decide(entry, &input) {
         PolicyDecision::Allow => {},
@@ -791,15 +843,70 @@ async fn execute(
             () = token.cancelled() => {},
         }
     };
-    match client.call_tool(&entry.tool, input, cancelled).await {
+    let ran_input = input.clone();
+    let (content, is_error, fatal) = match client.call_tool(&entry.tool, input, cancelled).await {
         Ok(result) => (result.text, result.is_error, None),
-        Err(McpError::Cancelled) => (stopped_message(signal, token), true, None),
-        Err(McpError::Died { code }) => (
-            "the tool server exited".to_owned(),
-            true,
-            Some(ProviderError::ProcessExited { code }),
-        ),
+        Err(McpError::Cancelled) => return (stopped_message(signal, token), true, None),
+        Err(McpError::Died { code }) => {
+            return (
+                "the tool server exited".to_owned(),
+                true,
+                Some(ProviderError::ProcessExited { code }),
+            );
+        },
         Err(McpError::Failed(error)) => (format!("tool call failed: {error}"), true, None),
         Err(McpError::Rpc { message }) => (message, true, None),
+    };
+    if let Some(hooks) = &core.hooks {
+        let info = ToolResultInfo {
+            call: ToolCallInfo {
+                id: Some(call.id.clone()),
+                name: call.name.clone(),
+                canonical: entry.canonical.clone(),
+                category: entry.category,
+                input: ran_input,
+            },
+            output: Value::String(content.clone()),
+            is_error,
+        };
+        if let Some(Some(text)) =
+            hook_call(core, signal, "after_tool", hooks.after_tool(&info)).await
+        {
+            context.push(text);
+        }
+    }
+    (content, is_error, fatal)
+}
+
+/// The tool result as the model reads it: the output, then what hooks added.
+fn with_context(run: &Run) -> String {
+    let mut text = run.content.clone();
+    for added in &run.context {
+        text.push_str("\n\n");
+        text.push_str(added);
+    }
+    text
+}
+
+/// Awaits a host hook, but never past the turn's end or `NativeConfig::hook_timeout`. `None` means the hook
+/// gave no answer (the turn was stopped, or it took too long: a notice says so).
+async fn hook_call<T>(
+    core: &Core,
+    signal: &TurnSignal,
+    name: &str,
+    call: impl std::future::Future<Output = T>,
+) -> Option<T> {
+    tokio::select! {
+        answer = tokio::time::timeout(core.settings.hook_timeout, call) => match answer {
+            Ok(answer) => Some(answer),
+            Err(_) => {
+                core.emit(AgentEvent::ProviderNotice {
+                    kind: "hook_timeout".to_owned(),
+                    data: json!({ "provider": "native", "hook": name }),
+                });
+                None
+            },
+        },
+        () = signal.token.cancelled() => None,
     }
 }

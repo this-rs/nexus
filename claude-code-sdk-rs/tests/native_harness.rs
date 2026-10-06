@@ -400,10 +400,11 @@ async fn capabilities_say_what_was_probed_and_nothing_more() {
     assert_eq!(after.cost, CostBasis::Priced);
     // What the native harness has not: stated as absent.
     assert!(!after.images && !after.native_question && !after.background_tasks);
-    assert_eq!(format!("{:?}", after.hooks), "None");
     assert_eq!(format!("{:?}", after.subagents), "None");
     assert_eq!(format!("{:?}", after.sandbox), "None");
     assert!(after.secret_isolation && after.per_session_mcp);
+    // What it has since the hooks run in its loop.
+    assert_eq!(after.hooks, HookSupport::InProtocol);
 }
 
 #[tokio::test]
@@ -1582,4 +1583,290 @@ async fn with_strict_exposure_off_an_allow_list_only_pre_approves() {
     let session = h.open(spec).await;
     turn(&*session, "list").await;
     assert_eq!(offered_tools(h.chat().last().unwrap()).len(), 9);
+}
+
+// ---------------------------------------------------------------------------
+// Host hooks (SessionHooks): the graph's way into the chain
+// ---------------------------------------------------------------------------
+
+use nexus_claude::agent::{
+    CompactionInfo, HookSupport, HookVerdict, SessionHooks, ToolCallInfo, ToolResultInfo,
+};
+use std::sync::Mutex;
+
+#[derive(Default)]
+struct TestHooks {
+    verdict: Mutex<Option<HookVerdict>>,
+    after: Option<String>,
+    compaction: Option<String>,
+    /// `before_tool` never answers.
+    stall: bool,
+    calls: Mutex<Vec<ToolCallInfo>>,
+    results: Mutex<Vec<ToolResultInfo>>,
+    compactions: Mutex<Vec<CompactionInfo>>,
+}
+
+#[async_trait::async_trait]
+impl SessionHooks for TestHooks {
+    async fn before_tool(&self, call: &ToolCallInfo) -> HookVerdict {
+        self.calls.lock().unwrap().push(call.clone());
+        if self.stall {
+            std::future::pending::<()>().await;
+        }
+        self.verdict
+            .lock()
+            .unwrap()
+            .take()
+            .unwrap_or(HookVerdict::Continue)
+    }
+
+    async fn after_tool(&self, result: &ToolResultInfo) -> Option<String> {
+        self.results.lock().unwrap().push(result.clone());
+        self.after.clone()
+    }
+
+    async fn before_compaction(&self, info: &CompactionInfo) -> Option<String> {
+        self.compactions.lock().unwrap().push(info.clone());
+        self.compaction.clone()
+    }
+}
+
+fn echo_routes() -> Vec<Value> {
+    vec![
+        tool_reply(Some("go"), &[echo_call()], None, None),
+        text_reply(Some(TOOL), "done", None, None),
+    ]
+}
+
+async fn hooked(
+    h: &Harness,
+    hooks: Arc<TestHooks>,
+    log: &std::path::Path,
+) -> Arc<dyn AgentSession> {
+    let mut spec = h.spec_with_mcp(log);
+    spec.hooks = Some(hooks);
+    h.open(spec).await
+}
+
+#[tokio::test]
+async fn the_native_harness_runs_the_hooks_in_protocol_and_says_nothing_about_ignoring_them() {
+    let h = Harness::new(echo_routes()).await;
+    assert_eq!(
+        h.provider.capabilities(Some("m")).hooks,
+        HookSupport::InProtocol
+    );
+    let log_dir = tempfile::tempdir().unwrap();
+    let session = hooked(&h, Arc::new(TestHooks::default()), &log_path(&log_dir)).await;
+    let events = turn(&*session, "go").await;
+    assert!(
+        !events.iter().any(|e| matches!(
+            e,
+            AgentEvent::ProviderNotice { kind, .. } if kind == "hooks_not_supported"
+        )),
+        "{events:?}"
+    );
+}
+
+#[tokio::test]
+async fn after_tool_text_reaches_the_model_and_not_the_tool_result_event() {
+    let h = Harness::new(echo_routes()).await;
+    let log_dir = tempfile::tempdir().unwrap();
+    let hooks = Arc::new(TestHooks {
+        after: Some("GRAPH: src/chat/manager.rs co-changes with composer.rs".into()),
+        ..TestHooks::default()
+    });
+    let session = hooked(&h, hooks.clone(), &log_path(&log_dir)).await;
+    let events = turn(&*session, "go").await;
+    assert_eq!(stop_reason(&events), StopReason::Completed);
+
+    // The model reads the output, then the hook's text, in the same tool message.
+    let second = &h.chat()[1];
+    let tool = second["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["role"] == "tool")
+        .unwrap();
+    let content = tool["content"].as_str().unwrap();
+    assert!(content.starts_with("echo: hi"), "{content}");
+    assert!(content.contains("GRAPH: src/chat/manager.rs"), "{content}");
+    // The event the consumer sees is the tool's own output.
+    assert_eq!(tool_results(&events)[0].2, "echo: hi");
+    // The hook saw the call that ran, with its canonical identity and input.
+    let results = hooks.results.lock().unwrap();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].call.name, "mcp__fake__echo");
+    assert_eq!(results[0].call.input, json!({"text": "hi"}));
+    assert_eq!(results[0].output, json!("echo: hi"));
+    assert!(!results[0].is_error);
+}
+
+#[tokio::test]
+async fn a_denying_before_tool_stops_the_call_and_tells_the_model_why() {
+    let h = Harness::new(echo_routes()).await;
+    let log_dir = tempfile::tempdir().unwrap();
+    let log = log_path(&log_dir);
+    let hooks = Arc::new(TestHooks {
+        verdict: Mutex::new(Some(HookVerdict::Deny {
+            reason: "blocked by the graph: hot bridge".into(),
+        })),
+        ..TestHooks::default()
+    });
+    let session = hooked(&h, hooks.clone(), &log).await;
+    let events = turn(&*session, "go").await;
+    assert_eq!(stop_reason(&events), StopReason::Completed);
+    assert_eq!(mcp_calls(&log, "echo"), 0);
+    assert_eq!(
+        tool_results(&events),
+        vec![("c1".into(), true, "blocked by the graph: hot bridge".into())]
+    );
+    assert!(h.chat()[1].to_string().contains("hot bridge"));
+    // A refused call did not run: no after_tool.
+    assert!(hooks.results.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn a_replaced_input_is_what_runs() {
+    let h = Harness::new(echo_routes()).await;
+    let log_dir = tempfile::tempdir().unwrap();
+    let hooks = Arc::new(TestHooks {
+        verdict: Mutex::new(Some(HookVerdict::ReplaceInput(
+            json!({"text": "rewritten"}),
+        ))),
+        ..TestHooks::default()
+    });
+    let session = hooked(&h, hooks, &log_path(&log_dir)).await;
+    let events = turn(&*session, "go").await;
+    assert_eq!(tool_results(&events)[0].2, "echo: rewritten");
+}
+
+#[tokio::test]
+async fn a_hook_verdict_is_not_a_way_around_the_tool_policy() {
+    // The hook cannot launder a call past the tool policy: `write` asks, and the user says no.
+    let h = Harness::new(vec![
+        tool_reply(Some("write"), &[write_call()], None, None),
+        text_reply(Some(TOOL), "ok", None, None),
+    ])
+    .await;
+    let log_dir = tempfile::tempdir().unwrap();
+    let log = log_path(&log_dir);
+    let hooks = Arc::new(TestHooks {
+        verdict: Mutex::new(Some(HookVerdict::ReplaceInput(json!({"text": "x"})))),
+        ..TestHooks::default()
+    });
+    let session = hooked(&h, hooks.clone(), &log).await;
+    let events = turn_deciding(&*session, "write", |_| PermissionDecision::Deny {
+        message: Some("no".into()),
+        interrupt: false,
+    })
+    .await;
+    // The hook did speak (a hook-free harness would also refuse, so this is what makes it a test)...
+    assert_eq!(hooks.calls.lock().unwrap().len(), 1);
+    // ...and the call still went through the policy, which asked and was refused.
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::PermissionAsk { .. }))
+    );
+    assert_eq!(mcp_calls(&log, "write"), 0);
+    assert_eq!(tool_results(&events)[0].2, "no");
+}
+
+#[tokio::test]
+async fn a_replacement_that_is_not_an_object_is_refused() {
+    let h = Harness::new(echo_routes()).await;
+    let log_dir = tempfile::tempdir().unwrap();
+    let log = log_path(&log_dir);
+    let hooks = Arc::new(TestHooks {
+        verdict: Mutex::new(Some(HookVerdict::ReplaceInput(json!("nope")))),
+        ..TestHooks::default()
+    });
+    let session = hooked(&h, hooks, &log).await;
+    let events = turn(&*session, "go").await;
+    assert_eq!(mcp_calls(&log, "echo"), 0);
+    assert!(tool_results(&events)[0].1);
+}
+
+#[tokio::test]
+async fn context_added_before_the_tool_follows_its_result() {
+    let h = Harness::new(echo_routes()).await;
+    let log_dir = tempfile::tempdir().unwrap();
+    let hooks = Arc::new(TestHooks {
+        verdict: Mutex::new(Some(HookVerdict::AddContext("NOTE: gotcha on echo".into()))),
+        ..TestHooks::default()
+    });
+    let session = hooked(&h, hooks, &log_path(&log_dir)).await;
+    let events = turn(&*session, "go").await;
+    assert_eq!(tool_results(&events)[0].2, "echo: hi");
+    let second = h.chat()[1].to_string();
+    assert!(second.contains("NOTE: gotcha on echo"), "{second}");
+}
+
+#[tokio::test]
+async fn a_hook_that_never_answers_does_not_freeze_the_turn() {
+    let h = Harness::with(echo_routes(), |config| {
+        config.hook_timeout = Duration::from_millis(150);
+    })
+    .await;
+    let log_dir = tempfile::tempdir().unwrap();
+    let log = log_path(&log_dir);
+    let hooks = Arc::new(TestHooks {
+        stall: true,
+        ..TestHooks::default()
+    });
+    let session = hooked(&h, hooks, &log).await;
+    let started = Instant::now();
+    let events = turn(&*session, "go").await;
+    assert!(started.elapsed() < Duration::from_secs(10));
+    assert_eq!(stop_reason(&events), StopReason::Completed);
+    // Skipped, not failed: the call went through the normal policy.
+    assert_eq!(mcp_calls(&log, "echo"), 1);
+    assert!(events.iter().any(|e| matches!(
+        e,
+        AgentEvent::ProviderNotice { kind, .. } if kind == "hook_timeout"
+    )));
+}
+
+#[tokio::test]
+async fn before_compaction_text_joins_the_summary_instructions() {
+    let h = Harness::with(
+        vec![
+            tool_reply(Some("go"), &[echo_call()], Some("old"), Some((100, 10))),
+            tool_reply(
+                Some(TOOL),
+                &[("c2", "mcp__fake__echo", json!({"text": "two"}))],
+                Some("kept"),
+                Some((10_000, 10)),
+            ),
+            text_reply(
+                Some("compacting the history"),
+                "THE SUMMARY",
+                None,
+                Some((50, 20)),
+            ),
+            text_reply(Some(TOOL), "done", None, Some((300, 10))),
+        ],
+        |config| {
+            config.context_window = Some(12_000);
+            config.compaction.keep_recent = 2;
+        },
+    )
+    .await;
+    let log_dir = tempfile::tempdir().unwrap();
+    let hooks = Arc::new(TestHooks {
+        compaction: Some("Keep the decision about the hot bridge.".into()),
+        ..TestHooks::default()
+    });
+    let session = hooked(&h, hooks.clone(), &log_path(&log_dir)).await;
+    let events = turn(&*session, "go").await;
+    assert_eq!(stop_reason(&events), StopReason::Completed);
+    let summary = &h.chat()[2];
+    let body = summary["messages"][1]["content"].as_str().unwrap();
+    assert!(
+        body.contains("Additional instructions: Keep the decision about the hot bridge."),
+        "{body}"
+    );
+    let seen = hooks.compactions.lock().unwrap();
+    assert_eq!(seen.len(), 1);
+    assert_eq!(seen[0].trigger, "auto");
 }
