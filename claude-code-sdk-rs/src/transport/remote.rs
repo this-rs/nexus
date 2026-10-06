@@ -248,6 +248,12 @@ fn known_hosts_host(host: &str, port: Option<u16>) -> String {
     }
 }
 
+/// Where the native installer puts `claude`: neither is on the `PATH` of a
+/// non-interactive ssh session, which is what runs our command. Added after the
+/// remote user's own `PATH` is read, expanded by the REMOTE shell, and only for a
+/// bare program name (an absolute path needs no search).
+const REMOTE_PATH: &str = r#"PATH="$HOME/.local/bin:$HOME/.claude/local:$PATH""#;
+
 /// The remote shell command: `cd <cwd> && exec env K=v <cli> <args…>`, every word quoted.
 fn remote_command(inner: &std::process::Command, remote: &RemoteHost) -> String {
     let mut out = String::new();
@@ -267,10 +273,17 @@ fn remote_command(inner: &std::process::Command, remote: &RemoteHost) -> String 
                 .then(|| shell_quote(&format!("{key}={value}")))
         })
         .collect();
-    if !forwarded.is_empty() {
+    let searches = !remote.cli.contains('/');
+    if !forwarded.is_empty() || searches {
         out.push_str("env ");
-        out.push_str(&forwarded.join(" "));
-        out.push(' ');
+        for word in &forwarded {
+            out.push_str(word);
+            out.push(' ');
+        }
+        if searches {
+            out.push_str(REMOTE_PATH);
+            out.push(' ');
+        }
     }
     out.push_str(&shell_quote(&remote.cli));
     for arg in inner.get_args() {
@@ -521,7 +534,10 @@ mod tests {
         let dd = a.iter().position(|x| x == "--").unwrap();
         assert_eq!(a[dd + 1], "build-1.example.net");
         assert_eq!(a.len(), dd + 3);
-        assert_eq!(a[dd + 2], "exec 'claude' '--model' 'opus'");
+        assert_eq!(
+            a[dd + 2],
+            "exec env PATH=\"$HOME/.local/bin:$HOME/.claude/local:$PATH\" 'claude' '--model' 'opus'"
+        );
     }
 
     #[test]
@@ -555,7 +571,10 @@ mod tests {
         let cmd = wrap_ssh(&local, &h, &launch);
         assert!(cmd.as_std().get_current_dir().is_none());
         let last = argv(&cmd).pop().unwrap();
-        assert_eq!(last, r"cd '/srv/my project/it'\''s' && exec 'claude' '-p'");
+        assert_eq!(
+            last,
+            r#"cd '/srv/my project/it'\''s' && exec env PATH="$HOME/.local/bin:$HOME/.claude/local:$PATH" 'claude' '-p'"#
+        );
         assert!(!last.contains("definitely"));
     }
 
@@ -570,12 +589,30 @@ mod tests {
         let last = argv(&cmd).pop().unwrap();
         assert_eq!(
             last,
-            "exec env 'CLAUDE_CODE_MAX_OUTPUT_TOKENS=8192' 'claude'"
+            "exec env 'CLAUDE_CODE_MAX_OUTPUT_TOKENS=8192' PATH=\"$HOME/.local/bin:$HOME/.claude/local:$PATH\" 'claude'"
         );
         let all = argv(&cmd).join(" ");
         assert!(!all.contains("sk-should-never-leave") && !all.contains("t0k3n"));
         // And the ssh client itself does not inherit them either.
         assert!(cmd.as_std().get_envs().all(|(k, _)| k == "PATH"));
+    }
+
+    #[test]
+    fn a_bare_program_name_is_searched_where_the_native_installer_puts_it_and_a_path_is_not() {
+        let launch = RemoteLaunch::prepare(&host(), false).unwrap();
+        let last = argv(&wrap_ssh(&inner(&[]), &host(), &launch))
+            .pop()
+            .unwrap();
+        assert!(
+            last.contains(r#"PATH="$HOME/.local/bin:$HOME/.claude/local:$PATH""#),
+            "{last}"
+        );
+        let mut absolute = host();
+        absolute.cli = "/opt/claude/bin/claude".into();
+        let last = argv(&wrap_ssh(&inner(&[]), &absolute, &launch))
+            .pop()
+            .unwrap();
+        assert_eq!(last, "exec '/opt/claude/bin/claude'");
     }
 
     #[test]
