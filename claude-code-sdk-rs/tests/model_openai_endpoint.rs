@@ -580,6 +580,67 @@ async fn probe_refused_by_the_server_with_a_tools_message_is_model_no_tools() {
     assert_eq!(error, ProviderError::ModelNoTools { model: "x".into() });
 }
 
+const THINKING_REFUSAL: &str = "Thinking mode does not support this tool_choice";
+
+#[tokio::test]
+async fn probe_refused_only_for_tool_choice_is_asked_again_with_auto() {
+    // A generic instance (no preset) on DeepSeek: the forced choice gets a 400
+    // that mentions "support" and "tool". That is not "the model has no tools".
+    let server = FakeOpenAi::start(json!([
+        post(
+            400,
+            json!({"body": {"error": {"message": THINKING_REFUSAL}}})
+        ),
+        probe_sse(true, Some("reasoning_content")),
+        models_route()
+    ]));
+    let probe = endpoint(&server, EndpointQuirks::generic())
+        .probe("deepseek-v4-pro")
+        .await
+        .unwrap();
+    assert!(probe.tools);
+    let sent = server.requests_to("POST", "/v1/chat/completions");
+    assert_eq!(sent.len(), 2);
+    assert_eq!(sent[0]["body"]["tool_choice"]["function"]["name"], "ping");
+    assert_eq!(sent[1]["body"]["tool_choice"], "auto");
+}
+
+#[tokio::test]
+async fn probe_on_the_deepseek_preset_never_forces_the_tool() {
+    let server = FakeOpenAi::start(json!([
+        probe_sse(true, Some("reasoning_content")),
+        models_route()
+    ]));
+    let probe = endpoint(&server, EndpointQuirks::deepseek())
+        .probe("deepseek-v4-pro")
+        .await
+        .unwrap();
+    assert!(probe.tools);
+    let sent = server.requests_to("POST", "/v1/chat/completions");
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0]["body"]["tool_choice"], "auto");
+}
+
+#[tokio::test]
+async fn a_tool_choice_refusal_that_persists_is_not_reported_as_no_tools() {
+    let refusal = || {
+        post(
+            400,
+            json!({"body": {"error": {"message": THINKING_REFUSAL}}}),
+        )
+    };
+    let server = FakeOpenAi::start(json!([refusal(), refusal()]));
+    let error = expect_err(
+        endpoint(&server, EndpointQuirks::generic())
+            .probe("m")
+            .await,
+    );
+    assert!(
+        !matches!(error, ProviderError::ModelNoTools { .. }),
+        "got {error:?}"
+    );
+}
+
 #[tokio::test]
 async fn probe_is_cached_per_model_and_expires() {
     let server = FakeOpenAi::start(json!([probe_sse(true, None), models_route()]));

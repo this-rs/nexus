@@ -150,8 +150,10 @@ pub(crate) fn build_request(
         body.insert("tools".into(), Value::Array(tools));
         if !quirks.omit_tool_choice {
             let choice = match forced_tool {
-                Some(name) => json!({"type": "function", "function": {"name": name}}),
-                None => json!("auto"),
+                Some(name) if !quirks.no_forced_tool_choice => {
+                    json!({"type": "function", "function": {"name": name}})
+                },
+                _ => json!("auto"),
             };
             body.insert("tool_choice".into(), choice);
         }
@@ -487,6 +489,24 @@ mod tests {
             body["messages"][2]["reasoning_content"],
             "I should read the file"
         );
+    }
+
+    #[test]
+    fn deepseek_never_forces_a_tool() {
+        // Thinking mode (DeepSeek's default) answers a named tool_choice with a 400.
+        let body = build_request(
+            &request(vec![tool()]),
+            &EndpointQuirks::deepseek(),
+            Some("read"),
+        );
+        assert_eq!(body["tool_choice"], "auto");
+        // Another endpoint still forces it.
+        let generic = build_request(
+            &request(vec![tool()]),
+            &EndpointQuirks::generic(),
+            Some("read"),
+        );
+        assert_eq!(generic["tool_choice"]["function"]["name"], "read");
     }
 
     #[test]

@@ -300,15 +300,24 @@ impl ModelEndpoint for OpenAiEndpoint {
             description: "Connectivity check: call it once, with no arguments.".into(),
             parameters: json!({"type": "object", "properties": {}}),
         }];
-        request.max_tokens = Some(1024);
+        // A reasoning model thinks before it calls: room for that, or the budget
+        // ends in the reasoning and the probe sees "no tool call".
+        request.max_tokens = Some(4096);
         request.temperature = Some(0.0);
         let no_tools = || ProviderError::ModelNoTools {
             model: model.to_string(),
         };
-        let (mut stream, field) = self
-            .start(request, Some(PROBE_TOOL))
-            .await
-            .map_err(|error| tools_refusal(error, &no_tools))?;
+        // Forcing the tool is a convenience, not what is being asked: an endpoint
+        // that refuses the FORCING (DeepSeek in thinking mode) is asked again with
+        // `auto` before anything is concluded about the model.
+        let first = self.start(request.clone(), Some(PROBE_TOOL)).await;
+        let started = match first {
+            Err(ProviderError::InvalidRequest { detail }) if mentions_tool_choice(&detail) => {
+                self.start(request, None).await
+            },
+            other => other,
+        };
+        let (mut stream, field) = started.map_err(|error| tools_refusal(error, &no_tools))?;
         let mut called = false;
         while let Some(item) = stream.next().await {
             match item.map_err(|error| tools_refusal(error, &no_tools))? {
@@ -339,11 +348,20 @@ impl ModelEndpoint for OpenAiEndpoint {
     }
 }
 
+/// The refusal is about the `tool_choice` parameter, not about tools.
+fn mentions_tool_choice(detail: &str) -> bool {
+    detail.to_ascii_lowercase().contains("tool_choice")
+}
+
 /// A 400 that says the model has no tool support is `ModelNoTools` for the probe.
+/// One that only refuses `tool_choice` is not: the model was never asked.
 fn tools_refusal(error: ProviderError, no_tools: &dyn Fn() -> ProviderError) -> ProviderError {
     if let ProviderError::InvalidRequest { detail } = &error {
         let lower = detail.to_ascii_lowercase();
-        if lower.contains("tool") && (lower.contains("support") || lower.contains("not allowed")) {
+        if lower.contains("tool")
+            && !mentions_tool_choice(&lower)
+            && (lower.contains("support") || lower.contains("not allowed"))
+        {
             return no_tools();
         }
     }

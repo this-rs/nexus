@@ -360,10 +360,58 @@ async fn a_background_task_has_an_id_and_its_output_is_readable_during_and_after
     })
     .await;
     // A finished task is still there, and stopping it is not an error.
-    let stop = f.call("TaskStop", json!({"task_id": id})).await;
-    assert!(!stop.is_error, "{}", stop.text);
-    assert!(stop.text.contains("not running"), "{}", stop.text);
+    let stop = stop_until_over(&f, &id).await;
+    assert!(stop.contains("not running"), "{stop}");
     assert_eq!(std::fs::read_to_string(&path).unwrap(), "one\ntwo\n");
+}
+
+/// Stops the task, then asks again until it says it is over.
+///
+/// The output file is complete a moment BEFORE the shell is reaped and the task is marked
+/// finished, so a first `TaskStop` right after the last line can still find it running (and
+/// stop it: it answers "Successfully stopped"). `TaskStop` is idempotent, so asking again is
+/// how the end is observed; this is what failed twice on a CI runner and never on a laptop.
+async fn stop_until_over(f: &Fixture, id: &str) -> String {
+    let mut last = String::new();
+    for _ in 0..150 {
+        let stop = f.call("TaskStop", json!({"task_id": id})).await;
+        assert!(!stop.is_error, "{}", stop.text);
+        last = stop.text;
+        if last.contains("not running") {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(40)).await;
+    }
+    last
+}
+
+#[tokio::test]
+async fn a_task_whose_output_is_complete_may_still_be_running_and_stop_ends_it_then_says_so() {
+    let f = fixture();
+    // The last line is written, the shell is still alive: what the CI runner saw by accident.
+    let r = f
+        .call(
+            "Bash",
+            json!({"command": "echo one; echo two; sleep 2", "run_in_background": true}),
+        )
+        .await;
+    assert!(!r.is_error, "{}", r.text);
+    let id = task_id(&r.text);
+    let path = output_path(&r.text);
+    eventually("both lines", || {
+        std::fs::read_to_string(&path).is_ok_and(|t| t == "one\ntwo\n")
+    })
+    .await;
+    // Still running: the first stop acts, it does not say "not running".
+    let first = f.call("TaskStop", json!({"task_id": id})).await;
+    assert!(!first.is_error, "{}", first.text);
+    assert!(
+        first.text.contains("Successfully stopped"),
+        "{}",
+        first.text
+    );
+    let over = stop_until_over(&f, &id).await;
+    assert!(over.contains("not running"), "{over}");
 }
 
 #[tokio::test]

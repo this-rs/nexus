@@ -316,6 +316,7 @@ impl ProviderInstanceConfig {
             echo_reasoning_with_tools: base.echo_reasoning_with_tools
                 || over.echo_reasoning_with_tools,
             omit_tool_choice: base.omit_tool_choice || over.omit_tool_choice,
+            no_forced_tool_choice: base.no_forced_tool_choice || over.no_forced_tool_choice,
             explicit_parallel_tool_calls: over
                 .explicit_parallel_tool_calls
                 .or(base.explicit_parallel_tool_calls),

@@ -47,6 +47,10 @@ pub struct EndpointQuirks {
     pub echo_reasoning_with_tools: bool,
     /// Never send `tool_choice` (Ollama's compatibility layer rejects or ignores it).
     pub omit_tool_choice: bool,
+    /// Never FORCE a tool (`tool_choice` naming a function): send `auto` instead.
+    /// DeepSeek V4 thinks by default and answers a forced or `required` choice
+    /// with HTTP 400 (\"Thinking mode does not support this tool_choice\").
+    pub no_forced_tool_choice: bool,
     /// Value of `parallel_tool_calls` to send when the request does not choose one
     /// and offers tools; `None` sends nothing.
     pub explicit_parallel_tool_calls: Option<bool>,
@@ -76,10 +80,12 @@ impl EndpointQuirks {
         Self::default()
     }
 
-    /// DeepSeek: reasoning must come back with tool calls.
+    /// DeepSeek: reasoning must come back with tool calls, and thinking mode
+    /// (the default) refuses a forced `tool_choice`.
     pub fn deepseek() -> Self {
         Self {
             echo_reasoning_with_tools: true,
+            no_forced_tool_choice: true,
             ..Self::default()
         }
     }
@@ -152,6 +158,8 @@ mod tests {
     #[test]
     fn presets_carry_their_documented_flags() {
         assert!(EndpointQuirks::deepseek().echo_reasoning_with_tools);
+        assert!(EndpointQuirks::deepseek().no_forced_tool_choice);
+        assert!(!EndpointQuirks::generic().no_forced_tool_choice);
         assert!(EndpointQuirks::ollama().omit_tool_choice);
         assert_eq!(
             EndpointQuirks::vllm().reasoning_field,
