@@ -136,11 +136,16 @@ impl Server {
             "tools/call needs a tool name".to_owned(),
         ))?;
         // Unknown and forbidden are one answer: the caller learns nothing about tools it
-        // may not use.
+        // may not use (outside the profile, or left out of the process by `--tools`).
         let tool = self
             .registry
             .resolve(&session.profile, name)
-            .ok_or_else(|| (code::INVALID_PARAMS, format!("unknown tool: {name}")))?;
+            .ok_or_else(|| {
+                (
+                    code::INVALID_PARAMS,
+                    format!("unknown tool: {name} (not served to this session)"),
+                )
+            })?;
         let arguments = match params.get("arguments") {
             None | Some(Value::Null) => json!({}),
             Some(object @ Value::Object(_)) => object.clone(),

@@ -50,6 +50,60 @@ const MAX_NAME: usize = 64;
 /// The name under which the harness attaches `nexus-tools`.
 pub const NEXUS_TOOLS_SERVER: &str = "nexus";
 
+/// Every tool `nexus-tools` can serve, by canonical name, with whether it is read-only (its
+/// `readOnlyHint`). The harness bounds the server it launches with it before the server runs
+/// (`--tools`, N27); `nexus-tools/tests/session_bound.rs` checks it against the real server.
+pub const NEXUS_TOOLS_CATALOG: &[(&str, bool)] = &[
+    ("Read", true),
+    ("Write", false),
+    ("Edit", false),
+    ("NotebookEdit", false),
+    ("Glob", true),
+    ("Grep", true),
+    ("Bash", false),
+    ("Monitor", false),
+    ("TaskStop", false),
+    ("WebFetch", true),
+    ("WebSearch", true),
+];
+
+/// The `nexus-tools` tools a session may ever be offered, by canonical name: what the harness
+/// passes as `--tools` when it launches the session's server (N27), so a tool the policy does not
+/// expose is not even in the process.
+///
+/// The exposure rule is applied to each tool of [`NEXUS_TOOLS_CATALOG`] with one widening: the
+/// mode can be raised during the session (`set_policy_mode`) up to the ceiling, so the plan-mode
+/// rule only bounds the process when the session can never leave `plan_only`. The `allow` and
+/// `deny` lists cannot change once the session is open.
+pub fn nexus_tools_bound(
+    policy: &ToolPolicy,
+    ceiling: Option<&ToolPolicy>,
+    strict: bool,
+) -> Vec<&'static str> {
+    let can_leave_plan = ceiling.is_none_or(|ceiling| ceiling.mode > PolicyMode::PlanOnly);
+    let reach = if policy.mode == PolicyMode::PlanOnly && can_leave_plan {
+        let mut wider = policy.clone();
+        wider.mode = PolicyMode::Ask;
+        std::borrow::Cow::Owned(wider)
+    } else {
+        std::borrow::Cow::Borrowed(policy)
+    };
+    NEXUS_TOOLS_CATALOG
+        .iter()
+        .filter(|(tool, read_only)| {
+            let entry = ToolEntry::mcp(
+                NEXUS_TOOLS_SERVER,
+                tool,
+                String::new(),
+                Value::Null,
+                *read_only,
+            );
+            ToolRegistry::is_exposed(&entry, &reach, strict)
+        })
+        .map(|(tool, _)| *tool)
+        .collect()
+}
+
 /// The category of a canonical `nexus-tools` tool, and the input fields that make up its
 /// primary argument (first present wins), or `None` for a tool that is not one of theirs.
 fn canonical_profile(tool: &str) -> Option<(ToolCategory, &'static [&'static str])> {
@@ -415,6 +469,71 @@ mod tests {
             other.primary_argument(&json!({"a": 1})).as_deref(),
             Some("{\"a\":1}")
         );
+    }
+
+    #[test]
+    fn the_nexus_tools_bound_is_what_the_policy_can_expose() {
+        let all: Vec<&str> = NEXUS_TOOLS_CATALOG.iter().map(|(n, _)| *n).collect();
+        let bound = |p: &ToolPolicy, ceiling: Option<&ToolPolicy>, strict| {
+            nexus_tools_bound(p, ceiling, strict)
+        };
+        assert_eq!(bound(&policy(PolicyMode::Ask, &[], &[]), None, true), all);
+        // An allow list is an exposure list, by canonical or full name, with or without argument.
+        assert_eq!(
+            bound(
+                &policy(
+                    PolicyMode::Ask,
+                    &["Read", "mcp__nexus__Grep", "Bash(git *)"],
+                    &[]
+                ),
+                None,
+                true
+            ),
+            ["Read", "Grep", "Bash"]
+        );
+        // ...but not when exposure is not strict.
+        assert_eq!(
+            bound(&policy(PolicyMode::Ask, &["Read"], &[]), None, false),
+            all
+        );
+        // A deny without argument removes the tool; one with an argument does not.
+        let no_bash = bound(&policy(PolicyMode::Ask, &[], &["Bash"]), None, true);
+        assert!(!no_bash.contains(&"Bash") && no_bash.contains(&"Write"));
+        let rm_only = bound(&policy(PolicyMode::Ask, &[], &["Bash(rm *)"]), None, true);
+        assert!(rm_only.contains(&"Bash"));
+        // Other servers' names do not leak in.
+        assert!(
+            bound(
+                &policy(PolicyMode::Ask, &["mcp__po__task"], &[]),
+                None,
+                true
+            )
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn plan_mode_bounds_the_process_only_when_the_session_cannot_leave_it() {
+        let plan = policy(PolicyMode::PlanOnly, &[], &[]);
+        let read_only: Vec<&str> = NEXUS_TOOLS_CATALOG
+            .iter()
+            .filter(|(_, ro)| *ro)
+            .map(|(n, _)| *n)
+            .collect();
+        assert_eq!(read_only, ["Read", "Glob", "Grep", "WebFetch", "WebSearch"]);
+        // No ceiling: `set_policy_mode(ask)` may come, the edits must be there then.
+        assert_eq!(
+            nexus_tools_bound(&plan, None, true).len(),
+            NEXUS_TOOLS_CATALOG.len()
+        );
+        let ask = ToolPolicy::new(PolicyMode::Ask);
+        assert_eq!(
+            nexus_tools_bound(&plan, Some(&ask), true).len(),
+            NEXUS_TOOLS_CATALOG.len()
+        );
+        // A plan-only ceiling: never anything but reads.
+        let ceiling = ToolPolicy::new(PolicyMode::PlanOnly);
+        assert_eq!(nexus_tools_bound(&plan, Some(&ceiling), true), read_only);
     }
 
     #[test]

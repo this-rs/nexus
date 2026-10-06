@@ -24,6 +24,7 @@ flowchart TD
         direction TB
         TOKEN["✅ jeton v1 signé HMAC-SHA256, clé ≥ 32 octets, expiration,<br/>un seul message d'échec<br/><i>vérifié : tests unitaires et refus HTTP 401</i>"]
         PROFILE["✅ profil par session : un outil hors profil n'est ni listé ni exécuté,<br/>et « interdit » a la même réponse que « inexistant »<br/><i>vérifié : compteur d'exécution à 0 ; mutation jouée</i>"]
+        BOUND["✅ un processus par session, borné au lancement (N27) : --tools (noms canoniques) = seuls outils listés ET exécutés, refus MCP -32602 même sur appel direct ; nom inconnu = sortie code 2 avec les noms valides ; intersection avec un profil signé ou --unrestricted, jamais plus large ; --trust-harness refusé avec --listen (code 2) : jetons signés pour HTTP<br/><i>vérifié : tests/session_bound.rs (13 tests, vrai binaire ; 10 rouges avant le changement) ; mutations : refus --listen retiré, filtre retiré, --tools qui remplace le profil, union au lieu d'intersection : chacune rougit au moins un test</i>"]
     end
 
     subgraph fichiers["Outils fichiers — files/*.rs (N19)"]
@@ -91,6 +92,7 @@ flowchart TD
     RPC --> CAP
     HTTP --> TOKEN
     TOKEN --> PROFILE
+    BOUND --> PROFILE
     RPC --> PROFILE
     PROFILE --> READ
     PROFILE --> WRITE

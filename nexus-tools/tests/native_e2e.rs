@@ -776,6 +776,32 @@ async fn a_tool_outside_the_profile_is_refused_and_never_runs() {
     session.close().await.unwrap();
 }
 
+/// The process the real `NativeProvider` launches for a session carries the session's bound
+/// (N27): `--tools` is what its policy exposes, `--cwd` its own directory. Read from `ps`, so the
+/// launch path of `open` is what is checked, not a helper.
+#[tokio::test]
+async fn the_harness_launches_the_session_server_bounded_by_its_policy() {
+    let model = model(vec![probe(), say(None, "hi")]).await;
+    let rig = rig(&model, Some(default_tools(&[])));
+    let session = rig
+        .open(policy(PolicyMode::Ask, &["Read", "Grep"], &["Bash"]))
+        .await;
+    let cwd = rig.cwd.path().display().to_string();
+    let output = std::process::Command::new("ps")
+        .args(["-axww", "-o", "args="])
+        .output()
+        .expect("ps");
+    let listing = String::from_utf8_lossy(&output.stdout);
+    let line = listing
+        .lines()
+        .find(|l| l.contains(NEXUS_TOOLS) && l.contains(&cwd))
+        .unwrap_or_else(|| panic!("no nexus-tools process for {cwd}:\n{listing}"));
+    assert!(line.contains("--trust-harness"), "{line}");
+    assert!(line.contains("--tools Read,Grep"), "{line}");
+    assert!(!line.contains("--listen"), "{line}");
+    session.close().await.unwrap();
+}
+
 #[tokio::test]
 async fn a_command_sees_no_host_variable_through_the_harness() {
     let cwd = tempfile::tempdir().unwrap();
