@@ -131,7 +131,14 @@ impl Tool for BashTool {
                 Ok(started) => started,
                 Err(message) => return ToolResult::error(message),
             };
-            adopt(&state, id.clone(), command, output.clone(), running);
+            adopt(
+                &state,
+                id.clone(),
+                command,
+                output.clone(),
+                running,
+                self.config.max_output_bytes,
+            );
             return ToolResult::ok(format!(
                 "Command running in background with ID: {id}. Output is being written to: {}. \
                  To check interim output, use Read on that file path; to stop it, use TaskStop.",
@@ -148,17 +155,30 @@ impl Tool for BashTool {
         // From here, abandoning this call (cancelled request, session over) kills the group.
         let mut guard = GroupGuard::new(running.pgid);
         let pgid = running.pgid;
-        let waited =
-            tokio::time::timeout(Duration::from_millis(timeout_ms), running.child.wait()).await;
+        let waited = tokio::time::timeout(
+            Duration::from_millis(timeout_ms),
+            process::wait_capped(
+                &mut running.child,
+                pgid,
+                &output,
+                self.config.max_output_bytes,
+            ),
+        )
+        .await;
+        let mut capped = false;
         let (code, timed_out) = match waited {
-            Ok(Ok(status)) => {
+            Ok(done) => {
                 guard.disarm();
-                (exit_code(status), false)
-            },
-            Ok(Err(error)) => {
-                guard.disarm();
-                let _ = std::fs::remove_file(&output);
-                return ToolResult::error(format!("waiting for the command failed: {error}"));
+                capped = done.capped;
+                match done.status {
+                    Ok(status) => (exit_code(status), false),
+                    Err(error) => {
+                        let _ = std::fs::remove_file(&output);
+                        return ToolResult::error(format!(
+                            "waiting for the command failed: {error}"
+                        ));
+                    },
+                }
             },
             Err(_) => {
                 process::terminate_group(pgid, STOP_GRACE).await;
@@ -168,10 +188,11 @@ impl Tool for BashTool {
             },
         };
 
-        let mut text = std::fs::read(&output)
-            .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
-            .unwrap_or_default();
-        let size = text.len();
+        // Never read the whole file: it can be as large as the ceiling. The head is all that is
+        // returned or previewed; the size comes from the file.
+        let size = std::fs::metadata(&output)
+            .map_or(0, |m| usize::try_from(m.len()).unwrap_or(usize::MAX));
+        let mut text = read_head(&output, INLINE_OUTPUT_LIMIT + 1);
         let persisted = size > INLINE_OUTPUT_LIMIT;
         if !timed_out && let Some(note) = self.adopt_cwd(&state, &cwd_file) {
             text = format!("{}\n{note}", text.trim_end());
@@ -183,6 +204,12 @@ impl Tool for BashTool {
             let _ = std::fs::remove_file(&output);
         }
         let text = text.trim_end().to_owned();
+        if capped {
+            return ToolResult::error(format!(
+                "Exit code {code}\nCommand ended: its output went past {}\n{text}",
+                process::human_bytes(self.config.max_output_bytes)
+            ));
+        }
         if timed_out {
             let seconds = timeout_ms.div_ceil(1000);
             let mut out = format!("Exit code 143\nCommand timed out after {seconds}s");
@@ -227,6 +254,16 @@ impl BashTool {
             },
         }
     }
+}
+
+/// The first `max` bytes of a file, as text; empty when it cannot be read.
+fn read_head(path: &std::path::Path, max: usize) -> String {
+    use std::io::Read;
+    let mut bytes = Vec::new();
+    if let Ok(file) = std::fs::File::open(path) {
+        let _ = file.take(max as u64).read_to_end(&mut bytes);
+    }
+    String::from_utf8_lossy(&bytes).into_owned()
 }
 
 /// Claude Code's shape for output too big to return: size, where the whole of it is, and a

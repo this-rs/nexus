@@ -807,3 +807,53 @@ async fn the_system_resolver_cannot_be_used_to_reach_localhost() {
     );
     assert_eq!(connects.load(Ordering::SeqCst), 0);
 }
+
+/// The shipped binary is built with `tls`; `Fetcher::new` must then really speak https. It once
+/// kept `PlainConnector` whatever the feature said, and every https fetch failed with
+/// "this build has no TLS support".
+#[cfg(feature = "tls")]
+#[test]
+fn with_the_tls_feature_the_default_fetcher_can_reach_https() {
+    assert!(Fetcher::new(FetchConfig::default()).supports_tls());
+}
+
+#[cfg(not(feature = "tls"))]
+#[test]
+fn without_the_tls_feature_the_default_fetcher_says_it_cannot_reach_https() {
+    assert!(!Fetcher::new(FetchConfig::default()).supports_tls());
+}
+
+/// Real network, real certificate chain: `cargo test -p nexus-tools --features tls --test web -- --ignored`.
+#[cfg(feature = "tls")]
+#[tokio::test]
+#[ignore = "needs the internet"]
+async fn a_real_https_page_is_fetched_with_the_default_fetcher() {
+    let tool = WebFetchTool::new(Fetcher::new(FetchConfig::default()));
+    let r = call(&tool, "https://example.com/").await;
+    assert!(
+        !r.is_error && r.text.contains("for use in documentation examples"),
+        "{}",
+        r.text
+    );
+}
+
+/// The real connector, not a steered one: it must connect to the address that was checked, never
+/// to a second resolution of the name (DNS rebinding). The name here resolves nowhere, so any
+/// connector that looks it up again fails.
+#[tokio::test]
+async fn the_real_plain_connector_connects_to_the_pinned_address_and_never_resolves_the_name() {
+    use nexus_tools::web::{Connect, PlainConnector, Target};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let accepted = tokio::spawn(async move { listener.accept().await.is_ok() });
+    let target = Target {
+        host: "pinned-address-only.invalid".to_owned(),
+        addr,
+        tls: false,
+    };
+    PlainConnector
+        .connect(&target)
+        .await
+        .expect("connects to the pinned address");
+    assert!(accepted.await.unwrap(), "the server saw the connection");
+}

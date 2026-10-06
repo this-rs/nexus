@@ -128,6 +128,7 @@ pub fn adopt(
     command: &str,
     output: PathBuf,
     running: Running,
+    max_output_bytes: u64,
 ) -> Arc<Task> {
     let task = Arc::new(Task {
         id: id.clone(),
@@ -144,8 +145,13 @@ pub fn adopt(
         .insert(id, Arc::clone(&task));
     let watched = Arc::clone(&task);
     let mut child = running.child;
+    let pgid = running.pgid;
+    let output = watched.output.clone();
     tokio::spawn(async move {
-        let code = match child.wait().await {
+        let code = match super::process::wait_capped(&mut child, pgid, &output, max_output_bytes)
+            .await
+            .status
+        {
             Ok(status) => super::bash::exit_code(status),
             Err(_) => -1,
         };
@@ -300,7 +306,14 @@ impl Tool for MonitorTool {
             Ok(started) => started,
             Err(message) => return ToolResult::error(message),
         };
-        let task = adopt(&state, id.clone(), command, output.clone(), running);
+        let task = adopt(
+            &state,
+            id.clone(),
+            command,
+            output.clone(),
+            running,
+            self.config.max_output_bytes,
+        );
         let notifier = context.notifier.clone();
         tokio::spawn(stream(
             Arc::clone(&task),

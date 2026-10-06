@@ -133,6 +133,9 @@ impl Tool for ReadTool {
                 Err(message) => ToolResult::error(message),
             };
         }
+        if meta.len() > self.config.max_text_bytes {
+            return self.config.too_large(given, meta.len(), "Read");
+        }
         let bytes = match std::fs::read(&path) {
             Ok(bytes) => bytes,
             Err(error) => return ToolResult::error(format!("{error}: read '{given}'")),

@@ -76,6 +76,12 @@ impl Tool for EditTool {
         };
         let state = file_state(context);
         let _serialised = state.writing.lock().await;
+        if let Ok(meta) = std::fs::metadata(&path)
+            && meta.is_file()
+            && meta.len() > self.config.max_text_bytes
+        {
+            return self.config.too_large(given, meta.len(), "Edit");
+        }
         let text = match std::fs::read(&path) {
             Ok(bytes) => match String::from_utf8(bytes) {
                 Ok(text) => text,

@@ -57,6 +57,14 @@ pub(crate) fn decide_call(
     cwd: &Path,
 ) -> PolicyDecision {
     let forms = forms(entry, input, cwd);
+    // Searching a file is reading it: `Read(.env*)` must stop `Grep` and `Glob` too.
+    if matches!(entry.canonical.as_deref(), Some("Grep" | "Glob")) {
+        for form in &forms.deny {
+            if policy.decide("Read", Some(form), entry.category) == PolicyDecision::Deny {
+                return PolicyDecision::Deny;
+            }
+        }
+    }
     let mut allowed = false;
     let mut asked = false;
     for name in entry.names() {
@@ -128,6 +136,33 @@ fn forms(entry: &ToolEntry, input: &Value, cwd: &Path) -> Forms {
                 },
             }
         },
+        "Grep" | "Glob" => {
+            let mut forms = path_forms(field("path").unwrap_or("."), cwd);
+            // What is searched for in a file name counts too: `Glob(".env*")`, `Grep(glob: ".env*")`.
+            for extra in [
+                field("glob"),
+                field("pattern").filter(|_| canonical == "Glob"),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                forms.deny.extend(path_forms(extra, cwd).deny);
+            }
+            // A directory searched is every file under it: `Read(secrets/*)` covers `secrets/`.
+            let directories: Vec<String> = forms
+                .deny
+                .iter()
+                .filter(|form| !form.ends_with('/') && form.as_str() != ".")
+                .map(|form| format!("{form}/"))
+                .collect();
+            forms.deny.extend(directories);
+            forms.allow = match entry.primary_argument(input) {
+                Some(argument) => AllowOn::Each(vec![argument]),
+                None => AllowOn::NoArgument,
+            };
+            dedupe(&mut forms.deny);
+            forms
+        },
         _ => match entry.primary_argument(input) {
             Some(argument) => Forms {
                 deny: vec![argument.clone()],
@@ -189,11 +224,39 @@ fn path_forms(given: &str, cwd: &Path) -> Forms {
     if let Some(last) = Path::new(&normal).file_name().and_then(|n| n.to_str()) {
         deny.push(last.to_owned());
     }
-    deny.dedup();
+    // A pattern may be written `./.env` or with the absolute path: offer those spellings of a
+    // path that is inside the session directory.
+    if normal != "."
+        && !normal.starts_with("..")
+        && !normal.starts_with('/')
+        && !normal.contains(':')
+    {
+        deny.push(format!("./{normal}"));
+        deny.push(slash(&cwd.join(&normal).display().to_string()));
+    }
+    // macOS and Windows file systems ignore case: `.ENV` is `.env`. Lower-case spellings are
+    // offered too; denying a differently-cased name on Linux is harmless.
+    let lowered: Vec<String> = deny.iter().map(|form| form.to_lowercase()).collect();
+    deny.extend(lowered);
+    dedupe(&mut deny);
     Forms {
         deny,
         allow: AllowOn::Each(vec![normal]),
     }
+}
+
+fn slash(path: &str) -> String {
+    if cfg!(windows) {
+        path.replace('\\', "/")
+    } else {
+        path.to_owned()
+    }
+}
+
+/// Removes repeats, keeping the first of each.
+fn dedupe(forms: &mut Vec<String>) {
+    let mut seen = HashSet::new();
+    forms.retain(|form| seen.insert(form.clone()));
 }
 
 // ---------------------------------------------------------------------------
@@ -205,13 +268,140 @@ fn command_forms(command: &str) -> Forms {
     let mut deny = vec![command.trim().to_owned()];
     deny.extend(split.parts.iter().cloned());
     deny.extend(split.inner.iter().cloned());
-    deny.dedup();
+    // What a part really runs: behind a keyword (`then`, `time`, `nohup`, `env`), an assignment
+    // (`FOO=1 cmd`), a path (`/bin/rm`, `//bin/rm`) or a shell (`sh -c '…'`, `eval '…'`).
+    let mut seen = Vec::new();
+    for part in split.parts.iter().chain(split.inner.iter()) {
+        unwrap_command(part, 0, &mut seen);
+    }
+    deny.extend(seen);
+    dedupe(&mut deny);
     let allow = if split.substitution || split.parts.is_empty() {
         AllowOn::NoArgument
     } else {
         AllowOn::Each(split.parts)
     };
     Forms { deny, allow }
+}
+
+/// Words that put another command after them.
+const WRAPPERS: &[&str] = &[
+    "then", "do", "else", "elif", "if", "while", "until", "!", "time", "nohup", "exec", "command",
+    "builtin", "env", "nice", "sudo", "doas", "setsid", "xargs", "ionice",
+];
+const SHELLS: &[&str] = &["sh", "bash", "zsh", "dash", "ksh", "ash"];
+const MAX_UNWRAP_DEPTH: usize = 4;
+
+/// One word of a command line: where it starts, and its text without quotes.
+struct Word {
+    start: usize,
+    text: String,
+}
+
+fn words(line: &str) -> Vec<Word> {
+    let mut out = Vec::new();
+    let mut current: Option<Word> = None;
+    let mut quote: Option<char> = None;
+    for (at, c) in line.char_indices() {
+        match (quote, c) {
+            (Some(q), c) if c == q => quote = None,
+            (Some(_), c) => current
+                .get_or_insert(Word {
+                    start: at,
+                    text: String::new(),
+                })
+                .text
+                .push(c),
+            (None, '\'' | '"') => {
+                quote = Some(c);
+                current.get_or_insert(Word {
+                    start: at,
+                    text: String::new(),
+                });
+            },
+            (None, c) if c.is_whitespace() => out.extend(current.take()),
+            (None, c) => current
+                .get_or_insert(Word {
+                    start: at,
+                    text: String::new(),
+                })
+                .text
+                .push(c),
+        }
+    }
+    out.extend(current);
+    out
+}
+
+fn is_assignment(word: &str) -> bool {
+    word.split_once('=').is_some_and(|(name, _)| {
+        !name.is_empty()
+            && !name.starts_with(|c: char| c.is_ascii_digit())
+            && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+    })
+}
+
+fn base_name(word: &str) -> &str {
+    word.rsplit('/')
+        .find(|piece| !piece.is_empty())
+        .unwrap_or(word)
+}
+
+/// Pushes what `part` really runs, and, for a shell or `eval`, what it is told to run.
+fn unwrap_command(part: &str, depth: usize, out: &mut Vec<String>) {
+    if depth > MAX_UNWRAP_DEPTH {
+        return;
+    }
+    let words = words(part);
+    let mut i = 0;
+    while let Some(word) = words.get(i) {
+        let base = base_name(&word.text);
+        if WRAPPERS.contains(&base) {
+            i += 1;
+            // Its options: `time -p`, `env -i`, `nice -n 10`.
+            while words.get(i).is_some_and(|w| w.text.starts_with('-')) {
+                let takes_value = base == "nice" && words[i].text == "-n";
+                i += if takes_value { 2 } else { 1 };
+            }
+        } else if is_assignment(&word.text) {
+            i += 1;
+        } else {
+            break;
+        }
+    }
+    let Some(command) = words.get(i) else { return };
+    let base = base_name(&command.text).to_owned();
+    // The command with its path reduced to a name: `//bin/rm -rf x` is `rm -rf x`.
+    let rest = part[command.start..]
+        .split_once(char::is_whitespace)
+        .map_or(String::new(), |(_, rest)| format!(" {}", rest.trim_start()));
+    out.push(format!("{base}{rest}"));
+
+    let payload = if SHELLS.contains(&base.as_str()) {
+        // `-c`, `-lc`, `-ec`: the next word is the script.
+        let flag = words[i + 1..].iter().position(|w| {
+            w.text.starts_with('-') && !w.text.starts_with("--") && w.text.contains('c')
+        });
+        flag.and_then(|at| words.get(i + 1 + at + 1))
+            .map(|w| w.text.clone())
+    } else if base == "eval" {
+        Some(
+            words[i + 1..]
+                .iter()
+                .map(|w| w.text.as_str())
+                .collect::<Vec<_>>()
+                .join(" "),
+        )
+    } else {
+        None
+    };
+    if let Some(script) = payload {
+        let inner = split_command(&script);
+        for piece in inner.parts.iter().chain(inner.inner.iter()) {
+            out.push(piece.clone());
+            unwrap_command(piece, depth + 1, out);
+        }
+    }
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -740,6 +930,144 @@ mod tests {
         assert_eq!(
             decide_call(&own, &HashSet::new(), &evil, &json!({}), Path::new(CWD)),
             PolicyDecision::Allow
+        );
+    }
+
+    // ----- bypasses found by the independent verification (N26) -------------
+
+    #[cfg(unix)]
+    #[test]
+    fn a_deny_pattern_written_with_an_absolute_path_or_a_dot_slash_still_denies() {
+        for pattern in ["Read(/work/project/.env)", "Read(./.env)", "Read(.env)"] {
+            let p = policy(PolicyMode::Ask, &[], &[pattern]);
+            for path in [".env", "./.env", "/work/project/.env", "src/../.env"] {
+                assert_eq!(
+                    decide(&p, "Read", json!({"file_path": path})),
+                    PolicyDecision::Deny,
+                    "{pattern} must deny {path}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_denied_file_is_denied_whatever_its_case() {
+        // macOS and Windows file systems are case-insensitive: `.ENV` is `.env` there.
+        let p = policy(PolicyMode::Ask, &[], &["Read(.env*)", "Edit(secrets/*)"]);
+        assert_eq!(
+            decide(&p, "Read", json!({"file_path": ".ENV"})),
+            PolicyDecision::Deny
+        );
+        assert_eq!(
+            decide(&p, "Read", json!({"file_path": "x/.Env.Local"})),
+            PolicyDecision::Deny
+        );
+        assert_eq!(
+            decide(&p, "Edit", json!({"file_path": "Secrets/k.pem"})),
+            PolicyDecision::Deny
+        );
+    }
+
+    #[test]
+    fn a_denied_domain_is_denied_with_a_trailing_dot_or_capitals() {
+        let p = policy(PolicyMode::Ask, &[], &["WebFetch(domain:evil.com)"]);
+        for url in [
+            "https://evil.com/x",
+            "https://evil.com./x",
+            "https://EVIL.com/x",
+            "https://evil.com.:8443/x",
+        ] {
+            assert_eq!(
+                decide(&p, "WebFetch", json!({"url": url})),
+                PolicyDecision::Deny,
+                "{url} must be denied"
+            );
+        }
+    }
+
+    #[test]
+    fn grep_and_glob_obey_the_read_deny_patterns() {
+        let p = policy(PolicyMode::Ask, &[], &["Read(.env*)", "Read(secrets/*)"]);
+        for (tool, input) in [
+            ("Grep", json!({"pattern": "KEY", "path": ".env"})),
+            ("Grep", json!({"pattern": "KEY", "path": "secrets"})),
+            (
+                "Grep",
+                json!({"pattern": "KEY", "path": "/work/project/secrets/a"}),
+            ),
+            ("Grep", json!({"pattern": "KEY", "glob": ".env*"})),
+            ("Glob", json!({"pattern": ".env*"})),
+            ("Glob", json!({"pattern": "*", "path": "secrets"})),
+        ] {
+            assert_eq!(
+                decide(&p, tool, input.clone()),
+                PolicyDecision::Deny,
+                "{tool} {input}"
+            );
+        }
+        assert_eq!(
+            decide(&p, "Grep", json!({"pattern": "fn main", "path": "src"})),
+            PolicyDecision::Allow,
+            "a search that touches no denied path is still free"
+        );
+    }
+
+    #[test]
+    fn a_denied_command_is_denied_behind_every_wrapper() {
+        let p = policy(PolicyMode::Ask, &[], &["Bash(rm *)"]);
+        for command in [
+            "if true; then rm -rf x; fi",
+            "time rm -rf x",
+            "nohup rm -rf x",
+            "FOO=1 rm -rf x",
+            "FOO=1 BAR=2 rm -rf x",
+            "env FOO=1 rm -rf x",
+            "/bin/rm -rf x",
+            "//bin/rm -rf x",
+            "/usr/bin/env rm -rf x",
+            "command rm -rf x",
+            "exec rm -rf x",
+            "sh -c 'rm -rf x'",
+            "bash -lc \"rm -rf x\"",
+            "eval 'rm -rf x'",
+            "sh -c 'sh -c \"rm -rf x\"'",
+            "while true; do rm -rf x; done",
+            "! rm -rf x",
+        ] {
+            assert_eq!(
+                bash(&p, command),
+                PolicyDecision::Deny,
+                "{command} must be denied"
+            );
+        }
+    }
+
+    #[test]
+    fn those_wrappers_never_make_a_command_allowed() {
+        let p = policy(PolicyMode::Ask, &["Bash(git *)"], &[]);
+        assert_eq!(bash(&p, "git status"), PolicyDecision::Allow);
+        for command in [
+            "sh -c 'git status'",
+            "eval 'git status'",
+            "FOO=1 git status",
+            "time git status",
+        ] {
+            assert_eq!(
+                bash(&p, command),
+                PolicyDecision::Ask,
+                "{command} is not a plain git command"
+            );
+        }
+    }
+
+    #[test]
+    fn a_deny_pattern_that_is_the_literal_text_the_model_wrote_still_denies() {
+        // The pattern spells the path as it was written, `..` included. Its normal form is `.env`
+        // and its last component is `.env`: only the as-written form can match.
+        let p = policy(PolicyMode::Ask, &[], &["Read(src/../.env)"]);
+        assert_eq!(
+            decide(&p, "Read", json!({"file_path": "src/../.env"})),
+            PolicyDecision::Deny
         );
     }
 

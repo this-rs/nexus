@@ -1,6 +1,6 @@
 %% name: nexus-tools
 %% covers: nexus-tools/src/*.rs, nexus-tools/src/files/*.rs, nexus-tools/src/shell/*.rs, nexus-tools/src/web/*.rs, nexus-tools/src/search/*.rs, nexus-tools/src/fake_search.rs, nexus-tools/src/bin/fake_search.rs, nexus-tools/src/bin/fake_obscura.rs, nexus-tools/tests/data/html/*.html, nexus-tools/tests/*.rs, nexus-tools/tests/golden_grep/*.txt, claude-code-sdk-rs/tests/parity/claude-code-2.1.287/*.json, docs/agent-tools-parity.md
-%% verified: 2026-10-05
+%% verified: 2026-10-06
 flowchart TD
     subgraph legend["Légende"]
         direction LR
@@ -30,7 +30,7 @@ flowchart TD
         direction TB
         SCOPE["✅ périmètre : résolution composant par composant,<br/>liens symboliques et .. suivis là où ils mènent<br/><i>vérifié : tests/files.rs, un test par évasion</i>"]
         STATE["✅ état « lu » par session : Edit/Write/NotebookEdit refusent un fichier<br/>non lu ou modifié depuis la lecture<br/><i>vérifié : mutation jouée (garde ignorée → test rouge)</i>"]
-        READ["✅ Read : texte numéroté comme cat -n, notebooks en cellules,<br/>plafond en caractères avec coupe annoncée (écart volontaire)<br/><i>vérifié : longueurs du relevé de Claude Code 2.1.287</i>"]
+        READ["✅ Read : texte numéroté comme cat -n, notebooks en cellules,<br/>plafond en caractères avec coupe annoncée (écart volontaire) ;<br/>Read et Edit refusent un fichier texte de plus de 64 Mio (FileConfig::with_max_text_bytes) en disant la taille, la limite et comment continuer<br/><i>vérifié : longueurs du relevé de Claude Code 2.1.287 ; tests/files.rs, un fichier à la limite exacte se lit encore</i>"]
         WRITE["✅ Write, Edit : messages du relevé, jamais de fichier tronqué<br/>(temporaire voisin, fsync, rename), sauvegarde optionnelle<br/><i>vérifié : lecteur concurrent ne voit jamais un fichier à moitié écrit</i>"]
         NB["✅ NotebookEdit : replace, insert, delete par id de cellule ;<br/>JSON indenté d'un espace, ordre des clés conservé (type local)<br/><i>vérifié : fichier final comparé octet pour octet</i>"]
         SEARCH["✅ Glob (mtime décroissant, 100 chemins, gitignore) et Grep<br/>(content, files_with_matches, count, -i -n -A -B -C, glob, type, multiline,<br/>head_limit, offset) sur ignore + globset + regex, sans binaire rg<br/><i>vérifié : sortie identique à un vrai rg (ou à ses goldens) ; liens non suivis</i>"]
@@ -39,7 +39,7 @@ flowchart TD
 
     subgraph shell["Outils shell — shell/*.rs (N20)"]
         direction TB
-        BASH["✅ Bash : sortie des deux flux fusionnée, codes de sortie, délai 120 s (max 600 s),<br/>au-delà de 30 000 octets sortie sur disque + aperçu de 2 Ko (formats du relevé 2.1.287),<br/>répertoire de travail persistant, un cd hors périmètre est annulé<br/><i>vérifié : tests/shell.rs, messages du relevé</i>"]
+        BASH["✅ Bash : sortie des deux flux fusionnée, codes de sortie, délai 120 s (max 600 s),<br/>au-delà de 30 000 octets sortie sur disque + aperçu de 2 Ko (formats du relevé 2.1.287),<br/>répertoire de travail persistant, un cd hors périmètre est annulé ;<br/>sortie plafonnée à 64 Mio sur disque (ShellConfig::with_max_output_bytes) : au-delà le groupe de processus est tué, le fichier recoupé et terminé par une ligne qui le dit, la tête seule est lue ; tâches de fond et Monitor identiques<br/><i>vérifié : tests/shell.rs, messages du relevé ; un « yes » en avant-plan et en arrière-plan est arrêté au plafond, test rouge quand la surveillance est neutralisée (mutation jouée sous ulimit)</i>"]
         GROUP["✅ groupe de processus : timeout, appel abandonné, TaskStop et fin de session<br/>tuent la commande ET ses descendants (SIGTERM puis SIGKILL du groupe)<br/><i>vérifié : un petit-enfant sleep disparaît ; 3 mutations rouges</i>"]
         BG["✅ arrière-plan : identifiant, sortie lisible pendant et après avec Read,<br/>TaskStop idempotent, tâches isolées par session<br/><i>vérifié : tests/shell.rs</i>"]
         MON["✅ Monitor : une notification notifications/message par ligne, dans l'ordre,<br/>fin signalée avec le processus ; fin d'entrée stdio ne reste jamais suspendue<br/><i>vérifié : tests/monitor.rs (régression d'une suspension réelle)</i>"]
@@ -49,12 +49,12 @@ flowchart TD
 
     subgraph web["WebFetch — web/*.rs (N21)"]
         direction TB
-        SSRF["✅ garde SSRF : privé, loopback, link-local (métadonnées cloud), CGNAT, multicast, réservé ;<br/>IPv6 : mappé, compatible, NAT64, 6to4, Teredo, ULA ; toutes les écritures numériques d'IPv4<br/><i>vérifié : un test rouge par vecteur, zéro connexion tentée ; 5 mutations rouges</i>"]
+        SSRF["✅ garde SSRF : privé, loopback, link-local (métadonnées cloud), CGNAT, multicast, réservé ;<br/>IPv6 : mappé, compatible, NAT64 (dont 64:ff9b:1::/48 à usage local), SIIT (::ffff:0:0/96), 6to4 et son relais anycast 192.88.99.0/24, Teredo, ORCHID et ORCHIDv2, ULA ; toutes les écritures numériques d'IPv4<br/><i>vérifié : un test rouge par vecteur, zéro connexion tentée ; 5 mutations rouges, plus une mutation jouée sur les plages SIIT, NAT64 local et relais 6to4</i>"]
         PIN["✅ résolution : TOUTES les adresses d'un nom sont contrôlées, la connexion va à l'adresse contrôlée<br/>(épinglée), chaque redirection est résolue et contrôlée de nouveau<br/><i>vérifié : rebinding DNS refusé au second saut</i>"]
         REDIR["✅ redirections : même hôte suivi (www. ignoré, http vers https accepté), autre hôte ou retour à http<br/>signalé avec l'URL cible, boucle bornée<br/><i>vérifié : tests/web.rs</i>"]
         CONV["✅ HTML vers Markdown (htmd, mesuré sur un corpus de 5 pages contre 4 autres crates) :<br/>titres, listes, tableaux, code avec langage, liens et images rendus absolus ;<br/>scripts, styles, svg, iframe jamais dans le texte ; décodage du charset<br/><i>vérifié : tests/web_convert.rs</i>"]
         CAPS["✅ plafonds : 5 Mio téléchargés, 100 000 caractères rendus, coupe annoncée ;<br/>binaire refusé (erreur typée) ; cache 15 min à horloge injectée ; aucun appel de modèle caché"]
-        TLS["✅ https : rustls + ring + racines Mozilla derrière la feature `tls` (désactivée par défaut) ; nom vérifié contre l'URL ; exception à la règle « Rust seul » limitée à ring et cc, vérifiée par le test de politique<br/><i>vérifié : tests/tls.rs (de confiance, non fiable, autre nom, upgrade http)</i>"]
+        TLS["✅ https : rustls + ring + racines Mozilla derrière la feature `tls` (désactivée par défaut) ; nom vérifié contre l'URL ; exception à la règle « Rust seul » limitée à ring et cc, vérifiée par le test de politique ;<br/>Fetcher::new choisit TlsConnector sous la feature (il gardait PlainConnector : un binaire construit avec tls répondait « no TLS support »), supports_tls() le fige sans réseau<br/><i>vérifié : tests/tls.rs (de confiance, non fiable, autre nom, upgrade http) ; tests/web.rs, les deux configurations ; une vraie page https récupérée par un test ignoré par défaut</i>"]
     end
 
     subgraph search["WebSearch — search/*.rs (N22)"]

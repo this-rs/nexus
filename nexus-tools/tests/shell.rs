@@ -533,3 +533,61 @@ async fn the_shell_tools_say_what_they_do_to_the_policy() {
             .open_world
     );
 }
+
+// ---------------------------------------------------------------------------
+// Output ceiling (N26): a command that floods its output file is ended
+// ---------------------------------------------------------------------------
+
+fn with_ceiling(f: &mut Fixture, bytes: u64) {
+    f.config = f.config.clone().with_max_output_bytes(bytes);
+    f.registry = register(ToolRegistry::new(), &f.config);
+}
+
+#[tokio::test]
+async fn a_command_that_floods_its_output_is_ended_at_the_ceiling() {
+    let mut f = fixture();
+    with_ceiling(&mut f, 1024 * 1024);
+    let started = std::time::Instant::now();
+    let r = f.bash("yes flood").await;
+    assert!(
+        started.elapsed() < Duration::from_secs(20),
+        "yes was not stopped"
+    );
+    assert!(r.is_error, "{}", r.text);
+    assert!(r.text.contains("went past 1 MiB"), "{}", r.text);
+    // What is on disk is bounded: the ceiling plus the note, never the flood.
+    let path = r
+        .text
+        .split("saved to: ")
+        .nth(1)
+        .unwrap()
+        .split('\n')
+        .next()
+        .unwrap()
+        .to_owned();
+    let size = std::fs::metadata(&path).unwrap().len();
+    assert!(size < 1024 * 1024 + 4096, "{size} bytes on disk");
+    let body = std::fs::read_to_string(&path).unwrap();
+    assert!(
+        body.trim_end().ends_with("was ended]"),
+        "no stop note in the file"
+    );
+}
+
+#[tokio::test]
+async fn a_background_task_that_floods_is_ended_and_its_file_says_so() {
+    let mut f = fixture();
+    with_ceiling(&mut f, 512 * 1024);
+    let r = f
+        .call(
+            "Bash",
+            json!({"command": "yes flood", "run_in_background": true}),
+        )
+        .await;
+    let path = output_path(&r.text);
+    eventually("the flood is cut", || {
+        std::fs::read_to_string(&path).is_ok_and(|t| t.trim_end().ends_with("was ended]"))
+    })
+    .await;
+    assert!(std::fs::metadata(&path).unwrap().len() < 512 * 1024 + 4096);
+}

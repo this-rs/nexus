@@ -7,7 +7,7 @@
 //! cache. It makes **no hidden model call**: the instruction (`prompt`) is for the session's
 //! model, which reads the Markdown.
 //!
-//! `https` needs a TLS backend; see `PlainConnector`.
+//! `https` needs the `tls` feature; without it `PlainConnector` refuses it.
 
 mod cache;
 mod convert;

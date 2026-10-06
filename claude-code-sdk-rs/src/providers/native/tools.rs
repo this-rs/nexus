@@ -148,6 +148,8 @@ impl ToolEntry {
             let host = url::Url::parse(text.trim())
                 .ok()
                 .and_then(|u| u.host_str().map(str::to_owned))?;
+            // `evil.com.` is `evil.com` (the root dot), and DNS ignores case.
+            let host = host.trim_end_matches('.').to_lowercase();
             return Some(format!("domain:{host}"));
         }
         Some(text.to_owned())

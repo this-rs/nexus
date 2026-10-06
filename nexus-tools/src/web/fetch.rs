@@ -36,6 +36,12 @@ pub struct Target {
 pub trait Connect: Send + Sync {
     /// Connects to the target.
     async fn connect(&self, target: &Target) -> std::io::Result<Box<dyn Io>>;
+
+    /// Whether `https` targets can be served. A connector that cannot says so here, so a build
+    /// that was meant to speak TLS can be checked without a network.
+    fn supports_tls(&self) -> bool {
+        true
+    }
 }
 
 /// Plain TCP. `https` is refused until a TLS backend is chosen and compiled in.
@@ -44,6 +50,10 @@ pub struct PlainConnector;
 
 #[async_trait]
 impl Connect for PlainConnector {
+    fn supports_tls(&self) -> bool {
+        false
+    }
+
     async fn connect(&self, target: &Target) -> std::io::Result<Box<dyn Io>> {
         if target.tls {
             return Err(std::io::Error::new(
@@ -198,6 +208,16 @@ pub enum Outcome {
     Redirect { from: Url, to: Url, status: u16 },
 }
 
+#[cfg(feature = "tls")]
+fn default_connector() -> Box<dyn Connect> {
+    Box::new(super::tls::TlsConnector::new())
+}
+
+#[cfg(not(feature = "tls"))]
+fn default_connector() -> Box<dyn Connect> {
+    Box::new(PlainConnector)
+}
+
 /// Fetches pages.
 pub struct Fetcher {
     pub(crate) config: FetchConfig,
@@ -206,13 +226,19 @@ pub struct Fetcher {
 }
 
 impl Fetcher {
-    /// A fetcher with the system resolver and plain TCP.
+    /// A fetcher with the system resolver. `https` works when the crate is built with the `tls`
+    /// feature; without it only plain TCP is available and `https` fails with a typed error.
     pub fn new(config: FetchConfig) -> Self {
         Self {
             config,
             resolver: Box::new(SystemResolver),
-            connector: Box::new(PlainConnector),
+            connector: default_connector(),
         }
+    }
+
+    /// Whether this fetcher can reach `https` URLs.
+    pub fn supports_tls(&self) -> bool {
+        self.connector.supports_tls()
     }
 
     /// Replaces the resolver (tests answer names themselves).

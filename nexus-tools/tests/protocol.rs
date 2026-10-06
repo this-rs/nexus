@@ -804,3 +804,52 @@ async fn session_state_survives_requests_and_is_forgotten_on_delete() {
         "forgotten after DELETE"
     );
 }
+
+/// A token that is well formed and unexpired but not signed by this server's key. The only
+/// thing that stops it is the signature check, which the other tests (garbage, expired, no
+/// prefix) never reach: they fail on the shape or the clock first.
+#[tokio::test]
+async fn http_refuses_a_well_formed_token_with_a_wrong_or_stolen_signature() {
+    use base64::Engine as _;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+
+    let ran = Arc::new(AtomicUsize::new(0));
+    let http = start_http(&ran, &[]).await;
+    let a = http.address;
+    let ping = r#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#;
+
+    // Signed by someone else's key.
+    let other = SigningKey::new(b"another-key-another-key-another-key-0".to_vec()).unwrap();
+    let exp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        + 600;
+    let foreign = issue(
+        &other,
+        &Claims {
+            sid: "s".into(),
+            tools: vec!["echo".into()],
+            exp,
+        },
+    );
+    assert_eq!(
+        raw(a, &post(a, &[bearer(&foreign)], ping)).await.status,
+        401
+    );
+
+    // A genuine token whose claims were widened after signing: the old tag is kept.
+    let genuine = token("s", &["echo"], 600);
+    let tag = genuine.rsplit('.').next().unwrap();
+    let widened = URL_SAFE_NO_PAD.encode(
+        serde_json::to_vec(&json!({"sid": "s", "tools": ["echo", "write"], "exp": exp})).unwrap(),
+    );
+    let forged = format!("v1.{widened}.{tag}");
+    assert_eq!(raw(a, &post(a, &[bearer(&forged)], ping)).await.status, 401);
+
+    // And the genuine one is accepted, so the refusals above are about the signature.
+    assert_eq!(
+        raw(a, &post(a, &[bearer(&genuine)], ping)).await.status,
+        200
+    );
+}

@@ -29,11 +29,17 @@ pub use write::WriteTool;
 use crate::registry::ToolRegistry;
 use crate::tool::{CallContext, ToolResult};
 
+/// The largest text file `Read` and `Edit` take whole. Both load the file into memory, so a
+/// ceiling is what keeps one call on a huge file from exhausting the host (N26). Pictures and
+/// PDFs have their own, smaller limits.
+pub const MAX_TEXT_FILE_BYTES: u64 = 64 * 1024 * 1024;
+
 /// What every file tool shares: where it may go, and where backups go (if anywhere).
 #[derive(Debug, Clone)]
 pub struct FileConfig {
     pub(crate) scope: Arc<Scope>,
     pub(crate) backup_dir: Option<PathBuf>,
+    pub(crate) max_text_bytes: u64,
 }
 
 impl FileConfig {
@@ -42,12 +48,29 @@ impl FileConfig {
         Self {
             scope: Arc::new(scope),
             backup_dir: None,
+            max_text_bytes: MAX_TEXT_FILE_BYTES,
         }
     }
 
     /// The scope, shared with the other tools of the session.
     pub fn scope(&self) -> Arc<Scope> {
         Arc::clone(&self.scope)
+    }
+
+    /// Replaces the largest text file `Read` and `Edit` accept (default [`MAX_TEXT_FILE_BYTES`]).
+    #[must_use]
+    pub fn with_max_text_bytes(mut self, bytes: u64) -> Self {
+        self.max_text_bytes = bytes;
+        self
+    }
+
+    /// The refusal for a file over the ceiling, naming a way out.
+    pub(crate) fn too_large(&self, given: &str, size: u64, tool: &str) -> ToolResult {
+        tool_error(format!(
+            "{given} is {size} bytes, over the {} byte limit of {tool}. Read part of it with \
+             Grep, or with Bash (head, sed -n) when that is allowed.",
+            self.max_text_bytes
+        ))
     }
 
     /// Copies a file here before overwriting it.
