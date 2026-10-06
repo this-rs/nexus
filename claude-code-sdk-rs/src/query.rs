@@ -185,6 +185,14 @@ async fn query_print_mode(
     // host with no `claude` anywhere. `SubprocessTransport::new` and
     // `SubprocessTransport::for_print_mode` both honour it; this now matches them.
     let cli_path = match options.cli_path {
+        // Nothing local to find: the program runs on the remote machine.
+        _ if options.remote.is_some() => std::path::PathBuf::from(
+            &options
+                .remote
+                .as_ref()
+                .map(|r| r.cli.clone())
+                .unwrap_or_default(),
+        ),
         Some(ref explicit_path) => {
             debug!("Using explicit CLI path: {:?}", explicit_path);
             explicit_path.clone()
@@ -194,12 +202,15 @@ async fn query_print_mode(
     // One builder for every entry point: flags, working directory, environment
     // (`options.env`, `options.env_policy`) and the MCP secret file come from the
     // same function the streaming transport uses.
+    // Remote first: it refuses an MCP configuration before any secret file is written.
+    let remote = crate::transport::subprocess::remote_launch(&options)?;
     let mcp_file = crate::transport::subprocess::mcp_secret_file(&options)?;
     let mut cmd = crate::transport::subprocess::build_cli_command(
         &cli_path,
         &options,
         crate::transport::subprocess::CommandMode::Print { prompt: &prompt },
         mcp_file.as_ref().map(|f| f.path()),
+        remote.as_ref(),
     );
 
     // Set up process pipes. stdin is left alone on purpose: print mode never

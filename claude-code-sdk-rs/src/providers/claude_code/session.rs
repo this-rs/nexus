@@ -58,6 +58,7 @@ use crate::agent::{
 };
 use crate::errors::SdkError;
 use crate::interactive::{InteractiveClient, dispatch_hook_from_registry};
+use crate::transport::remote::{RemoteProbe, probe_version};
 use crate::transport::subprocess::{find_claude_cli, get_cli_version_with_policy, min_cli_version};
 use crate::types::{
     ClaudeCodeOptions, HookCallback, HookContext, HookInput, HookJSONOutput, HookMatcher,
@@ -175,6 +176,11 @@ impl ClaudeCodeProvider {
             core,
             client: tokio::sync::Mutex::new(client),
             pid,
+            machine: self
+                .config
+                .remote
+                .as_ref()
+                .map(crate::transport::remote::RemoteHost::machine),
             pump,
         }))
     }
@@ -220,19 +226,39 @@ impl AgentProvider for ClaudeCodeProvider {
             // No executable behind a custom client.
             return ProviderHealth::ok(None);
         }
-        let path = match &self.config.cli_path {
-            Some(path) => path.clone(),
-            None => match find_claude_cli() {
-                Ok(path) => path,
-                Err(error) => return ProviderHealth::unavailable(error.into()),
-            },
+        let version = if let Some(remote) = &self.config.remote {
+            // The machine is asked through the same pinned channel a session uses.
+            // Never a fallback to the local CLI: that would run somewhere else than
+            // where the user chose.
+            match probe_version(remote).await {
+                RemoteProbe::Version(version) => version,
+                RemoteProbe::CliMissing => {
+                    return ProviderHealth::unavailable(ProviderError::CliNotFound {
+                        program: format!("{} on {}", remote.cli, remote.machine()),
+                    });
+                },
+                RemoteProbe::Unreachable(why) => {
+                    return ProviderHealth::unavailable(ProviderError::unreachable(format!(
+                        "{}: {why}",
+                        remote.machine()
+                    )));
+                },
+            }
+        } else {
+            let path = match &self.config.cli_path {
+                Some(path) => path.clone(),
+                None => match find_claude_cli() {
+                    Ok(path) => path,
+                    Err(error) => return ProviderHealth::unavailable(error.into()),
+                },
+            };
+            if !path.exists() {
+                return ProviderHealth::unavailable(ProviderError::CliNotFound {
+                    program: path.display().to_string(),
+                });
+            }
+            get_cli_version_with_policy(&path, &self.config.env_policy).await
         };
-        if !path.exists() {
-            return ProviderHealth::unavailable(ProviderError::CliNotFound {
-                program: path.display().to_string(),
-            });
-        }
-        let version = get_cli_version_with_policy(&path, &self.config.env_policy).await;
         let minimum = min_cli_version();
         match version {
             Some(version) if version < minimum => ProviderHealth {
@@ -267,8 +293,23 @@ impl AgentProvider for ClaudeCodeProvider {
         spec: SessionSpec,
         token: ResumeToken,
     ) -> Result<Arc<dyn AgentSession>, ProviderError> {
-        let session_id = token
-            .expect_kind(ProviderKind::ClaudeCode)?
+        let data = token.expect_kind(ProviderKind::ClaudeCode)?;
+        // A CLI session lives in one user's home on one machine: resuming it
+        // anywhere else would silently start a different conversation.
+        let issued_on = data.get("machine").and_then(Value::as_str);
+        let here = self
+            .config
+            .remote
+            .as_ref()
+            .map(crate::transport::remote::RemoteHost::machine);
+        if issued_on != here.as_deref() {
+            return Err(ProviderError::invalid(format!(
+                "this session belongs to {}, not to {}",
+                issued_on.unwrap_or("the local machine"),
+                here.as_deref().unwrap_or("the local machine")
+            )));
+        }
+        let session_id = data
             .get("session_id")
             .and_then(Value::as_str)
             .filter(|id| !id.is_empty())
@@ -894,6 +935,9 @@ struct ClaudeCodeSession {
     client: tokio::sync::Mutex<InteractiveClient>,
     /// Process identifier of the CLI. Diagnostic only.
     pid: Option<u32>,
+    /// The machine the CLI runs on (`user@host:port`), `None` when local. A session
+    /// identifier only means something on the machine that produced it.
+    machine: Option<String>,
     pump: JoinHandle<()>,
 }
 
@@ -918,11 +962,15 @@ impl AgentSession for ClaudeCodeSession {
     }
 
     fn resume_token(&self) -> Option<ResumeToken> {
-        self.core
-            .lock()
-            .session_id
-            .clone()
-            .map(ResumeToken::claude_code_session)
+        let session_id = self.core.lock().session_id.clone()?;
+        Some(match &self.machine {
+            None => ResumeToken::claude_code_session(session_id),
+            Some(machine) => ResumeToken::new(
+                ProviderKind::ClaudeCode,
+                1,
+                json!({ "session_id": session_id, "machine": machine }),
+            ),
+        })
     }
 
     async fn send_turn(&self, input: TurnInput) -> Result<EventStream, ProviderError> {

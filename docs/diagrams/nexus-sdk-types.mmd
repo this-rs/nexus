@@ -91,7 +91,7 @@ flowchart TD
         t_mcp -->|"type inconnu, ex. websocket"| t_mcp_no["✅ refusé, aucun repli silencieux"]
 
         t_redact["✅ RedactedValues — Debug qui montre les noms<br/>jamais les valeurs, clés triées pour un log stable<br/><i>vérifié : map vide, ordre imposé, secret absent</i>"]
-        t_dbg["✅ Debug de ClaudeCodeOptions<br/>env via RedactedValues ; hooks, can_use_tool et<br/>debug_stderr réduits à un booléen ; env_policy, mcp_config_via_file et permission_mode_native affichés<br/>stderr_callback N'APPARAÎT PAS du tout"]
+        t_dbg["✅ Debug de ClaudeCodeOptions<br/>env via RedactedValues ; hooks, can_use_tool et<br/>debug_stderr réduits à un booléen ; env_policy, mcp_config_via_file, permission_mode_native et remote (hôte, port, utilisateur, répertoire ; ni la clé ni l identité) affichés<br/>stderr_callback N'APPARAÎT PAS du tout"]
         t_dbg --> t_redact
 
         t_builder["✅ ClaudeCodeOptionsBuilder — 55 méthodes publiques<br/>54 setters consommants plus build ; ajoutés le 2026-10-05 : env_policy (défaut InheritAll)<br/>et mcp_config_via_file (défaut false), puis permission_mode_native (défaut None, chaîne écrite telle quelle dans --permission-mode) — effet décrit et vérifié dans nexus-sdk-transport"]

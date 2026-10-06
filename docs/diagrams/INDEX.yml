@@ -129,12 +129,12 @@ diagrams:
       - claude-code-sdk-rs/src/bin/fake_claude.rs
   - name: nexus-sdk-transport
     file: nexus-sdk-transport.mmd
-    verified: 2026-10-05
+    verified: 2026-10-06
     covers:
       - claude-code-sdk-rs/src/transport/*.rs
   - name: nexus-sdk-types
     file: nexus-sdk-types.mmd
-    verified: 2026-10-05
+    verified: 2026-10-06
     covers:
       - claude-code-sdk-rs/src/types.rs
       - claude-code-sdk-rs/src/message_parser.rs

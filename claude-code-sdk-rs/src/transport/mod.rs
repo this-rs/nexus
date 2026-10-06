@@ -14,9 +14,11 @@ use std::pin::Pin;
 use tokio::sync::mpsc::Receiver;
 
 pub mod mock;
+pub mod remote;
 pub mod spawn;
 pub mod subprocess;
 
+pub use remote::{RemoteHost, RemoteLaunch};
 pub use spawn::{EnvPolicy, SecretFile};
 
 pub use subprocess::SECRET_BEARING_ARGS;
