@@ -1061,6 +1061,17 @@ mod tests {
     }
 
     #[test]
+    fn a_deny_pattern_that_is_the_literal_text_the_model_wrote_still_denies() {
+        // The pattern spells the path as it was written, `..` included. Its normal form is `.env`
+        // and its last component is `.env`: only the as-written form can match.
+        let p = policy(PolicyMode::Ask, &[], &["Read(src/../.env)"]);
+        assert_eq!(
+            decide(&p, "Read", json!({"file_path": "src/../.env"})),
+            PolicyDecision::Deny
+        );
+    }
+
+    #[test]
     fn a_session_approval_lifts_an_ask_but_never_a_deny() {
         let p = policy(PolicyMode::Ask, &[], &["Bash(rm *)"]);
         let approved: HashSet<String> = ["mcp__nexus__Bash".to_owned()].into();

@@ -836,3 +836,24 @@ async fn a_real_https_page_is_fetched_with_the_default_fetcher() {
         r.text
     );
 }
+
+/// The real connector, not a steered one: it must connect to the address that was checked, never
+/// to a second resolution of the name (DNS rebinding). The name here resolves nowhere, so any
+/// connector that looks it up again fails.
+#[tokio::test]
+async fn the_real_plain_connector_connects_to_the_pinned_address_and_never_resolves_the_name() {
+    use nexus_tools::web::{Connect, PlainConnector, Target};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let accepted = tokio::spawn(async move { listener.accept().await.is_ok() });
+    let target = Target {
+        host: "pinned-address-only.invalid".to_owned(),
+        addr,
+        tls: false,
+    };
+    PlainConnector
+        .connect(&target)
+        .await
+        .expect("connects to the pinned address");
+    assert!(accepted.await.unwrap(), "the server saw the connection");
+}
