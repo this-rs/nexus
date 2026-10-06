@@ -50,8 +50,8 @@ use super::wire::{
 use crate::agent::{
     AgentEvent, AgentSession, CancelOutcome, CancelScope, Capabilities, EventStream,
     InterruptOutcome, InterruptScope, PermissionDecision, PolicyDecision, PolicyMode,
-    ProcessDiagnostic, ProviderError, ProviderKind, QuestionAnswer, ResumeToken, SandboxLevel,
-    SessionLimits, StopReason, ToolPolicy, TurnInput,
+    ProcessDiagnostic, ProviderError, ProviderKind, QuestionAnswer, ResumeToken, SessionLimits,
+    StopReason, ToolPolicy, TurnInput,
 };
 
 /// Capacity of the out-of-band buffer.
@@ -685,9 +685,6 @@ impl AgentSession for AcpSession {
             && mode > ceiling.mode
         {
             return Err(ProviderError::unsupported("policy_ceiling"));
-        }
-        if mode == PolicyMode::Trust && self.capabilities.sandbox == SandboxLevel::None {
-            return Err(ProviderError::unsupported("sandbox"));
         }
         let mode_id = {
             let state = self.core.lock();

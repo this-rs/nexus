@@ -26,7 +26,7 @@ pub enum PermissionScope {
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum SandboxLevel {
-    /// No operating-system sandbox. `trust` mode is refused for a third-party provider.
+    /// No operating-system sandbox. Information for the user (what isolates the tools), not a gate: `trust` opens on every provider.
     #[default]
     None,
     /// Writes confined to the workspace.

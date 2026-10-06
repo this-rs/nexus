@@ -43,7 +43,7 @@
 //! | `per_session_mcp`, `tools` | yes: `mcpServers` of `session/new`; an HTTP / SSE server needs `mcpCapabilities.http` / `.sse` (else `Unsupported { mcp_http | mcp_sse }`) |
 //! | `interactive_permissions` | yes; scopes `once`, `always`; a request offers those it has an `allow_once` / `allow_always` option for |
 //! | `hooks`, `subagents`, `compaction_signal`, `background_tasks`, `tool_cancel`, `native_question` | none: ACP carries none of them |
-//! | `sandbox` | `none`: `trust` is refused at opening and live |
+//! | `sandbox` | `none`: information for the user, not a gate: `trust` opens, and is applied live when the agent publishes a matching mode |
 //! | `secret_isolation` | yes: allowlisted environment, no secret on argv (an argument that looks like one is refused), MCP credentials only in the `session/new` JSON on the pipe |
 //! | `context_window` | `AcpConfig::context_window` (`configured`), else `None`: never implicit |
 //! | `set_model_live` | no (`session/set_model` is unstable): `Unsupported { set_model_live }`; `SessionSpec::model` is a label of `done.model` and of the price, announced by `provider_notice { model_not_applied }` |
@@ -84,8 +84,8 @@ use serde_json::{Value, json};
 
 use crate::agent::{
     AgentEvent, AgentProvider, AgentSession, Capabilities, ContextWindow, ContextWindowSource,
-    CostBasis, McpServerSpec, McpServerStatus, ModelInfo, PermissionScope, PolicyMode,
-    ProviderError, ProviderHealth, ProviderKind, ResumeToken, SessionSpec, redact,
+    CostBasis, McpServerSpec, McpServerStatus, ModelInfo, PermissionScope, ProviderError,
+    ProviderHealth, ProviderKind, ResumeToken, SessionSpec, redact,
 };
 use crate::model::PriceTable;
 use crate::transport::spawn::EnvPolicy;
@@ -401,9 +401,6 @@ impl AcpProvider {
         // Refusals that need nothing from the disk, the network or a process.
         self.config.validate()?;
         spec.validate()?;
-        if spec.policy.mode == PolicyMode::Trust {
-            return Err(ProviderError::unsupported("sandbox"));
-        }
         if spec.max_turns.is_some()
             || spec.limits.max_tokens.is_some()
             || spec.limits.max_cost_usd.is_some()

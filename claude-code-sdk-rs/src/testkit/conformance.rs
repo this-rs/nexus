@@ -208,9 +208,9 @@ pub enum Scenario {
     ///
     /// Checked: `set_policy_mode(auto_edits)` is `Ok` or `Unsupported`, never
     /// another error; the turn completes; `open` refuses a policy above its
-    /// ceiling (`Unsupported { policy_ceiling }`); with `sandbox: none`, a
-    /// provider other than Claude Code refuses to open in `trust` mode
-    /// (`Unsupported { sandbox }`).
+    /// ceiling (`Unsupported { policy_ceiling }`); `open` in `trust` mode is
+    /// never refused for lack of a sandbox (`Unsupported { sandbox }` is a
+    /// failure: the sandbox level is information, not a gate).
     ChangementPolitique,
     /// Stage: [`Prepared::resume`] holds a token the provider accepts, and the
     /// resumed session runs one plain turn.
@@ -1974,18 +1974,26 @@ async fn changement_politique(ctx: &mut Ctx, prepared: &Prepared) {
         &["policy_ceiling"],
         opened,
     );
-    if ctx.caps.sandbox == SandboxLevel::None
-        && prepared.provider.kind() != ProviderKind::ClaudeCode
+    // `trust` is a mode like the others, on every provider: the sandbox level is
+    // information for the user (what isolates the tools), never a gate. A provider that
+    // cannot honour the mode says so with its own typed refusal; it does not blame a
+    // missing sandbox. (Decision of 2026-10-07: behave the same whatever the provider.)
     {
         let mut trust = prepared.spec.clone();
         trust.policy = ToolPolicy::new(PolicyMode::Trust);
         trust.policy_ceiling = None;
-        let opened = ctx.bounded("open()", prepared.provider.open(trust)).await;
-        ctx.expect_unsupported(
-            "open() in `trust` mode on a provider without sandbox",
-            &["sandbox"],
-            opened,
-        );
+        match ctx.bounded("open()", prepared.provider.open(trust)).await {
+            Some(Ok(session)) => {
+                let _ = session.close().await;
+            },
+            Some(Err(ProviderError::Unsupported { capability })) if capability == "sandbox" => {
+                ctx.fail(
+                    "open() in `trust` mode was refused for lack of a sandbox: the sandbox is \
+                     information, not a gate",
+                );
+            },
+            Some(Err(_)) | None => {},
+        }
     }
 
     let Some(session) = open(ctx, prepared).await else {
