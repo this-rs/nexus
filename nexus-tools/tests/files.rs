@@ -980,3 +980,43 @@ async fn a_damaged_pdf_is_an_error_not_a_crash() {
         r.text
     );
 }
+
+// ---------------------------------------------------------------------------
+// Size ceiling (N26): Read and Edit load the file whole, so a huge one is refused
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn read_and_edit_refuse_a_file_over_the_ceiling_and_say_how_to_go_on() {
+    let f = Fixture::with(|config| config.with_max_text_bytes(1000));
+    f.put("big.txt", &"x".repeat(1001));
+    f.put("ok.txt", &"y".repeat(1000));
+
+    let r = f
+        .call("Read", json!({"file_path": f.path("big.txt")}))
+        .await;
+    assert!(
+        r.is_error
+            && r.text
+                .contains("1001 bytes, over the 1000 byte limit of Read"),
+        "{}",
+        r.text
+    );
+    assert!(r.text.contains("Grep"), "{}", r.text);
+
+    let r = f
+        .call(
+            "Edit",
+            json!({"file_path": f.path("big.txt"), "old_string": "x", "new_string": "z", "replace_all": true}),
+        )
+        .await;
+    assert!(r.is_error && r.text.contains("limit of Edit"), "{}", r.text);
+    assert_eq!(
+        f.get("big.txt"),
+        "x".repeat(1001),
+        "a refused edit must not touch the file"
+    );
+
+    // At the ceiling exactly, it still reads.
+    let r = f.call("Read", json!({"file_path": f.path("ok.txt")})).await;
+    assert!(!r.is_error, "{}", r.text);
+}
