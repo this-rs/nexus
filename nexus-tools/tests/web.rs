@@ -830,5 +830,9 @@ fn without_the_tls_feature_the_default_fetcher_says_it_cannot_reach_https() {
 async fn a_real_https_page_is_fetched_with_the_default_fetcher() {
     let tool = WebFetchTool::new(Fetcher::new(FetchConfig::default()));
     let r = call(&tool, "https://example.com/").await;
-    assert!(!r.is_error && r.text.contains("for use in documentation examples"), "{}", r.text);
+    assert!(
+        !r.is_error && r.text.contains("for use in documentation examples"),
+        "{}",
+        r.text
+    );
 }

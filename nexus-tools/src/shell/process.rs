@@ -155,3 +155,60 @@ impl Drop for GroupGuard {
         }
     }
 }
+
+/// What ended a command: how it exited, and whether the output ceiling did it.
+pub struct Waited {
+    /// The exit status, or the error of waiting.
+    pub status: std::io::Result<std::process::ExitStatus>,
+    /// The command wrote more than the ceiling and its group was killed.
+    pub capped: bool,
+}
+
+/// Waits for `child`, and ends its whole group as soon as `output` grows past `cap` bytes. The
+/// file is then cut back to `cap` and ends with a line saying why, so whoever reads it later
+/// (a `Read` of a background task's file) is told and never mistakes it for the full output.
+pub async fn wait_capped(
+    child: &mut tokio::process::Child,
+    pgid: u32,
+    output: &Path,
+    cap: u64,
+) -> Waited {
+    let mut capped = false;
+    let mut tick = tokio::time::interval(Duration::from_millis(20));
+    loop {
+        tokio::select! {
+            status = child.wait() => return Waited { status, capped },
+            _ = tick.tick(), if !capped => {
+                let size = std::fs::metadata(output).map(|m| m.len()).unwrap_or(0);
+                if size > cap {
+                    capped = true;
+                    kill_group_now(pgid);
+                    cut_output(output, cap);
+                }
+            }
+        }
+    }
+}
+
+fn cut_output(output: &Path, cap: u64) {
+    use std::io::Write;
+    if let Ok(file) = std::fs::OpenOptions::new().write(true).open(output)
+        && file.set_len(cap).is_ok()
+        && let Ok(mut file) = std::fs::OpenOptions::new().append(true).open(output)
+    {
+        let _ = writeln!(
+            file,
+            "\n[output stopped: the command wrote more than {} and was ended]",
+            human_bytes(cap)
+        );
+    }
+}
+
+/// `64 MiB`, `512 KiB`: sizes in the messages the model reads.
+pub(crate) fn human_bytes(bytes: u64) -> String {
+    if bytes >= 1024 * 1024 {
+        format!("{} MiB", bytes / (1024 * 1024))
+    } else {
+        format!("{} KiB", bytes / 1024)
+    }
+}

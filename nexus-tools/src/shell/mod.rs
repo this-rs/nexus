@@ -33,6 +33,10 @@ pub const DEFAULT_TIMEOUT_MS: u64 = 120_000;
 pub const MAX_TIMEOUT_MS: u64 = 600_000;
 /// Output above this many bytes is not returned inline.
 pub const INLINE_OUTPUT_LIMIT: usize = 30_000;
+/// A command whose output file grows past this is ended. The output goes to disk, and a loop
+/// such as `yes` writes hundreds of megabytes a second: without a ceiling it fills the disk
+/// of the host (N26).
+pub const MAX_OUTPUT_FILE_BYTES: u64 = 64 * 1024 * 1024;
 
 /// What the shell tools share.
 #[derive(Debug, Clone)]
@@ -42,6 +46,7 @@ pub struct ShellConfig {
     pub(crate) home: PathBuf,
     pub(crate) env: EnvPolicy,
     pub(crate) shell: PathBuf,
+    pub(crate) max_output_bytes: u64,
 }
 
 impl ShellConfig {
@@ -59,6 +64,7 @@ impl ShellConfig {
             home,
             env: EnvPolicy::default(),
             shell: process::default_shell(),
+            max_output_bytes: MAX_OUTPUT_FILE_BYTES,
         })
     }
 
@@ -66,6 +72,13 @@ impl ShellConfig {
     #[must_use]
     pub fn with_env(mut self, env: EnvPolicy) -> Self {
         self.env = env;
+        self
+    }
+
+    /// Replaces the ceiling on one command's output file (default [`MAX_OUTPUT_FILE_BYTES`]).
+    #[must_use]
+    pub fn with_max_output_bytes(mut self, bytes: u64) -> Self {
+        self.max_output_bytes = bytes;
         self
     }
 
