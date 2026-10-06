@@ -6,6 +6,23 @@ use std::sync::Arc;
 use crate::profile::Profile;
 use crate::tool::Tool;
 
+/// The canonical names of every tool this crate can serve, whatever the platform (`Bash`,
+/// `Monitor` and `TaskStop` exist on Unix only). `--tools` accepts exactly these (plus the test
+/// tools of a `test-tools` build); a name that is not served here is simply absent.
+pub const CANONICAL_TOOLS: [&str; 11] = [
+    "Read",
+    "Write",
+    "Edit",
+    "NotebookEdit",
+    "Glob",
+    "Grep",
+    "Bash",
+    "Monitor",
+    "TaskStop",
+    "WebFetch",
+    "WebSearch",
+];
+
 /// The set of tools of a server.
 #[derive(Default, Clone)]
 pub struct ToolRegistry {
@@ -27,6 +44,14 @@ impl ToolRegistry {
     /// Adds an already shared tool.
     pub fn with_arc(mut self, tool: Arc<dyn Tool>) -> Self {
         self.tools.insert(tool.name().to_owned(), tool);
+        self
+    }
+
+    /// Keeps only the tools named in `names` (`--tools`): the others are dropped from the
+    /// server, so no profile, token or client request can reach them. A name that this registry
+    /// does not hold is ignored here; checking names is the caller's job ([`CANONICAL_TOOLS`]).
+    pub fn retain_only(mut self, names: &std::collections::BTreeSet<String>) -> Self {
+        self.tools.retain(|name, _| names.contains(name));
         self
     }
 

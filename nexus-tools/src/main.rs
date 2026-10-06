@@ -4,11 +4,19 @@
 //! nexus-tools                      # stdio; profile from NEXUS_TOOLS_PROFILE (a signed token)
 //! nexus-tools --unrestricted       # stdio, every tool, development only
 //! nexus-tools --listen 127.0.0.1:0 # HTTP; every request carries a bearer token
+//! nexus-tools --trust-harness --cwd DIR --tools Read,Grep  # one harness session, stdio only
 //! ```
+//!
+//! One process per session, bounded at launch (N27): `--cwd`/`--add-dir` are its whole file
+//! scope and `--tools` the only tools it serves, listed or called, whatever the profile or the
+//! client asks (an intersection with a signed profile, never wider). `--trust-harness` (no
+//! signed profile: the harness is the only client and enforces the policy) is refused with
+//! `--listen`: a socket is not a private pipe.
 //!
 //! Secrets arrive in the **environment**, never on the command line: `NEXUS_TOOLS_KEY` (the
 //! token signing key, at least 32 bytes) and `NEXUS_TOOLS_PROFILE` (the session's token).
 
+use std::collections::BTreeSet;
 use std::net::SocketAddr;
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -17,11 +25,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use nexus_tools::files::{FileConfig, Scope};
 use nexus_tools::http;
 use nexus_tools::limits::DEFAULT_MAX_OUTPUT_CHARS;
+use nexus_tools::registry::CANONICAL_TOOLS;
 use nexus_tools::{Profile, Server, Session, SigningKey, ToolRegistry, serve_lines, verify};
 use tokio::io::BufReader;
 
 const USAGE: &str = "usage: nexus-tools [--listen ADDR] [--allow-origin ORIGIN]... \
-[--max-output-chars N] [--cwd DIR] [--add-dir DIR]... [--backup-dir DIR] [--search-engine SPEC]... [--search-allow-private] [--brave-endpoint URL] [--unrestricted | --trust-harness]\n\
+[--max-output-chars N] [--cwd DIR] [--add-dir DIR]... [--backup-dir DIR] [--search-engine SPEC]... [--search-allow-private] [--brave-endpoint URL] [--tools NAME,...]... [--unrestricted | --trust-harness]\n\
 environment: NEXUS_TOOLS_KEY (signing key, >= 32 bytes), NEXUS_TOOLS_PROFILE (stdio token), \
 NEXUS_TOOLS_LOG";
 
@@ -39,7 +48,14 @@ struct Options {
     search_engines: Vec<String>,
     search_allow_private: bool,
     brave_endpoint: Option<String>,
+    /// `--tools`: the only tools this process serves, whatever the profile. Repeated, each
+    /// narrows the previous (an intersection). `None`: every tool of the build.
+    tools: Option<BTreeSet<String>>,
 }
+
+/// The one-line reason `--trust-harness` and `--listen` do not go together.
+const TRUST_HARNESS_IS_STDIO: &str =
+    "--trust-harness is for one harness over a private pipe; it cannot be combined with --listen";
 
 fn fail(message: &str) -> ExitCode {
     eprintln!("nexus-tools: {message}");
@@ -59,6 +75,7 @@ fn parse_args() -> Result<Options, String> {
         search_engines: Vec::new(),
         search_allow_private: false,
         brave_endpoint: None,
+        tools: None,
     };
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -83,6 +100,18 @@ fn parse_args() -> Result<Options, String> {
             "--search-engine" => options.search_engines.push(value("--search-engine")?),
             "--search-allow-private" => options.search_allow_private = true,
             "--brave-endpoint" => options.brave_endpoint = Some(value("--brave-endpoint")?),
+            "--tools" => {
+                let named: BTreeSet<String> = value("--tools")?
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|name| !name.is_empty())
+                    .map(str::to_owned)
+                    .collect();
+                options.tools = Some(match options.tools.take() {
+                    Some(previous) => previous.intersection(&named).cloned().collect(),
+                    None => named,
+                });
+            },
             "--unrestricted" => options.unrestricted = true,
             "--trust-harness" => options.trust_harness = true,
             "--version" => {
@@ -95,6 +124,11 @@ fn parse_args() -> Result<Options, String> {
             },
             other => return Err(format!("unknown argument: {other}\n{USAGE}")),
         }
+    }
+    // The harness is trusted because it is the only client of a private pipe; a socket has no
+    // such guarantee, so HTTP always verifies a signed token per request.
+    if options.trust_harness && options.listen.is_some() {
+        return Err(TRUST_HARNESS_IS_STDIO.to_owned());
     }
     Ok(options)
 }
@@ -136,7 +170,34 @@ fn registry(options: &Options) -> Result<ToolRegistry, String> {
     registry =
         nexus_tools::web::register(registry, nexus_tools::web::Fetcher::new(Default::default()));
     registry = nexus_tools::search::register(registry, search_engine(options)?);
-    Ok(registry)
+    match &options.tools {
+        Some(names) => bounded(registry, names),
+        None => Ok(registry),
+    }
+}
+
+/// The registry cut down to `names` (`--tools`). A name that is neither canonical nor served by
+/// this build is a mistake, refused at start with the valid names; a canonical name this platform
+/// does not serve (`Bash` on Windows) is accepted and simply absent.
+fn bounded(registry: ToolRegistry, names: &BTreeSet<String>) -> Result<ToolRegistry, String> {
+    let valid: BTreeSet<&str> = CANONICAL_TOOLS
+        .iter()
+        .copied()
+        .chain(registry.names())
+        .collect();
+    let unknown: Vec<&str> = names
+        .iter()
+        .map(String::as_str)
+        .filter(|name| !valid.contains(name))
+        .collect();
+    if !unknown.is_empty() {
+        return Err(format!(
+            "--tools: unknown tool name(s): {}; valid names (canonical, case included): {}",
+            unknown.join(", "),
+            valid.into_iter().collect::<Vec<_>>().join(", ")
+        ));
+    }
+    Ok(registry.retain_only(names))
 }
 
 /// An environment variable name: letters, digits and underscores, not starting with a digit. A

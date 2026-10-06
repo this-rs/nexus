@@ -78,7 +78,10 @@ pub use cancel::CancelToken;
 pub use compaction::CompactionConfig;
 pub use mcp::{McpClient, McpConfig, McpError, McpLaunch, McpTool};
 pub use session::NativeSession;
-pub use tools::{NEXUS_TOOLS_SERVER, ToolEntry, ToolRegistry, exposed_name};
+pub use tools::{
+    NEXUS_TOOLS_CATALOG, NEXUS_TOOLS_SERVER, ToolEntry, ToolRegistry, exposed_name,
+    nexus_tools_bound,
+};
 pub use transcript::{
     FileTranscriptStore, MemoryTranscriptStore, TranscriptStore, new_transcript_id,
 };
@@ -127,8 +130,15 @@ impl DefaultTools {
         beside.or_else(on_path).map(Self::new)
     }
 
-    /// The MCP server entry for a session.
-    pub fn server_for(&self, spec: &SessionSpec) -> McpServerSpec {
+    /// The MCP server entry for a session: one process per session, bounded at launch (N27).
+    ///
+    /// Its scope is the session's directories and its `--tools` the `nexus-tools` tools the
+    /// session's policy can expose ([`tools::nexus_tools_bound`], `strict` being the instance's
+    /// `strict_tool_exposure`): a tool the harness would never offer is not in the process at
+    /// all, so a call that slipped past the harness still finds nothing to run. A `--tools` in
+    /// [`DefaultTools::args`] narrows it further (the server intersects them).
+    pub fn server_for(&self, spec: &SessionSpec, strict: bool) -> McpServerSpec {
+        let bound = tools::nexus_tools_bound(&spec.policy, spec.policy_ceiling.as_ref(), strict);
         let mut args = vec![
             "--trust-harness".to_owned(),
             "--cwd".to_owned(),
@@ -138,6 +148,8 @@ impl DefaultTools {
             args.push("--add-dir".to_owned());
             args.push(dir.display().to_string());
         }
+        args.push("--tools".to_owned());
+        args.push(bound.join(","));
         args.extend(self.args.iter().cloned());
         McpServerSpec::Stdio {
             command: self.program.display().to_string(),
@@ -388,7 +400,10 @@ impl NativeProvider {
             && !servers.contains_key(NEXUS_TOOLS_SERVER)
         {
             if capabilities.tools {
-                servers.insert(NEXUS_TOOLS_SERVER.to_owned(), default.server_for(&spec));
+                servers.insert(
+                    NEXUS_TOOLS_SERVER.to_owned(),
+                    default.server_for(&spec, self.config.strict_tool_exposure),
+                );
             } else {
                 notices.push(AgentEvent::ProviderNotice {
                     kind: "default_tools_skipped".to_owned(),
@@ -578,5 +593,39 @@ impl AgentProvider for NativeProvider {
             .load(&id)?
             .ok_or_else(|| ProviderError::invalid("unknown transcript: nothing to resume"))?;
         self.build(spec, Some((id, messages))).await
+    }
+}
+
+#[cfg(test)]
+mod default_tools_tests {
+    use super::*;
+    use crate::agent::ToolPolicy;
+
+    fn args(spec: &SessionSpec, extra: &[&str]) -> Vec<String> {
+        let mut tools = DefaultTools::new("nexus-tools");
+        tools.args = extra.iter().map(|a| (*a).to_owned()).collect();
+        match tools.server_for(spec, true) {
+            McpServerSpec::Stdio { args, .. } => args,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_server_of_a_session_is_launched_with_the_tools_its_policy_exposes() {
+        let mut spec = SessionSpec::new(std::env::temp_dir());
+        spec.policy = ToolPolicy::from_patterns(PolicyMode::Ask, &["Read", "Grep"], &[]).unwrap();
+        spec.extra_dirs = vec![std::env::temp_dir().join("extra")];
+        let args = args(&spec, &["--tools", "Read"]);
+        let at = args.iter().position(|a| a == "--tools").unwrap();
+        assert_eq!(args[at + 1], "Read,Grep", "{args:?}");
+        assert_eq!(args[0], "--trust-harness");
+        assert!(args.iter().any(|a| a == "--add-dir"), "{args:?}");
+        // The operator's own `--tools` comes after: the server narrows by both.
+        assert_eq!(args.last().map(String::as_str), Some("Read"));
+        // A policy that exposes none of them launches a server with none.
+        spec.policy = ToolPolicy::from_patterns(PolicyMode::Ask, &["mcp__other__x"], &[]).unwrap();
+        let args = self::args(&spec, &[]);
+        let at = args.iter().position(|a| a == "--tools").unwrap();
+        assert_eq!(args[at + 1], "");
     }
 }

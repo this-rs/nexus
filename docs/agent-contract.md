@@ -859,6 +859,33 @@ utilisateur système lit : la politique décide de ce qui est *demandé*, ce n'e
 tuer : `nexus-tools` arrête alors les commandes de la session et leurs descendants. Un `SIGKILL` du serveur ne
 leur laisse pas cette chance (limite).
 
+**Un serveur par session, borné au lancement (N27).** Le harnais ne partage jamais un `nexus-tools` entre
+sessions : chaque session native a **son** processus, et ce processus est borné par construction, en défense en
+profondeur derrière la politique du harnais.
+- *stdio seulement* : `--trust-harness` vaut pour un client unique sur un tube privé ; combiné à `--listen`
+  (HTTP), le programme refuse de démarrer (code 2, « --trust-harness is for one harness over a private pipe; it
+  cannot be combined with --listen »).
+- *portée fixée au lancement* : `--cwd` et `--add-dir` (le répertoire de la session et ses `extra_dirs`) sont tout
+  le périmètre des outils de fichiers de ce processus ; deux sessions de répertoires différents ne lisent pas les
+  fichiers l'une de l'autre (ce que borne `Read`/`Write`/`Edit`, pas ce qu'un shell lit).
+- *`--tools`* : `--tools Read,Grep,…` (noms canoniques, casse comprise) est la liste des seuls outils du
+  processus : `tools/list` n'en montre pas d'autre et un `tools/call` d'un autre outil est refusé (`unknown tool`,
+  erreur MCP `-32602`) même demandé directement. Un nom inconnu est une erreur de démarrage (code 2) qui liste les
+  noms valides ; un nom canonique que la plate-forme n'a pas (`Bash` sous Windows) est accepté et simplement absent.
+  Répété, chaque `--tools` restreint le précédent ; avec un profil signé ou `--unrestricted`, c'est une
+  intersection, jamais plus large que le profil. Le harnais passe l'ensemble que la politique de la session
+  **peut exposer** (`nexus_tools_bound` : règle d'exposition appliquée aux onze outils, avec le mode le plus haut
+  que la session peut atteindre par `set_policy_mode` sous son plafond — `plan_only` ne borne le processus aux
+  lectures que si le plafond est `plan_only`) ; un `--tools` dans `extensions.nexus_tools.args` restreint encore.
+- *jetons signés réservés au HTTP* (et au stdio d'un client qui n'est pas le harnais : `NEXUS_TOOLS_PROFILE`) :
+  `--listen` vérifie un jeton à chaque requête, `--trust-harness` n'en demande aucun.
+
+Coût mesuré d'un processus par session (binaire `release`, macOS, M4 Max chargé) : environ 4,2 Mo de RSS au repos
+après `initialize` ; démarrage jusqu'à la réponse `initialize` en moyenne 7 à 40 ms sur 20 lancements (médiane
+3 à 10 ms). Le **premier** lancement du binaire depuis un processus neuf paie environ 300 ms côté système (même
+`--version`, qui ne démarre rien). Rejouable : `cargo test -p nexus-tools --release --test session_bound --
+--ignored --nocapture`.
+
 **`WebSearch`** n'existe que si le serveur a au moins un moteur configuré (`args: ["--search-engine", …]`).
 
 **Navigateur optionnel (N23).** `extensions.browser` = `true` (cherche `obscura` dans le `PATH`) ou
