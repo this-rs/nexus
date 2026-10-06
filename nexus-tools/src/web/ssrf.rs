@@ -28,6 +28,7 @@ fn v4_reason(ip: Ipv4Addr) -> Option<&'static str> {
         (172, 16..=31, _) => "private network (172.16.0.0/12)",
         (192, 0, 0) => "IETF protocol assignments (192.0.0.0/24)",
         (192, 0, 2) | (198, 51, 100) | (203, 0, 113) => "documentation range",
+        (192, 88, 99) => "6to4 relay anycast (192.88.99.0/24)",
         (192, 168, _) => "private network (192.168.0.0/16)",
         (198, 18..=19, _) => "benchmarking (198.18.0.0/15)",
         (224..=239, ..) => "multicast",
@@ -58,6 +59,14 @@ fn v6_reason(ip: Ipv6Addr) -> Option<&'static str> {
             "IPv4-compatible / NAT64 address (not routable for a fetch)"
         });
     }
+    // ::ffff:0:a.b.c.d, the stateless (SIIT) translation of an IPv4 address.
+    if segments[..4] == [0; 4] && segments[4] == 0xffff && segments[5] == 0 {
+        return Some("SIIT translation of an IPv4 address (::ffff:0:0/96)");
+    }
+    // 64:ff9b:1::/48, NAT64 for local use: it can reach a private network.
+    if segments[..3] == [0x64, 0xff9b, 1] {
+        return Some("local-use NAT64 (64:ff9b:1::/48)");
+    }
     // 6to4 (2002::/16) embeds the IPv4 address in bits 16..48.
     if segments[0] == 0x2002 {
         let v4 = Ipv4Addr::new(octets[2], octets[3], octets[4], octets[5]);
@@ -73,6 +82,8 @@ fn v6_reason(ip: Ipv6Addr) -> Option<&'static str> {
         0xfc00..=0xfdff => "unique local address (fc00::/7)",
         0xff00..=0xffff => "multicast",
         0x2001 if segments[1] == 0 => "Teredo tunnel (2001::/32)",
+        0x2001 if segments[1] & 0xfff0 == 0x0010 => "ORCHID (2001:10::/28)",
+        0x2001 if segments[1] & 0xfff0 == 0x0020 => "ORCHIDv2 (2001:20::/28)",
         0x2001 if segments[1] == 0x0db8 => "documentation range (2001:db8::/32)",
         0x0100 if segments[1..4] == [0, 0, 0] => "discard-only (100::/64)",
         _ => return None,
@@ -82,6 +93,33 @@ fn v6_reason(ip: Ipv6Addr) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn translation_and_anycast_ranges_the_verification_found_are_refused() {
+        for ip in [
+            "::ffff:0:10.0.0.1", // SIIT translation of a private address
+            "::ffff:0:8.8.8.8",  // SIIT: not routable on its own either
+            "64:ff9b:1::a00:1",  // local-use NAT64 (64:ff9b:1::/48)
+            "64:ff9b:1:ffff::1",
+            "192.88.99.1", // 6to4 relay anycast (192.88.99.0/24)
+            "192.88.99.255",
+            "2001:10::1", // ORCHID (2001:10::/28)
+            "2001:1f::1",
+            "2001:20::1", // ORCHIDv2 (2001:20::/28)
+        ] {
+            assert!(blocked(ip), "{ip} should be refused");
+        }
+        // Their neighbours stay reachable.
+        for ip in [
+            "192.88.98.1",
+            "192.88.100.1",
+            "2001:30::1",
+            "2001:4860:4860::8888",
+            "2606:4700::1111",
+        ] {
+            assert!(!blocked(ip), "{ip} should be allowed");
+        }
+    }
 
     fn blocked(text: &str) -> bool {
         blocked_reason(text.parse().unwrap()).is_some()
