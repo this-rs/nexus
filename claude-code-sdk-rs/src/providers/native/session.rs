@@ -36,8 +36,8 @@ use super::{NativeConfig as Settings, r#loop};
 use crate::agent::{
     AgentEvent, AgentSession, CancelOutcome, CancelScope, Capabilities, EventStream,
     InterruptOutcome, InterruptScope, PermissionDecision, PermissionScope, PolicyDecision,
-    PolicyMode, ProviderError, ProviderKind, QuestionAnswer, ResumeToken, SessionLimits,
-    ToolPolicy, TurnInput,
+    PolicyMode, ProviderError, ProviderKind, QuestionAnswer, ResumeToken, SessionHooks,
+    SessionLimits, ToolPolicy, TurnInput,
 };
 use crate::model::{ChatMessage, ModelEndpoint};
 
@@ -161,6 +161,8 @@ pub(crate) struct Core {
     pub(crate) ceiling: Option<ToolPolicy>,
     /// The session directory: paths in policy patterns are relative to it.
     pub(crate) cwd: std::path::PathBuf,
+    /// Host callbacks around tools and compaction (`SessionSpec::hooks`).
+    pub(crate) hooks: Option<Arc<dyn SessionHooks>>,
     pub(crate) transcript_id: String,
     pub(crate) store: Arc<dyn TranscriptStore>,
     pub(crate) state: Mutex<State>,
@@ -180,6 +182,7 @@ pub(crate) struct CoreParts {
     pub(crate) limits: SessionLimits,
     pub(crate) ceiling: Option<ToolPolicy>,
     pub(crate) cwd: std::path::PathBuf,
+    pub(crate) hooks: Option<Arc<dyn SessionHooks>>,
     pub(crate) transcript_id: String,
     pub(crate) store: Arc<dyn TranscriptStore>,
     pub(crate) policy: ToolPolicy,
@@ -223,6 +226,7 @@ impl Core {
             limits: parts.limits,
             ceiling: parts.ceiling,
             cwd: parts.cwd,
+            hooks: parts.hooks,
             transcript_id: parts.transcript_id,
             store: parts.store,
             state: Mutex::new(state),
