@@ -13,7 +13,8 @@ use crate::agent::{
     ProviderError, ProviderKind, SandboxLevel, SessionSpec, SubagentSupport, SystemPromptMode,
 };
 use crate::transport::EnvPolicy;
-use crate::types::{ClaudeCodeOptions, McpServerConfig, SettingSource};
+use crate::transport::remote::RemoteHost;
+use crate::types::{ClaudeCodeOptions, McpServerConfig, PermissionMode, SettingSource};
 
 /// Tool name the CLI is told to route permission prompts to: the control
 /// protocol on stdio.
@@ -60,6 +61,10 @@ pub struct ClaudeCodeConfig {
     pub default_model: Option<String>,
     /// Catalogue answered by `catalog()`.
     pub models: Vec<ModelInfo>,
+    /// Run the CLI on another machine over SSH (see [`crate::transport::remote`]).
+    /// A remote instance has no per-session MCP server, cannot cancel tools by
+    /// process, and refuses the no-confirmation mode unless the machine allows it.
+    pub remote: Option<RemoteHost>,
 }
 
 impl Default for ClaudeCodeConfig {
@@ -73,6 +78,7 @@ impl Default for ClaudeCodeConfig {
             context_window: None,
             default_model: None,
             models: Vec::new(),
+            remote: None,
         }
     }
 }
@@ -100,6 +106,12 @@ impl ClaudeCodeConfig {
         capabilities.sandbox = SandboxLevel::None;
         capabilities.secret_isolation = self.env_policy.is_isolated() && self.mcp_config_via_file;
         capabilities.per_session_mcp = true;
+        if self.remote.is_some() {
+            // Nothing of the host crosses to the remote command line, and an MCP
+            // configuration is refused rather than forwarded: no MCP, but isolated.
+            capabilities.secret_isolation = true;
+            capabilities.per_session_mcp = false;
+        }
         capabilities.hooks = HookSupport::InProtocol;
         capabilities.subagents = SubagentSupport::Nested;
         capabilities.compaction_signal = true;
@@ -112,7 +124,9 @@ impl ClaudeCodeConfig {
             .or(self.context_window);
         capabilities.set_model_live = true;
         capabilities.native_question = true;
-        capabilities.tool_cancel = true;
+        // Cancelling signals the CLI's descendants by PID: over SSH those are on the
+        // other machine, out of reach.
+        capabilities.tool_cancel = self.remote.is_none();
         capabilities.background_tasks = true;
         capabilities.resume = true;
         capabilities.cost = self.cost_basis;
@@ -184,6 +198,27 @@ pub fn build_options(
     resume: Option<&str>,
 ) -> Result<ClaudeCodeOptions, ProviderError> {
     let policy = translate_policy(&spec.policy);
+    if let Some(remote) = &config.remote {
+        // What cannot work or must not happen on another machine is refused here,
+        // never dropped: a session that quietly lost its MCP tools or its extra
+        // directories would run a different task than the one asked.
+        if !spec.mcp_servers.is_empty() {
+            return Err(ProviderError::unsupported("per_session_mcp"));
+        }
+        if !spec.extra_dirs.is_empty() {
+            return Err(ProviderError::invalid(
+                "a remote session cannot add local directories",
+            ));
+        }
+        let trust = policy.permission_mode == PermissionMode::BypassPermissions
+            || policy.native_mode == "bypassPermissions";
+        if trust && !remote.allow_trust {
+            return Err(ProviderError::invalid(format!(
+                "the no-confirmation mode is refused on {}: allow it for that machine explicitly",
+                remote.machine()
+            )));
+        }
+    }
     let mut builder = ClaudeCodeOptions::builder()
         .cwd(spec.cwd.clone())
         .permission_mode(policy.permission_mode)
@@ -227,6 +262,7 @@ pub fn build_options(
         .with_inherited(spec.env.inherit.iter().cloned());
     options.mcp_config_via_file = config.mcp_config_via_file;
     options.cli_path = config.cli_path.clone();
+    options.remote = config.remote.clone();
     options.max_budget_usd = spec.limits.max_cost_usd;
 
     if let Some(extension) = claude_extension(spec) {

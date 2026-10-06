@@ -1110,6 +1110,14 @@ pub struct ClaudeCodeOptions {
     /// Default: false (inline JSON, the historical behaviour).
     pub mcp_config_via_file: bool,
 
+    /// Run the CLI on another machine over SSH instead of locally.
+    ///
+    /// See [`crate::transport::remote`]: the host key is pinned, nothing is
+    /// learned or forwarded, and an MCP configuration is refused. `cli_path` and
+    /// `cwd` then name nothing local; the remote program and directory come from
+    /// the [`RemoteHost`](crate::transport::remote::RemoteHost).
+    pub remote: Option<crate::transport::remote::RemoteHost>,
+
     /// Permission mode written **verbatim** to `--permission-mode`, for the CLI
     /// modes [`PermissionMode`] cannot name (`auto`, `dontAsk`, `manual`).
     ///
@@ -1152,6 +1160,7 @@ impl std::fmt::Debug for ClaudeCodeOptions {
             .field("control_protocol_format", &self.control_protocol_format)
             .field("env_policy", &self.env_policy)
             .field("mcp_config_via_file", &self.mcp_config_via_file)
+            .field("remote", &self.remote)
             .field("permission_mode_native", &self.permission_mode_native)
             .finish()
     }
@@ -1629,6 +1638,12 @@ impl ClaudeCodeOptionsBuilder {
     /// See [`ClaudeCodeOptions::mcp_config_via_file`].
     pub fn mcp_config_via_file(mut self, via_file: bool) -> Self {
         self.options.mcp_config_via_file = via_file;
+        self
+    }
+
+    /// See [`ClaudeCodeOptions::remote`].
+    pub fn remote(mut self, remote: crate::transport::remote::RemoteHost) -> Self {
+        self.options.remote = Some(remote);
         self
     }
 

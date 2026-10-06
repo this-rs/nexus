@@ -283,7 +283,43 @@ pub(crate) fn mcp_secret_file(
 /// and environment, through the single launcher of `spawn.rs`. Stdio, process
 /// group and the SDK markers stay with the caller because they differ per entry
 /// point.
+/// Prepares what a remote launch needs to outlive the child (`None` for a local one).
+///
+/// Fails before anything is spawned: a bad host, a key that is not pinned, an
+/// identity readable by others, or an MCP configuration (refused, never forwarded).
+pub(crate) fn remote_launch(
+    options: &ClaudeCodeOptions,
+) -> Result<Option<super::remote::RemoteLaunch>> {
+    options
+        .remote
+        .as_ref()
+        .map(|r| super::remote::RemoteLaunch::prepare(r, !options.mcp_servers.is_empty()))
+        .transpose()
+}
+
+/// The command line of the CLI: local, or the `ssh` command that runs it on the
+/// remote machine when `options.remote` is set.
+///
+/// `remote` comes from [`remote_launch`]. A remote option without it would run
+/// the CLI HERE, on a machine the user did not choose, so it stops instead.
 pub(crate) fn build_cli_command(
+    cli_path: &Path,
+    options: &ClaudeCodeOptions,
+    mode: CommandMode<'_>,
+    mcp_config_file: Option<&Path>,
+    remote: Option<&super::remote::RemoteLaunch>,
+) -> Command {
+    let local = local_cli_command(cli_path, options, mode, mcp_config_file);
+    match (&options.remote, remote) {
+        (None, _) => local,
+        (Some(host), Some(launch)) => super::remote::wrap_ssh(local.as_std(), host, launch),
+        (Some(_), None) => panic!(
+            "remote options without a prepared launch: refusing to run the CLI locally instead"
+        ),
+    }
+}
+
+fn local_cli_command(
     cli_path: &Path,
     options: &ClaudeCodeOptions,
     mode: CommandMode<'_>,
@@ -651,12 +687,17 @@ pub struct SubprocessTransport {
     /// `ClaudeCodeOptions::mcp_config_via_file` is set. Lives as long as the child;
     /// dropped (and deleted) on disconnect.
     mcp_config_file: Option<super::spawn::SecretFile>,
+    /// What a remote launch needs to outlive the child (the pinned `known_hosts` file).
+    remote_launch: Option<super::remote::RemoteLaunch>,
 }
 
 impl SubprocessTransport {
     /// Create a new subprocess transport
     pub fn new(options: ClaudeCodeOptions) -> Result<Self> {
-        let cli_path = if let Some(ref explicit_path) = options.cli_path {
+        let cli_path = if let Some(remote) = options.remote.as_ref() {
+            // Nothing local to find: the program runs on the remote machine.
+            PathBuf::from(&remote.cli)
+        } else if let Some(ref explicit_path) = options.cli_path {
             debug!("Using explicit CLI path: {:?}", explicit_path);
             explicit_path.clone()
         } else {
@@ -675,6 +716,7 @@ impl SubprocessTransport {
             request_counter: 0,
             close_stdin_after_prompt: false,
             mcp_config_file: None,
+            remote_launch: None,
         })
     }
 
@@ -683,7 +725,10 @@ impl SubprocessTransport {
     /// This version supports auto-downloading the CLI if `auto_download_cli` is enabled
     /// in the options and the CLI is not found.
     pub async fn new_async(options: ClaudeCodeOptions) -> Result<Self> {
-        let cli_path = if let Some(ref explicit_path) = options.cli_path {
+        let cli_path = if let Some(remote) = options.remote.as_ref() {
+            // Nothing local to find: the program runs on the remote machine.
+            PathBuf::from(&remote.cli)
+        } else if let Some(ref explicit_path) = options.cli_path {
             debug!("Using explicit CLI path: {:?}", explicit_path);
             explicit_path.clone()
         } else {
@@ -710,6 +755,7 @@ impl SubprocessTransport {
             request_counter: 0,
             close_stdin_after_prompt: false,
             mcp_config_file: None,
+            remote_launch: None,
         })
     }
 
@@ -752,6 +798,7 @@ impl SubprocessTransport {
             request_counter: 0,
             close_stdin_after_prompt: false,
             mcp_config_file: None,
+            remote_launch: None,
         }
     }
 
@@ -773,6 +820,13 @@ impl SubprocessTransport {
     #[allow(dead_code)]
     pub fn for_print_mode(options: ClaudeCodeOptions, _prompt: String) -> Result<Self> {
         let cli_path = match options.cli_path {
+            _ if options.remote.is_some() => PathBuf::from(
+                options
+                    .remote
+                    .as_ref()
+                    .map(|r| r.cli.as_str())
+                    .unwrap_or_default(),
+            ),
             Some(ref explicit_path) => explicit_path.clone(),
             None => find_claude_cli()?,
         };
@@ -789,6 +843,7 @@ impl SubprocessTransport {
             request_counter: 0,
             close_stdin_after_prompt: true,
             mcp_config_file: None,
+            remote_launch: None,
         })
     }
 
@@ -799,6 +854,7 @@ impl SubprocessTransport {
             &self.options,
             CommandMode::Stream,
             self.mcp_config_file.as_ref().map(|f| f.path()),
+            self.remote_launch.as_ref(),
         );
 
         // Set up process pipes
@@ -842,6 +898,11 @@ impl SubprocessTransport {
 
     /// Check CLI version and warn if below minimum required version
     async fn check_cli_version(&self) -> Result<()> {
+        if self.options.remote.is_some() {
+            // `--version` would run the local binary; the remote version is the
+            // provider's preflight to ask, over the same pinned channel.
+            return Ok(());
+        }
         if let Some(semver) =
             get_cli_version_with_policy(&self.cli_path, &self.options.env_policy).await
         {
@@ -872,6 +933,8 @@ impl SubprocessTransport {
     async fn spawn_process(&mut self) -> Result<()> {
         self.state = TransportState::Connecting;
 
+        // Remote first: it refuses an MCP configuration before any secret file is written.
+        self.remote_launch = remote_launch(&self.options)?;
         self.mcp_config_file = mcp_secret_file(&self.options)?;
 
         let mut cmd = self.build_command();
