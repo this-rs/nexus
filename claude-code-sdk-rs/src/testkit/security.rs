@@ -8,7 +8,6 @@
 //!
 //! | Scenario | Rule |
 //! |---|---|
-//! | [`SecurityScenario::TrustWithoutSandbox`] | `trust` asked of a third-party provider with no sandbox is refused when the session opens, with a typed error (A35); never downgraded silently |
 //! | [`SecurityScenario::UnknownPolicyRefused`] | an unknown mode, a malformed pattern and a policy above its ceiling are refused, never read as "allow" (A35) |
 //! | [`SecurityScenario::EnvironmentIsolation`] | the child starts from an empty environment: no host variable reaches it, and a third-party provider gets a `HOME` of its own (A33) |
 //! | [`SecurityScenario::NoSecretInArgv`] | the secret appears nowhere on the command line (A33) |
@@ -17,7 +16,7 @@
 //!
 //! Each scenario is **first proven red** against a deliberately faulty provider
 //! (`tests/agent_security.rs`): one that inherits the host environment, writes the
-//! secret on argv, leaks it in an error, and opens `trust` without a sandbox. A
+//! secret on argv and leaks it in an error. A
 //! check that has never failed proves nothing.
 //!
 //! The only "not applicable" verdict is [`SecurityScenario::OutOfProfileToolRefused`]
@@ -34,7 +33,7 @@ use futures::StreamExt;
 
 use crate::agent::{
     AgentEvent, AgentProvider, AgentSession, PermissionDecision, PolicyMode, ProviderError,
-    ProviderKind, SandboxLevel, SessionSpec, ToolPolicy, TurnInput,
+    ProviderKind, SessionSpec, ToolPolicy, TurnInput,
 };
 
 /// The secret every target is asked to wire in. It is key-shaped on purpose so a
@@ -52,8 +51,6 @@ const TURN_TIMEOUT: Duration = Duration::from_secs(20);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum SecurityScenario {
-    /// `trust` + third-party provider + no sandbox → refused when opening.
-    TrustWithoutSandbox,
     /// Unknown mode, malformed pattern, policy above its ceiling → refused.
     UnknownPolicyRefused,
     /// Empty environment plus an allowlist; a dedicated `HOME` for a third party.
@@ -68,8 +65,7 @@ pub enum SecurityScenario {
 
 impl SecurityScenario {
     /// Every scenario, in the order the suite runs them.
-    pub const ALL: [SecurityScenario; 6] = [
-        SecurityScenario::TrustWithoutSandbox,
+    pub const ALL: [SecurityScenario; 5] = [
         SecurityScenario::UnknownPolicyRefused,
         SecurityScenario::EnvironmentIsolation,
         SecurityScenario::NoSecretInArgv,
@@ -80,7 +76,6 @@ impl SecurityScenario {
     /// Stable name, used in reports and in the documentation.
     pub fn name(self) -> &'static str {
         match self {
-            Self::TrustWithoutSandbox => "trust_without_sandbox",
             Self::UnknownPolicyRefused => "unknown_policy_refused",
             Self::EnvironmentIsolation => "isolation_env",
             Self::NoSecretInArgv => "argv_sans_secret",
@@ -239,41 +234,6 @@ async fn observe_launch(
     Ok((observation, events, staging))
 }
 
-async fn trust_without_sandbox(target: &dyn SecurityTarget) -> Result<SecurityVerdict, Violation> {
-    let mut staging = staged(target).await?;
-    let provider = staging.provider.clone();
-    let capabilities = provider.capabilities(None);
-    staging.spec.policy = ToolPolicy::new(PolicyMode::Trust);
-    let outcome = provider.open(staging.spec.clone()).await;
-    let must_refuse = third_party(provider.kind()) && capabilities.sandbox == SandboxLevel::None;
-    match outcome {
-        Ok(session) => {
-            let _ = session.close().await;
-            if must_refuse {
-                return Err(Violation(format!(
-                    "{:?} opened a session in `trust` mode with no sandbox: the refusal is \
-                     missing",
-                    provider.kind()
-                )));
-            }
-            Ok(SecurityVerdict::Passed)
-        },
-        Err(error) => {
-            let sandbox_refusal = matches!(
-                &error,
-                ProviderError::Unsupported { capability } if capability == "sandbox"
-            );
-            if must_refuse && !sandbox_refusal {
-                return Err(Violation(format!(
-                    "`trust` without a sandbox was refused with the wrong error: {error:?} \
-                     (expected unsupported sandbox)"
-                )));
-            }
-            Ok(SecurityVerdict::Passed)
-        },
-    }
-}
-
 async fn unknown_policy_refused(target: &dyn SecurityTarget) -> Result<SecurityVerdict, Violation> {
     for text in ["\"bogus\"", "\"yolo\"", "\"TRUST\"", "\"\"", "null", "3"] {
         if serde_json::from_str::<PolicyMode>(text).is_ok() {
@@ -429,7 +389,6 @@ pub async fn run_scenario(
     scenario: SecurityScenario,
 ) -> Result<SecurityVerdict, Violation> {
     match scenario {
-        SecurityScenario::TrustWithoutSandbox => trust_without_sandbox(target).await,
         SecurityScenario::UnknownPolicyRefused => unknown_policy_refused(target).await,
         SecurityScenario::EnvironmentIsolation => environment_isolation(target).await,
         SecurityScenario::NoSecretInArgv => no_secret_in_argv(target).await,

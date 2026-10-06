@@ -26,7 +26,7 @@
 //! | `interactive_permissions` | yes; scopes `once` and `session` (`always` has nowhere to be kept) |
 //! | `resume`, `set_model_live`, `per_session_mcp`, `compaction_signal`, `tool_cancel` | yes |
 //! | `secret_isolation` | yes: stdio servers get an allowlisted environment, credentials are resolved per request and never stored |
-//! | `sandbox` | none: `trust` mode is refused (`Unsupported { sandbox }`) |
+//! | `sandbox` | none: information for the user, not a gate: `trust` opens like on every provider |
 //! | `hooks` | none: `SessionSpec::hooks` is ignored, with `provider_notice { hooks_not_supported }` first on `out_of_band()` — so `before_compaction` is never called |
 //! | `subagents`, `background_tasks`, `native_question`, `images` | no |
 //!
@@ -57,9 +57,9 @@ use async_trait::async_trait;
 
 use crate::agent::{
     AgentEvent, AgentProvider, AgentSession, Capabilities, ContextWindow, ContextWindowSource,
-    CostBasis, McpServerSpec, McpServerStatus, ModelInfo, PermissionScope, PolicyMode,
-    ProviderError, ProviderHealth, ProviderKind, ResumeToken, SandboxLevel, SessionLimits,
-    SessionSpec, SystemPromptSpec,
+    CostBasis, McpServerSpec, McpServerStatus, ModelInfo, PermissionScope, ProviderError,
+    ProviderHealth, ProviderKind, ResumeToken, SandboxLevel, SessionLimits, SessionSpec,
+    SystemPromptSpec,
 };
 use crate::model::{ChatMessage, EndpointProbe, ModelEndpoint, PriceTable};
 
@@ -345,9 +345,6 @@ impl NativeProvider {
     ) -> Result<Arc<dyn AgentSession>, ProviderError> {
         // Refusals that need nothing from the network or the disk.
         spec.validate()?;
-        if spec.policy.mode == PolicyMode::Trust {
-            return Err(ProviderError::unsupported("sandbox"));
-        }
         if spec
             .mcp_servers
             .values()
@@ -599,7 +596,7 @@ impl AgentProvider for NativeProvider {
 #[cfg(test)]
 mod default_tools_tests {
     use super::*;
-    use crate::agent::ToolPolicy;
+    use crate::agent::{PolicyMode, ToolPolicy};
 
     fn args(spec: &SessionSpec, extra: &[&str]) -> Vec<String> {
         let mut tools = DefaultTools::new("nexus-tools");

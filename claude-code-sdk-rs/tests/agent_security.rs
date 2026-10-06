@@ -125,7 +125,7 @@ struct LeakyProvider {
 }
 
 fn leaky_capabilities() -> Capabilities {
-    // No sandbox: `trust` must be refused. Third-party kind, below. MCP servers are
+    // No sandbox (information, not a gate). Third-party kind, below. MCP servers are
     // accepted: a provider that refused them would never open the session the
     // scenarios observe, and the scenarios would be red by accident, not by the
     // fault they are meant to catch.
@@ -187,7 +187,7 @@ impl AgentProvider for LeakyProvider {
             .stdout(std::process::Stdio::null())
             .status();
         let _ = status;
-        // Fault 3: no refusal of `trust` without a sandbox, and the ceiling is ignored.
+        // Fault 3: the ceiling is ignored.
         spec.policy = ToolPolicy::new(PolicyMode::Ask);
         spec.policy_ceiling = None;
         self.inner.open(spec).await
@@ -302,11 +302,6 @@ async fn each_scenario_names_the_fault_it_found() {
         let target = &target;
         async move { run_scenario(target, scenario).await.unwrap_err().0 }
     };
-    assert!(
-        reason(SecurityScenario::TrustWithoutSandbox)
-            .await
-            .contains("trust")
-    );
     assert!(
         reason(SecurityScenario::UnknownPolicyRefused)
             .await

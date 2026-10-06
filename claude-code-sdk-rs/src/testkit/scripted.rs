@@ -31,8 +31,8 @@ use crate::agent::{
     CancelScope, Capabilities, CompactionInfo, CompactionPhase, CompactionTrigger, Cost, CostBasis,
     EventStream, HealthStatus, HookSupport, InterruptOutcome, InterruptScope, ModelInfo,
     PermissionDecision, PolicyMode, ProviderError, ProviderHealth, ProviderKind, QuestionAnswer,
-    QuestionReply, ResumeToken, SandboxLevel, SessionHooks, SessionSpec, StopReason, ToolCallInfo,
-    ToolOutput, ToolPolicy, ToolResultInfo, TurnInput, Usage,
+    QuestionReply, ResumeToken, SessionHooks, SessionSpec, StopReason, ToolCallInfo, ToolOutput,
+    ToolPolicy, ToolResultInfo, TurnInput, Usage,
 };
 
 /// Capacity of the out-of-band buffer (contract §9).
@@ -599,9 +599,6 @@ impl ScriptedProvider {
                     model: spec.model.clone().unwrap_or_else(|| "default".to_owned()),
                 });
             }
-        }
-        if spec.policy.mode == PolicyMode::Trust && capabilities.sandbox == SandboxLevel::None {
-            return Err(ProviderError::unsupported("sandbox"));
         }
 
         let number = self.sessions.fetch_add(1, Ordering::SeqCst) + 1;
@@ -1435,9 +1432,6 @@ impl AgentSession for ScriptedSession {
             return Err(ProviderError::Closed);
         }
         // What `open` refuses cannot be obtained afterwards.
-        if mode == PolicyMode::Trust && shared.capabilities.sandbox == SandboxLevel::None {
-            return Err(ProviderError::unsupported("sandbox"));
-        }
         Ok(())
     }
 

@@ -941,28 +941,71 @@ async fn plan_only_offers_read_only_tools_and_refuses_the_others() {
 }
 
 #[tokio::test]
-async fn trust_mode_is_refused_without_a_sandbox_at_opening_and_live() {
+async fn trust_mode_opens_and_switches_live_whatever_the_sandbox() {
+    // Decision of 2026-10-07: a third-party provider behaves like Claude Code. The sandbox
+    // level is information for the user, never a gate on a mode.
     let h = Harness::new(vec![]).await;
     let mut spec = h.spec();
     spec.policy = ToolPolicy::new(PolicyMode::Trust);
-    // Refused before anything is spawned or probed.
-    let refused = h.provider.open(spec).await.err().expect("refused");
-    assert_eq!(refused, ProviderError::unsupported("sandbox"));
-    assert!(
-        h.server.requests().is_empty(),
-        "nothing was asked of the endpoint"
-    );
+    let trusted = h.provider.open(spec).await.expect("trust opens");
+    assert!(trusted.capabilities().sandbox == nexus_claude::agent::SandboxLevel::None);
+    trusted.close().await.unwrap();
+
     let session = h.open(h.spec()).await;
-    let live = session
+    session
         .set_policy_mode(PolicyMode::Trust, None)
         .await
-        .unwrap_err();
-    assert_eq!(live, ProviderError::unsupported("sandbox"));
+        .expect("trust is applied live");
     session
         .set_policy_mode(PolicyMode::AutoEdits, None)
         .await
         .unwrap();
-    assert!(session.capabilities().sandbox == nexus_claude::agent::SandboxLevel::None);
+}
+
+#[tokio::test]
+async fn in_trust_mode_a_writing_tool_runs_without_asking() {
+    let h = Harness::new(vec![
+        tool_reply(Some("go"), &[write_call()], None, None),
+        text_reply(Some(TOOL), "done", None, None),
+    ])
+    .await;
+    let log_dir = tempfile::tempdir().unwrap();
+    let log = log_path(&log_dir);
+    let mut spec = h.spec_with_mcp(&log);
+    spec.policy = ToolPolicy::new(PolicyMode::Trust);
+    let session = h.open(spec).await;
+    let events = turn(&*session, "go").await;
+    assert_eq!(stop_reason(&events), StopReason::Completed);
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::PermissionAsk { .. })),
+        "the user is never asked in trust mode"
+    );
+    assert_eq!(mcp_calls(&log, "write"), 1, "the write ran");
+}
+
+#[tokio::test]
+async fn the_same_writing_tool_asks_in_ask_mode() {
+    // The control of the test above: without it, "never asked" could be an accident of the
+    // scripted turn.
+    let h = Harness::new(vec![
+        tool_reply(Some("go"), &[write_call()], None, None),
+        text_reply(Some(TOOL), "done", None, None),
+    ])
+    .await;
+    let log_dir = tempfile::tempdir().unwrap();
+    let log = log_path(&log_dir);
+    let mut spec = h.spec_with_mcp(&log);
+    spec.policy = ToolPolicy::new(PolicyMode::Ask);
+    let session = h.open(spec).await;
+    let events = turn_deciding(&*session, "go", |_| PermissionDecision::allow_once()).await;
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::PermissionAsk { .. })),
+        "{events:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------

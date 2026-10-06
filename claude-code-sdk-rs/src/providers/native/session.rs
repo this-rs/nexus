@@ -476,9 +476,6 @@ impl AgentSession for NativeSession {
         _native: Option<&str>,
     ) -> Result<(), ProviderError> {
         self.core.usable()?;
-        if mode == PolicyMode::Trust {
-            return Err(ProviderError::unsupported("sandbox"));
-        }
         if let Some(ceiling) = &self.core.ceiling
             && mode > ceiling.mode
         {

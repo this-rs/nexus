@@ -810,9 +810,11 @@ async fn e_absent_capabilities_answer_unsupported_never_a_silent_success() {
         provider.open(with_mcp.clone()).await.err(),
         unsupported("per_session_mcp")
     );
+    // `trust` is a mode like the others: with no sandbox it still opens (decision of
+    // 2026-10-07; the sandbox level is information, not a gate).
     let mut trust = SessionSpec::new("/work");
     trust.policy = ToolPolicy::new(PolicyMode::Trust);
-    assert_eq!(provider.open(trust).await.err(), unsupported("sandbox"));
+    assert!(provider.open(trust).await.is_ok());
     let mut above = SessionSpec::new("/work");
     above.policy = ToolPolicy::new(PolicyMode::AutoEdits);
     above.policy_ceiling = Some(ToolPolicy::new(PolicyMode::Ask));

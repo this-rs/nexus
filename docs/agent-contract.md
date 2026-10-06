@@ -155,8 +155,7 @@ pub struct SessionSpec {
   permission_prompt_tool, append_system_prompt_preset, extra_args }` ; `codex` =
   `{ codex_home, sandbox }` ; `acp` = `{ command, args }` (normalement portés par l'instance).
 - Refus d'ouverture (`open` / `resume`) : `policy` plus permissive que `policy_ceiling` →
-  `Unsupported { capability: "policy_ceiling" }` ; mode `trust` sans `Capabilities.sandbox != none`
-  pour un provider tiers (A35) → `Unsupported { capability: "sandbox" }` ; serveurs MCP demandés
+  `Unsupported { capability: "policy_ceiling" }` ; serveurs MCP demandés
   sans `per_session_mcp` → `Unsupported { capability: "per_session_mcp" }`.
 
 ## 4. `AgentEvent`
@@ -233,7 +232,7 @@ puis affectation des champs.
 |---|---|---|
 | `interactive_permissions` | `bool` | Pas de `permission_ask` : la politique seule décide ; ce qui demanderait est REFUSÉ (`tool_result` en erreur « permission denied by policy ») ; `answer_permission` → `Unsupported` |
 | `permission_scopes` | `Vec<PermissionScope>` | Une portée non listée dans une réponse → `Unsupported { capability: "permission_scope" }` ; le frontend ne propose que les portées listées |
-| `sandbox` | `none \| workspace \| full` | `none` : mode `trust` refusé à l'ouverture pour un provider tiers (A35) |
+| `sandbox` | `none \| workspace \| full` | `none` : information pour l'utilisateur (ce qui isole les outils), **pas une barrière** : `trust` s'ouvre sur tout provider (décision du 2026-10-07, remplace A35) |
 | `secret_isolation` | `bool` | `false` : le registre refuse l'instance pour un projet soumis au consentement (porte A32) ; jamais ouvert « quand même » |
 | `per_session_mcp` | `bool` | `open()` avec `mcp_servers` non vide → `Unsupported { capability: "per_session_mcp" }` |
 | `hooks` | `in_protocol \| command \| none` | `spec.hooks` ignoré + `provider_notice { kind: "hooks_not_supported" }` ; repli backend (A7) |
@@ -293,8 +292,8 @@ bascule `images` à `true` qu'avec une décision de contrat et un scénario `mes
 - **Portées** : `once` et `session` (`always` n'a nulle part où être gardé) ; `always` répond
   `Unsupported { permission_scope }`. `native_question`, `background_tasks`, `subagents`, `images`,
   `sandbox` : absents ; `cancel_tools(task)` → `Unsupported { background_tasks }`,
-  `answer_question` → `Unsupported { native_question }`, mode `trust` → `Unsupported { sandbox }`
-  à l'ouverture et à chaud.
+  `answer_question` → `Unsupported { native_question }`, mode `trust` accepté à
+  l'ouverture et à chaud (la politique locale autorise tout appel que ne refuse pas un `deny`).
 - **Outils** : uniquement ceux des serveurs MCP de la session, offerts sous le nom
   `mcp__<serveur>__<outil>` (caractères hors `[A-Za-z0-9_-]` remplacés par `_`, 64 caractères au plus) ;
   `category: mcp`, `canonical` = ce nom. Règle d'exposition : un outil n'est pas offert si un `deny`
@@ -428,7 +427,7 @@ transcriptions écrites depuis les pages publiques d'`agentclientprotocol.com`
   { permission_scope }`. Un refus choisit `reject_once`, sinon `reject_always`, sinon répond `cancelled`. `Allow` avec
   `updated_input` → `Unsupported { permission_updated_input }`.
 - **`hooks` = `none`**, `subagents` = `none`, `compaction_signal`, `background_tasks`, `tool_cancel`, `native_question`
-  = non ; `sandbox` = `none` (`trust` refusé à l'ouverture et à chaud : `Unsupported { sandbox }`) ;
+  = non ; `sandbox` = `none` (information : `trust` s'ouvre ; à chaud il passe par un mode que l'agent publie, sinon `Unsupported { set_policy_mode }`) ;
   `per_session_mcp` / `tools` oui : `mcpServers` de `session/new` (env et en-têtes en tableaux `{name, value}`, dans
   ce JSON seulement ; HTTP / SSE selon `mcpCapabilities`, sinon `Unsupported { mcp_http | mcp_sse }`).
 - **`context_window`** : celle de la configuration (`configured`), sinon `None`. **`set_model_live` = non** :
@@ -627,6 +626,12 @@ interdit dans `providers/`** (test de garde par recherche textuelle) :
 
 ### 11.1 Scénarios de sécurité obligatoires (A32, A33, A35)
 
+> **Décision du 2026-10-07 — un provider tiers se comporte comme Claude Code.** `trust` est un mode
+> comme les autres : aucun provider ne le refuse faute de bac à sable (`Capabilities.sandbox` informe
+> l'utilisateur, il ne verrouille rien). Un provider qui ne peut pas l'honorer le dit avec son propre
+> refus typé. Le scénario `trust_without_sandbox` (A35) est retiré ; la suite de conformité échoue
+> désormais si un provider répond `Unsupported { sandbox }` à `trust`.
+
 `testkit::security` — derrière la feature `testkit`, joué par `tests/agent_security.rs` contre CHAQUE
 provider livré et contre un provider volontairement fautif. Contrairement à la suite de conformité
 (§5), **aucune capacité ne dispense d'un scénario** : une cible qui ne peut pas être montée est un
@@ -634,7 +639,6 @@ provider livré et contre un provider volontairement fautif. Contrairement à la
 
 | Scénario | Règle |
 |---|---|
-| `trust_without_sandbox` | `trust` demandé à un tiers sans bac à sable est refusé à l'ouverture par `Unsupported { sandbox }`, jamais rétrogradé en silence |
 | `unknown_policy_refused` | un mode inconnu, un motif mal formé ou une politique au-dessus de son plafond sont refusés, jamais lus comme « autoriser » |
 | `isolation_env` | aucune variable de l'hôte n'atteint l'enfant ; un tiers a un `HOME` qui n'est pas celui de l'hôte |
 | `argv_sans_secret` | la valeur secrète n'est nulle part sur la ligne de commande |
@@ -643,7 +647,7 @@ provider livré et contre un provider volontairement fautif. Contrairement à la
 
 **Rouge d'abord.** `every_scenario_is_red_against_the_faulty_provider` exige une violation de
 chaque scénario contre un provider qui hérite l'environnement, écrit le secret sur argv, le laisse
-dans un `Debug` et dans une erreur, accepte `trust` sans bac à sable et ignore un plafond ;
+dans un `Debug` et dans une erreur, et ignore un plafond ;
 `each_scenario_names_the_fault_it_found` exige que chacun soit rouge pour SA raison (un premier jet
 passait pour une mauvaise raison : le provider fautif refusait les serveurs MCP et ne s'ouvrait
 jamais). Les constructeurs `ProviderError::invalid/protocol/unreachable` masquent déjà les valeurs de
@@ -853,7 +857,7 @@ canonique et la vraie catégorie (lecture, édition, recherche, commande, web).
 Limites dites : la comparaison est lexicale (un lien symbolique innocent vers `.env` est jugé sur son nom ; ce qui
 borne les outils de fichiers est le périmètre de `nexus-tools`, qui résout les liens) ; un shell lit tout ce que son
 utilisateur système lit : la politique décide de ce qui est *demandé*, ce n'est pas un bac à sable (capacité
-`sandbox: none`, `trust` refusé).
+`sandbox: none`, information et non barrière : `trust` s'ouvre).
 
 **Fermeture.** `close` d'une session native ferme l'entrée du serveur et lui laisse 2,5 s pour partir avant de le
 tuer : `nexus-tools` arrête alors les commandes de la session et leurs descendants. Un `SIGKILL` du serveur ne

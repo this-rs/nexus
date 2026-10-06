@@ -802,7 +802,9 @@ async fn what_acp_cannot_do_is_unsupported_by_name() {
     );
     assert_eq!(
         session.set_policy_mode(PolicyMode::Trust, None).await.err(),
-        Some(ProviderError::unsupported("sandbox"))
+        // The agent publishes no mode that matches `trust`: the neutral policy cannot reach it.
+        // The sandbox level is not what refuses it (it is information, not a gate).
+        Some(ProviderError::unsupported("set_policy_mode"))
     );
     let images = TurnInput {
         blocks: vec![nexus_claude::agent::InputBlock::Image {
@@ -835,11 +837,13 @@ async fn set_policy_mode_is_session_set_mode_when_the_agent_published_modes() {
         requests[0]["params"],
         json!({"sessionId": "sess_fake1", "modeId": "acceptEdits"})
     );
-    // No published mode matches `trust` ... and `trust` is refused anyway; `plan_only`
-    // is published and has no transcript step: only the lookup is checked here.
+    // No published mode matches `trust`; `plan_only` is published and has no transcript
+    // step: only the lookup is checked here.
     assert_eq!(
         session.set_policy_mode(PolicyMode::Trust, None).await.err(),
-        Some(ProviderError::unsupported("sandbox"))
+        // The agent publishes no mode that matches `trust`: the neutral policy cannot reach it.
+        // The sandbox level is not what refuses it (it is information, not a gate).
+        Some(ProviderError::unsupported("set_policy_mode"))
     );
     assert_eq!(stop_of(&turn(&*session).await), StopReason::Completed);
     session.close().await.unwrap();
@@ -1294,9 +1298,6 @@ async fn what_the_protocol_cannot_honour_is_refused_before_anything_starts() {
     let mut spec = staging.spec("plain");
     spec.extra_dirs.push(PathBuf::from("/tmp"));
     assert_eq!(provider.open(spec).await.err(), refuse("extra_dirs"));
-    let mut spec = staging.spec("plain");
-    spec.policy = ToolPolicy::new(PolicyMode::Trust);
-    assert_eq!(provider.open(spec).await.err(), refuse("sandbox"));
     assert!(staging.recorded().is_empty(), "nothing was started");
 }
 
