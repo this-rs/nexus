@@ -280,9 +280,13 @@ bascule `images` à `true` qu'avec une décision de contrat et un scénario `mes
 Écarts constatés à l'implémentation du natif (`claude-code-sdk-rs/src/providers/native/`, feature
 `provider-native`, `NativeProvider` / `NativeConfig`) :
 
-- **`hooks` = `none`**, pas `in_protocol` comme la table de référence : `SessionSpec::hooks` est ignoré
-  et `provider_notice { kind: "hooks_not_supported" }` ouvre `out_of_band()` ; `before_tool`,
-  `after_tool` et `before_compaction` ne sont jamais appelés (le repli est celui du backend, A7).
+- **`hooks` = `in_protocol`** : la boucle du harnais appelle `SessionHooks`. `before_tool` passe après le
+  contrôle d'exposition et AVANT la politique (une entrée remplacée est donc jugée comme une autre ;
+  `ReplaceInput` doit rester un objet JSON), `after_tool` ne s'appelle que pour un appel qui a couru et son
+  texte suit le résultat dans le message d'outil lu par le modèle (pas dans l'événement `tool_result`),
+  `before_compaction` joint son texte aux instructions du résumé. Un hook qui ne répond pas dans
+  `NativeConfig::hook_timeout` (30 s) est ignoré avec `provider_notice { kind: "hook_timeout" }` ; l'arrêt
+  du tour l'abandonne aussi. Plus de `hooks_not_supported` pour le natif.
 - **`capabilities(model)` est synchrone** : il lit ce qui a été sondé. Tant qu'un modèle n'est pas sondé
   (`refresh_capabilities(model)`, ou `open`, qui sonde), `tools` est `false`, `thinking` `false`,
   `context_window` `None` ; rien n'est affirmé sans preuve. `thinking` = la sonde a vu un champ de
@@ -330,7 +334,7 @@ bascule `images` à `true` qu'avec une décision de contrat et un scénario `mes
   collé dans un message n'est pas persisté, donc le texte rechargé peut différer du texte envoyé. Le
   raisonnement est conservé (A39), y compris par la compaction (les derniers messages gardés sont
   intacts). Pas de compaction manuelle (le contrat n'en prévoit pas pour le natif).
-- **Hors tour** : le natif émet `session_started` (et la notice `hooks_not_supported`) sur `out_of_band()`
+- **Hors tour** : le natif émet `session_started` sur `out_of_band()`
   dès l'ouverture ; un flux de tour lâché envoie le reste du tour (permissions comprises) hors tour.
   La conformité de `permission_hors_tour` est montée ainsi (`DetachedTurn` dans
   `tests/native_conformance.rs`).
