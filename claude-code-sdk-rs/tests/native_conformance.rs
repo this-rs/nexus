@@ -440,6 +440,7 @@ async fn check_conformance(route: Route) {
         Scenario::Compaction,
         Scenario::Reprise,
         Scenario::ChangementModele,
+        Scenario::DirectiveModele,
         Scenario::Raisonnement,
         Scenario::FinUsageCout,
         Scenario::HorsTour,

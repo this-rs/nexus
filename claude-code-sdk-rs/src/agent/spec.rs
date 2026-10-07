@@ -280,6 +280,71 @@ pub trait SessionHooks: Send + Sync {
     async fn before_compaction(&self, _info: &CompactionInfo) -> Option<String> {
         None
     }
+
+    /// Called before a turn starts, before the harness reads which model to send
+    /// it to. The returned directive may name another model of the **same**
+    /// provider: the turn then runs on that model and a [`AgentEvent::ModelChanged`]
+    /// is emitted first. A provider without `set_model_live` ignores the model and
+    /// says so with `provider_notice { kind: "model_directive_ignored" }`.
+    ///
+    /// [`AgentEvent::ModelChanged`]: crate::agent::AgentEvent::ModelChanged
+    async fn before_turn(&self, _ctx: &TurnContext) -> TurnDirective {
+        TurnDirective::default()
+    }
+}
+
+/// The turn about to start, as a `before_turn` hook sees it.
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub struct TurnContext {
+    /// Index of the turn in the session, starting at 0.
+    pub turn_index: u32,
+    /// Model the turn would run on if the hook says nothing.
+    pub current_model: String,
+    /// Length of the user input, in characters.
+    pub input_chars: usize,
+    /// Tokens in context after the previous turn, when the provider reported them.
+    pub context_tokens: Option<u64>,
+    /// Tokens spent by the session so far.
+    pub tokens_spent: u64,
+    /// USD spent by the session so far, when a price is known.
+    pub usd_spent: Option<f64>,
+}
+
+impl TurnContext {
+    /// A context for `turn_index` on `current_model`.
+    pub fn new(turn_index: u32, current_model: impl Into<String>) -> Self {
+        Self {
+            turn_index,
+            current_model: current_model.into(),
+            input_chars: 0,
+            context_tokens: None,
+            tokens_spent: 0,
+            usd_spent: None,
+        }
+    }
+}
+
+/// What a `before_turn` hook asks of the turn about to start.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct TurnDirective {
+    /// Model to run the turn on (same provider), when the hook wants another one.
+    pub model: Option<String>,
+}
+
+impl TurnDirective {
+    /// A directive that changes nothing.
+    pub fn none() -> Self {
+        Self::default()
+    }
+
+    /// A directive that runs the turn on `model`.
+    pub fn model(model: impl Into<String>) -> Self {
+        Self {
+            model: Some(model.into()),
+        }
+    }
 }
 
 /// A tool call, as seen by a hook or by the policy.

@@ -41,7 +41,7 @@ Règle transversale (contrainte `d79436cc`) : **une capacité absente rend `Prov
 ## 2. Traits
 
 ```rust
-pub const CONTRACT_VERSION: u32 = 2;
+pub const CONTRACT_VERSION: u32 = 4;
 
 pub type EventStream = Pin<Box<dyn Stream<Item = AgentEvent> + Send>>;
 
@@ -143,9 +143,23 @@ pub struct SessionSpec {
       async fn before_tool(&self, call: &ToolCallInfo) -> HookVerdict { HookVerdict::Continue }
       async fn after_tool(&self, result: &ToolResultInfo) -> Option<String> { None }      // contexte ajouté
       async fn before_compaction(&self, info: &CompactionInfo) -> Option<String> { None } // instructions
+      async fn before_turn(&self, ctx: &TurnContext) -> TurnDirective { TurnDirective::default() } // v4
   }
   pub enum HookVerdict { Continue, Deny { reason: String }, ReplaceInput(Value), AddContext(String) }
+  pub struct TurnContext { turn_index: u32, current_model: String, input_chars: usize,
+                           context_tokens: Option<u64>, tokens_spent: u64, usd_spent: Option<f64> }
+  pub struct TurnDirective { model: Option<String> }   // TurnDirective::model(m) / ::none()
   ```
+  **`before_turn` (contrat v4, décision R3 du 2026-10-07)** : appelé AVANT que le harnais lise le modèle du
+  tour. Une directive nommant un autre modèle du **même** provider rend ce modèle actif pour ce tour et les
+  suivants, et le tour s'ouvre par `model_changed { model }` avant tout autre événement. La directive est
+  honorée seulement si `set_model_live` ; sinon elle est dite par `provider_notice { kind:
+  "model_directive_ignored", data: { model, capability: "set_model_live" } }` et le tour continue sur le
+  modèle courant. Un hook sans réponse dans le délai (natif : `NativeConfig::hook_timeout` ; façade Claude :
+  30 s) est ignoré avec `provider_notice { kind: "hook_timeout", data: { hook: "before_turn" } }`. Nommer le
+  modèle courant, ou un nom vide, ne fait rien. C'est le point d'entrée du routage cognitif du backend
+  (`GraphSessionHooks::before_turn`) : le harnais ne sait pas pourquoi, il obéit. Le changement d'ENDPOINT en
+  cours de session n'existe pas (une session = un provider).
   `Capabilities.hooks` dit si le provider les appelle (`in_protocol`), sait seulement lancer une
   commande (`command` — pas d'exécutable relais en v1) ou ne sait pas (`none`). Dans les deux
   derniers cas `open()` **ignore** `spec.hooks` et le backend applique son repli (injection par tour,
@@ -242,7 +256,7 @@ puis affectation des champs.
 | `images` | `bool` | `send_turn` avec un bloc image → `Unsupported { capability: "images" }` |
 | `tools` | `bool` | `open()` avec `mcp_servers` non vide ou préflight d'outil → `ModelNoTools` |
 | `context_window` | `Option<{ value: u64, source: reported \| catalog \| configured \| probed \| assumed }>` | `None` : budget en tokens impossible → run budgété refusé (A21) ; jamais de 200000 implicite |
-| `set_model_live` | `bool` | `set_model` → `Unsupported { capability: "set_model_live" }` ; modèle verrouillé dans l'UI |
+| `set_model_live` | `bool` | `set_model` → `Unsupported { capability: "set_model_live" }` ; une directive `before_turn` → `provider_notice { model_directive_ignored }` ; modèle verrouillé dans l'UI. Présent : le modèle ACTIF (après `set_model` ou directive) gouverne la fenêtre de compaction et la base de coût du tour ; `capabilities()` reste l'instantané d'ouverture (A4) |
 | `native_question` | `bool` | Aucun `question` natif ; le backend synthétise `ask_user_question` et répond par un tour utilisateur (A45) ; `answer_question` → `Unsupported` |
 | `tool_cancel` | `bool` | `cancel_tools` → `Unsupported { capability: "tool_cancel" }` ; seul `interrupt` reste |
 | `background_tasks` | `bool` | Aucun `background_tasks` / `task_update` ; `cancel_tools(task)` → `Unsupported` |
@@ -270,7 +284,7 @@ Un bloc `image` dans `send_turn` rend `Unsupported { capability: "images" }` ; u
 bascule `images` à `true` qu'avec une décision de contrat et un scénario `message_images` joué (et non replié).
 | tools | oui | selon modèle (sonde) | oui | oui |
 | context_window | reported | configured / probed | configured | None |
-| set_model_live | oui | oui (entre deux tours) | oui (par tour) | non |
+| set_model_live | oui (`set_model` de contrôle ; `before_turn` → `set_model` écrit avant l'entrée du tour) | oui (entre deux tours ; `before_turn` appliqué au tour qui commence, fenêtre et coût du modèle actif) | oui (par tour ; hooks `none` : `before_turn` jamais appelé) | non (directive → `model_directive_ignored` si les hooks étaient honorés ; ils ne le sont pas) |
 | native_question | oui (`AskUserQuestion`) | non | non (expérimental) | non |
 | tool_cancel | oui (par PID, dans l'adaptateur) | oui (jeton d'annulation) | non | non |
 | background_tasks | oui | non | non | non |
@@ -286,7 +300,13 @@ bascule `images` à `true` qu'avec une décision de contrat et un scénario `mes
   texte suit le résultat dans le message d'outil lu par le modèle (pas dans l'événement `tool_result`),
   `before_compaction` joint son texte aux instructions du résumé. Un hook qui ne répond pas dans
   `NativeConfig::hook_timeout` (30 s) est ignoré avec `provider_notice { kind: "hook_timeout" }` ; l'arrêt
-  du tour l'abandonne aussi. Plus de `hooks_not_supported` pour le natif.
+  du tour l'abandonne aussi. Plus de `hooks_not_supported` pour le natif. `before_turn` est appelé par
+  `run_turn` avant la lecture du modèle ; sa directive passe par `Core::apply_model`, comme `set_model` :
+  le modèle devient actif et `State.active_window` / `State.active_cost` sont recalculés depuis la sonde ou
+  le catalogue du provider (`ModelFacts::active` ; un modèle jamais vu est sondé une fois, au mieux). La
+  compaction (`maybe_compact`) et le coût du tour (`terminal_event`) lisent l'ACTIF, pas l'instantané : un
+  modèle plus petit choisi pour un tour compacte là où celui d'ouverture ne compactait pas, un modèle sans
+  prix rend `cost.usd = None` même si celui d'ouverture en avait un.
 - **`capabilities(model)` est synchrone** : il lit ce qui a été sondé. Tant qu'un modèle n'est pas sondé
   (`refresh_capabilities(model)`, ou `open`, qui sonde), `tools` est `false`, `thinking` `false`,
   `context_window` `None` ; rien n'est affirmé sans preuve. `thinking` = la sonde a vu un champ de
@@ -972,7 +992,8 @@ Inchangés par le contrat, toujours produits par le backend : `user_message`, `s
 l'interruption), `streaming_status`, `pending_queue`, `permission_decision` (après
 `answer_permission`), `permission_mode_changed` (après `set_policy_mode` ; ou depuis
 `policy_mode_changed` quand le provider change de mode seul), `model_changed` (après `set_model` ;
-ou depuis `model_changed`), `compaction_recovery`, `auto_continue`,
+ou depuis `model_changed`, que le provider émet lui-même quand une directive `before_turn` change le
+modèle du tour — v4), `compaction_recovery`, `auto_continue`,
 `auto_continue_state_changed`, `retrying`, `tools_cancelled` (après `cancel_tools` :
 `cli_pid` ← `diagnostic.pid`, `killed_count` ← `tools_cancelled`), `active_tasks_update`,
 `secret_request`, `secret_request_resolved`, `session_closed` (A45, émis par `close_session`).
@@ -1021,8 +1042,12 @@ jeton, `add_dirs` ← `extra_dirs`, `env` ← `EnvSpec.set`, `cli_path` ← exte
 - Historique : v1 (e15cd6e, 81ad207) ; **v2** = v1 + champ optionnel `done.error` (ajout compatible :
   un pair v1 qui l'ignore reste correct) ; **v3** = v2 + variante `ProviderError::ModelProtocolMismatch`
   (kind `model_protocol_mismatch`, N16 ; ajout compatible : un pair v2 qui ne la connaît pas la traite
-  comme une erreur inconnue). Le fichier `tests/snapshots/agent_contract_v2.json` est conservé : le
-  backend et le frontend, tant qu'ils sont en v2, le copient comme fixture.
+  comme une erreur inconnue) ; **v4** = v3 + méthode à défaut `SessionHooks::before_turn(&TurnContext) ->
+  TurnDirective` et ses deux types (ajout compatible : un hôte v3 n'implémente pas la méthode et rien ne
+  change pour lui ; aucune forme sérialisée ne bouge : `tests/snapshots/agent_contract_v4.json` ne diffère
+  de v3 que par la version), scénario de conformité `directive_modele` (26 scénarios). Le fichier
+  `tests/snapshots/agent_contract_v2.json` est conservé : le backend et le frontend, tant qu'ils sont en
+  v2, le copient comme fixture.
   L'instantané v2 porte aussi `provider_instance_config` (natif avec préréglage, prix et extension ; ACP ; Claude Code) : une entrée d'instantané ajoutée pour une
   forme que le registre sérialisait déjà, **sans changement de forme ni de `CONTRACT_VERSION`**.
 - `agent::CONTRACT_VERSION: u32`. Monte de 1 à chaque changement d'une forme sérialisée

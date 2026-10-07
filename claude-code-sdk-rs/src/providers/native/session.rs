@@ -32,9 +32,9 @@ use super::cancel::CancelToken;
 use super::mcp::McpClient;
 use super::tools::{ToolEntry, ToolRegistry};
 use super::transcript::TranscriptStore;
-use super::{NativeConfig as Settings, r#loop};
+use super::{ModelFacts, NativeConfig as Settings, r#loop};
 use crate::agent::{
-    AgentEvent, AgentSession, CancelOutcome, CancelScope, Capabilities, EventStream,
+    AgentEvent, AgentSession, CancelOutcome, CancelScope, Capabilities, CostBasis, EventStream,
     InterruptOutcome, InterruptScope, PermissionDecision, PermissionScope, PolicyDecision,
     PolicyMode, ProviderError, ProviderKind, QuestionAnswer, ResumeToken, SessionHooks,
     SessionLimits, ToolPolicy, TurnInput,
@@ -105,6 +105,13 @@ pub(crate) struct State {
     pub(crate) approved: HashSet<String>,
     pub(crate) policy: ToolPolicy,
     pub(crate) model: String,
+    /// Window of the model now active: what compaction reads. Starts as the
+    /// snapshot's, follows every model change (`set_model`, `before_turn`).
+    pub(crate) active_window: Option<u64>,
+    /// Cost basis of the model now active: what the cost of a turn reads.
+    pub(crate) active_cost: CostBasis,
+    /// Turns started so far (the index of the next one).
+    pub(crate) turn_index: u32,
     /// The committed conversation.
     pub(crate) messages: Vec<ChatMessage>,
     /// Tokens and USD spent by the session so far (budgets).
@@ -150,6 +157,8 @@ impl State {
 /// What a session shares with its turn task.
 pub(crate) struct Core {
     pub(crate) capabilities: Capabilities,
+    /// Facts per model, shared with the provider: what a model change reads.
+    pub(crate) facts: ModelFacts,
     pub(crate) endpoint: Arc<dyn ModelEndpoint>,
     pub(crate) settings: Arc<Settings>,
     pub(crate) registry: ToolRegistry,
@@ -172,6 +181,7 @@ pub(crate) struct Core {
 /// Everything `open`/`resume` hand over to build a session.
 pub(crate) struct CoreParts {
     pub(crate) capabilities: Capabilities,
+    pub(crate) facts: ModelFacts,
     pub(crate) endpoint: Arc<dyn ModelEndpoint>,
     pub(crate) settings: Arc<Settings>,
     pub(crate) registry: ToolRegistry,
@@ -206,6 +216,9 @@ impl Core {
             approved: HashSet::new(),
             policy: parts.policy,
             model: parts.model,
+            active_window: parts.capabilities.context_window.map(|w| w.value),
+            active_cost: parts.capabilities.cost,
+            turn_index: 0,
             messages: parts.messages,
             tokens_spent: 0,
             usd_spent: 0.0,
@@ -216,6 +229,7 @@ impl Core {
         }
         Arc::new(Self {
             capabilities: parts.capabilities,
+            facts: parts.facts,
             endpoint: parts.endpoint,
             settings: parts.settings,
             registry: parts.registry,
@@ -256,6 +270,22 @@ impl Core {
             return Err(dead.clone());
         }
         Ok(())
+    }
+
+    /// Makes `model` the active model: the next turn runs on it, and the window
+    /// and cost basis that govern compaction and cost become its own. The
+    /// capabilities snapshot of the session does not move (A4). Answers whether
+    /// the model changed.
+    pub(crate) async fn apply_model(&self, model: &str) -> bool {
+        if self.lock().model == model {
+            return false;
+        }
+        let (window, cost) = self.facts.active(self.endpoint.as_ref(), model).await;
+        let mut state = self.lock();
+        state.model = model.to_owned();
+        state.active_window = window;
+        state.active_cost = cost;
+        true
     }
 
     pub(crate) fn is_closed(&self) -> bool {
@@ -470,7 +500,7 @@ impl AgentSession for NativeSession {
         if model.trim().is_empty() {
             return Err(ProviderError::invalid("empty model name"));
         }
-        self.core.lock().model = model.to_owned();
+        self.core.apply_model(model).await;
         Ok(())
     }
 
