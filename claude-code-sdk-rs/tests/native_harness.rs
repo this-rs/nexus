@@ -1870,3 +1870,272 @@ async fn before_compaction_text_joins_the_summary_instructions() {
     assert_eq!(seen.len(), 1);
     assert_eq!(seen[0].trigger, "auto");
 }
+
+// ---------------------------------------------------------------------------
+// Active model: `set_model` and a `before_turn` directive make a model active;
+// its window and its price govern the turn, not the opening snapshot's (R3)
+// ---------------------------------------------------------------------------
+
+use nexus_claude::agent::{TurnContext, TurnDirective};
+
+/// Hooks that answer `before_turn` with a fixed directive and record what they saw.
+#[derive(Default)]
+struct ModelHooks {
+    /// Model to ask for; `None` asks for nothing.
+    model: Mutex<Option<String>>,
+    /// `before_turn` never answers.
+    stall: bool,
+    contexts: Mutex<Vec<TurnContext>>,
+}
+
+#[async_trait::async_trait]
+impl SessionHooks for ModelHooks {
+    async fn before_turn(&self, ctx: &TurnContext) -> TurnDirective {
+        self.contexts.lock().unwrap().push(ctx.clone());
+        if self.stall {
+            std::future::pending::<()>().await;
+        }
+        match self.model.lock().unwrap().clone() {
+            Some(model) => TurnDirective::model(model),
+            None => TurnDirective::none(),
+        }
+    }
+}
+
+/// Two models on the same endpoint: `m` (128k window, no price) and `small`
+/// (2k window, priced). The opening model is `m`.
+struct TwoModels {
+    server: FakeOpenAi,
+    provider: Arc<NativeProvider>,
+    cwd: tempfile::TempDir,
+}
+
+impl TwoModels {
+    async fn start(routes: Vec<Value>, tweak: impl FnOnce(&mut NativeConfig)) -> Self {
+        let mut all = vec![
+            probe_route(false),
+            json!({"method": "GET", "path": "/v1/models", "status": 200, "body": {"object": "list",
+                "data": [{"id": "m", "context_length": 128_000}, {"id": "small", "context_length": 2_000}]}}),
+        ];
+        all.extend(routes);
+        let server = FakeOpenAi::start(json!(all));
+        let mut config = NativeConfig::new("native-test");
+        config.default_model = Some("m".to_owned());
+        config.prices = PriceTable::new().with("small", price(10.0));
+        tweak(&mut config);
+        let provider = Arc::new(NativeProvider::new(
+            config,
+            endpoint(server.base_url(), EndpointQuirks::generic()),
+        ));
+        Self {
+            server,
+            provider,
+            cwd: tempfile::tempdir().unwrap(),
+        }
+    }
+
+    async fn open(&self, hooks: Option<Arc<ModelHooks>>) -> Arc<dyn AgentSession> {
+        let mut spec = SessionSpec::new(self.cwd.path());
+        spec.model = Some("m".to_owned());
+        spec.hooks = hooks.map(|hooks| hooks as Arc<dyn SessionHooks>);
+        self.provider.open(spec).await.expect("open")
+    }
+
+    /// The `model` field of every chat request, probes excluded.
+    fn wire_models(&self) -> Vec<String> {
+        self.server
+            .requests_to("POST", "/v1/chat/completions")
+            .into_iter()
+            .map(|r| r["body"].clone())
+            .filter(|body| !body.to_string().contains("Call the ping tool now"))
+            .map(|body| body["model"].as_str().unwrap().to_owned())
+            .collect()
+    }
+}
+
+fn model_changes(events: &[AgentEvent]) -> Vec<String> {
+    events
+        .iter()
+        .filter_map(|e| match e {
+            AgentEvent::ModelChanged { model } => Some(model.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn set_model_sends_the_new_model_on_the_wire_and_prices_the_turn_with_it() {
+    let t = TwoModels::start(
+        vec![
+            text_reply(Some("alpha"), "ok", None, Some((100, 10))),
+            text_reply(Some("beta"), "ok", None, Some((100, 10))),
+        ],
+        |_| {},
+    )
+    .await;
+    let session = t.open(None).await;
+    let first = turn(&*session, "alpha").await;
+    let AgentEvent::Done { cost, .. } = done(&first) else {
+        unreachable!()
+    };
+    // The opening model has no price: unknown, never zero.
+    assert_eq!((cost.usd, cost.basis), (None, CostBasis::Unknown));
+
+    session.set_model("small").await.unwrap();
+    let second = turn(&*session, "beta").await;
+    assert_eq!(stop_reason(&second), StopReason::Completed);
+    assert_eq!(
+        t.wire_models(),
+        ["m", "small"],
+        "the wire carries the active model"
+    );
+    let AgentEvent::Done {
+        cost, usage, model, ..
+    } = done(&second)
+    else {
+        unreachable!()
+    };
+    // The active model is priced: its price, its basis, its window on the usage.
+    assert_eq!(model.as_deref(), Some("small"));
+    assert_eq!(cost.basis, CostBasis::Priced);
+    assert!(cost.usd.is_some_and(|usd| usd > 0.0), "{cost:?}");
+    assert_eq!(usage.by_model[0].model, "small");
+    assert_eq!(usage.by_model[0].context_window, Some(2_000));
+    // The snapshot of the session did not move (A4).
+    assert_eq!(session.capabilities().cost, CostBasis::Unknown);
+    assert_eq!(
+        session.capabilities().context_window.unwrap().value,
+        128_000
+    );
+}
+
+#[tokio::test]
+async fn a_smaller_active_model_compacts_where_the_opening_one_would_not() {
+    let t = TwoModels::start(
+        vec![
+            // The first turn leaves 1 800 tokens of context: nothing for a 128k window.
+            text_reply(Some("alpha"), "ok", None, Some((1_800, 5))),
+            text_reply(
+                Some("compacting the history"),
+                "THE SUMMARY",
+                None,
+                Some((50, 20)),
+            ),
+            text_reply(Some("beta"), "done", None, Some((300, 10))),
+        ],
+        |config| config.compaction.keep_recent = 1,
+    )
+    .await;
+    let session = t.open(None).await;
+    let first = turn(&*session, "alpha").await;
+    assert!(
+        !first
+            .iter()
+            .any(|e| matches!(e, AgentEvent::Compaction { .. })),
+        "128k window: no compaction"
+    );
+    // 1 800 ≥ 80 % of the 2k window of the model now active: the next turn compacts first.
+    session.set_model("small").await.unwrap();
+    let second = turn(&*session, "beta").await;
+    assert_eq!(stop_reason(&second), StopReason::Completed);
+    let phases: Vec<String> = second
+        .iter()
+        .filter_map(|e| match e {
+            AgentEvent::Compaction { phase, .. } => Some(format!("{phase:?}")),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(phases, ["Started", "Completed"], "{second:?}");
+    assert_eq!(t.wire_models(), ["m", "small", "small"]);
+}
+
+#[tokio::test]
+async fn a_before_turn_directive_runs_the_turn_on_that_model_and_announces_it_first() {
+    let t = TwoModels::start(
+        vec![
+            text_reply(Some("alpha"), "ok", None, Some((100, 10))),
+            text_reply(Some("beta"), "ok", None, Some((100, 10))),
+        ],
+        |_| {},
+    )
+    .await;
+    let hooks = Arc::new(ModelHooks {
+        model: Mutex::new(Some("small".to_owned())),
+        ..ModelHooks::default()
+    });
+    let session = t.open(Some(hooks.clone())).await;
+    let first = turn(&*session, "alpha").await;
+    assert_eq!(stop_reason(&first), StopReason::Completed);
+    assert_eq!(model_changes(&first), ["small"]);
+    assert!(
+        matches!(first[0], AgentEvent::ModelChanged { .. }),
+        "the change is announced before anything else of the turn: {first:?}"
+    );
+    let AgentEvent::Done { model, cost, .. } = done(&first) else {
+        unreachable!()
+    };
+    assert_eq!(model.as_deref(), Some("small"));
+    assert_eq!(cost.basis, CostBasis::Priced);
+
+    // The hook says nothing on the next turn: the model stays, nothing is announced.
+    *hooks.model.lock().unwrap() = None;
+    let second = turn(&*session, "beta").await;
+    assert!(model_changes(&second).is_empty());
+    assert_eq!(t.wire_models(), ["small", "small"]);
+
+    let contexts = hooks.contexts.lock().unwrap();
+    assert_eq!(contexts.len(), 2);
+    assert_eq!(
+        (contexts[0].turn_index, contexts[0].current_model.as_str()),
+        (0, "m")
+    );
+    assert_eq!(contexts[0].input_chars, "alpha".len());
+    assert_eq!(
+        (contexts[1].turn_index, contexts[1].current_model.as_str()),
+        (1, "small")
+    );
+    assert_eq!(contexts[1].tokens_spent, 110);
+    assert!(
+        contexts[1].usd_spent.is_some(),
+        "a priced active model reports what was spent"
+    );
+}
+
+#[tokio::test]
+async fn a_directive_naming_the_current_model_or_an_empty_one_changes_nothing() {
+    let t = TwoModels::start(vec![text_reply(None, "ok", None, Some((100, 10)))], |_| {}).await;
+    let hooks = Arc::new(ModelHooks {
+        model: Mutex::new(Some("m".to_owned())),
+        ..ModelHooks::default()
+    });
+    let session = t.open(Some(hooks.clone())).await;
+    let same = turn(&*session, "alpha").await;
+    assert!(model_changes(&same).is_empty());
+    *hooks.model.lock().unwrap() = Some("  ".to_owned());
+    let empty = turn(&*session, "beta").await;
+    assert!(model_changes(&empty).is_empty());
+    assert_eq!(t.wire_models(), ["m", "m"]);
+}
+
+#[tokio::test]
+async fn a_before_turn_hook_that_never_answers_is_skipped_with_a_notice_and_the_turn_runs() {
+    let t = TwoModels::start(
+        vec![text_reply(None, "ok", None, Some((100, 10)))],
+        |config| config.hook_timeout = Duration::from_millis(50),
+    )
+    .await;
+    let hooks = Arc::new(ModelHooks {
+        model: Mutex::new(Some("small".to_owned())),
+        stall: true,
+        ..ModelHooks::default()
+    });
+    let session = t.open(Some(hooks)).await;
+    let events = turn(&*session, "alpha").await;
+    assert_eq!(stop_reason(&events), StopReason::Completed);
+    assert!(events.iter().any(|e| matches!(
+        e,
+        AgentEvent::ProviderNotice { kind, data } if kind == "hook_timeout" && data["hook"] == "before_turn"
+    )), "{events:?}");
+    assert!(model_changes(&events).is_empty());
+    assert_eq!(t.wire_models(), ["m"]);
+}

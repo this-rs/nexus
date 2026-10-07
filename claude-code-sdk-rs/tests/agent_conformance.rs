@@ -74,7 +74,7 @@ async fn b_the_suite_passes_on_a_scripted_target_with_no_capability() {
         .iter()
         .filter(|(_, outcome)| *outcome == ScenarioOutcome::FallbackVerified)
         .count();
-    assert_eq!(fallbacks, 16, "{}", report.summary());
+    assert_eq!(fallbacks, 17, "{}", report.summary());
 }
 
 #[tokio::test]

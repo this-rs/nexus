@@ -175,6 +175,13 @@ impl ClaudeCodeProvider {
         Ok(Arc::new(ClaudeCodeSession {
             core,
             client: tokio::sync::Mutex::new(client),
+            hooks: spec.hooks.clone(),
+            model: Mutex::new(
+                spec.model
+                    .clone()
+                    .or_else(|| self.config.default_model.clone()),
+            ),
+            turns: std::sync::atomic::AtomicU32::new(0),
             pid,
             machine: self
                 .config
@@ -933,6 +940,14 @@ struct ClaudeCodeSession {
     core: Arc<Core>,
     /// Locked only to send the input of a turn and to disconnect.
     client: tokio::sync::Mutex<InteractiveClient>,
+    /// The host's hooks, for `before_turn` (the tool and compaction hooks go
+    /// through the CLI's hook protocol).
+    hooks: Option<Arc<dyn SessionHooks>>,
+    /// Model the next turn runs on, as far as this side knows: the spec's, then
+    /// what `set_model` and the directives asked for.
+    model: Mutex<Option<String>>,
+    /// Turns started so far.
+    turns: std::sync::atomic::AtomicU32,
     /// Process identifier of the CLI. Diagnostic only.
     pid: Option<u32>,
     /// The machine the CLI runs on (`user@host:port`), `None` when local. A session
@@ -953,7 +968,48 @@ impl ClaudeCodeSession {
     fn usable(&self) -> Result<(), ProviderError> {
         Core::check_usable(&self.core.lock())
     }
+
+    /// Asks the host which model the turn runs on (`SessionHooks::before_turn`).
+    /// Another model: `set_model` is written to the CLI before the input, and a
+    /// `model_changed` opens the turn. Nothing to ask, nothing said, the current
+    /// model, or a hook that does not answer in time: nothing happens.
+    async fn before_turn(&self, input_chars: usize) -> Result<(), ProviderError> {
+        let Some(hooks) = &self.hooks else {
+            return Ok(());
+        };
+        let index = self.turns.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let current = self
+            .model
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        let mut ctx = crate::agent::TurnContext::new(index, current.clone().unwrap_or_default());
+        ctx.input_chars = input_chars;
+        let directive = match tokio::time::timeout(HOOK_TIMEOUT, hooks.before_turn(&ctx)).await {
+            Ok(directive) => directive,
+            Err(_) => {
+                self.core.emit(AgentEvent::ProviderNotice {
+                    kind: "hook_timeout".to_owned(),
+                    data: json!({ "provider": "claude_code", "hook": "before_turn" }),
+                });
+                return Ok(());
+            },
+        };
+        let Some(model) = directive.model else {
+            return Ok(());
+        };
+        if model.trim().is_empty() || current.as_deref() == Some(model.as_str()) {
+            return Ok(());
+        }
+        self.core.write(control::set_model(&model)).await?;
+        *self.model.lock().unwrap_or_else(PoisonError::into_inner) = Some(model.clone());
+        self.core.emit(AgentEvent::ModelChanged { model });
+        Ok(())
+    }
 }
+
+/// How long a `before_turn` hook may take before the turn goes on without it.
+const HOOK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 #[async_trait]
 impl AgentSession for ClaudeCodeSession {
@@ -988,12 +1044,12 @@ impl AgentSession for ClaudeCodeSession {
             state.map.set_interrupt_requested(false);
             receiver
         };
-        let sent = self
-            .client
-            .lock()
-            .await
-            .send_message(input.joined_text())
-            .await;
+        let text = input.joined_text();
+        if let Err(error) = self.before_turn(text.len()).await {
+            self.core.lock().turn = None;
+            return Err(error);
+        }
+        let sent = self.client.lock().await.send_message(text).await;
         if let Err(error) = sent {
             // Nothing reached the CLI: no turn is running.
             self.core.lock().turn = None;
@@ -1176,7 +1232,9 @@ impl AgentSession for ClaudeCodeSession {
 
     async fn set_model(&self, model: &str) -> Result<(), ProviderError> {
         self.usable()?;
-        self.core.write(control::set_model(model)).await
+        self.core.write(control::set_model(model)).await?;
+        *self.model.lock().unwrap_or_else(PoisonError::into_inner) = Some(model.to_owned());
+        Ok(())
     }
 
     async fn set_policy_mode(

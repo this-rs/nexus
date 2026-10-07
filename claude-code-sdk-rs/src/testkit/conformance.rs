@@ -43,7 +43,7 @@ use crate::agent::{
     ModelInfo, PermissionDecision, PermissionScope, PolicyMode, ProviderError, ProviderKind,
     QuestionAnswer, QuestionAnswerItem, QuestionReply, ResumeToken, SandboxLevel, SessionHooks,
     SessionSpec, StopReason, SubagentSupport, ToolCallInfo, ToolCategory, ToolPolicy,
-    ToolResultInfo, TurnInput,
+    ToolResultInfo, TurnContext, TurnDirective, TurnInput,
 };
 
 /// Longest wait for one step of a scenario: an answer to a call, the next event
@@ -204,6 +204,16 @@ pub enum Scenario {
     /// completes. Fallback (`set_model_live: false`): `set_model` answers
     /// `Unsupported { set_model_live }` and the session still works.
     ChangementModele,
+    /// Stage: a session opened with hooks whose `before_turn` names the other
+    /// model of the catalogue, then one plain turn.
+    ///
+    /// Checked (`set_model_live` and `hooks: in_protocol`): `before_turn` was
+    /// called, the turn opens with `model_changed { model }` before any other
+    /// event, the turn completes, the capabilities stay frozen. Fallback
+    /// (`set_model_live: false`, hooks honoured): no `model_changed`, a
+    /// `provider_notice { model_directive_ignored }` in the turn, which completes.
+    /// Hooks not honoured: no `model_changed`, the turn completes.
+    DirectiveModele,
     /// Stage: a session that runs one plain turn after `set_policy_mode`.
     ///
     /// Checked: `set_policy_mode(auto_edits)` is `Ok` or `Unsupported`, never
@@ -287,7 +297,7 @@ pub enum Scenario {
 
 impl Scenario {
     /// Every scenario, in the order the suite runs them.
-    pub const ALL: [Scenario; 25] = [
+    pub const ALL: [Scenario; 26] = [
         Self::TourTexteSimple,
         Self::FluxDeltas,
         Self::Raisonnement,
@@ -301,6 +311,7 @@ impl Scenario {
         Self::AnnulationTourPreserve,
         Self::AnnulationTache,
         Self::ChangementModele,
+        Self::DirectiveModele,
         Self::ChangementPolitique,
         Self::Reprise,
         Self::MessageImages,
@@ -331,6 +342,7 @@ impl Scenario {
             Self::AnnulationTourPreserve => "annulation_tour_preserve",
             Self::AnnulationTache => "annulation_tache",
             Self::ChangementModele => "changement_modele",
+            Self::DirectiveModele => "directive_modele",
             Self::ChangementPolitique => "changement_politique",
             Self::Reprise => "reprise",
             Self::MessageImages => "message_images",
@@ -366,7 +378,7 @@ impl Scenario {
             Self::QuestionUtilisateur => Some("native_question"),
             Self::AnnulationTourPreserve => Some("tool_cancel"),
             Self::AnnulationTache => Some("background_tasks"),
-            Self::ChangementModele => Some("set_model_live"),
+            Self::ChangementModele | Self::DirectiveModele => Some("set_model_live"),
             Self::Reprise => Some("resume"),
             Self::MessageImages => Some("images"),
             Self::SousAgent => Some("subagents"),
@@ -401,6 +413,7 @@ impl Scenario {
             Self::AnnulationTourPreserve => &["tool_cancel"],
             Self::AnnulationTache => &["background_tasks"],
             Self::ChangementModele => &["set_model_live"],
+            Self::DirectiveModele => &["set_model_live", "hooks"],
             Self::ChangementPolitique => &["sandbox"],
             Self::Reprise => &["resume"],
             Self::MessageImages => &["images"],
@@ -621,6 +634,7 @@ async fn run_staged(target: &dyn ConformanceTarget, scenario: Scenario) -> Scena
         Scenario::AnnulationTourPreserve => annulation_tour_preserve(&mut ctx, &prepared).await,
         Scenario::AnnulationTache => annulation_tache(&mut ctx, &prepared).await,
         Scenario::ChangementModele => changement_modele(&mut ctx, &prepared).await,
+        Scenario::DirectiveModele => directive_modele(&mut ctx, &prepared).await,
         Scenario::ChangementPolitique => changement_politique(&mut ctx, &prepared).await,
         Scenario::Reprise => reprise(&mut ctx, &prepared).await,
         Scenario::MessageImages => message_images(&mut ctx, &prepared).await,
@@ -1962,6 +1976,75 @@ async fn changement_modele(ctx: &mut Ctx, prepared: &Prepared) {
     finish(ctx, &*session).await;
 }
 
+/// Hooks whose `before_turn` names a model and counts its calls.
+struct DirectiveHooks {
+    model: String,
+    calls: AtomicU32,
+}
+
+#[async_trait]
+impl SessionHooks for DirectiveHooks {
+    async fn before_turn(&self, _ctx: &TurnContext) -> TurnDirective {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        TurnDirective::model(self.model.clone())
+    }
+}
+
+fn is_directive_notice(event: &AgentEvent) -> bool {
+    matches!(event, AgentEvent::ProviderNotice { kind, .. } if kind == "model_directive_ignored")
+}
+
+async fn directive_modele(ctx: &mut Ctx, prepared: &Prepared) {
+    let model = other_model(prepared).await;
+    let hooks = Arc::new(DirectiveHooks {
+        model: model.clone(),
+        calls: AtomicU32::new(0),
+    });
+    let mut spec = prepared.spec.clone();
+    spec.hooks = Some(hooks.clone());
+    let Some(session) = open_with(ctx, prepared, spec).await else {
+        return;
+    };
+    let events = plain_turn(ctx, &*session, "the turn with a model directive").await;
+    let changes: Vec<&str> = events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::ModelChanged { model } => Some(model.as_str()),
+            _ => None,
+        })
+        .collect();
+    let honoured = ctx.caps.hooks == HookSupport::InProtocol;
+    if honoured && hooks.calls.load(Ordering::SeqCst) == 0 {
+        ctx.fail("`hooks` is `in_protocol` but `before_turn` was not called before the turn");
+    }
+    if honoured && ctx.caps.set_model_live {
+        if changes != [model.as_str()] {
+            ctx.fail(format!(
+                "a `before_turn` directive naming `{model}` must open the turn with exactly one `model_changed {{ model: \"{model}\" }}`, got {changes:?}"
+            ));
+        }
+        let first = events
+            .iter()
+            .find(|event| !matches!(event, AgentEvent::ProviderNotice { .. }));
+        if !matches!(first, Some(AgentEvent::ModelChanged { .. })) {
+            ctx.fail("`model_changed` must come before any other event of the turn it applies to");
+        }
+    } else {
+        if !changes.is_empty() {
+            ctx.fail(format!(
+                "no `model_changed` is expected when the directive is not honoured (set_model_live: {}, hooks: {:?}), got {changes:?}",
+                ctx.caps.set_model_live, ctx.caps.hooks
+            ));
+        }
+        if honoured && !events.iter().any(is_directive_notice) {
+            ctx.fail(
+                "`set_model_live` is absent and the hooks are honoured: the ignored directive must be said with `provider_notice { model_directive_ignored }`",
+            );
+        }
+    }
+    finish(ctx, &*session).await;
+}
+
 async fn changement_politique(ctx: &mut Ctx, prepared: &Prepared) {
     // Refusals at opening, on variants of the staged spec. Nothing is spawned:
     // each must be refused before the provider starts anything.
@@ -2678,7 +2761,7 @@ fn scenario_script(caps: &Capabilities, scenario: Scenario) -> Script {
             turn.extend([answer(), done()]);
             script.turns.push(turn);
         },
-        Scenario::ChangementModele => {
+        Scenario::ChangementModele | Scenario::DirectiveModele => {
             let mut default = ModelInfo::new(SCRIPTED_MODEL);
             default.is_default = true;
             script.models = vec![default, ModelInfo::new("scripted-model-b")];

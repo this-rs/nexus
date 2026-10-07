@@ -57,7 +57,7 @@ pub use spec::{
     CancelOutcome, CancelScope, CompactionInfo, EnvSpec, HookVerdict, InputBlock, InterruptOutcome,
     InterruptScope, Lineage, McpServerSpec, PermissionDecision, ProcessDiagnostic, QuestionAnswer,
     QuestionAnswerItem, SessionHooks, SessionLimits, SessionSpec, SystemPromptMode,
-    SystemPromptSpec, ToolCallInfo, ToolResultInfo, TurnInput,
+    SystemPromptSpec, ToolCallInfo, ToolResultInfo, TurnContext, TurnDirective, TurnInput,
 };
 
 /// Version of the contract. Goes up by one whenever a serialised shape
@@ -65,7 +65,7 @@ pub use spec::{
 /// [`ResumeToken`]) or a trait signature changes. The JSON snapshots in
 /// `tests/agent_contract_snapshots.rs` carry it: changing a shape without
 /// changing the version fails that test.
-pub const CONTRACT_VERSION: u32 = 3;
+pub const CONTRACT_VERSION: u32 = 4;
 
 /// Events of a turn, or of the out-of-band channel.
 pub type EventStream = Pin<Box<dyn Stream<Item = AgentEvent> + Send>>;

@@ -1,8 +1,8 @@
 %% name: nexus-agent-contract
 %% covers: claude-code-sdk-rs/src/agent/*.rs, docs/agent-contract.md, claude-code-sdk-rs/tests/agent_contract_snapshots.rs, claude-code-sdk-rs/tests/agent_registry.rs
-%% verified: 2026-10-05
+%% verified: 2026-10-07
 %% ---
-%% ETAT (HEAD de la branche d'intégration, 2026-10-05) : `claude-code-sdk-rs/src/agent/` existe : types, traits ET registre (registry.rs) ;
+%% ETAT (main, 2026-10-07, CONTRACT_VERSION = 4 : + SessionHooks::before_turn, TurnContext, TurnDirective — instantané v4 identique à v3 hors version) ; au 2026-10-05 : `claude-code-sdk-rs/src/agent/` existe : types, traits ET registre (registry.rs) ;
 %%   des providers l'implémentent (claude_code, native, codex, acp : voir nexus-agent-providers). Vérifié par : cargo test -p nexus-claude --lib agent:: ;
 %%   cargo test -p nexus-claude --test agent_contract_snapshots (instantané tests/snapshots/agent_contract_v2.json) ; cargo test -p nexus-claude --doc agent.
 %%   Les lignes « PROUVE » et « SOURCES LUES » ci-dessous décrivent l'état AVANT (58e27e6) et restent pour la partie « code antérieur au module agent/ ».
@@ -55,6 +55,7 @@ flowchart TD
         POL["✅ ToolPolicy { mode, native_mode, allow, deny }, ToolPattern, decide() en refus par défaut, restrict(parent) monotone<br/><i>agent/policy.rs ; vérifié : tests unitaires agent::policy (10 tests : deny l'emporte, restrict idempotent, motif malformé = erreur)</i>"]
         CAP["✅ Capabilities par modèle, 18 champs, Capabilities::none() ; fenêtre inconnue = absente, jamais 200000<br/><i>agent/capabilities.rs ; vérifié : tests unitaires agent::capabilities ; les replis ne seront vérifiés que par testkit (palier 4)</i>"]
         RES["✅ ResumeToken opaque { k, v, d }, to_wire / from_wire, expect_kind refuse le jeton d'un autre provider<br/><i>agent/resume.rs ; vérifié : tests unitaires agent::resume</i>"]
+        HOOKS["✅ SessionHooks (A7, agent/spec.rs) : before_tool → HookVerdict, after_tool → contexte, before_compaction → instructions, before_turn(TurnContext) → TurnDirective { model } (v4, décision R3 : le routage cognitif du backend choisit le modèle du tour, le harnais obéit sans savoir pourquoi) ; méthodes à défaut (un hôte v3 ne change pas) ; TurnContext { turn_index, current_model, input_chars, context_tokens, tokens_spent, usd_spent }<br/><i>vérifié : cargo test -p nexus-claude --features testkit --test agent_conformance (scénario directive_modele : scripted toutes capacités → model_changed en tête du tour ; aucune capacité → repli vérifié) ; --features provider-native --test native_harness a_before_turn_directive_runs_the_turn_on_that_model_and_announces_it_first ; --test claude_code_conformance a_before_turn_directive_writes_set_model_before_the_input_… ; tests/agent_contract_snapshots.rs (instantané v4)</i>"]
         ERR["✅ ProviderError (17 variantes, retryable(), kind(), http_status_hint()), détails expurgés par credentials::redact (mots délimités par espace, puis champs par `,` et `;` : un nom sensible qui n'est pas le premier du mot est vu, ex. JSON compact ; WipedText : texte dérivé d'une clé, écrasé au drop)<br/><i>agent/error.rs, agent/credentials.rs (Secret, CredentialRef, CredentialResolver) ; vérifié : instantané + tests agent::credentials (redact_cuts_on_commas_and_semicolons_not_only_on_spaces : rouge avant, JSON compact et assignations collées par `;` fuyaient ; a_wiped_bearer_text_…)</i>"]
         DONEERR["✅ done.error (contrat v2) : cause classée portée par `done` (usage et coût conservés) ; épinglée par l'instantané tests/snapshots/agent_contract_v2.json, entrée done_with_error<br/><i>vérifié : cargo test -p nexus-claude --test agent_contract_snapshots (rouge avant l'ajout de l'entrée ; un renommage serde du champ casse l'instantané) ; le même instantané épingle ProviderInstanceConfig (entrée provider_instance_config : natif avec préréglage/prix/extension, ACP, Claude Code, sans secret ; entrée ajoutée sans changer CONTRACT_VERSION)</i>"]
         MODELP["✅ fournisseur de modèle APART du harnais (agent/model_provider.rs) : ModelProtocol (anthropic_messages, openai_chat, openai_responses), ModelProviderConfig (sans secret, champ inconnu refusé), ModelBinding sur SessionSpec ; chaque harnais déclare les protocoles qu il consomme (ProviderKind::model_protocols) ; contrat v3, instantané tests/snapshots/agent_contract_v3.json<br/><i>vérifié : tests unitaires agent::model_provider (7) ; tests/model_binding.rs (11, trois mutations jouées : sans masquage de la clé de l hôte, identifiant résolu au nom du harnais, sans vérification de paire — chacune attrapée)</i>"]
@@ -72,6 +73,7 @@ flowchart TD
         SESS --> ERR
         EVT --> ERR
         SESS -.-> RES
+        SESS -->|"spec.hooks"| HOOKS
     end
 
     BACKEND -.->|"cible : Arc dyn AgentSession"| SESS

@@ -40,7 +40,7 @@ use super::tools::{ToolEntry, ToolRegistry};
 use crate::agent::{
     AgentEvent, CompactionInfo, CompactionPhase, CompactionTrigger, Cost, CostBasis, DeltaKind,
     HookVerdict, ModelUsage, PermissionDecision, PolicyDecision, ProviderError, StopReason,
-    ToolCallInfo, ToolCategory, ToolOutput, ToolResultInfo, TurnInput, Usage,
+    ToolCallInfo, ToolCategory, ToolOutput, ToolResultInfo, TurnContext, TurnInput, Usage,
 };
 use crate::model::{
     ChatMessage, CompletionChunk, CompletionRequest, FinishReason, Role, ToolCallChunk,
@@ -119,13 +119,47 @@ pub(crate) async fn run_turn(core: Arc<Core>, input: TurnInput, signal: Arc<Turn
             signal.stop(StopCause::TimedOut(ms));
         })
     });
+    let user_text = input.joined_text();
+    before_turn(&core, &signal, user_text.len()).await;
     let model = core.lock().model.clone();
-    let outcome = drive(&core, &signal, &model, input.joined_text(), &mut acc).await;
+    let outcome = drive(&core, &signal, &model, user_text, &mut acc).await;
     if let Some(timer) = timer {
         timer.abort();
     }
     let terminal = terminal_event(&core, &signal, &model, outcome, &acc);
     core.emit(terminal);
+}
+
+/// Asks the host, through `SessionHooks::before_turn`, which model the turn runs
+/// on. A directive naming another model makes it active (window and cost basis
+/// included) and announces it with `model_changed` before anything else of the
+/// turn. No hook, a hook that says nothing, that times out or that names the
+/// current model: nothing happens.
+async fn before_turn(core: &Core, signal: &TurnSignal, input_chars: usize) {
+    let Some(hooks) = &core.hooks else {
+        return;
+    };
+    let ctx = {
+        let mut state = core.lock();
+        let index = state.turn_index;
+        state.turn_index += 1;
+        let mut ctx = TurnContext::new(index, state.model.clone());
+        ctx.input_chars = input_chars;
+        ctx.context_tokens = state.last_prompt_tokens;
+        ctx.tokens_spent = state.tokens_spent;
+        ctx.usd_spent = (state.active_cost != CostBasis::Unknown).then_some(state.usd_spent);
+        ctx
+    };
+    let directive = hook_call(core, signal, "before_turn", hooks.before_turn(&ctx)).await;
+    let Some(model) = directive.and_then(|directive| directive.model) else {
+        return;
+    };
+    if model.trim().is_empty() {
+        return;
+    }
+    if core.apply_model(&model).await {
+        core.emit(AgentEvent::ModelChanged { model });
+    }
 }
 
 fn terminal_event(
@@ -144,8 +178,13 @@ fn terminal_event(
         context_tokens: acc.prompt_tokens,
         by_model: Vec::new(),
     };
-    // `None` without a price, never a zero (A21); the session's declared basis rules.
-    let cost = match core.capabilities.cost {
+    // `None` without a price, never a zero (A21); the basis of the model the turn
+    // ran on rules (the snapshot's until a model change).
+    let (active_cost, active_window) = {
+        let state = core.lock();
+        (state.active_cost, state.active_window)
+    };
+    let cost = match active_cost {
         CostBasis::Unknown => Cost::unknown(),
         basis => core.settings.prices.cost(model, &usage, basis),
     };
@@ -156,7 +195,7 @@ fn terminal_event(
         cache_read_tokens: acc.usage.cache_read,
         cache_creation_tokens: acc.usage.cache_creation,
         cost_usd: cost.usd,
-        context_window: core.capabilities.context_window.map(|w| w.value),
+        context_window: active_window,
     }];
     let done = |stop_reason: StopReason,
                 subtype: &str,
@@ -554,7 +593,9 @@ async fn maybe_compact(
     acc: &mut Acc,
 ) -> Result<(), ProviderError> {
     let config = core.settings.compaction;
-    let window = core.capabilities.context_window.map(|w| w.value);
+    // The window of the model now active, not the snapshot's: a smaller model
+    // chosen for this turn compacts where the opening one would not.
+    let window = core.lock().active_window;
     let system = core
         .system_prompt
         .as_deref()

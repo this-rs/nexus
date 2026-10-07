@@ -140,6 +140,7 @@ fn transcript_for(scenario: Scenario) -> Transcript {
     let script = match scenario {
         Scenario::TourTexteSimple
         | Scenario::ChangementModele
+        | Scenario::DirectiveModele
         | Scenario::ChangementPolitique
         | Scenario::Reprise
         | Scenario::FinUsageCout
@@ -701,6 +702,77 @@ async fn set_policy_mode_and_set_model_are_written_byte_for_byte() {
         ]
     );
     session.close().await.unwrap();
+}
+
+/// Hooks whose `before_turn` asks for a fixed model.
+struct ModelDirectiveHooks(&'static str);
+
+#[async_trait::async_trait]
+impl nexus_claude::agent::SessionHooks for ModelDirectiveHooks {
+    async fn before_turn(
+        &self,
+        _ctx: &nexus_claude::agent::TurnContext,
+    ) -> nexus_claude::agent::TurnDirective {
+        nexus_claude::agent::TurnDirective::model(self.0)
+    }
+}
+
+#[tokio::test]
+async fn a_before_turn_directive_writes_set_model_before_the_input_and_opens_the_turn_with_model_changed()
+ {
+    let (fake, provider, mut spec) = stage(until_closed(
+        Transcript::new()
+            .await_stdin_containing("bonjour")
+            .init("fake-session")
+            .result_ok("ok"),
+    ));
+    spec.hooks = Some(Arc::new(ModelDirectiveHooks("fake-claude-2")));
+    let session = open(&provider, spec).await;
+    let events = read_turn(
+        session.send_turn(TurnInput::text("bonjour")).await.unwrap(),
+        |_| async {},
+    )
+    .await;
+    assert!(
+        matches!(&events[0], AgentEvent::ModelChanged { model } if model == "fake-claude-2"),
+        "{events:?}"
+    );
+    // Line 0 registers the hooks (`initialize`); then set_model, then the input.
+    let lines = fake.wait_for_stdin_lines(3, WAIT).await;
+    assert_eq!(
+        mask_uuid(&lines[1]),
+        r#"{"request":{"model":"fake-claude-2","subtype":"set_model"},"request_id":"<uuid>","type":"control_request"}"#,
+        "set_model is written before the input of the turn"
+    );
+    assert!(lines[2].contains("bonjour"), "{lines:?}");
+    // The directive named the model now current: the next turn asks nothing more.
+    let (second_fake, second_provider, mut second_spec) = stage(until_closed(
+        Transcript::new()
+            .await_stdin_containing("encore")
+            .init("fake-session")
+            .result_ok("ok"),
+    ));
+    second_spec.model = Some("fake-claude-2".to_owned());
+    second_spec.hooks = Some(Arc::new(ModelDirectiveHooks("fake-claude-2")));
+    let same = open(&second_provider, second_spec).await;
+    let events = read_turn(
+        same.send_turn(TurnInput::text("encore")).await.unwrap(),
+        |_| async {},
+    )
+    .await;
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::ModelChanged { .. })),
+        "{events:?}"
+    );
+    let lines = second_fake.wait_for_stdin_lines(2, WAIT).await;
+    assert!(
+        lines[1].contains("encore") && !lines[1].contains("set_model"),
+        "{lines:?}"
+    );
+    session.close().await.unwrap();
+    same.close().await.unwrap();
 }
 
 #[tokio::test]

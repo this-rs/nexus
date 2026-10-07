@@ -243,8 +243,121 @@ pub struct NativeProvider {
     config: Arc<NativeConfig>,
     endpoint: Arc<dyn ModelEndpoint>,
     store: Arc<dyn TranscriptStore>,
-    probes: Mutex<HashMap<String, EndpointProbe>>,
-    catalog: Mutex<Vec<ModelInfo>>,
+    facts: ModelFacts,
+}
+
+/// What the provider knows about each model: the probes, the catalogue and the
+/// configuration. Shared with every session so that a model change in a live
+/// session (`set_model`, `before_turn`) reads the facts of the model now active.
+#[derive(Clone)]
+pub(crate) struct ModelFacts {
+    config: Arc<NativeConfig>,
+    probes: Arc<Mutex<HashMap<String, EndpointProbe>>>,
+    catalog: Arc<Mutex<Vec<ModelInfo>>>,
+}
+
+impl ModelFacts {
+    fn new(config: Arc<NativeConfig>) -> Self {
+        Self {
+            config,
+            probes: Arc::new(Mutex::new(HashMap::new())),
+            catalog: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    fn record_probe(&self, model: &str, probe: EndpointProbe) {
+        self.probes
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(model.to_owned(), probe);
+    }
+
+    fn record_catalog(&self, models: Vec<ModelInfo>) {
+        *self.catalog.lock().unwrap_or_else(PoisonError::into_inner) = models;
+    }
+
+    pub(crate) fn probed(&self, model: &str) -> Option<EndpointProbe> {
+        self.probes
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(model)
+            .cloned()
+    }
+
+    pub(crate) fn context_window(
+        &self,
+        model: &str,
+        probe: Option<&EndpointProbe>,
+    ) -> Option<ContextWindow> {
+        if let Some(value) = self.config.context_window {
+            return Some(ContextWindow {
+                value,
+                source: ContextWindowSource::Configured,
+            });
+        }
+        // The probe wins over the catalogue: reading the catalogue (`catalog()`)
+        // must not change what `capabilities(model)` says once the model is probed.
+        let probed = probe
+            .and_then(|probe| probe.context_window)
+            .map(|value| ContextWindow {
+                value,
+                source: ContextWindowSource::Probed,
+            });
+        probed.or_else(|| {
+            self.catalog
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .iter()
+                .find(|info| info.id == model)
+                .and_then(|info| info.context_window)
+        })
+    }
+
+    pub(crate) fn cost_basis(&self, model: &str) -> CostBasis {
+        if self.config.cost_basis == CostBasis::Free {
+            CostBasis::Free
+        } else if self.config.prices.get(model).is_some() {
+            CostBasis::Priced
+        } else {
+            CostBasis::Unknown
+        }
+    }
+
+    /// The window and the cost basis that govern a turn on `model`: what was
+    /// probed or catalogued. A model never seen is probed once, best effort
+    /// (the endpoint caches it); a probe that fails leaves the window unknown,
+    /// which means no automatic compaction, never an error for the caller.
+    pub(crate) async fn active(
+        &self,
+        endpoint: &dyn ModelEndpoint,
+        model: &str,
+    ) -> (Option<u64>, CostBasis) {
+        let mut probe = self.probed(model);
+        if probe.is_none() && self.config.context_window.is_none() {
+            match endpoint.probe(model).await {
+                Ok(fresh) => {
+                    self.record_probe(model, fresh.clone());
+                    probe = Some(fresh);
+                },
+                Err(ProviderError::ModelNoTools { .. }) => {
+                    let fresh = EndpointProbe {
+                        tools: false,
+                        parallel_tools: None,
+                        reasoning_field: None,
+                        context_window: None,
+                        checked_at_ms: crate::agent::now_ms(),
+                    };
+                    self.record_probe(model, fresh.clone());
+                    probe = Some(fresh);
+                },
+                Err(_) => {},
+            }
+        }
+        (
+            self.context_window(model, probe.as_ref()).map(|w| w.value),
+            self.cost_basis(model),
+        )
+    }
 }
 
 impl std::fmt::Debug for NativeProvider {
@@ -258,12 +371,12 @@ impl std::fmt::Debug for NativeProvider {
 impl NativeProvider {
     /// A provider on `endpoint`, with transcripts kept in memory.
     pub fn new(config: NativeConfig, endpoint: Arc<dyn ModelEndpoint>) -> Self {
+        let config = Arc::new(config);
         Self {
-            config: Arc::new(config),
+            facts: ModelFacts::new(Arc::clone(&config)),
+            config,
             endpoint,
             store: Arc::new(MemoryTranscriptStore::new()),
-            probes: Mutex::new(HashMap::new()),
-            catalog: Mutex::new(Vec::new()),
         }
     }
 
@@ -293,54 +406,20 @@ impl NativeProvider {
             },
             Err(error) => return Err(error),
         };
-        self.probes
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .insert(model.to_owned(), probe);
+        self.facts.record_probe(model, probe);
         Ok(self.capabilities(Some(model)))
     }
 
     fn probed(&self, model: &str) -> Option<EndpointProbe> {
-        self.probes
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .get(model)
-            .cloned()
+        self.facts.probed(model)
     }
 
     fn context_window(&self, model: &str, probe: Option<&EndpointProbe>) -> Option<ContextWindow> {
-        if let Some(value) = self.config.context_window {
-            return Some(ContextWindow {
-                value,
-                source: ContextWindowSource::Configured,
-            });
-        }
-        // The probe wins over the catalogue: reading the catalogue (`catalog()`)
-        // must not change what `capabilities(model)` says once the model is probed.
-        let probed = probe
-            .and_then(|probe| probe.context_window)
-            .map(|value| ContextWindow {
-                value,
-                source: ContextWindowSource::Probed,
-            });
-        probed.or_else(|| {
-            self.catalog
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .iter()
-                .find(|info| info.id == model)
-                .and_then(|info| info.context_window)
-        })
+        self.facts.context_window(model, probe)
     }
 
     fn cost_basis(&self, model: &str) -> CostBasis {
-        if self.config.cost_basis == CostBasis::Free {
-            CostBasis::Free
-        } else if self.config.prices.get(model).is_some() {
-            CostBasis::Priced
-        } else {
-            CostBasis::Unknown
-        }
+        self.facts.cost_basis(model)
     }
 
     async fn build(
@@ -500,6 +579,7 @@ impl NativeProvider {
         let max_turns = max_turns.or(self.config.max_turns);
         let core = session::Core::new(session::CoreParts {
             capabilities,
+            facts: self.facts.clone(),
             endpoint: Arc::clone(&self.endpoint),
             settings: Arc::clone(&self.config),
             registry,
@@ -542,7 +622,7 @@ impl AgentProvider for NativeProvider {
             info.is_default = self.config.default_model.as_deref() == Some(info.id.as_str());
             info.pricing = self.config.prices.get(&info.id).copied();
         }
-        *self.catalog.lock().unwrap_or_else(PoisonError::into_inner) = models.clone();
+        self.facts.record_catalog(models.clone());
         Ok(models)
     }
 

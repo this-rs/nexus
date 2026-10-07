@@ -622,6 +622,7 @@ impl ScriptedProvider {
             script: Arc::clone(&self.script),
             log: Arc::clone(&self.log),
             hooks: honoured_hooks,
+            model: Mutex::new(spec.model.clone().unwrap_or_else(|| "default".to_owned())),
             resume_token,
             changed,
             state: Mutex::new(State {
@@ -869,6 +870,9 @@ struct Shared {
     log: CallLog,
     /// Hooks, only when the capabilities say they are honoured.
     hooks: Option<Arc<dyn SessionHooks>>,
+    /// Model the next turn runs on: the spec's, then what `set_model` and the
+    /// `before_turn` directives asked for.
+    model: Mutex<String>,
     resume_token: Option<ResumeToken>,
     /// Bumped at every state change; what the waiting steps listen to.
     changed: watch::Sender<u64>,
@@ -1211,12 +1215,45 @@ impl AgentSession for ScriptedSession {
     async fn send_turn(&self, input: TurnInput) -> Result<EventStream, ProviderError> {
         let shared = &self.shared;
         shared.record(RecordedCall::SendTurn(input.clone()));
+        {
+            let state = shared.lock();
+            if state.closed {
+                return Err(ProviderError::Closed);
+            }
+            if input.has_images() && !shared.capabilities.images {
+                return Err(ProviderError::unsupported("images"));
+            }
+            if state.turn.is_some() {
+                return Err(ProviderError::TurnInProgress);
+            }
+        }
+        // `before_turn` (contract §3): the host may name the model of this turn.
+        // Honoured only with `set_model_live`; otherwise said, never silently dropped.
+        let mut opening = Vec::new();
+        if let Some(hooks) = &shared.hooks {
+            let index = shared.lock().next_turn as u32;
+            let current = lock(&shared.model).clone();
+            let mut ctx = crate::agent::TurnContext::new(index, current.clone());
+            ctx.input_chars = input.joined_text().len();
+            let directive = hooks.before_turn(&ctx).await;
+            if let Some(model) = directive
+                .model
+                .filter(|m| !m.trim().is_empty() && *m != current)
+            {
+                if shared.capabilities.set_model_live {
+                    *lock(&shared.model) = model.clone();
+                    opening.push(AgentEvent::ModelChanged { model });
+                } else {
+                    opening.push(AgentEvent::ProviderNotice {
+                        kind: "model_directive_ignored".to_owned(),
+                        data: json!({ "model": model, "capability": "set_model_live" }),
+                    });
+                }
+            }
+        }
         let mut state = shared.lock();
         if state.closed {
             return Err(ProviderError::Closed);
-        }
-        if input.has_images() && !shared.capabilities.images {
-            return Err(ProviderError::unsupported("images"));
         }
         if state.turn.is_some() {
             return Err(ProviderError::TurnInProgress);
@@ -1246,6 +1283,9 @@ impl AgentSession for ScriptedSession {
                 ended: false,
             },
         );
+        for event in opening {
+            shared.emit(&mut state, Origin::Turn(epoch), event);
+        }
         drop(state);
         let task = Arc::clone(shared);
         tokio::spawn(async move { task.run_turn(epoch, steps).await });
@@ -1414,6 +1454,8 @@ impl AgentSession for ScriptedSession {
         if !shared.capabilities.set_model_live {
             return Err(ProviderError::unsupported("set_model_live"));
         }
+        drop(state);
+        *lock(&shared.model) = model.to_owned();
         Ok(())
     }
 
