@@ -21,7 +21,7 @@ use std::time::Duration;
 use futures::StreamExt;
 use nexus_claude::agent::{
     AgentEvent, AgentProvider, AgentSession, HealthStatus, McpServerSpec, PolicyMode,
-    ProviderError, ResumeToken, SessionSpec, StopReason, ToolPolicy, TurnInput,
+    ProviderError, ProviderHealth, ResumeToken, SessionSpec, StopReason, ToolPolicy, TurnInput,
 };
 use nexus_claude::providers::claude_code::{ClaudeCodeConfig, ClaudeCodeProvider};
 use nexus_claude::transport::RemoteHost;
@@ -58,6 +58,32 @@ fn failing_ssh(dir: &Path, code: i32, stderr: &str) -> PathBuf {
     .unwrap();
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
     path
+}
+
+/// `health()` of a remote instance, asked again while the `ssh` stand-in cannot be started yet.
+///
+/// The stand-ins are shell scripts written a moment before they are run. Tests share one process
+/// and fork in parallel: a child forked while a script is still open for writing holds that
+/// descriptor until it execs, and running the script meanwhile fails with `ETXTBSY` ("text file
+/// busy"). The probe reports it as "the ssh client could not be started". It clears within
+/// milliseconds, so ask again (bounded) instead of failing the test on a race the code under test
+/// does not own. Red twice on `ubuntu-latest / nightly`, never on a laptop.
+async fn health_when_the_stand_in_can_start(config: ClaudeCodeConfig) -> ProviderHealth {
+    let mut health = ClaudeCodeProvider::new(config.clone()).health().await;
+    for _ in 0..20 {
+        if !ssh_could_not_be_started(&health) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        health = ClaudeCodeProvider::new(config.clone()).health().await;
+    }
+    health
+}
+
+fn ssh_could_not_be_started(health: &ProviderHealth) -> bool {
+    health.status == HealthStatus::Unavailable
+        && serde_json::to_string(health)
+            .is_ok_and(|shown| shown.contains("the ssh client could not be started"))
 }
 
 struct Staged {
@@ -312,7 +338,7 @@ async fn health_reads_the_remote_version_through_the_pinned_channel() {
     let mut remote = RemoteHost::new("build-1.example.net", KEY);
     remote.ssh_program = Some(ssh);
     config.remote = Some(remote);
-    let health = ClaudeCodeProvider::new(config).health().await;
+    let health = health_when_the_stand_in_can_start(config).await;
     assert_eq!(health.status, HealthStatus::Ok, "{health:?}");
     assert_eq!(health.version.as_deref(), Some("2.1.287"));
 }
@@ -330,7 +356,7 @@ async fn an_unreachable_machine_is_unavailable_with_a_readable_reason_and_no_loc
     let mut remote = RemoteHost::new("build-1.example.net", KEY);
     remote.ssh_program = Some(ssh);
     config.remote = Some(remote);
-    let health = ClaudeCodeProvider::new(config).health().await;
+    let health = health_when_the_stand_in_can_start(config).await;
     assert_eq!(health.status, HealthStatus::Unavailable, "{health:?}");
     let shown = serde_json::to_string(&health).unwrap();
     assert!(shown.contains("does not match the pinned key"), "{shown}");
@@ -348,10 +374,48 @@ async fn a_missing_remote_cli_is_told_apart_from_an_unreachable_machine() {
     let mut remote = RemoteHost::new("build-1.example.net", KEY);
     remote.ssh_program = Some(ssh);
     config.remote = Some(remote);
-    let health = ClaudeCodeProvider::new(config).health().await;
+    let health = health_when_the_stand_in_can_start(config).await;
     assert_eq!(health.status, HealthStatus::Unavailable);
     assert!(
         matches!(health.error, Some(ProviderError::CliNotFound { .. })),
         "{health:?}"
+    );
+}
+
+#[tokio::test]
+async fn health_is_asked_again_while_the_stand_in_is_not_runnable_yet() {
+    let dir = tempfile::tempdir().unwrap();
+    let ssh = dir.path().join("ssh-late");
+    let mut config = ClaudeCodeConfig::default();
+    let mut remote = RemoteHost::new("build-1.example.net", KEY);
+    remote.ssh_program = Some(ssh.clone());
+    config.remote = Some(remote);
+    // The stand-in appears 250 ms late: the first asks cannot start it.
+    let writer = {
+        let ssh = ssh.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            std::fs::write(&ssh, "#!/bin/sh\necho '2.1.287 (Claude Code)'\n").unwrap();
+            std::fs::set_permissions(&ssh, std::fs::Permissions::from_mode(0o755)).unwrap();
+        })
+    };
+    let health = health_when_the_stand_in_can_start(config).await;
+    writer.await.unwrap();
+    assert_eq!(health.status, HealthStatus::Ok, "{health:?}");
+}
+
+#[tokio::test]
+async fn a_stand_in_that_never_starts_is_reported_after_a_bounded_wait() {
+    let mut config = ClaudeCodeConfig::default();
+    let mut remote = RemoteHost::new("build-1.example.net", KEY);
+    remote.ssh_program = Some(PathBuf::from("/nonexistent/ssh"));
+    config.remote = Some(remote);
+    let started = std::time::Instant::now();
+    let health = health_when_the_stand_in_can_start(config).await;
+    assert!(ssh_could_not_be_started(&health), "{health:?}");
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(10),
+        "{:?}",
+        started.elapsed()
     );
 }
