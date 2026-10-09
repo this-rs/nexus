@@ -28,19 +28,17 @@ runs:
     - name: Setup Rust cache
       uses: Swatinem/rust-cache@v2
       with:
-        # Cache key prefix
         prefix-key: 'nexus-rust'
-        # Shared cache key for workspace
-        shared-key: 'workspace'
-        # Cache ~/.cargo/bin
+        # NO shared-key: it made every job of the same OS and toolchain (fmt, clippy, docs, test,
+        # coverage, audit, drift) read and write ONE entry. The first to finish, `fmt`, saved a
+        # 74 MB cache holding almost no dependency, and the others (which cannot overwrite an
+        # existing key) all started cold. By default the key carries the job id, so each kind of
+        # build keeps its own artifacts (clippy metadata, test binaries, rustdoc, instrumented).
         cache-bin: true
-        # Cache on failure for debugging
         cache-on-failure: true
-        # Additional paths to cache
-        cache-directories: |
-          ~/.cargo/registry/index/
-          ~/.cargo/registry/cache/
-          ~/.cargo/git/db/
+        # Only main writes the cache; pull requests read it. Otherwise every branch re-saves
+        # 400 MB per job and evicts the entries main depends on (10 GB limit per repository).
+        save-if: ${{ github.ref == 'refs/heads/main' }}
 
     - name: Print Rust version
       shell: bash
