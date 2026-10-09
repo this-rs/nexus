@@ -6,9 +6,24 @@ on:
   pull_request:
     branches: [main, 'v*']
 
+# A new push to a pull request makes the previous run pointless: cancel it instead of burning
+# 8 runner-jobs (three of them on the expensive macOS / Windows images). Never on main, where
+# every push must keep its own verdict.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  # A CI build starts from a clean checkout, so incremental compilation only writes state nobody
+  # reads (and bloats the cache).
+  CARGO_INCREMENTAL: 0
+  # The workspace has ~80 test binaries, each linking the whole library. Full debug info is what
+  # makes those links (and the cache) heavy; line tables keep the file:line of backtraces and
+  # panics, which is all a CI log needs.
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+  CARGO_NET_RETRY: 5
 
 jobs:
   # Format check - runs first and fast
@@ -65,7 +80,6 @@ jobs:
   clippy:
     name: Clippy
     runs-on: ubuntu-latest
-    needs: fmt
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/setup-rust
@@ -74,30 +88,30 @@ jobs:
       - name: Run Clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
 
-  # Build and test matrix
+  # Test matrix. Ubuntu / stable is NOT here: it is the `coverage` job below, which runs the same
+  # `cargo test --all-features` instrumented, so the suite is run once on that platform instead
+  # of twice (a plain run, then a second one for the coverage figure).
+  #
+  # beta and nightly only run on Linux: they watch for a compiler regression, which does not
+  # depend on the operating system. Windows and macOS keep stable, where the platform-specific
+  # code (paths, processes, signals) is exercised.
   test:
     name: Test (${{ matrix.os }} / ${{ matrix.toolchain }})
     runs-on: ${{ matrix.os }}
-    needs: fmt
-    # A healthy job takes ~3 min on Unix and 3.5-4.5 min on Windows (measured on
-    # PR #43 and #44), build and doc tests included. 30 minutes is roughly six
-    # times the worst of that, so a cold dependency cache or a slow runner will
-    # never trip it, while a hung test is cut off after 30 minutes instead of
-    # holding a runner for GitHub's 6-hour default. PR #45 did exactly that:
-    # two `start_paused` tests deadlocked on Windows and the job sat silent for
-    # 49 minutes before being cancelled by hand.
+    # A healthy job takes about 3 minutes; 30 cuts off a hung test (PR #45: two `start_paused`
+    # tests deadlocked on Windows and the job sat silent for 49 minutes) instead of holding a
+    # runner for GitHub's 6-hour default.
     timeout-minutes: 30
-    # Nightly is advisory only: rustc nightly is prone to ICEs (internal compiler
-    # errors) unrelated to our code — don't let a toolchain regression block CI.
+    # Nightly is advisory only: rustc nightly is prone to ICEs unrelated to our code.
     continue-on-error: ${{ matrix.toolchain == 'nightly' }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
-        toolchain: [stable, beta]
         include:
-          - os: ubuntu-latest
-            toolchain: nightly
+          - { os: macos-latest, toolchain: stable }
+          - { os: windows-latest, toolchain: stable }
+          - { os: ubuntu-latest, toolchain: beta }
+          - { os: ubuntu-latest, toolchain: nightly }
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/setup-rust
@@ -105,35 +119,23 @@ jobs:
           toolchain: ${{ matrix.toolchain }}
           components: ''
 
-      - name: Build (Unix)
-        if: runner.os != 'Windows'
-        run: cargo build --all-features --verbose
-
-      - name: Build (Windows)
-        if: runner.os == 'Windows'
-        run: cargo build --features auto-download --verbose
-
+      # No separate `cargo build` and no separate `cargo test --doc`: `cargo test` builds
+      # everything it runs and already runs the doc tests. The non-test build of every target is
+      # covered by Clippy (--all-targets) and by the MSRV job.
       - name: Run tests (Unix)
         if: runner.os != 'Windows'
-        run: cargo test --all-features --verbose
+        run: cargo test --all-features
 
       - name: Run tests (Windows)
         if: runner.os == 'Windows'
-        run: cargo test --features auto-download --verbose
+        run: cargo test --features auto-download
 
-      - name: Run doc tests (Unix)
-        if: runner.os != 'Windows'
-        run: cargo test --doc --all-features
-
-      - name: Run doc tests (Windows)
-        if: runner.os == 'Windows'
-        run: cargo test --doc --features auto-download
-
-  # Code coverage
+  # Ubuntu / stable: the test suite, run once, instrumented. Its result is the platform's test
+  # verdict AND the coverage figure; there is no second plain run.
   coverage:
-    name: Coverage
+    name: Test + Coverage (ubuntu-latest / stable)
     runs-on: ubuntu-latest
-    needs: test
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/setup-rust
@@ -143,19 +145,16 @@ jobs:
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
 
-      - name: Generate coverage report
+      - name: Run tests with coverage
         run: cargo llvm-cov --all-features --lcov --output-path lcov.info
 
-      # The repo's reference figure, produced here and nowhere else. It used to
-      # exist only as a usage line in the script's docstring, with no caller at
-      # all: `--ignore-filename-regex` appeared exactly once in the tree, in that
-      # comment. A measurement convention that lives in prose is not a convention,
-      # and two people quoted two different "96.7 %" an hour apart because of it.
-      #
-      # `report` re-reads the profdata the step above already merged, so this
-      # costs seconds rather than a second run of the suite. Not a gate yet: a
-      # threshold and a new producer in one change would leave nobody able to say
-      # which of the two broke.
+      # `cargo llvm-cov` does not run doc tests on stable.
+      - name: Run doc tests
+        run: cargo test --doc --all-features
+
+      # The repo's reference figure, produced here and nowhere else (two people once quoted two
+      # different "96.7 %" an hour apart because the convention lived in prose). `report` re-reads
+      # the profdata the step above already merged: seconds, not a second run. Not a gate yet.
       - name: Measure and publish logic coverage
         run: |
           set -euo pipefail
@@ -163,7 +162,7 @@ jobs:
             --ignore-filename-regex '(examples/|/tests/|src/bin/)' \
             --output-path cov-logic.json
           # No pipe here on purpose: a shell reports the LAST command of a
-          # pipeline, so `… | tee` would hide the script refusing the export.
+          # pipeline, so `... | tee` would hide the script refusing the export.
           python3 scripts/coverage_logic_only.py cov-logic.json \
             --strip-prefix "${GITHUB_WORKSPACE}/" > logic-coverage.txt
           cat logic-coverage.txt
@@ -189,7 +188,6 @@ jobs:
   docs:
     name: Documentation
     runs-on: ubuntu-latest
-    needs: fmt
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/setup-rust
@@ -225,14 +223,16 @@ jobs:
           toolchain: '1.88'
           components: ''
 
-      - name: Build with MSRV
-        run: cargo build --all-features
+      # `check`, not `build`: the same type checking and dependency resolution at 1.88, without
+      # code generation or linking, which is where a build spends its time.
+      - name: Check with MSRV
+        run: cargo check --all-features
 
   # Final CI status check
   ci-success:
     name: CI Success
     runs-on: ubuntu-latest
-    needs: [fmt, diagram-drift, clippy, test, docs, msrv]
+    needs: [fmt, diagram-drift, clippy, test, coverage, docs, msrv]
     if: always()
     steps:
       - name: Check all jobs passed
@@ -240,6 +240,7 @@ jobs:
           if [[ "${{ needs.fmt.result }}" != "success" ]] || \
              [[ "${{ needs.clippy.result }}" != "success" ]] || \
              [[ "${{ needs.test.result }}" != "success" ]] || \
+             [[ "${{ needs.coverage.result }}" != "success" ]] || \
              [[ "${{ needs.docs.result }}" != "success" ]] || \
              [[ "${{ needs.msrv.result }}" != "success" ]]; then
             echo "One or more jobs failed"
