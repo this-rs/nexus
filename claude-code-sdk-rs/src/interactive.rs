@@ -400,6 +400,7 @@ impl InteractiveClient {
         // Return stream that stops at Result message
         Ok(async_stream::stream! {
             let mut rx_stream = ReceiverStream::new(rx);
+            let mut finished = false;
 
             while let Some(result) = rx_stream.next().await {
                 match &result {
@@ -407,14 +408,22 @@ impl InteractiveClient {
                         let is_result = matches!(msg, Message::Result { .. });
                         yield result;
                         if is_result {
+                            finished = true;
                             break;
                         }
                     }
                     Err(_) => {
                         yield result;
+                        finished = true;
                         break;
                     }
                 }
+            }
+
+            // The CLI left before answering: a turn that ends without a Result is
+            // an error, never a quiet end of turn (a silent 2 s turn at no cost).
+            if !finished {
+                yield Err(stream_ended_before_result());
             }
         })
     }
@@ -905,6 +914,14 @@ impl InteractiveClient {
     pub async fn child_pid(&self) -> Option<u32> {
         let transport = self.transport.lock().await;
         transport.child_pid()
+    }
+
+    /// Whether the CLI is still there: connected, and its stdout not at EOF.
+    ///
+    /// A CLI that exited (crash, invalid `--resume` target, killed process group)
+    /// answers `false`; the caller can then respawn instead of writing to a dead stdin.
+    pub async fn is_alive(&self) -> bool {
+        self.connected && self.transport.lock().await.is_connected()
     }
 
     /// Send interrupt signal to cancel current operation
@@ -1875,6 +1892,17 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn is_alive_follows_the_transport_and_the_connection() {
+        let (transport, _handle) = ScriptedBuilder::new().build();
+        let mut client = InteractiveClient::from_transport(transport);
+        assert!(!client.is_alive().await, "not connected yet");
+        client.connect().await.unwrap();
+        assert!(client.is_alive().await);
+        client.disconnect().await.unwrap();
+        assert!(!client.is_alive().await);
+    }
+
+    #[tokio::test]
     async fn connect_and_disconnect_are_idempotent_and_reach_the_transport_once() {
         let (transport, handle) = ScriptedBuilder::new().build();
         let mut client = InteractiveClient::from_transport(transport);
@@ -2259,6 +2287,31 @@ mod tests {
             stream.next().await.is_none(),
             "a failure ends the turn — the result message after it is never yielded"
         );
+    }
+
+    #[tokio::test]
+    async fn send_and_receive_stream_yields_an_error_when_the_cli_leaves_before_the_result() {
+        // The 2 s silent turn of 09/10: the CLI is gone, the stream just ends.
+        let (transport, _handle) = ScriptedBuilder::new().msg(system_message("init")).build();
+        let mut client = InteractiveClient::from_transport(transport);
+        client.connect().await.unwrap();
+
+        let stream = client
+            .send_and_receive_stream("hi".to_string())
+            .await
+            .unwrap();
+        let mut stream = std::pin::pin!(stream);
+        let _init = stream.next().await.expect("the init message").unwrap();
+        let error = stream
+            .next()
+            .await
+            .expect("the missing Result is an error, not a quiet end of turn")
+            .unwrap_err();
+        assert!(
+            matches!(&error, SdkError::TransportError(why) if why.contains("ended before a Result")),
+            "got {error:?}"
+        );
+        assert!(stream.next().await.is_none());
     }
 
     #[tokio::test]
