@@ -641,6 +641,93 @@ async fn a_tool_choice_refusal_that_persists_is_not_reported_as_no_tools() {
     );
 }
 
+/// 400s that refuse the FORCED `tool_choice` of a reasoning model, not tools. Each one is
+/// answered once by the forced probe; the probe must ask again with `auto` and find the tool.
+const FORCING_REFUSALS: [&str; 7] = [
+    // DeepSeek V4 (thinking by default).
+    "Thinking mode does not support this tool_choice",
+    // Anthropic (OpenAI-compatible layer, Bedrock) with extended thinking.
+    "Thinking may not be enabled when tool_choice forces tool use.",
+    // Qwen3 on DashScope in thinking mode.
+    "The tool_choice parameter does not support being set to required or object in thinking mode.",
+    // Kimi K2 thinking (Moonshot).
+    "tool_choice 'specified' is incompatible with thinking enabled",
+    // Bedrock Converse spells it toolChoice: "support" + "tool", and no "tool_choice".
+    "This model doesn't support the toolConfig.toolChoice.any field. Remove toolConfig.toolChoice.any and try again.",
+    // Spelled with a space (vLLM-style wording).
+    "Named tool choice is not supported for reasoning models",
+    // Names neither tool_choice nor tools: only the forcing is refused.
+    "Forced function calling is not supported in thinking mode",
+];
+
+#[tokio::test]
+async fn every_known_refusal_of_a_forced_tool_is_asked_again_with_auto() {
+    for refusal in FORCING_REFUSALS {
+        let server = FakeOpenAi::start(json!([
+            post(400, json!({"body": {"error": {"message": refusal}}})),
+            probe_sse(true, Some("reasoning_content")),
+            models_route()
+        ]));
+        let probe = endpoint(&server, EndpointQuirks::generic())
+            .probe("reasoner")
+            .await;
+        assert!(
+            probe.as_ref().is_ok_and(|p| p.tools),
+            "{refusal:?} -> {probe:?}"
+        );
+        let sent = server.requests_to("POST", "/v1/chat/completions");
+        assert_eq!(sent.len(), 2, "{refusal:?}");
+        assert_eq!(sent[1]["body"]["tool_choice"], "auto", "{refusal:?}");
+    }
+}
+
+#[tokio::test]
+async fn a_refusal_about_tool_choice_is_never_reported_as_no_tools() {
+    // Refused twice (the `auto` retry too): the endpoint is in trouble, but nothing
+    // says the MODEL has no tools.
+    for refusal in FORCING_REFUSALS {
+        let answer = || post(400, json!({"body": {"error": {"message": refusal}}}));
+        let server = FakeOpenAi::start(json!([answer(), answer()]));
+        let error = expect_err(
+            endpoint(&server, EndpointQuirks::generic())
+                .probe("m")
+                .await,
+        );
+        let tool_choice = refusal.to_ascii_lowercase().contains("tool")
+            && refusal.to_ascii_lowercase().contains("choice");
+        if tool_choice {
+            assert!(
+                !matches!(error, ProviderError::ModelNoTools { .. }),
+                "{refusal:?} -> {error:?}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_model_without_tools_is_still_model_no_tools_after_the_auto_retry() {
+    // A generic endpoint that forced the tool: the refusal names tools, the
+    // retry with auto names them again. That one is a model without tools.
+    let refusal = || {
+        post(
+            400,
+            json!({"body": {"error": {"message": "tools is not supported with this model"}}}),
+        )
+    };
+    let server = FakeOpenAi::start(json!([refusal(), refusal()]));
+    let error = expect_err(
+        endpoint(&server, EndpointQuirks::generic())
+            .probe("o1-mini")
+            .await,
+    );
+    assert_eq!(
+        error,
+        ProviderError::ModelNoTools {
+            model: "o1-mini".into()
+        }
+    );
+}
+
 #[tokio::test]
 async fn probe_is_cached_per_model_and_expires() {
     let server = FakeOpenAi::start(json!([probe_sse(true, None), models_route()]));

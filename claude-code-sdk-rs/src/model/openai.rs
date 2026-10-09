@@ -307,14 +307,16 @@ impl ModelEndpoint for OpenAiEndpoint {
         let no_tools = || ProviderError::ModelNoTools {
             model: model.to_string(),
         };
-        // Forcing the tool is a convenience, not what is being asked: an endpoint
-        // that refuses the FORCING (DeepSeek in thinking mode) is asked again with
-        // `auto` before anything is concluded about the model.
+        // Forcing the tool is a convenience, not what is being asked: a 400 to the
+        // FORCED probe is a refusal of the forcing as often as of tools (reasoning
+        // models in thinking mode: DeepSeek, Anthropic, Qwen, Kimi..., each with its
+        // own wording), so the model is asked again with `auto` before anything is
+        // concluded. Only that answer says whether the model has tools.
+        let forced =
+            !self.config.quirks.omit_tool_choice && !self.config.quirks.no_forced_tool_choice;
         let first = self.start(request.clone(), Some(PROBE_TOOL)).await;
         let started = match first {
-            Err(ProviderError::InvalidRequest { detail }) if mentions_tool_choice(&detail) => {
-                self.start(request, None).await
-            },
+            Err(ProviderError::InvalidRequest { .. }) if forced => self.start(request, None).await,
             other => other,
         };
         let (mut stream, field) = started.map_err(|error| tools_refusal(error, &no_tools))?;
@@ -348,9 +350,15 @@ impl ModelEndpoint for OpenAiEndpoint {
     }
 }
 
-/// The refusal is about the `tool_choice` parameter, not about tools.
+/// The refusal is about the `tool_choice` parameter, not about tools, however it is
+/// spelled: `tool_choice`, `toolChoice` (Bedrock), "tool choice".
 fn mentions_tool_choice(detail: &str) -> bool {
-    detail.to_ascii_lowercase().contains("tool_choice")
+    let squashed: String = detail
+        .chars()
+        .filter(char::is_ascii_alphanumeric)
+        .map(|c| c.to_ascii_lowercase())
+        .collect();
+    squashed.contains("toolchoice")
 }
 
 /// A 400 that says the model has no tool support is `ModelNoTools` for the probe.
