@@ -693,14 +693,17 @@ async fn a_refusal_about_tool_choice_is_never_reported_as_no_tools() {
                 .probe("m")
                 .await,
         );
-        let tool_choice = refusal.to_ascii_lowercase().contains("tool")
-            && refusal.to_ascii_lowercase().contains("choice");
-        if tool_choice {
-            assert!(
-                !matches!(error, ProviderError::ModelNoTools { .. }),
-                "{refusal:?} -> {error:?}"
-            );
-        }
+        // Every form, not only those that spell "tool" and "choice": the last one
+        // names neither, and must not slip through either.
+        assert!(
+            matches!(error, ProviderError::InvalidRequest { .. }),
+            "{refusal:?} -> {error:?}"
+        );
+        assert_eq!(
+            server.requests_to("POST", "/v1/chat/completions").len(),
+            2,
+            "{refusal:?}"
+        );
     }
 }
 
@@ -726,6 +729,149 @@ async fn a_model_without_tools_is_still_model_no_tools_after_the_auto_retry() {
             model: "o1-mini".into()
         }
     );
+}
+
+#[tokio::test]
+async fn a_refusal_of_parallel_tool_calls_is_not_reported_as_no_tools() {
+    // OpenAI's wording for a model that refuses the `parallel_tool_calls` PARAMETER
+    // (sent by the nim and llama_server presets). It names "tool" and "support",
+    // but the model may well call tools: refusing one parameter is not refusing tools.
+    let refusal = || {
+        post(
+            400,
+            json!({"body": {"error": {
+                "message": "Unsupported parameter: 'parallel_tool_calls' is not supported with this model.",
+                "type": "invalid_request_error", "param": "parallel_tool_calls",
+                "code": "unsupported_parameter"
+            }}}),
+        )
+    };
+    let server = FakeOpenAi::start(json!([refusal(), refusal()]));
+    let error = expect_err(endpoint(&server, EndpointQuirks::nim()).probe("m").await);
+    assert!(
+        matches!(error, ProviderError::InvalidRequest { .. }),
+        "{error:?}"
+    );
+}
+
+#[tokio::test]
+async fn openrouter_404_about_tool_choice_is_asked_again_with_auto() {
+    // OpenRouter answers a tool_choice no routed provider supports with a 404.
+    let server = FakeOpenAi::start(json!([
+        post(
+            404,
+            json!({"body": {"error": {"message": "No endpoints found that support the provided 'tool_choice' value.", "code": 404}}})
+        ),
+        probe_sse(true, None),
+        models_route()
+    ]));
+    let probe = endpoint(&server, EndpointQuirks::generic())
+        .probe("m")
+        .await
+        .unwrap();
+    assert!(probe.tools);
+    assert_eq!(server.requests_to("POST", "/v1/chat/completions").len(), 2);
+}
+
+#[tokio::test]
+async fn a_400_without_a_json_body_is_asked_again_with_auto() {
+    for body in [json!(""), json!("<html><body>Bad Request</body></html>")] {
+        let server = FakeOpenAi::start(json!([
+            post(400, json!({ "body": body })),
+            probe_sse(true, None),
+            models_route()
+        ]));
+        let probe = endpoint(&server, EndpointQuirks::generic())
+            .probe("m")
+            .await;
+        assert!(probe.as_ref().is_ok_and(|p| p.tools), "{body} -> {probe:?}");
+        assert_eq!(server.requests_to("POST", "/v1/chat/completions").len(), 2);
+    }
+}
+
+#[tokio::test]
+async fn a_transient_failure_of_the_auto_retry_is_returned_as_is() {
+    let cases = [
+        (
+            post(
+                429,
+                json!({"headers": {"Retry-After": "2"}, "body": "slow down"}),
+            ),
+            ProviderError::RateLimited {
+                retry_after_ms: Some(2000),
+            },
+        ),
+        (
+            post(503, json!({"body": "busy"})),
+            ProviderError::Overloaded,
+        ),
+    ];
+    for (retry, expected) in cases {
+        let server = FakeOpenAi::start(json!([
+            post(
+                400,
+                json!({"body": {"error": {"message": THINKING_REFUSAL}}})
+            ),
+            retry
+        ]));
+        let error = expect_err(
+            endpoint(&server, EndpointQuirks::generic())
+                .probe("m")
+                .await,
+        );
+        assert_eq!(error, expected);
+        // Exactly two requests: no loop on a transient answer.
+        assert_eq!(server.requests_to("POST", "/v1/chat/completions").len(), 2);
+    }
+    let server = FakeOpenAi::start(json!([
+        post(
+            400,
+            json!({"body": {"error": {"message": THINKING_REFUSAL}}})
+        ),
+        post(500, json!({"body": "<html>oops</html>"}))
+    ]));
+    let error = expect_err(
+        endpoint(&server, EndpointQuirks::generic())
+            .probe("m")
+            .await,
+    );
+    assert!(
+        matches!(error, ProviderError::EndpointUnreachable { .. }),
+        "{error:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_timeout_of_the_auto_retry_is_a_timeout() {
+    let server = FakeOpenAi::start(json!([
+        post(
+            400,
+            json!({"body": {"error": {"message": THINKING_REFUSAL}}})
+        ),
+        post(200, json!({"body": "late", "delay_ms": 1500}))
+    ]));
+    let (endpoint, _) = endpoint_with(server.base_url(), EndpointQuirks::generic(), |c| {
+        c.response_timeout = Duration::from_millis(300)
+    });
+    let error = expect_err(endpoint.probe("m").await);
+    assert!(matches!(error, ProviderError::Timeout { .. }), "{error:?}");
+    assert_eq!(server.requests_to("POST", "/v1/chat/completions").len(), 2);
+}
+
+#[tokio::test]
+async fn presets_that_never_force_are_not_asked_twice() {
+    for quirks in [EndpointQuirks::deepseek(), EndpointQuirks::ollama()] {
+        let server = FakeOpenAi::start(json!([
+            post(400, json!({"body": {"error": {"message": "bad request"}}})),
+            probe_sse(true, None)
+        ]));
+        let error = expect_err(endpoint(&server, quirks.clone()).probe("m").await);
+        assert!(
+            matches!(error, ProviderError::InvalidRequest { .. }),
+            "{quirks:?} -> {error:?}"
+        );
+        assert_eq!(server.requests_to("POST", "/v1/chat/completions").len(), 1);
+    }
 }
 
 #[tokio::test]
