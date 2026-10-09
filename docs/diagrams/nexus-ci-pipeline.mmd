@@ -1,6 +1,6 @@
 %% name: nexus-ci-pipeline
 %% covers: .github/workflows/ci.yml, .github/workflows/release.yml
-%% verified: 2026-10-03
+%% verified: 2026-10-09
 flowchart TD
     subgraph PR["Pull Request"]
         direction TB
@@ -9,17 +9,19 @@ flowchart TD
         fmt["fmt\n✅ rustfmt --check\n✅ diagram index derived & current (cargo xtask)"]
         push --> drift["diagram-drift (PR only)\n✅ covered file changed ⇒ .mmd touched\nor Diagram-Unchanged trailer with a reason\n(cargo xtask diagrams drift · xtask/tests/commands.rs)"]
         drift --> ok
-        fmt --> clippy["clippy\n✅ -D warnings"]
-        fmt --> test["test matrix\nubuntu / macos / windows\nstable + beta + nightly"]
-        fmt --> docs["docs\ncargo doc"]
-        fmt --> msrv["MSRV 1.88\ncargo build"]
+        push --> clippy["clippy\n✅ -D warnings"]
+        push --> test["test matrix\nmacOS stable · Windows stable\nLinux beta + nightly (advisory)\ncargo test (build + doc tests)"]
+        push --> cov["ubuntu stable: test + coverage\ncargo llvm-cov (the one run of the suite)\n+ doc tests + logic-only report"]
+        push --> docs["docs\ncargo doc"]
+        push --> msrv["MSRV 1.88\ncargo check"]
 
-        clippy --> ok{CI Success}
+        fmt --> ok{CI Success}
+        clippy --> ok
         test --> ok
+        cov --> ok
         docs --> ok
         msrv --> ok
 
-        test --> cov["coverage\ncargo llvm-cov\n+ logic-only report"]
         cov --> cc["Codecov\n🟠 project: informational\n✅ patch: blocking ≥80 %"]
     end
 
