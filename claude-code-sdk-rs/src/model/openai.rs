@@ -350,24 +350,27 @@ impl ModelEndpoint for OpenAiEndpoint {
     }
 }
 
-/// The refusal is about the `tool_choice` parameter, not about tools, however it is
-/// spelled: `tool_choice`, `toolChoice` (Bedrock), "tool choice".
-fn mentions_tool_choice(detail: &str) -> bool {
+/// The refusal is about a PARAMETER that concerns tools, not about tools, however it
+/// is spelled: `tool_choice`, `toolChoice` (Bedrock), "tool choice", and
+/// `parallel_tool_calls` (sent by the nim and llama_server presets; OpenAI answers
+/// "Unsupported parameter: 'parallel_tool_calls' is not supported with this model").
+fn names_a_tool_parameter(detail: &str) -> bool {
     let squashed: String = detail
         .chars()
         .filter(char::is_ascii_alphanumeric)
         .map(|c| c.to_ascii_lowercase())
         .collect();
-    squashed.contains("toolchoice")
+    squashed.contains("toolchoice") || squashed.contains("paralleltoolcalls")
 }
 
 /// A 400 that says the model has no tool support is `ModelNoTools` for the probe.
-/// One that only refuses `tool_choice` is not: the model was never asked.
+/// One that only refuses a tool parameter (`tool_choice`, `parallel_tool_calls`) is
+/// not: the model was never asked.
 fn tools_refusal(error: ProviderError, no_tools: &dyn Fn() -> ProviderError) -> ProviderError {
     if let ProviderError::InvalidRequest { detail } = &error {
         let lower = detail.to_ascii_lowercase();
         if lower.contains("tool")
-            && !mentions_tool_choice(&lower)
+            && !names_a_tool_parameter(&lower)
             && (lower.contains("support") || lower.contains("not allowed"))
         {
             return no_tools();
