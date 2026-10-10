@@ -306,7 +306,7 @@ sur un provider, aucune forme sérialisée ne bouge : `CONTRACT_VERSION` reste 5
 | context_window | reported | configured / probed | configured | None |
 | set_model_live | oui (`set_model` de contrôle ; `before_turn` → `set_model` écrit avant l'entrée du tour) | oui (entre deux tours ; `before_turn` appliqué au tour qui commence, fenêtre et coût du modèle actif) | oui (par tour ; hooks `none` : `before_turn` jamais appelé) | non (directive → `model_directive_ignored` si les hooks étaient honorés ; ils ne le sont pas) |
 | native_question | oui (`AskUserQuestion`) | non | non (expérimental) | non |
-| tool_cancel | oui (par PID, dans l'adaptateur) | oui (jeton d'annulation) | non | non |
+| tool_cancel | oui (par PID, dans l'adaptateur ; Unix et local seulement : par SSH ou hors Unix, non, et `cancel_tools` → `Unsupported { tool_cancel }`) | oui (jeton d'annulation) | non | non |
 | background_tasks | oui | oui quand la session a le `Bash` de son serveur `nexus` (`nexus-tools` ; `capabilities(modèle)` : `default_tools` configuré et modèle à outils) | non | non |
 | resume | oui | oui (transcript) | oui | selon `loadSession` |
 | cost | reported (subscription si OAuth) | priced / free / unknown | unknown (tokens seuls, A40) | reported si `Cost` présent, sinon unknown |
