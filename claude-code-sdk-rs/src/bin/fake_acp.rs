@@ -43,6 +43,10 @@
 //! * `{"op":"expect","method":"session/prompt","defer":"p"}` — wait for the request but do not
 //!   answer it yet; `{"op":"reply","to":"p","result":{…}}` (or `"error"`) answers it later
 //!   (a prompt is answered after its `session/update`s).
+//! * `{"op":"expect","method":"session/new","refuse_mcp_servers":true,"reply":{…}}` — a
+//!   request of that method whose `mcpServers` is not empty is answered as `openclaw acp`
+//!   answers it (`-32603 Internal error`, the refusal in `data.details`, read in OpenClaw's
+//!   published code) and the directive keeps waiting; one with no server gets `reply`.
 //! * `{"op":"expect_notification","method":"session/cancel"}`
 //! * `{"op":"notify","method":"session/update","params":{…}}`
 //! * `{"op":"server_request","id":"s1","method":"session/request_permission","params":{…}}`
@@ -69,6 +73,10 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde_json::{Value, json};
+
+/// What `openclaw acp` (2026.9.x, `assertSupportedSessionSetup`) throws when a session
+/// is given MCP servers.
+const OPENCLAW_MCP_REFUSAL: &str = "ACP bridge mode does not support per-session MCP servers. Configure MCP on the OpenClaw gateway or agent instead.";
 
 const EXIT_BAD_DIRECTIVE: i32 = 94;
 const EXIT_STDIN_CLOSED: i32 = 95;
@@ -235,6 +243,27 @@ impl Fake {
                         }
                         if op == "expect" {
                             let id = message["id"].clone();
+                            if directive
+                                .get("refuse_mcp_servers")
+                                .and_then(Value::as_bool)
+                                .unwrap_or(false)
+                                && message
+                                    .pointer("/params/mcpServers")
+                                    .and_then(Value::as_array)
+                                    .is_some_and(|servers| !servers.is_empty())
+                            {
+                                self.record(&json!({"kind": "refused_mcp", "method": method}));
+                                self.write_line(&json!({
+                                    "jsonrpc": "2.0",
+                                    "id": id,
+                                    "error": {
+                                        "code": -32603,
+                                        "message": "Internal error",
+                                        "data": {"details": OPENCLAW_MCP_REFUSAL},
+                                    },
+                                }));
+                                continue;
+                            }
                             if let Some(name) = directive.get("defer").and_then(Value::as_str) {
                                 // The answer comes later, with a `reply` directive.
                                 self.deferred.insert(name.to_owned(), id);

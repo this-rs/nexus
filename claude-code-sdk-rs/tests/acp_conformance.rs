@@ -1402,3 +1402,158 @@ async fn mcp_servers_are_given_to_session_new_in_the_arrays_of_the_protocol() {
     );
     session.close().await.unwrap();
 }
+
+// ---------------------------------------------------------------------------
+// An agent that refuses per-session MCP servers (`openclaw acp`)
+// ---------------------------------------------------------------------------
+
+/// The PO server a host gives a session.
+fn with_po_server(mut spec: SessionSpec) -> SessionSpec {
+    spec.mcp_servers.insert(
+        "project-orchestrator".to_owned(),
+        McpServerSpec::Stdio {
+            command: "/bin/po-mcp".to_owned(),
+            args: Vec::new(),
+            env: BTreeMap::new(),
+        },
+    );
+    spec
+}
+
+/// `openclaw acp` answers a `session/new` that carries `mcpServers` with an error (it
+/// used to ignore them). The session opens without them, says so, and the provider
+/// keeps it learned: its capabilities and the next opening follow.
+#[tokio::test]
+async fn an_agent_that_refuses_mcp_servers_opens_without_them_and_says_so() {
+    let staging = Staging::new();
+    let provider = staging.learned_provider().await;
+    assert!(provider.capabilities(None).per_session_mcp);
+    let session = provider
+        .open(with_po_server(staging.spec("mcp_refused")))
+        .await
+        .expect("the session opens without its MCP servers");
+    let mut oob = session.out_of_band().expect("out of band");
+    // Asked twice: with the server, refused; then without.
+    let asked: Vec<Value> = staging
+        .requests("session/new")
+        .into_iter()
+        .map(|entry| entry["params"]["mcpServers"].clone())
+        .collect();
+    assert_eq!(asked.len(), 2, "{asked:?}");
+    assert_eq!(asked[0][0]["name"], "project-orchestrator");
+    assert_eq!(asked[1], json!([]));
+    assert!(
+        staging
+            .recorded()
+            .iter()
+            .any(|entry| entry["kind"] == "refused_mcp")
+    );
+    // Said three ways: the capabilities, a notice, the server's status.
+    assert!(!session.capabilities().per_session_mcp);
+    assert!(!provider.capabilities(None).per_session_mcp);
+    let notice = next_matching(&mut oob, |event| {
+        matches!(event, AgentEvent::ProviderNotice { kind, .. } if kind == "mcp_servers_refused")
+    })
+    .await;
+    assert!(matches!(
+        notice,
+        AgentEvent::ProviderNotice { data, .. } if data["servers"] == json!(["project-orchestrator"])
+    ));
+    let started = next_matching(&mut oob, |event| {
+        matches!(event, AgentEvent::SessionStarted { .. })
+    })
+    .await;
+    match started {
+        AgentEvent::SessionStarted { mcp_servers, .. } => {
+            assert_eq!(mcp_servers.len(), 1);
+            assert_eq!(mcp_servers[0].status, "refused");
+        },
+        other => panic!("{other:?}"),
+    }
+    // The session works.
+    let events = turn(&*session).await;
+    assert_eq!(stop_of(&events), StopReason::Completed);
+    session.close().await.unwrap();
+    // Learned: a next session given a server is refused before anything starts.
+    let before = staging.requests("session/new").len();
+    assert_eq!(
+        provider
+            .open(with_po_server(staging.spec("mcp_refused")))
+            .await
+            .err(),
+        Some(ProviderError::unsupported("per_session_mcp"))
+    );
+    assert_eq!(staging.requests("session/new").len(), before);
+}
+
+/// The same refusal on `session/load` (a resume): retried without the servers.
+#[tokio::test]
+async fn an_agent_that_refuses_mcp_servers_on_load_resumes_without_them() {
+    let staging = Staging::new();
+    let provider = staging.learned_provider().await;
+    let session = provider
+        .resume(
+            with_po_server(staging.spec("mcp_refused_load")),
+            token("sess_prev"),
+        )
+        .await
+        .expect("loads without its MCP servers");
+    let loads = staging.requests("session/load");
+    assert_eq!(loads.len(), 2, "{loads:?}");
+    assert_eq!(loads[1]["params"]["mcpServers"], json!([]));
+    assert!(!session.capabilities().per_session_mcp);
+    assert_eq!(
+        session.resume_token().expect("a token").data(),
+        &json!({"session_id": "sess_prev"})
+    );
+    session.close().await.unwrap();
+}
+
+/// An instance configured without per-session MCP (`openclaw acp`) says so up front,
+/// refuses a server before anything starts, and opens a session that has none.
+#[tokio::test]
+async fn an_instance_configured_without_per_session_mcp_says_so_and_refuses_a_server() {
+    let staging = Staging::new();
+    let mut config = staging.config();
+    config.per_session_mcp = false;
+    let provider = AcpProvider::new(config);
+    assert!(!provider.capabilities(None).per_session_mcp);
+    assert!(
+        provider.capabilities(None).tools,
+        "the agent keeps its own tools"
+    );
+    assert_eq!(
+        provider
+            .open(with_po_server(staging.spec("plain")))
+            .await
+            .err(),
+        Some(ProviderError::unsupported("per_session_mcp"))
+    );
+    assert!(staging.recorded().is_empty(), "nothing was started");
+    let session = provider
+        .open(staging.spec("plain"))
+        .await
+        .expect("opens without a server");
+    assert!(!session.capabilities().per_session_mcp);
+    assert_eq!(
+        staging.requests("session/new")[0]["params"]["mcpServers"],
+        json!([])
+    );
+    session.close().await.unwrap();
+}
+
+/// Any other refusal of `session/new` is not taken for a refusal of the servers: no
+/// second request, the error as before.
+#[tokio::test]
+async fn another_refusal_of_session_new_is_not_retried() {
+    let staging = Staging::new();
+    let provider = staging.learned_provider().await;
+    let error = provider
+        .open(with_po_server(staging.spec("auth_required")))
+        .await
+        .err()
+        .expect("refused");
+    assert_eq!(error.kind(), "auth_required");
+    assert_eq!(staging.requests("session/new").len(), 1);
+    assert!(provider.capabilities(None).per_session_mcp);
+}

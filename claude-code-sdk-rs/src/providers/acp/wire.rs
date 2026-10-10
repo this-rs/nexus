@@ -28,6 +28,11 @@ pub struct RpcError {
     pub code: i64,
     /// Message.
     pub message: String,
+    /// What `data` says, when it says it in words: `data.details` or `data.message`,
+    /// or `data` itself when it is a string. The TypeScript ACP SDK answers an
+    /// exception with `-32603 Internal error` and puts the exception's text in
+    /// `data.details` (OpenClaw's refusal of per-session MCP servers arrives so).
+    pub detail: Option<String>,
 }
 
 /// One line read from the agent.
@@ -85,9 +90,22 @@ impl Frame {
                         .and_then(Value::as_str)
                         .unwrap_or_default()
                         .to_owned();
+                    let detail = error
+                        .get("data")
+                        .and_then(|data| {
+                            data.get("details")
+                                .or_else(|| data.get("message"))
+                                .and_then(Value::as_str)
+                                .or_else(|| data.as_str())
+                        })
+                        .map(str::to_owned);
                     Ok(Self::Response {
                         id,
-                        outcome: Err(RpcError { code, message }),
+                        outcome: Err(RpcError {
+                            code,
+                            message,
+                            detail,
+                        }),
                     })
                 } else if let Some(result) = object.get("result") {
                     Ok(Self::Response {

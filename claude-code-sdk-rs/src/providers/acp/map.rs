@@ -674,10 +674,35 @@ pub fn classify_rpc_error(error: &RpcError) -> ProviderError {
     if has(&["unreachable", "connection refused", "network", "econn"]) {
         return ProviderError::unreachable(&error.message);
     }
-    ProviderError::protocol(format!(
-        "the agent refused ({}): {}",
-        error.code, error.message
-    ))
+    match &error.detail {
+        Some(detail) => ProviderError::protocol(format!(
+            "the agent refused ({}): {}: {}",
+            error.code,
+            error.message,
+            redact(detail)
+        )),
+        None => ProviderError::protocol(format!(
+            "the agent refused ({}): {}",
+            error.code, error.message
+        )),
+    }
+}
+
+/// The agent refuses the `mcpServers` of `session/new` / `session/load`: its message or
+/// detail names MCP and says it does not support them. OpenClaw's `openclaw acp`
+/// (2026.9.x) answers `-32603 Internal error` with `data.details` = "ACP bridge mode
+/// does not support per-session MCP servers. …" (read in its published code, not run).
+pub fn refuses_mcp_servers(error: &RpcError) -> bool {
+    [Some(&error.message), error.detail.as_ref()]
+        .into_iter()
+        .flatten()
+        .any(|text| {
+            let lower = text.to_ascii_lowercase();
+            lower.contains("mcp")
+                && ["not support", "unsupported", "not allowed", "not accepted"]
+                    .iter()
+                    .any(|needle| lower.contains(needle))
+        })
 }
 
 /// Puts the login hint on an `auth_required` error.
@@ -860,6 +885,7 @@ mod tests {
             classify_rpc_error(&RpcError {
                 code,
                 message: message.to_owned(),
+                detail: None,
             })
             .kind()
         };
@@ -946,5 +972,37 @@ mod tests {
         let only_allow = &options[..1];
         let (cancelled, _) = answer_for(only_allow, &PermissionDecision::deny()).unwrap();
         assert_eq!(cancelled, json!({"outcome":{"outcome":"cancelled"}}));
+    }
+
+    /// OpenClaw's refusal arrives as `-32603 Internal error` with its text in
+    /// `data.details`: it is read there, recognised, and shown in the error.
+    #[test]
+    fn a_refusal_of_mcp_servers_is_read_in_the_data_of_the_error() {
+        let line = r#"{"jsonrpc":"2.0","id":2,"error":{"code":-32603,"message":"Internal error","data":{"details":"ACP bridge mode does not support per-session MCP servers. Configure MCP on the OpenClaw gateway or agent instead."}}}"#;
+        let Ok(super::super::wire::Frame::Response {
+            outcome: Err(error),
+            ..
+        }) = super::super::wire::Frame::parse(line)
+        else {
+            panic!("an error response");
+        };
+        assert!(refuses_mcp_servers(&error));
+        let shown = classify_rpc_error(&error).to_string();
+        assert!(shown.contains("per-session MCP servers"), "{shown}");
+        let other = |message: &str, detail: Option<&str>| RpcError {
+            code: -32603,
+            message: message.to_owned(),
+            detail: detail.map(str::to_owned),
+        };
+        assert!(refuses_mcp_servers(&other(
+            "mcpServers are not supported",
+            None
+        )));
+        assert!(!refuses_mcp_servers(&other(
+            "Internal error",
+            Some("rate limit exceeded")
+        )));
+        assert!(!refuses_mcp_servers(&other("the MCP server crashed", None)));
+        assert!(!refuses_mcp_servers(&other("Internal error", None)));
     }
 }

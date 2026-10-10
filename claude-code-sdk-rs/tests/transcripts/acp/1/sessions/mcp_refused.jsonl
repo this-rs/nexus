@@ -1,0 +1,7 @@
+# An agent that refuses per-session MCP servers, as `openclaw acp` (2026.9.x) does: its
+# `initialize` (no HTTP / SSE MCP), then a `session/new` WITH servers answered
+# `-32603 Internal error` + `data.details` (fake_acp's `refuse_mcp_servers`), the same
+# request without servers answered. Read in OpenClaw's published code, NOT run.
+{"op":"expect","method":"initialize","reply":{"protocolVersion":1,"agentCapabilities":{"loadSession":true,"promptCapabilities":{"image":true,"audio":false,"embeddedContext":true},"mcpCapabilities":{"http":false,"sse":false}},"agentInfo":{"name":"openclaw-acp","title":"OpenClaw ACP Gateway","version":"2026.9.9"},"authMethods":[]}}
+{"op":"expect","method":"session/new","refuse_mcp_servers":true,"reply":{"sessionId":"sess_fake1"}}
+{"op":"include","file":"turn1_text.jsonl"}

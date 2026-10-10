@@ -40,7 +40,8 @@
 //! | `resume` | `agentCapabilities.loadSession` as learned by `health()` / the last `open`; `false` until learned |
 //! | `images` | no (A12), whatever `promptCapabilities.image` says |
 //! | `thinking` | `AcpConfig::thinking` (ACP has no flag for it), or a thought chunk already seen by this provider |
-//! | `per_session_mcp`, `tools` | yes: `mcpServers` of `session/new`; an HTTP / SSE server needs `mcpCapabilities.http` / `.sse` (else `Unsupported { mcp_http | mcp_sse }`) |
+//! | `tools` | yes (the agent's own) |
+//! | `per_session_mcp` | `AcpConfig::per_session_mcp` (default yes) unless the agent refused them once: `mcpServers` of `session/new` / `session/load`; an HTTP / SSE server needs `mcpCapabilities.http` / `.sse` (else `Unsupported { mcp_http | mcp_sse }`). A refusal (`openclaw acp`) is retried once without the servers, announced by `provider_notice { mcp_servers_refused }`, and learned |
 //! | `interactive_permissions` | yes; scopes `once`, `always`; a request offers those it has an `allow_once` / `allow_always` option for |
 //! | `hooks`, `subagents`, `compaction_signal`, `background_tasks`, `tool_cancel`, `native_question` | none: ACP carries none of them |
 //! | `sandbox` | `none`: information for the user, not a gate: `trust` opens, and is applied live when the agent publishes a matching mode |
@@ -75,7 +76,7 @@
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, PoisonError};
 use std::time::Duration;
 
@@ -143,6 +144,12 @@ pub struct AcpConfig {
     /// `0700` when the agent starts. A human logs in with
     /// `HOME=<this dir> <agent> login`.
     pub home: std::path::PathBuf,
+    /// The agent takes MCP servers in `session/new` / `session/load` (default `true`).
+    /// `false` for an agent known to refuse them (`openclaw acp`): `per_session_mcp`
+    /// is then `false` and a session given a server is refused before anything starts
+    /// (`Unsupported { per_session_mcp }`). An agent that refuses them although this
+    /// says `true` is learned at its first refusal (see [`AcpProvider`]).
+    pub per_session_mcp: bool,
 }
 
 impl std::fmt::Debug for AcpConfig {
@@ -162,6 +169,7 @@ impl std::fmt::Debug for AcpConfig {
             .field("context_window", &self.context_window)
             .field("login_hint", &self.login_hint)
             .field("home", &self.home)
+            .field("per_session_mcp", &self.per_session_mcp)
             .finish()
     }
 }
@@ -193,6 +201,7 @@ impl AcpConfig {
             thinking: false,
             context_window: None,
             login_hint: None,
+            per_session_mcp: true,
         }
     }
 
@@ -252,12 +261,24 @@ struct Handshake {
     session_id: String,
     modes: Option<ModeState>,
     replayed: u64,
+    /// The agent refused the session's MCP servers and the session was opened
+    /// without them.
+    mcp_dropped: bool,
 }
 
 /// The ACP provider: one instance of an ACP agent, one process per session.
+///
+/// An agent that answers `session/new` (or `session/load`) with a refusal of its
+/// `mcpServers` ([`map::refuses_mcp_servers`]) is asked ONCE more without them: the
+/// session opens without its servers, says so (`provider_notice { mcp_servers_refused }`,
+/// the servers `refused` in `session_started`, `per_session_mcp: false` in its
+/// capabilities), and the provider keeps it learned: from then on `per_session_mcp` is
+/// `false` and a session given a server is `Unsupported { per_session_mcp }`.
 pub struct AcpProvider {
     config: Arc<AcpConfig>,
     learned: Mutex<Option<Learned>>,
+    /// The agent refused per-session MCP servers once (kept across processes).
+    mcp_refused: AtomicBool,
     shared: Arc<Shared>,
 }
 
@@ -276,6 +297,7 @@ impl AcpProvider {
         Self {
             config: Arc::new(config),
             learned: Mutex::new(None),
+            mcp_refused: AtomicBool::new(false),
             shared: Arc::new(Shared::default()),
         }
     }
@@ -283,6 +305,12 @@ impl AcpProvider {
     /// The configuration of the instance.
     pub fn config(&self) -> &AcpConfig {
         &self.config
+    }
+
+    /// The sessions of this instance carry MCP servers: configured so, and never
+    /// refused by the agent.
+    fn carries_mcp(&self) -> bool {
+        self.config.per_session_mcp && !self.mcp_refused.load(Ordering::SeqCst)
     }
 
     fn learned(&self) -> Option<Learned> {
@@ -414,6 +442,9 @@ impl AcpProvider {
         if !spec.extra_dirs.is_empty() {
             return Err(ProviderError::unsupported("extra_dirs"));
         }
+        if !spec.mcp_servers.is_empty() && !self.carries_mcp() {
+            return Err(ProviderError::unsupported("per_session_mcp"));
+        }
         if resume.is_some() && self.learned().is_some_and(|learned| !learned.load_session) {
             return Err(ProviderError::unsupported("resume"));
         }
@@ -458,6 +489,15 @@ impl AcpProvider {
                         data: json!({ "detail": "ACP gives no stable way to choose the model: the name is a label" }),
                     });
                 }
+                if handshake.mcp_dropped {
+                    initial_events.push(AgentEvent::ProviderNotice {
+                        kind: "mcp_servers_refused".to_owned(),
+                        data: json!({
+                            "servers": spec.mcp_servers.keys().collect::<Vec<_>>(),
+                            "detail": "the agent refuses per-session MCP servers: the session was opened without them",
+                        }),
+                    });
+                }
                 if handshake.replayed > 0 {
                     initial_events.push(AgentEvent::ProviderNotice {
                         kind: "history_replayed".to_owned(),
@@ -478,7 +518,12 @@ impl AcpProvider {
                         .keys()
                         .map(|name| McpServerStatus {
                             name: name.clone(),
-                            status: "configured".to_owned(),
+                            status: if handshake.mcp_dropped {
+                                "refused"
+                            } else {
+                                "configured"
+                            }
+                            .to_owned(),
                         })
                         .collect(),
                     cwd: Some(spec.cwd.display().to_string()),
@@ -496,7 +541,11 @@ impl AcpProvider {
                         model,
                         deltas: spec.deltas,
                         login_hint: self.login_hint(Some(&init)),
-                        mcp_servers: spec.mcp_servers.keys().cloned().collect(),
+                        mcp_servers: if handshake.mcp_dropped {
+                            Vec::new()
+                        } else {
+                            spec.mcp_servers.keys().cloned().collect()
+                        },
                         modes: handshake.modes,
                         shared: Arc::clone(&self.shared),
                         initial_events,
@@ -540,18 +589,16 @@ impl AcpProvider {
         let hint = self.login_hint(Some(init));
         let cwd = spec.cwd.display().to_string();
         let refine = |error: ProviderError| map::with_login_hint(error, hint.as_deref());
-        let (session_id, modes, replayed) = match resume {
+        let (session_id, modes, replayed, mcp_dropped) = match resume {
             Some(session_id) => {
-                let value = process
-                    .request(
-                        "session/load",
+                let (value, dropped) = self
+                    .open_request(process, "session/load", mcp, |mcp_servers| {
                         to_value(&LoadSessionParams {
                             session_id: session_id.clone(),
-                            cwd,
-                            mcp_servers: mcp.to_vec(),
-                        }),
-                        HANDSHAKE_TIMEOUT,
-                    )
+                            cwd: cwd.clone(),
+                            mcp_servers,
+                        })
+                    })
                     .await
                     .map_err(refine)?;
                 let loaded = if value.is_null() {
@@ -569,23 +616,21 @@ impl AcpProvider {
                         replayed += 1;
                     }
                 }
-                (session_id, loaded.modes, replayed)
+                (session_id, loaded.modes, replayed, dropped)
             },
             None => {
-                let value = process
-                    .request(
-                        "session/new",
+                let (value, dropped) = self
+                    .open_request(process, "session/new", mcp, |mcp_servers| {
                         to_value(&NewSessionParams {
-                            cwd,
-                            mcp_servers: mcp.to_vec(),
-                        }),
-                        HANDSHAKE_TIMEOUT,
-                    )
+                            cwd: cwd.clone(),
+                            mcp_servers,
+                        })
+                    })
                     .await
                     .map_err(refine)?;
                 let created = serde_json::from_value::<NewSessionResult>(value)
                     .map_err(|_| ProviderError::protocol("malformed `session/new` result"))?;
-                (created.session_id, created.modes, 0)
+                (created.session_id, created.modes, 0, dropped)
             },
         };
         if let Some(native) = spec.policy.native_mode.as_deref()
@@ -608,7 +653,34 @@ impl AcpProvider {
             session_id,
             modes,
             replayed,
+            mcp_dropped,
         })
+    }
+
+    /// `session/new` or `session/load` with the session's MCP servers. An agent that
+    /// refuses them ([`map::refuses_mcp_servers`]) is asked once more without them;
+    /// the refusal is learned. `true` beside the result: the servers were dropped.
+    async fn open_request(
+        &self,
+        process: &Arc<Process>,
+        method: &str,
+        mcp: &[McpServer],
+        params: impl Fn(Vec<McpServer>) -> Value,
+    ) -> Result<(Value, bool), ProviderError> {
+        match process
+            .request_raw(method, params(mcp.to_vec()), HANDSHAKE_TIMEOUT)
+            .await?
+        {
+            Ok(value) => Ok((value, false)),
+            Err(error) if !mcp.is_empty() && map::refuses_mcp_servers(&error) => {
+                self.mcp_refused.store(true, Ordering::SeqCst);
+                let value = process
+                    .request(method, params(Vec::new()), HANDSHAKE_TIMEOUT)
+                    .await?;
+                Ok((value, true))
+            },
+            Err(error) => Err(map::classify_rpc_error(&error)),
+        }
     }
 }
 
@@ -776,7 +848,7 @@ impl AgentProvider for AcpProvider {
         capabilities.interactive_permissions = true;
         capabilities.permission_scopes = vec![PermissionScope::Once, PermissionScope::Always];
         capabilities.secret_isolation = true;
-        capabilities.per_session_mcp = true;
+        capabilities.per_session_mcp = self.carries_mcp();
         capabilities.thinking =
             self.config.thinking || self.shared.thinking_seen.load(Ordering::SeqCst);
         capabilities.tools = true;
