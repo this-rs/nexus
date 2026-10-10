@@ -41,7 +41,7 @@
 //! | `images` | no (A12), whatever `promptCapabilities.image` says |
 //! | `thinking` | `AcpConfig::thinking` (ACP has no flag for it), or a thought chunk already seen by this provider |
 //! | `tools` | yes (the agent's own) |
-//! | `per_session_mcp` | `AcpConfig::per_session_mcp` (default yes) unless the agent refused them once: `mcpServers` of `session/new` / `session/load`; an HTTP / SSE server needs `mcpCapabilities.http` / `.sse` (else `Unsupported { mcp_http | mcp_sse }`). A refusal (`openclaw acp`) is retried once without the servers, announced by `provider_notice { mcp_servers_refused }`, and learned |
+//! | `per_session_mcp` | `AcpConfig::per_session_mcp` (default yes) unless the agent refused them once: `mcpServers` of `session/new` / `session/load`; an HTTP / SSE server needs `mcpCapabilities.http` / `.sse` (else `Unsupported { mcp_http | mcp_sse }`). A refusal (`openclaw acp`) is retried once without the servers, announced by `provider_notice { mcp_servers_refused }`, and learned. A session's own `per_session_mcp` is what ITS handshake did (servers kept or dropped), never flipped by a concurrent refusal |
 //! | `interactive_permissions` | yes; scopes `once`, `always`; a request offers those it has an `allow_once` / `allow_always` option for |
 //! | `hooks`, `subagents`, `compaction_signal`, `background_tasks`, `tool_cancel`, `native_question` | none: ACP carries none of them |
 //! | `sandbox` | `none`: information for the user, not a gate: `trust` opens, and is applied live when the agent publishes a matching mode |
@@ -272,7 +272,8 @@ struct Handshake {
 /// `mcpServers` ([`map::refuses_mcp_servers`]) is asked ONCE more without them: the
 /// session opens without its servers, says so (`provider_notice { mcp_servers_refused }`,
 /// the servers `refused` in `session_started`, `per_session_mcp: false` in its
-/// capabilities), and THIS provider value keeps it learned: from then on
+/// capabilities: those of THIS session, a concurrent session that kept its servers still
+/// says `true`), and THIS provider value keeps it learned: from then on
 /// `per_session_mcp` is `false` and a session given a server is
 /// `Unsupported { per_session_mcp }`. Learned in memory only: a new `AcpProvider` (a
 /// restarted host, a rebuilt instance) starts from the configuration again; a host that
@@ -532,7 +533,17 @@ impl AcpProvider {
                         .collect(),
                     cwd: Some(spec.cwd.display().to_string()),
                 });
-                let capabilities = self.capabilities(model.as_deref());
+                let mut capabilities = self.capabilities(model.as_deref());
+                // Per session, not per instance: a concurrent opening refused by the agent
+                // teaches the provider (`mcp_refused`) while this one already has its
+                // servers. What THIS handshake did decides: servers given and kept → yes,
+                // dropped → no; no server given → what the instance knows.
+                capabilities.per_session_mcp = session_carries_mcp(
+                    self.config.per_session_mcp,
+                    !spec.mcp_servers.is_empty(),
+                    handshake.mcp_dropped,
+                    capabilities.per_session_mcp,
+                );
                 let core = session::Core::start(
                     session::CoreParts {
                         capabilities,
@@ -685,6 +696,18 @@ impl AcpProvider {
             },
             Err(error) => Err(map::classify_rpc_error(&error)),
         }
+    }
+}
+
+/// `per_session_mcp` of ONE session: what its handshake did, not the instance's state at
+/// the time the session is built. A session given servers carries them unless the agent
+/// refused them in this very handshake (`dropped`); a session given none says what the
+/// instance knows (`instance`: configured and not learned refused).
+fn session_carries_mcp(configured: bool, given: bool, dropped: bool, instance: bool) -> bool {
+    if given {
+        configured && !dropped
+    } else {
+        instance
     }
 }
 

@@ -1,0 +1,7 @@
+# An agent that takes the session's MCP servers, but answers `session/new` late: the
+# window in which a concurrent opening of the same instance is refused its servers
+# (`mcp_refused.jsonl`) and teaches the provider. This session kept its servers.
+{"op":"include","file":"handshake.jsonl"}
+{"op":"sleep","ms":1500}
+{"op":"expect","method":"session/new","reply":{"sessionId":"sess_kept"}}
+{"op":"include","file":"turn1_text.jsonl"}

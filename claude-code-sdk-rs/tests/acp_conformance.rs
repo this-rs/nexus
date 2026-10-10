@@ -1604,3 +1604,47 @@ async fn another_refusal_of_session_new_is_not_retried() {
     assert_eq!(staging.requests("session/new").len(), 1);
     assert!(provider.capabilities(None).per_session_mcp);
 }
+
+/// Two openings of ONE instance at the same time: B is refused its servers (and teaches
+/// the provider), A kept its own. A's `per_session_mcp` is what A's handshake did, not
+/// the instance's state when A is built: a host reading `false` would revoke the token
+/// of a session whose MCP server works.
+#[tokio::test]
+async fn a_concurrent_refusal_does_not_flip_a_session_that_kept_its_servers() {
+    let staging = Staging::new();
+    let provider = staging.learned_provider().await;
+    let kept = provider.open(with_po_server(staging.spec("mcp_kept_slow")));
+    let refused = async {
+        // A is past its checks and waiting for its `session/new`.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        provider
+            .open(with_po_server(staging.spec("mcp_refused")))
+            .await
+    };
+    let (kept, refused) = tokio::join!(kept, refused);
+    let refused = refused.expect("B opens without its servers");
+    let kept = kept.expect("A opens with its servers");
+    assert!(!refused.capabilities().per_session_mcp);
+    assert!(
+        !provider.capabilities(None).per_session_mcp,
+        "the instance learned the refusal"
+    );
+    assert!(
+        kept.capabilities().per_session_mcp,
+        "A kept its servers: a concurrent refusal does not say otherwise"
+    );
+    let mut oob = kept.out_of_band().expect("out of band");
+    match next_matching(&mut oob, |event| {
+        matches!(event, AgentEvent::SessionStarted { .. })
+    })
+    .await
+    {
+        AgentEvent::SessionStarted { mcp_servers, .. } => {
+            assert_eq!(mcp_servers.len(), 1);
+            assert_eq!(mcp_servers[0].status, "configured");
+        },
+        other => panic!("{other:?}"),
+    }
+    refused.close().await.unwrap();
+    kept.close().await.unwrap();
+}
