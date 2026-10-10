@@ -230,6 +230,19 @@ impl Process {
         params: Value,
         within: Duration,
     ) -> Result<Value, ProviderError> {
+        self.request_raw(method, params, within)
+            .await?
+            .map_err(|error| classify_rpc_error(&error))
+    }
+
+    /// [`Process::request`], the agent's JSON-RPC error kept as it came (the caller
+    /// reads it before classifying it); the outer error is the transport's.
+    pub async fn request_raw(
+        &self,
+        method: &str,
+        params: Value,
+        within: Duration,
+    ) -> Result<Result<Value, RpcError>, ProviderError> {
         let id = self.next_id();
         let (sender, receiver) = oneshot::channel();
         self.pending
@@ -244,8 +257,7 @@ impl Process {
             return Err(error);
         }
         match tokio::time::timeout(within, receiver).await {
-            Ok(Ok(Ok(result))) => Ok(result),
-            Ok(Ok(Err(error))) => Err(classify_rpc_error(&error)),
+            Ok(Ok(outcome)) => Ok(outcome),
             // The reader dropped the sender: the process is gone.
             Ok(Err(_)) => Err(self.died_error()),
             Err(_) => {

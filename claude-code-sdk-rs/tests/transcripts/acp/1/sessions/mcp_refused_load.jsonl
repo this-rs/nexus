@@ -1,0 +1,4 @@
+# `session/load` of an agent that refuses per-session MCP servers (`openclaw acp`
+# asserts the same rule on load and resume). NOT run against a real agent.
+{"op":"expect","method":"initialize","reply":{"protocolVersion":1,"agentCapabilities":{"loadSession":true,"promptCapabilities":{"image":true,"audio":false,"embeddedContext":true},"mcpCapabilities":{"http":false,"sse":false}},"agentInfo":{"name":"openclaw-acp","title":"OpenClaw ACP Gateway","version":"2026.9.9"},"authMethods":[]}}
+{"op":"expect","method":"session/load","refuse_mcp_servers":true,"reply":null}

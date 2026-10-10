@@ -271,7 +271,7 @@ Valeurs de référence (v1, à confirmer par la conformité de chaque adaptateur
 | permission_scopes | once, session, always | once, session | once, session | once, always |
 | sandbox | none | none (outils MCP seuls) | workspace | none |
 | secret_isolation | oui (env en liste blanche, MCP hors argv) | oui | oui (`env_vars` par nom) | oui (env par JSON stdio) |
-| per_session_mcp | oui | oui | oui (un processus par session) | oui |
+| per_session_mcp | oui | oui | oui (un processus par session) | oui, sauf `AcpConfig::per_session_mcp = false` ou refus appris (`openclaw acp`) |
 | hooks | in_protocol | in_protocol (boucle locale) | command | none |
 | subagents | nested | none | separate_thread | none |
 | compaction_signal | oui | oui | oui | non |
@@ -504,8 +504,16 @@ transcriptions écrites depuis les pages publiques d'`agentclientprotocol.com`
   `updated_input` → `Unsupported { permission_updated_input }`.
 - **`hooks` = `none`**, `subagents` = `none`, `compaction_signal`, `background_tasks`, `tool_cancel`, `native_question`
   = non ; `sandbox` = `none` (information : `trust` s'ouvre ; à chaud il passe par un mode que l'agent publie, sinon `Unsupported { set_policy_mode }`) ;
-  `per_session_mcp` / `tools` oui : `mcpServers` de `session/new` (env et en-têtes en tableaux `{name, value}`, dans
+  `tools` oui (ceux de l'agent) ; `per_session_mcp` oui par défaut : `mcpServers` de `session/new` / `session/load` (env et en-têtes en tableaux `{name, value}`, dans
   ce JSON seulement ; HTTP / SSE selon `mcpCapabilities`, sinon `Unsupported { mcp_http | mcp_sse }`).
+- **Agent qui refuse les serveurs MCP par session** (`openclaw acp`, 2026.9.x : `-32603 Internal error`, le texte « does not
+  support per-session MCP servers » dans `data.details`, lu dans son code publié, NON exécuté) : `AcpConfig::per_session_mcp
+  = false` le déclare d'avance (`per_session_mcp: false`, une session à qui l'on donne un serveur → `Unsupported
+  { per_session_mcp }` avant tout lancement). Sinon le refus est **appris** : `session/new` (ou `session/load`) est
+  redemandé UNE fois sans serveurs, la session s'ouvre et le dit (`provider_notice { mcp_servers_refused }`, serveurs
+  `refused` dans `session_started`, `per_session_mcp: false` dans ses capacités), puis le provider répond
+  `per_session_mcp: false` et refuse un serveur comme ci-dessus. Un autre refus n'est pas redemandé.
+  `RpcError::detail` garde le texte de `data` (`details`, `message` ou chaîne), affiché dans l'erreur `protocol`.
 - **`context_window`** : celle de la configuration (`configured`), sinon `None`. **`set_model_live` = non** :
   `session/set_model` est instable, `set_model` → `Unsupported { set_model_live }` ; `SessionSpec::model` n'est
   qu'une étiquette de `done.model` et du prix (`provider_notice { model_not_applied }`).

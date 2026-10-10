@@ -386,6 +386,7 @@ impl Core {
                     Err(_) => Err(super::wire::RpcError {
                         code: -32603,
                         message: "malformed session/prompt result".to_owned(),
+                        detail: None,
                     }),
                 },
                 Err(error) => Err(error),
