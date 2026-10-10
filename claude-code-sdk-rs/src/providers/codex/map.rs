@@ -558,7 +558,13 @@ impl MapState {
                 .and_then(Value::as_str)
                 .map(str::to_owned)
         };
-        let tool = text("tool_name").or_else(|| text("tool_title"));
+        // `tool_name` identifies the tool; `tool_title` is a label the MCP server chooses
+        // freely (another tool of the same server may carry the title of a known one). The
+        // title may still name the request for the user, but only `tool_name` makes it
+        // `canonical`: a consumer that keys anything on the tool (a session grant) refuses
+        // a request without one.
+        let identified = text("tool_name");
+        let tool = identified.clone().or_else(|| text("tool_title"));
         let name = match &tool {
             Some(tool) => format!("mcp__{}__{tool}", request.server_name),
             None => format!("mcp__{}", request.server_name),
@@ -597,7 +603,7 @@ impl MapState {
                 tool_name: name.clone(),
                 input,
                 category: ToolCategory::Mcp,
-                canonical: tool.is_some().then(|| name.clone()),
+                canonical: identified.is_some().then(|| name.clone()),
                 tool_call_id,
                 scopes: scopes.clone(),
                 parent: None,
@@ -1139,6 +1145,51 @@ mod tests {
                 basis: CostBasis::Priced
             }
         );
+    }
+
+    /// An MCP approval elicitation named only by its `tool_title` (a label the server
+    /// chooses) has no `canonical`: only `tool_name` identifies the tool.
+    #[test]
+    fn an_elicitation_named_by_its_title_has_no_canonical() {
+        let ask = |meta: Value| {
+            let request: ElicitationRequest = serde_json::from_value(json!({
+                "threadId": "thr_1",
+                "serverName": "acme",
+                "message": "Allow acme to run a tool?",
+                "_meta": meta,
+            }))
+            .unwrap();
+            let ask = state()
+                .ask_for(&ServerRequest::Elicitation(request))
+                .expect("an MCP approval");
+            match ask.events.as_slice() {
+                [
+                    AgentEvent::PermissionAsk {
+                        tool_name,
+                        canonical,
+                        ..
+                    },
+                ] => (tool_name.clone(), canonical.clone()),
+                other => panic!("{other:?}"),
+            }
+        };
+        // By its title only: named for the user, not identified.
+        let (name, canonical) = ask(json!({
+            "codex_approval_kind": "mcp_tool_call",
+            "tool_title": "list",
+            "tool_params": {"dir": "a"},
+        }));
+        assert_eq!(name, "mcp__acme__list");
+        assert_eq!(canonical, None);
+        // By its name: identified, whatever its title.
+        let (name, canonical) = ask(json!({
+            "codex_approval_kind": "mcp_tool_call",
+            "tool_name": "list",
+            "tool_title": "List files",
+            "tool_params": {"dir": "a"},
+        }));
+        assert_eq!(name, "mcp__acme__list");
+        assert_eq!(canonical.as_deref(), Some("mcp__acme__list"));
     }
 
     #[test]
