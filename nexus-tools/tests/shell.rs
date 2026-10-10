@@ -639,3 +639,48 @@ async fn a_background_task_that_floods_is_ended_and_its_file_says_so() {
     .await;
     assert!(std::fs::metadata(&path).unwrap().len() < 512 * 1024 + 4096);
 }
+
+/// What the harness reads instead of the text (`structuredContent`): the task's id, kind, command,
+/// process group and status, from `Bash` (`run_in_background`) and `TaskStop`; and one
+/// `nexus-tools/tasks` notification when the task ends.
+#[tokio::test]
+async fn a_background_task_is_described_in_structured_content_and_its_end_is_notified() {
+    let mut f = fixture();
+    let heard = Arc::new(std::sync::Mutex::new(Vec::<Value>::new()));
+    let sink = Arc::clone(&heard);
+    f.context.notifier = Some(nexus_tools::Notifier::new(move |n| {
+        sink.lock().unwrap().push(n);
+    }));
+    let started = f
+        .call(
+            "Bash",
+            json!({"command": "exec sleep 60", "run_in_background": true}),
+        )
+        .await;
+    let id = task_id(&started.text);
+    let task = &started.structured.as_ref().expect("structured content")["background_task"];
+    assert_eq!(task["id"], json!(id));
+    assert_eq!(task["kind"], "shell");
+    assert_eq!(task["command"], "exec sleep 60");
+    assert_eq!(task["status"], "running");
+    assert_eq!(task["output_file"], json!(output_path(&started.text)));
+    let group = u32::try_from(task["pid"].as_u64().expect("a pid")).unwrap();
+    assert!(alive(group));
+
+    let stopped = f.call("TaskStop", json!({"task_id": id})).await;
+    let task = &stopped.structured.as_ref().expect("structured content")["background_task"];
+    assert_eq!(task["id"], json!(id));
+    assert_eq!(task["status"], "killed");
+    eventually("the group is gone", || !alive(group)).await;
+    eventually("the end is notified", || {
+        heard.lock().unwrap().iter().any(|n| {
+            n["params"]["logger"] == "nexus-tools/tasks"
+                && n["params"]["data"]["task_id"] == json!(id)
+                && n["params"]["data"]["event"] == "ended"
+                && n["params"]["data"]["status"] == "killed"
+        })
+    })
+    .await;
+    // A plain command says nothing structured.
+    assert!(f.bash("true").await.structured.is_none());
+}

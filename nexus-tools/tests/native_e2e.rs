@@ -12,11 +12,15 @@ use std::time::Duration;
 
 use futures::StreamExt;
 use nexus_claude::agent::{
-    AgentEvent, AgentProvider, AgentSession, PermissionDecision, PolicyMode, SessionSpec,
+    AgentEvent, AgentProvider, AgentSession, BackgroundTask, BackgroundTaskKind,
+    BackgroundTaskStatus, CancelScope, PermissionDecision, PolicyMode, ProviderError, SessionSpec,
     StopReason, ToolCategory, ToolOutput, ToolPolicy, TurnInput,
 };
 use nexus_claude::model::{EndpointQuirks, OpenAiEndpoint, OpenAiEndpointConfig};
 use nexus_claude::providers::native::{DefaultTools, NativeConfig, NativeProvider};
+use nexus_claude::testkit::conformance::{
+    ConformanceTarget, Prepared, Scenario, ScenarioOutcome, run_scenario,
+};
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -872,4 +876,280 @@ async fn a_session_that_ends_leaves_no_command_running() {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     panic!("the command outlived the session");
+}
+
+// ---------------------------------------------------------------------------
+// Background tasks (contract §4 `background_tasks`, §10 `cancel_tools(task)`)
+// ---------------------------------------------------------------------------
+
+fn alive(pid: u32) -> bool {
+    std::process::Command::new("kill")
+        .args(["-0", &pid.to_string()])
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
+}
+
+async fn wait_for_pid(path: &str) -> u32 {
+    for _ in 0..100 {
+        if let Ok(pid) = file(path).trim().parse::<u32>() {
+            return pid;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    panic!("the background command never wrote its pid");
+}
+
+/// Every task of every `background_tasks` snapshot, in order.
+fn snapshots(events: &[AgentEvent]) -> Vec<Vec<BackgroundTask>> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::BackgroundTasks { tasks } => Some(tasks.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The out-of-band events of a session, collected in the background.
+fn collect_out_of_band(session: &dyn AgentSession) -> Arc<Mutex<Vec<AgentEvent>>> {
+    let mut stream = session.out_of_band().expect("the out-of-band stream");
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&events);
+    tokio::spawn(async move {
+        while let Some(event) = stream.next().await {
+            sink.lock().unwrap().push(event);
+        }
+    });
+    events
+}
+
+#[tokio::test]
+async fn a_background_command_is_tracked_and_cancel_by_task_kills_its_process_group() {
+    let cwd = tempfile::tempdir().unwrap();
+    let pid_file = in_dir(&cwd, "pid");
+    let command = format!("echo $$ > {pid_file}; exec sleep 300");
+    let model = model(vec![
+        probe(),
+        call(
+            None,
+            "b1",
+            "mcp__nexus__Bash",
+            json!({"command": command, "run_in_background": true}),
+        ),
+        say(Some("b1"), "started"),
+    ])
+    .await;
+    let rig = rig_in(cwd, &model, Some(default_tools(&[])));
+    let session = rig.open(policy(PolicyMode::Ask, &["Bash"], &[])).await;
+    assert!(
+        session.capabilities().background_tasks,
+        "a session whose nexus-tools serves Bash declares background_tasks"
+    );
+    let out_of_band = collect_out_of_band(&*session);
+    let events = turn(&*session, deny_all).await;
+    assert!(completed(&events), "{events:?}");
+
+    // The snapshot comes after the result of the call that started the task.
+    let result_at = events
+        .iter()
+        .position(|e| matches!(e, AgentEvent::ToolResult { id, is_error: false, .. } if id == "b1"))
+        .expect("the Bash call succeeded");
+    let snapshot_at = events
+        .iter()
+        .position(|e| matches!(e, AgentEvent::BackgroundTasks { .. }))
+        .expect("a background_tasks snapshot in the turn");
+    assert!(snapshot_at > result_at);
+    let tasks = snapshots(&events).remove(0);
+    assert_eq!(tasks.len(), 1, "{tasks:?}");
+    let task = tasks[0].clone();
+    assert_eq!(task.kind, BackgroundTaskKind::Shell);
+    assert_eq!(task.status, BackgroundTaskStatus::Running);
+    assert_eq!(task.description, command);
+    assert_eq!(task.tool_call_id.as_deref(), Some("b1"));
+    assert!(task.started_at_ms.is_some());
+    // The id is nexus-tools' own (the one its TaskStop knows), named in the text too.
+    let (_, _, _, text, _) = results(&events).remove(0);
+    assert!(
+        text.contains(&format!("ID: {}", task.id)),
+        "{} not in {text}",
+        task.id
+    );
+
+    let pid = wait_for_pid(&pid_file).await;
+    assert!(alive(pid));
+    assert_eq!(task.pid.map(alive), Some(true));
+
+    let outcome = session
+        .cancel_tools(CancelScope::Task {
+            id: task.id.clone(),
+        })
+        .await
+        .expect("cancel_tools(task)");
+    assert_eq!(outcome.tools_cancelled, 1);
+    for _ in 0..100 {
+        if !alive(pid) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(
+        !alive(pid),
+        "the background command survived cancel_tools(task)"
+    );
+
+    // The table says so, out of band (no turn runs), and only once.
+    let mut killed = Vec::new();
+    for _ in 0..100 {
+        killed = snapshots(&out_of_band.lock().unwrap())
+            .into_iter()
+            .filter(|tasks| {
+                tasks
+                    .iter()
+                    .any(|t| t.id == task.id && t.status == BackgroundTaskStatus::Killed)
+            })
+            .collect();
+        if !killed.is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(killed.len(), 1, "{:?}", out_of_band.lock().unwrap());
+    assert_eq!(killed[0].len(), 1);
+
+    // A task that is over: nothing to stop. An unknown one: an invalid request.
+    let again = session
+        .cancel_tools(CancelScope::Task {
+            id: task.id.clone(),
+        })
+        .await
+        .expect("cancel_tools(task) of a stopped task");
+    assert_eq!(again.tools_cancelled, 0);
+    assert!(matches!(
+        session
+            .cancel_tools(CancelScope::Task { id: "nope".into() })
+            .await,
+        Err(ProviderError::InvalidRequest { .. })
+    ));
+    session.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_background_command_that_ends_on_its_own_is_reported_completed() {
+    let model = model(vec![
+        probe(),
+        call(
+            None,
+            "b1",
+            "mcp__nexus__Bash",
+            json!({"command": "sleep 0.3", "run_in_background": true}),
+        ),
+        say(Some("b1"), "started"),
+    ])
+    .await;
+    let rig = rig(&model, Some(default_tools(&[])));
+    let session = rig.open(policy(PolicyMode::Trust, &[], &[])).await;
+    let out_of_band = collect_out_of_band(&*session);
+    let events = turn(&*session, deny_all).await;
+    let id = snapshots(&events)
+        .first()
+        .and_then(|tasks| tasks.first())
+        .map(|task| task.id.clone())
+        .expect("a background_tasks snapshot");
+    for _ in 0..100 {
+        let all: Vec<AgentEvent> = events
+            .iter()
+            .cloned()
+            .chain(out_of_band.lock().unwrap().iter().cloned())
+            .collect();
+        if snapshots(&all).iter().any(|tasks| {
+            tasks
+                .iter()
+                .any(|t| t.id == id && t.status == BackgroundTaskStatus::Completed)
+        }) {
+            session.close().await.unwrap();
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    panic!(
+        "the end of the task was never reported: {:?}",
+        out_of_band.lock().unwrap()
+    );
+}
+
+#[tokio::test]
+async fn without_bash_a_session_has_no_background_tasks() {
+    let model = model(vec![probe(), say(None, "hi")]).await;
+    let rig = rig(&model, Some(default_tools(&[])));
+    let session = rig
+        .open(policy(PolicyMode::Ask, &["Read", "Grep"], &[]))
+        .await;
+    assert!(!session.capabilities().background_tasks);
+    assert_eq!(
+        session
+            .cancel_tools(CancelScope::Task { id: "t".into() })
+            .await
+            .unwrap_err(),
+        ProviderError::unsupported("background_tasks")
+    );
+    session.close().await.unwrap();
+}
+
+/// The conformance scenario `annulation_tache`, played for real: the native harness, the real
+/// `nexus-tools`, a background `sleep` started by a scripted model, cancelled by task.
+struct BackgroundTarget {
+    provider: Arc<NativeProvider>,
+}
+
+#[async_trait::async_trait]
+impl ConformanceTarget for BackgroundTarget {
+    fn name(&self) -> &str {
+        "native + nexus-tools (background tasks)"
+    }
+
+    fn provider(&self) -> Arc<dyn AgentProvider> {
+        self.provider.clone()
+    }
+
+    async fn prepare(&self, scenario: Scenario) -> Option<Prepared> {
+        let model = model(vec![
+            probe(),
+            call(
+                None,
+                "b1",
+                "mcp__nexus__Bash",
+                json!({"command": "exec sleep 300", "run_in_background": true}),
+            ),
+            say(Some("b1"), "started"),
+        ])
+        .await;
+        let cwd = tempfile::tempdir().unwrap();
+        let rig = rig_in(cwd, &model, Some(default_tools(&[])));
+        let provider = Arc::new(rig.provider);
+        provider.refresh_capabilities("m").await.ok()?;
+        let mut spec = SessionSpec::new(rig.cwd.path());
+        spec.model = Some("m".to_owned());
+        let _ = scenario;
+        Some(Prepared {
+            provider,
+            spec,
+            resume: None,
+            guard: Some(Box::new(rig.cwd)),
+        })
+    }
+}
+
+#[tokio::test]
+async fn the_task_cancel_conformance_scenario_plays_for_real_on_native() {
+    let model = model(vec![probe()]).await;
+    let rig = rig(&model, Some(default_tools(&[])));
+    let provider = Arc::new(rig.provider);
+    provider.refresh_capabilities("m").await.unwrap();
+    assert!(provider.capabilities(Some("m")).background_tasks);
+    let target = BackgroundTarget { provider };
+    assert_eq!(
+        run_scenario(&target, Scenario::AnnulationTache).await,
+        ScenarioOutcome::Passed
+    );
 }

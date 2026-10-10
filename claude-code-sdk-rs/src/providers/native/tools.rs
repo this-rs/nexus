@@ -74,7 +74,9 @@ pub const NEXUS_TOOLS_CATALOG: &[(&str, bool)] = &[
 /// The exposure rule is applied to each tool of [`NEXUS_TOOLS_CATALOG`] with one widening: the
 /// mode can be raised during the session (`set_policy_mode`) up to the ceiling, so the plan-mode
 /// rule only bounds the process when the session can never leave `plan_only`. The `allow` and
-/// `deny` lists cannot change once the session is open.
+/// `deny` lists cannot change once the session is open. One addition: `TaskStop` is in the
+/// process whenever `Bash` or `Monitor` is, since the harness stops a background task with it
+/// (`cancel_tools(task)`); the model is offered it only if the policy exposes it.
 pub fn nexus_tools_bound(
     policy: &ToolPolicy,
     ceiling: Option<&ToolPolicy>,
@@ -88,17 +90,24 @@ pub fn nexus_tools_bound(
     } else {
         std::borrow::Cow::Borrowed(policy)
     };
+    let exposed = |tool: &str, read_only: bool| {
+        let entry = ToolEntry::mcp(
+            NEXUS_TOOLS_SERVER,
+            tool,
+            String::new(),
+            Value::Null,
+            read_only,
+        );
+        ToolRegistry::is_exposed(&entry, &reach, strict)
+    };
+    // A process that can start background tasks also holds `TaskStop`: it is how the harness
+    // stops one (`cancel_tools(task)`). The model is still offered it only if the policy exposes
+    // it (the exposure rule is applied again, call by call).
+    let starts_tasks = exposed("Bash", false) || exposed("Monitor", false);
     NEXUS_TOOLS_CATALOG
         .iter()
         .filter(|(tool, read_only)| {
-            let entry = ToolEntry::mcp(
-                NEXUS_TOOLS_SERVER,
-                tool,
-                String::new(),
-                Value::Null,
-                *read_only,
-            );
-            ToolRegistry::is_exposed(&entry, &reach, strict)
+            exposed(tool, *read_only) || (*tool == "TaskStop" && starts_tasks)
         })
         .map(|(tool, _)| *tool)
         .collect()
@@ -489,7 +498,12 @@ mod tests {
                 None,
                 true
             ),
-            ["Read", "Grep", "Bash"]
+            // `TaskStop` comes with `Bash`: the harness's way to stop what it starts.
+            ["Read", "Grep", "Bash", "TaskStop"]
+        );
+        assert_eq!(
+            bound(&policy(PolicyMode::Ask, &["Read"], &[]), None, true),
+            ["Read"]
         );
         // ...but not when exposure is not strict.
         assert_eq!(

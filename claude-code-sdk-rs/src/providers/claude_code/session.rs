@@ -1187,6 +1187,11 @@ impl AgentSession for ClaudeCodeSession {
     /// is and `tools_cancelled` is 0 — never a `killed` nothing was sent to.
     async fn cancel_tools(&self, scope: CancelScope) -> Result<CancelOutcome, ProviderError> {
         self.usable()?;
+        // Capability absent (over SSH, off Unix): the written fallback (§5), never a
+        // cancellation that reaches nothing.
+        if !self.core.capabilities.tool_cancel {
+            return Err(ProviderError::unsupported("tool_cancel"));
+        }
         let diagnostic = |killed: Vec<u32>| {
             Some(ProcessDiagnostic {
                 pid: self.pid,

@@ -189,7 +189,11 @@ impl Server {
                 .iter()
                 .map(|i| json!({"type": "image", "data": i.data, "mimeType": i.mime_type})),
         );
-        Ok(json!({"content": content, "isError": result.is_error}))
+        let mut reply = json!({"content": content, "isError": result.is_error});
+        if let Some(structured) = result.structured {
+            reply["structuredContent"] = structured;
+        }
+        Ok(reply)
     }
 }
 

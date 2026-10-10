@@ -135,7 +135,14 @@ pub struct McpCallResult {
     /// stands in `text` as [`IMAGE_NOT_SHOWN`]: the loop passes them to a model
     /// with vision and leaves the marker alone for one without.
     pub images: Vec<ImagePart>,
+    /// The result's `structuredContent`, when the server sent one: facts for the harness,
+    /// not for the model (`nexus-tools` puts its `background_task` there).
+    pub structured: Option<Value>,
 }
+
+/// What the client does with a notification the server sends on its own (a
+/// `notifications/message` of a background task, for instance).
+pub type NotificationSink = Arc<dyn Fn(&Value) + Send + Sync>;
 
 /// What an image block of a tool result becomes in its text.
 pub const IMAGE_NOT_SHOWN: &str = "[image content not shown]";
@@ -164,7 +171,7 @@ pub enum McpError {
 }
 
 impl McpError {
-    fn into_provider(self) -> ProviderError {
+    pub(crate) fn into_provider(self) -> ProviderError {
         match self {
             Self::Cancelled => ProviderError::protocol("the MCP request was cancelled"),
             Self::Died { code } => ProviderError::ProcessExited { code },
@@ -329,8 +336,22 @@ impl McpClient {
                 text: message,
                 is_error: true,
                 images: Vec::new(),
+                structured: None,
             }),
             Err(other) => Err(other),
+        }
+    }
+
+    /// Sends every notification the server makes on its own (a JSON-RPC message with a
+    /// `method` and no `id`) to `sink`, from the reading task: `sink` must not block. Over
+    /// stdio only: a streamable HTTP server can only notify inside the answer to a request,
+    /// which this client does not read for notifications.
+    pub fn set_notification_sink(&self, sink: NotificationSink) {
+        if let Transport::Stdio(inner) = &self.transport {
+            *inner
+                .notifications
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner) = Some(sink);
         }
     }
 
@@ -453,6 +474,7 @@ pub fn parse_call_result(result: &Value, limit: usize) -> McpCallResult {
             .and_then(Value::as_bool)
             .unwrap_or(false),
         images,
+        structured: result.get("structuredContent").cloned(),
     }
 }
 
@@ -468,6 +490,8 @@ struct StdioInner {
     /// `Some(code)` once the process is gone.
     dead: Mutex<Option<Option<i32>>>,
     closing: AtomicBool,
+    /// Where notifications from the server go, once the session asked for them.
+    notifications: Mutex<Option<NotificationSink>>,
 }
 
 impl StdioInner {
@@ -511,6 +535,7 @@ impl StdioInner {
             next_id: AtomicU64::new(1),
             dead: Mutex::new(None),
             closing: AtomicBool::new(false),
+            notifications: Mutex::new(None),
         });
         tokio::spawn(read_loop(Arc::clone(&inner), stdout));
         Ok(inner)
@@ -690,6 +715,16 @@ async fn read_loop(inner: Arc<StdioInner>, stdout: ChildStdout) {
                     json!({"jsonrpc": "2.0", "id": id, "error": {"code": -32601, "message": "method not found"}})
                 };
                 let _ = inner.write(&answer).await;
+            },
+            (None, false) if message.get("method").is_some() => {
+                let sink = inner
+                    .notifications
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .clone();
+                if let Some(sink) = sink {
+                    sink(&message);
+                }
             },
             _ => {},
         }

@@ -5,7 +5,9 @@
 //!
 //! What the native harness declares absent is proven through its written
 //! fallback (§5): `native_question`, `background_tasks`, `subagents`, `hooks`
-//! and `sandbox`. `images` is the model's: with a catalogue that states no
+//! and `sandbox`. `background_tasks` is absent HERE because these sessions have
+//! `fake_mcp` and no `nexus-tools`: with the real `nexus-tools` (its `Bash`),
+//! `annulation_tache` is played for real in `nexus-tools/tests/native_e2e.rs`. `images` is the model's: with a catalogue that states no
 //! vision the fallback is verified, with one that states it `message_images`
 //! is played for real (the image reaches the fake, which answers only to it).
 //!

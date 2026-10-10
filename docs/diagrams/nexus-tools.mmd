@@ -1,6 +1,6 @@
 %% name: nexus-tools
 %% covers: nexus-tools/src/*.rs, nexus-tools/src/files/*.rs, nexus-tools/src/shell/*.rs, nexus-tools/src/web/*.rs, nexus-tools/src/search/*.rs, nexus-tools/src/fake_search.rs, nexus-tools/src/bin/fake_search.rs, nexus-tools/src/bin/fake_obscura.rs, nexus-tools/tests/data/html/*.html, nexus-tools/tests/*.rs, nexus-tools/tests/golden_grep/*.txt, claude-code-sdk-rs/tests/parity/claude-code-2.1.287/*.json, docs/agent-tools-parity.md
-%% verified: 2026-10-06
+%% verified: 2026-10-10
 flowchart TD
     subgraph legend["Légende"]
         direction LR
@@ -42,7 +42,7 @@ flowchart TD
         direction TB
         BASH["✅ Bash : sortie des deux flux fusionnée, codes de sortie, délai 120 s (max 600 s),<br/>au-delà de 30 000 octets sortie sur disque + aperçu de 2 Ko (formats du relevé 2.1.287),<br/>répertoire de travail persistant, un cd hors périmètre est annulé ;<br/>sortie plafonnée à 64 Mio sur disque (ShellConfig::with_max_output_bytes) : au-delà le groupe de processus est tué, le fichier recoupé et terminé par une ligne qui le dit, la tête seule est lue ; tâches de fond et Monitor identiques<br/><i>vérifié : tests/shell.rs, messages du relevé ; un « yes » en avant-plan et en arrière-plan est arrêté au plafond, test rouge quand la surveillance est neutralisée (mutation jouée sous ulimit)</i>"]
         GROUP["✅ groupe de processus : timeout, appel abandonné, TaskStop et fin de session<br/>tuent la commande ET ses descendants (SIGTERM puis SIGKILL du groupe)<br/><i>vérifié : un petit-enfant sleep disparaît ; 3 mutations rouges</i>"]
-        BG["✅ arrière-plan : identifiant, sortie lisible pendant et après avec Read,<br/>TaskStop idempotent, tâches isolées par session<br/><i>vérifié : tests/shell.rs</i>"]
+        BG["✅ arrière-plan : identifiant, sortie lisible pendant et après avec Read,<br/>TaskStop idempotent, tâches isolées par session ;<br/>pour le harnais (additif, le texte du modèle ne bouge pas) : structuredContent.background_task {id, kind shell|monitor, command, output_file, pid = groupe, status running|completed|failed|killed} sur Bash run_in_background, Monitor et TaskStop, et une notification notifications/message logger nexus-tools/tasks {task_id, event ended, status, exit_code} à la fin de chaque tâche<br/><i>vérifié : tests/shell.rs (a_background_task_is_described_in_structured_content_and_its_end_is_notified) ; suivi natif de bout en bout : tests/native_e2e.rs</i>"]
         MON["✅ Monitor : une notification notifications/message par ligne, dans l'ordre,<br/>fin signalée avec le processus ; fin d'entrée stdio ne reste jamais suspendue<br/><i>vérifié : tests/monitor.rs (régression d'une suspension réelle)</i>"]
         ENV["✅ environnement vierge : PATH LANG LC_* TZ seulement + ajouts explicites,<br/>HOME propre au serveur, texte de la commande hors argv<br/><i>vérifié : aucune variable CARGO_* ne passe</i>"]
         NOSANDBOX["🟠 Bash n'est PAS un bac à sable : il lit tout ce que l'utilisateur système peut lire ;<br/>la protection est la politique du harnais et l'environnement vierge"]
@@ -73,7 +73,7 @@ flowchart TD
     end
 
     subgraph harness["Branchement au harnais natif — N24 (voir nexus-agent-providers, noeud NATTOOLS)"]
-        WIRED["✅ chaque outil traverse le vrai NativeProvider : Write, Read, Edit, Glob, Grep, NotebookEdit, Bash, WebFetch (SSRF refusée de bout en bout), WebSearch ;<br/>événements au nom canonique ; politique par motifs à la Claude Code ; outil hors profil jamais exécuté ; aucune variable de l'hôte dans une commande ; fin de session = commandes arrêtées<br/><i>vérifié : tests/native_e2e.rs (10 tests)</i>"]
+        WIRED["✅ chaque outil traverse le vrai NativeProvider : Write, Read, Edit, Glob, Grep, NotebookEdit, Bash, WebFetch (SSRF refusée de bout en bout), WebSearch ;<br/>événements au nom canonique ; politique par motifs à la Claude Code ; outil hors profil jamais exécuté ; aucune variable de l'hôte dans une commande ; fin de session = commandes arrêtées ; tâche de fond suivie (snapshot background_tasks, fin notifiée → completed), cancel_tools(task) tue le groupe, scénario de conformité annulation_tache JOUÉ<br/><i>vérifié : tests/native_e2e.rs (15 tests ; les 3 du suivi rouges sans le changement)</i>"]
     end
 
     subgraph browser["Navigateur optionnel — N23 (attaché, jamais compilé)"]

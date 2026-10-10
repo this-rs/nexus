@@ -126,8 +126,10 @@ impl ClaudeCodeConfig {
         capabilities.set_model_live = true;
         capabilities.native_question = true;
         // Cancelling signals the CLI's descendants by PID: over SSH those are on the
-        // other machine, out of reach.
-        capabilities.tool_cancel = self.remote.is_none();
+        // other machine, out of reach; off Unix there is neither a process table nor a
+        // signal to send (`cancel::process_table` and `cancel::signal_pid` are empty there),
+        // so a cancellation would report nothing cancelled: not declared.
+        capabilities.tool_cancel = self.remote.is_none() && cfg!(unix);
         capabilities.background_tasks = true;
         capabilities.resume = true;
         capabilities.cost = self.cost_basis;
@@ -351,7 +353,7 @@ mod tests {
                 "tools": true,
                 "set_model_live": true,
                 "native_question": true,
-                "tool_cancel": true,
+                "tool_cancel": cfg!(unix),
                 "background_tasks": true,
                 "resume": true,
                 "cost": "reported",

@@ -150,6 +150,10 @@ fn transcript_for(scenario: Scenario) -> Transcript {
                 .init("fake-session"),
             "bonjour",
         ),
+        // Off Unix the adapter declares no `tool_cancel` (no process table, no
+        // signal): the suite checks the fallback, a refused cancellation then a
+        // plain turn.
+        Scenario::AnnulationTourPreserve if !cfg!(unix) => answer(begin(scenario), "went on"),
         // A tool is a real child process of the fake; cancelling the tools
         // signals it, the tool ends in error and the turn goes on to its end.
         Scenario::AnnulationTourPreserve => answer(
@@ -412,9 +416,17 @@ async fn a_claude_code_passes_the_conformance_suite() {
     report.assert_conformant();
 
     // Every scenario played out for real, `message_images` included: no
-    // capability of this provider is absent, no fallback stands in.
+    // capability of this provider is absent, no fallback stands in. Off Unix,
+    // `tool_cancel` is absent (cancellation is by PID): `annulation_tour_preserve`
+    // verifies its fallback, and `annulation_tache` (its capability,
+    // `background_tasks`, is there) plays its refused-cancellation branch.
     for (scenario, outcome) in &report.results {
-        assert_eq!(outcome, &ScenarioOutcome::Passed, "{scenario}");
+        let expected = if *scenario == Scenario::AnnulationTourPreserve && !cfg!(unix) {
+            ScenarioOutcome::FallbackVerified
+        } else {
+            ScenarioOutcome::Passed
+        };
+        assert_eq!(outcome, &expected, "{scenario}");
     }
 }
 
@@ -425,7 +437,8 @@ fn the_declared_capabilities_are_the_ones_of_this_slice() {
     assert_eq!(provider.id(), "claude-code");
     let capabilities = provider.capabilities(None);
     assert!(capabilities.secret_isolation);
-    assert!(capabilities.tool_cancel);
+    // By PID: Unix only (off Unix there is no process table to read nor signal to send).
+    assert_eq!(capabilities.tool_cancel, cfg!(unix));
     assert!(capabilities.background_tasks);
     assert!(capabilities.images);
     assert_eq!(

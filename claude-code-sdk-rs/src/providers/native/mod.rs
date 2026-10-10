@@ -14,6 +14,7 @@
 //! | `transcript.rs` | [`TranscriptStore`] (memory, `0600` files), reasoning kept (A39) |
 //! | `compaction.rs` | summary of the old history by the same endpoint, recent messages intact |
 //! | `cancel.rs` | the cancellation token |
+//! | `tasks.rs` | the background tasks `nexus-tools` runs for a session, read from its structured results and notifications |
 //!
 //! # Capabilities (per model, contract §5)
 //!
@@ -29,7 +30,8 @@
 //! | `sandbox` | none: information for the user, not a gate: `trust` opens like on every provider |
 //! | `hooks` | `in_protocol`: `before_tool` (after the exposure check, before the policy, so a replaced input is judged too), `after_tool` (only for a call that ran; its text reaches the model, not the `tool_result` event) and `before_compaction` (its text joins the summary instructions). A hook that does not answer within `NativeConfig::hook_timeout` is skipped with `provider_notice { hook_timeout }` |
 //! | `images` | **per model**: what the catalogue says of its vision (`ModelInfo::supports_images`: OpenRouter `architecture.modality`, `input_modalities`, `capabilities`…), else the one-pixel probe when the instance sets `vision_probe`, else the instance's `vision` declaration; `false` when nothing said. A model without vision refuses an image turn with `Unsupported { images }`: the limit of the MODEL, never of the harness |
-//! | `subagents`, `background_tasks`, `native_question` | no |
+//! | `background_tasks` | the session's `nexus` server serves `Bash` (by default, `default_tools` and a model with tools: what `capabilities(model)` says); tasks tracked from the structured results and notifications of `nexus-tools`, `cancel_tools(task)` through its `TaskStop` (see `session.rs`) |
+//! | `subagents`, `native_question` | no |
 //!
 //! `capabilities()` is synchronous: it reads what was probed. Call
 //! [`NativeProvider::refresh_capabilities`] (or `catalog` then `open`) to fill it;
@@ -71,6 +73,7 @@ pub mod r#loop;
 pub mod mcp;
 pub(crate) mod policy_args;
 pub mod session;
+pub(crate) mod tasks;
 pub mod tools;
 pub mod transcript;
 
@@ -583,6 +586,13 @@ impl NativeProvider {
             return Err(error);
         }
 
+        // Background tasks are what the session's `nexus` server runs with `Bash`: the session
+        // has them exactly when that server serves it (whatever the provider says by default).
+        let mut capabilities = capabilities;
+        capabilities.background_tasks = registry
+            .get(&exposed_name(NEXUS_TOOLS_SERVER, "Bash"))
+            .is_some_and(|entry| entry.canonical.as_deref() == Some("Bash"));
+
         let (transcript_id, messages) = match resumed {
             Some(found) => found,
             None => (new_transcript_id(), Vec::new()),
@@ -633,6 +643,17 @@ impl NativeProvider {
             messages,
             initial_events,
         });
+        // The ends of the tasks (and the lines of a `Monitor`) arrive as notifications.
+        if core.capabilities.background_tasks
+            && let Some(client) = core.mcp.get(NEXUS_TOOLS_SERVER)
+        {
+            let weak = Arc::downgrade(&core);
+            client.set_notification_sink(Arc::new(move |notification| {
+                if let Some(core) = weak.upgrade() {
+                    core.server_notification(notification);
+                }
+            }));
+        }
         Ok(Arc::new(NativeSession::new(core)))
     }
 }
@@ -684,6 +705,8 @@ impl AgentProvider for NativeProvider {
         capabilities.context_window = self.context_window(model, probe.as_ref());
         capabilities.cost = self.cost_basis(model);
         capabilities.images = self.facts.images(model, probe.as_ref());
+        // Sessions get `nexus-tools` (and its `Bash`) by default: each one says whether it has it.
+        capabilities.background_tasks = capabilities.tools && self.config.default_tools.is_some();
         capabilities
     }
 
