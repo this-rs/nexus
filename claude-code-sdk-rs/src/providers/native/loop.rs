@@ -32,18 +32,19 @@ use tokio::sync::oneshot;
 
 use super::cancel::CancelToken;
 use super::compaction::{
-    apply, estimate_tokens, should_compact, split_point, summarise, summary_request,
+    apply, count_images, estimate_tokens, should_compact, split_point, summarise, summary_request,
 };
-use super::mcp::McpError;
+use super::mcp::{IMAGE_NOT_SHOWN, McpError};
 use super::session::{Core, PendingAsk, StopCause, TurnSignal};
 use super::tools::{ToolEntry, ToolRegistry};
 use crate::agent::{
     AgentEvent, CompactionInfo, CompactionPhase, CompactionTrigger, Cost, CostBasis, DeltaKind,
-    HookVerdict, ModelUsage, PermissionDecision, PolicyDecision, ProviderError, StopReason,
-    ToolCallInfo, ToolCategory, ToolOutput, ToolResultInfo, TurnContext, TurnInput, Usage,
+    HookVerdict, InputBlock, ModelUsage, PermissionDecision, PolicyDecision, ProviderError,
+    StopReason, ToolCallInfo, ToolCategory, ToolOutput, ToolResultInfo, TurnContext, TurnInput,
+    Usage,
 };
 use crate::model::{
-    ChatMessage, CompletionChunk, CompletionRequest, FinishReason, Role, ToolCallChunk,
+    ChatMessage, CompletionChunk, CompletionRequest, FinishReason, ImagePart, Role, ToolCallChunk,
 };
 
 /// How the body of a turn ended, before it becomes a terminal event.
@@ -119,10 +120,20 @@ pub(crate) async fn run_turn(core: Arc<Core>, input: TurnInput, signal: Arc<Turn
             signal.stop(StopCause::TimedOut(ms));
         })
     });
-    let user_text = input.joined_text();
-    before_turn(&core, &signal, user_text.len()).await;
-    let model = core.lock().model.clone();
-    let outcome = drive(&core, &signal, &model, user_text, &mut acc).await;
+    let user = user_message(&input);
+    before_turn(&core, &signal, input.joined_text().len()).await;
+    let (model, images) = {
+        let state = core.lock();
+        (state.model.clone(), state.active_images)
+    };
+    // A `before_turn` directive may have made a model without vision active after
+    // `send_turn` accepted the image: the turn fails with the same typed refusal,
+    // before anything reaches the model (nothing is committed).
+    let outcome = if input.has_images() && !images {
+        Outcome::Failed(ProviderError::unsupported("images"))
+    } else {
+        drive(&core, &signal, &model, user, &mut acc).await
+    };
     if let Some(timer) = timer {
         timer.abort();
     }
@@ -254,15 +265,35 @@ fn terminal_event(
     }
 }
 
+/// The user message of a turn: the text blocks joined, then the images (sent
+/// as `image_url` parts, kept whole in the transcript).
+fn user_message(input: &TurnInput) -> ChatMessage {
+    let images = input
+        .blocks
+        .iter()
+        .filter_map(|block| match block {
+            InputBlock::Image {
+                media_type,
+                data_base64,
+            } => Some(ImagePart {
+                media_type: media_type.clone(),
+                data_base64: data_base64.clone(),
+            }),
+            _ => None,
+        })
+        .collect();
+    ChatMessage::user_with_images(input.joined_text(), images)
+}
+
 async fn drive(
     core: &Core,
     signal: &TurnSignal,
     model: &str,
-    user_text: String,
+    user: ChatMessage,
     acc: &mut Acc,
 ) -> Outcome {
     let mut messages = core.lock().messages.clone();
-    messages.push(ChatMessage::user(user_text));
+    messages.push(user);
     let outcome = iterate(core, signal, model, &mut messages, acc).await;
     let commit = match &outcome {
         Outcome::Stop(..) => true,
@@ -296,6 +327,7 @@ fn assistant(text: &str, reasoning: &str, tool_calls: Vec<ToolCallChunk>) -> Cha
     ChatMessage {
         role: Role::Assistant,
         content: (!text.is_empty() || tool_calls.is_empty()).then(|| text.to_owned()),
+        images: Vec::new(),
         reasoning: (!reasoning.is_empty()).then(|| reasoning.to_owned()),
         tool_calls,
         tool_call_id: None,
@@ -361,15 +393,49 @@ async fn iterate(
         let calls = normalise_ids(step.tool_calls);
         messages.push(assistant(&step.text, &step.reasoning, calls.clone()));
         let ran = run_tools(core, signal, &calls).await;
-        for (call, run) in calls.iter().zip(&ran) {
-            messages.push(ChatMessage::tool(call.id.clone(), with_context(run)));
-        }
+        push_results(core, messages, &calls, &ran);
         if let Some(fatal) = ran.into_iter().find_map(|run| run.fatal) {
             core.mark_dead(fatal.clone());
             return Outcome::Fatal(fatal);
         }
     }
 }
+
+/// The tool results, in call order, and the images they returned.
+///
+/// The OpenAI wire takes images in **user** messages only (a `tool` message is
+/// text on most servers), so a model with vision gets them in one user message
+/// right after the results, which names the calls; in the result text the marker
+/// says where the image went. A model without vision keeps the marker
+/// ([`IMAGE_NOT_SHOWN`]) and nothing else.
+fn push_results(
+    core: &Core,
+    messages: &mut Vec<ChatMessage>,
+    calls: &[ToolCallChunk],
+    ran: &[Run],
+) {
+    let vision = core.lock().active_images;
+    let mut images = Vec::new();
+    let mut from = Vec::new();
+    for (call, run) in calls.iter().zip(ran) {
+        let mut text = with_context(run);
+        if vision && !run.images.is_empty() {
+            text = text.replace(IMAGE_NOT_SHOWN, TOOL_IMAGE_ATTACHED);
+            images.extend(run.images.iter().cloned());
+            from.push(call.id.as_str());
+        }
+        messages.push(ChatMessage::tool(call.id.clone(), text));
+    }
+    if !images.is_empty() {
+        messages.push(ChatMessage::user_with_images(
+            format!("[images returned by the tool call(s) {}]", from.join(", ")),
+            images,
+        ));
+    }
+}
+
+/// What stands for a tool image in the result text when the image follows.
+pub(crate) const TOOL_IMAGE_ATTACHED: &str = "[image: attached in the next message]";
 
 /// An endpoint may omit or repeat tool call ids; the transcript needs unique ones.
 fn normalise_ids(mut calls: Vec<ToolCallChunk>) -> Vec<ToolCallChunk> {
@@ -384,12 +450,23 @@ fn normalise_ids(mut calls: Vec<ToolCallChunk>) -> Vec<ToolCallChunk> {
 }
 
 fn build_request(core: &Core, model: &str, messages: &[ChatMessage]) -> CompletionRequest {
-    let policy = core.lock().policy.clone();
+    let (policy, vision) = {
+        let state = core.lock();
+        (state.policy.clone(), state.active_images)
+    };
     let mut wire = Vec::with_capacity(messages.len() + 1);
     if let Some(system) = &core.system_prompt {
         wire.push(ChatMessage::system(system.clone()));
     }
-    wire.extend(messages.iter().cloned());
+    // A history written on a model with vision, now replayed to one without:
+    // its images become a marker on the wire (the transcript keeps them).
+    wire.extend(messages.iter().map(|message| {
+        if vision || message.images.is_empty() {
+            message.clone()
+        } else {
+            message.images_as_text()
+        }
+    }));
     let mut request = CompletionRequest::new(model, wire);
     request.tools = core
         .registry
@@ -655,6 +732,15 @@ async fn maybe_compact(
     }
     // Neither the summary's prompt nor the old reports say how big the new history is.
     acc.prompt_tokens = None;
+    // Images of the summarised history reached the summary as "[image]": the
+    // model keeps what it said of them, not the pixels. Said, never silent.
+    let images = count_images(&messages[..split]);
+    if images > 0 {
+        core.emit(AgentEvent::ProviderNotice {
+            kind: "images_compacted".to_owned(),
+            data: json!({ "count": images, "summarised_as": "[image]" }),
+        });
+    }
     *messages = apply(std::mem::take(messages), split, &text);
     core.lock().last_prompt_tokens = None;
     core.emit(AgentEvent::Compaction {
@@ -674,6 +760,8 @@ struct Run {
     /// Text a hook asked to put in front of the model with this result. It is not part of the
     /// `tool_result` event: the host that wrote the hook already has it.
     context: Vec<String>,
+    /// Images the tool returned (MCP `image` blocks): for a model with vision.
+    images: Vec<ImagePart>,
     fatal: Option<ProviderError>,
 }
 
@@ -724,7 +812,9 @@ async fn run_one(
     token: CancelToken,
 ) -> Run {
     let mut context = Vec::new();
-    let (content, is_error, fatal) = execute(core, signal, call, &token, &mut context).await;
+    let mut images = Vec::new();
+    let (content, is_error, fatal) =
+        execute(core, signal, call, &token, &mut context, &mut images).await;
     core.end_tool(&call.id);
     core.emit(AgentEvent::ToolResult {
         id: call.id.clone(),
@@ -736,6 +826,7 @@ async fn run_one(
     Run {
         content,
         context,
+        images,
         fatal,
     }
 }
@@ -815,6 +906,7 @@ async fn execute(
     call: &ToolCallChunk,
     token: &CancelToken,
     context: &mut Vec<String>,
+    images: &mut Vec<ImagePart>,
 ) -> (String, bool, Option<ProviderError>) {
     let fail = |message: &str| (message.to_owned(), true, None);
     let Some(entry) = core.registry.get(&call.name) else {
@@ -886,7 +978,10 @@ async fn execute(
     };
     let ran_input = input.clone();
     let (content, is_error, fatal) = match client.call_tool(&entry.tool, input, cancelled).await {
-        Ok(result) => (result.text, result.is_error, None),
+        Ok(result) => {
+            *images = result.images;
+            (result.text, result.is_error, None)
+        },
         Err(McpError::Cancelled) => return (stopped_message(signal, token), true, None),
         Err(McpError::Died { code }) => {
             return (

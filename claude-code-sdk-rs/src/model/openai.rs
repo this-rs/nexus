@@ -33,7 +33,7 @@ use super::quirks::EndpointQuirks;
 use super::sse::SseDecoder;
 use super::wire::{self, PROBE_TOOL, StreamParser};
 use super::{
-    ChatMessage, CompletionChunk, CompletionRequest, CompletionStream, EndpointProbe,
+    ChatMessage, CompletionChunk, CompletionRequest, CompletionStream, EndpointProbe, ImagePart,
     ModelEndpoint, ToolSpec,
 };
 use crate::agent::credentials::WipedText;
@@ -46,6 +46,12 @@ use crate::agent::{
 const ERROR_BODY_READ_LIMIT: usize = 8 * 1024;
 /// Largest `/models` answer accepted.
 const CATALOG_LIMIT: usize = 4 * 1024 * 1024;
+
+/// The image of the vision probe: a 1×1 transparent PNG (67 bytes).
+pub const PROBE_PIXEL_PNG_BASE64: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
+
+/// The text of the vision probe (a route of a fake may match on it).
+pub const PROBE_VISION_PROMPT: &str = "Reply with the single word: ok.";
 
 /// Static description of one endpoint instance. Holds a credential **reference**,
 /// never a credential.
@@ -104,6 +110,8 @@ pub struct OpenAiEndpoint {
     guard: EndpointGuard,
     client: Mutex<Option<(String, Vec<SocketAddr>, Client)>>,
     probes: Mutex<HashMap<String, (Instant, EndpointProbe)>>,
+    /// What is known of each model's vision, with the same TTL as the probes.
+    vision: Mutex<HashMap<String, (Instant, Option<bool>)>>,
 }
 
 impl std::fmt::Debug for OpenAiEndpoint {
@@ -125,6 +133,7 @@ impl OpenAiEndpoint {
             guard,
             client: Mutex::new(None),
             probes: Mutex::new(HashMap::new()),
+            vision: Mutex::new(HashMap::new()),
         }
     }
 
@@ -252,6 +261,142 @@ impl OpenAiEndpoint {
         let (at, probe) = probes.get(model)?;
         (at.elapsed() < self.config.probe_ttl).then(|| probe.clone())
     }
+
+    fn cached_vision(&self, model: &str) -> Option<Option<bool>> {
+        let vision = locked(&self.vision);
+        let (at, known) = vision.get(model)?;
+        (at.elapsed() < self.config.probe_ttl).then_some(*known)
+    }
+
+    /// Whether `model` takes images: the catalogue's word (`from_catalogue`),
+    /// else the one-pixel probe when the instance allows it, else the instance's
+    /// declaration. The probe decides only on what it can read: a completion is
+    /// vision, a request refusal that names images is none, and any other failure
+    /// (another 400, 401, 429, 5xx, a timeout) leaves the question open rather
+    /// than answering it wrong.
+    ///
+    /// Only what was ESTABLISHED (catalogue or probe) is cached, with the probe
+    /// TTL: an open question is asked again next time (a rate limit does not
+    /// become an hour of "unknown"), and the declaration is read live.
+    async fn vision(&self, model: &str, from_catalogue: Option<bool>) -> Option<bool> {
+        if let Some(known) = self.cached_vision(model) {
+            return known;
+        }
+        let mut known = from_catalogue;
+        if known.is_none() && self.config.quirks.vision_probe {
+            known = self.probe_vision(model).await;
+        }
+        if known.is_some() {
+            locked(&self.vision).insert(model.to_string(), (Instant::now(), known));
+        }
+        known.or(self.config.quirks.vision)
+    }
+
+    async fn probe_vision(&self, model: &str) -> Option<bool> {
+        let mut request = CompletionRequest::new(
+            model,
+            vec![ChatMessage::user_with_images(
+                PROBE_VISION_PROMPT,
+                vec![ImagePart {
+                    media_type: "image/png".into(),
+                    data_base64: PROBE_PIXEL_PNG_BASE64.into(),
+                }],
+            )],
+        );
+        request.max_tokens = Some(16);
+        request.temperature = Some(0.0);
+        let (mut stream, _field) = match self.start(request, None).await {
+            Ok(started) => started,
+            Err(error) => return images_refusal(&error).then_some(false),
+        };
+        while let Some(item) = stream.next().await {
+            if let Err(error) = item {
+                return images_refusal(&error).then_some(false);
+            }
+        }
+        Some(true)
+    }
+}
+
+/// The server refused the REQUEST (not the key, not the load) and said why in
+/// terms of image SUPPORT: "image_url is only supported by certain models"
+/// (OpenAI), "does not support image input" (DeepSeek, OpenRouter), "image input
+/// is not supported" (llama-server), "Unknown part type: image_url" (vLLM), "does
+/// not have vision capability", "not multimodal", "unsupported modality".
+///
+/// Naming an image is not enough: "invalid image", "could not decode the image"
+/// or "image too small" come from a server that DOES read images (it failed on
+/// this one), so they decide nothing, like a refusal that names no image.
+fn images_refusal(error: &ProviderError) -> bool {
+    let ProviderError::InvalidRequest { detail } = error else {
+        return false;
+    };
+    let squashed: String = detail
+        .chars()
+        .filter(char::is_ascii_alphanumeric)
+        .map(|c| c.to_ascii_lowercase())
+        .collect();
+    let names_images = ["image", "vision", "multimodal", "modality"]
+        .iter()
+        .any(|word| squashed.contains(word));
+    let about_support = [
+        "support",
+        "notallowed",
+        "unknownpart",
+        "capabilit",
+        "notmultimodal",
+        "modality",
+        "textonly",
+        "onlytext",
+    ]
+    .iter()
+    .any(|word| squashed.contains(word));
+    names_images && about_support
+}
+
+/// What a catalogue entry says of a model's vision, when it says anything:
+/// OpenRouter's `architecture.modality` (`text+image->text`) and
+/// `architecture.input_modalities`, a top-level `input_modalities` / `modalities`
+/// list, a `capabilities` list (`vision`), or a boolean `supports_vision` /
+/// `supports_images` / `vision`. Absent: `None`, nothing is guessed.
+fn catalogue_vision(entry: &Value) -> Option<bool> {
+    let lists_image = |value: &Value| {
+        value.as_array().map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .any(|item| item.eq_ignore_ascii_case("image"))
+        })
+    };
+    let architecture = entry.get("architecture");
+    if let Some(modality) = architecture
+        .and_then(|a| a.get("modality"))
+        .and_then(Value::as_str)
+    {
+        let input = modality.split("->").next().unwrap_or(modality);
+        return Some(
+            input
+                .split(['+', ',', ' '])
+                .any(|part| part.trim().eq_ignore_ascii_case("image")),
+        );
+    }
+    if let Some(found) = architecture
+        .and_then(|a| a.get("input_modalities"))
+        .or_else(|| entry.get("input_modalities"))
+        .or_else(|| entry.get("modalities"))
+        .and_then(lists_image)
+    {
+        return Some(found);
+    }
+    if let Some(capabilities) = entry.get("capabilities").and_then(Value::as_array) {
+        let names: Vec<&str> = capabilities.iter().filter_map(Value::as_str).collect();
+        if !names.is_empty() {
+            return Some(names.iter().any(|name| name.eq_ignore_ascii_case("vision")));
+        }
+    }
+    ["supports_vision", "supports_images", "vision"]
+        .iter()
+        .find_map(|key| entry.get(*key).and_then(Value::as_bool))
 }
 
 #[async_trait]
@@ -331,22 +476,41 @@ impl ModelEndpoint for OpenAiEndpoint {
             return Err(no_tools());
         }
         // The catalogue is best effort: a failure here does not fail the probe.
-        let context_window = self.models().await.ok().and_then(|models| {
-            models
-                .into_iter()
-                .find(|info| info.id == model)
-                .and_then(|info| info.context_window)
-                .map(|window| window.value)
-        });
+        let listed = self
+            .models()
+            .await
+            .ok()
+            .and_then(|models| models.into_iter().find(|info| info.id == model));
+        let context_window = listed
+            .as_ref()
+            .and_then(|info| info.context_window)
+            .map(|window| window.value);
+        let images = self
+            .vision(model, listed.and_then(|info| info.supports_images))
+            .await;
         let probe = EndpointProbe {
             tools: true,
             parallel_tools: self.config.quirks.explicit_parallel_tool_calls,
             reasoning_field: locked(&field).map(str::to_string),
             context_window,
+            images,
             checked_at_ms: crate::agent::now_ms(),
         };
         locked(&self.probes).insert(model.to_string(), (Instant::now(), probe.clone()));
         Ok(probe)
+    }
+
+    async fn probe_images(&self, model: &str) -> Option<bool> {
+        if let Some(known) = self.cached_vision(model) {
+            return known;
+        }
+        let from_catalogue = self.models().await.ok().and_then(|models| {
+            models
+                .into_iter()
+                .find(|info| info.id == model)
+                .and_then(|info| info.supports_images)
+        });
+        self.vision(model, from_catalogue).await
     }
 }
 
@@ -520,6 +684,7 @@ fn parse_models(body: &[u8]) -> Result<Vec<ModelInfo>, ProviderError> {
             value,
             source: ContextWindowSource::Catalog,
         });
+        info.supports_images = catalogue_vision(entry);
         models.push(info);
     }
     Ok(models)
@@ -597,8 +762,10 @@ mod tests {
         let endpoint = OpenAiEndpoint::new(config, Arc::new(crate::agent::EnvCredentialResolver));
         poison(&endpoint.client);
         poison(&endpoint.probes);
-        // Reading and filling both caches goes on, on the data the panic left.
+        poison(&endpoint.vision);
+        // Reading and filling the caches goes on, on the data the panic left.
         assert!(endpoint.cached_probe("m").is_none());
+        assert!(endpoint.cached_vision("m").is_none());
         let (_checked, _client) = endpoint.prepare().await.expect("prepare after poison");
         let (_checked, _client) = endpoint.prepare().await.expect("the cache is reused");
         let field: SharedField = Arc::new(Mutex::new(None));
@@ -709,6 +876,99 @@ mod tests {
         assert_eq!(models[2].context_window, None);
         assert!(parse_models(b"[]").is_err());
         assert!(parse_models(b"not json").is_err());
+    }
+
+    #[test]
+    fn catalogue_parsing_reads_vision_only_where_it_is_stated() {
+        let body = br#"{"data":[
+            {"id":"openrouter-vl","architecture":{"modality":"text+image->text"}},
+            {"id":"openrouter-text","architecture":{"modality":"text->text"}},
+            {"id":"openrouter-new","architecture":{"input_modalities":["text","image"],"output_modalities":["text"]}},
+            {"id":"modalities","modalities":["text"]},
+            {"id":"caps-vision","capabilities":["completion","vision"]},
+            {"id":"caps-none","capabilities":["completion","tools"]},
+            {"id":"bool-yes","supports_vision":true},
+            {"id":"bool-no","supports_images":false},
+            {"id":"silent","max_model_len":8192}
+        ]}"#;
+        let models = parse_models(body).unwrap();
+        let vision: Vec<(&str, Option<bool>)> = models
+            .iter()
+            .map(|info| (info.id.as_str(), info.supports_images))
+            .collect();
+        assert_eq!(
+            vision,
+            vec![
+                ("openrouter-vl", Some(true)),
+                ("openrouter-text", Some(false)),
+                ("openrouter-new", Some(true)),
+                ("modalities", Some(false)),
+                ("caps-vision", Some(true)),
+                ("caps-none", Some(false)),
+                ("bool-yes", Some(true)),
+                ("bool-no", Some(false)),
+                ("silent", None),
+            ]
+        );
+    }
+
+    #[test]
+    fn only_a_request_refusal_naming_images_counts_as_no_vision() {
+        let refusal = |detail: &str| ProviderError::InvalidRequest {
+            detail: detail.to_owned(),
+        };
+        for wording in [
+            "Invalid content type. image_url is only supported by certain models.",
+            "This model does not support image input",
+            "No endpoints found that support image input",
+            "image input is not supported - hint: you may need to provide the mmproj",
+            "Unknown part type: image_url",
+            "Model does not have vision capability",
+            "unsupported modality",
+            "The model is not multimodal",
+        ] {
+            assert!(images_refusal(&refusal(wording)), "{wording}");
+        }
+        // A 400 about something else decides nothing, and neither does any
+        // failure that is not a refusal of the request.
+        assert!(!images_refusal(&refusal(
+            "Unsupported parameter: 'temperature' is not supported with this model"
+        )));
+        // A server that failed on THIS image reads images: nothing is decided.
+        for wording in [
+            "Invalid image: could not decode the payload",
+            "image too small: height:1 or width:1 must be larger than factor:28",
+            "Image exceeds the 20 MB limit",
+        ] {
+            assert!(!images_refusal(&refusal(wording)), "{wording}");
+        }
+        assert!(!images_refusal(&ProviderError::Unauthorized));
+        assert!(!images_refusal(&ProviderError::RateLimited {
+            retry_after_ms: None
+        }));
+        assert!(!images_refusal(&ProviderError::Overloaded));
+        assert!(!images_refusal(&ProviderError::protocol(
+            "the model does not support image input"
+        )));
+        assert!(!images_refusal(&ProviderError::Timeout { after_ms: 1 }));
+    }
+
+    #[test]
+    fn the_probe_pixel_is_a_png() {
+        // Decoded by hand (no base64 crate): the eight-byte PNG signature.
+        let alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let digits: Vec<u32> = PROBE_PIXEL_PNG_BASE64
+            .chars()
+            .take(12)
+            .map(|c| alphabet.find(c).unwrap() as u32)
+            .collect();
+        let mut bytes = Vec::new();
+        for group in digits.chunks(4) {
+            let word = (group[0] << 18) | (group[1] << 12) | (group[2] << 6) | group[3];
+            bytes.extend([(word >> 16) as u8, (word >> 8) as u8, word as u8]);
+        }
+        assert_eq!(&bytes[..8], b"\x89PNG\r\n\x1a\n");
+        assert_eq!(PROBE_PIXEL_PNG_BASE64.len() % 4, 0);
     }
 
     #[test]

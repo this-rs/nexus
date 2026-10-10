@@ -301,8 +301,9 @@ impl ProviderInstanceConfig {
 
     /// The quirks a `native` instance runs with: the preset's, plus the instance's
     /// own. Booleans are OR-ed (an override can add a flag, not remove the preset's:
-    /// leave `preset` out to control every flag), `explicit_parallel_tool_calls` and
-    /// `reasoning_field` take the override when it sets one (`Some`, non-default).
+    /// leave `preset` out to control every flag), `explicit_parallel_tool_calls`,
+    /// `vision` and `reasoning_field` take the override when it sets one (`Some`,
+    /// non-default).
     pub fn effective_quirks(&self) -> Result<EndpointQuirks, ProviderError> {
         let base = match &self.preset {
             Some(name) => EndpointQuirks::preset(name)
@@ -327,6 +328,8 @@ impl ProviderInstanceConfig {
             },
             fold_late_system: base.fold_late_system || over.fold_late_system,
             tool_args_as_object: base.tool_args_as_object || over.tool_args_as_object,
+            vision_probe: base.vision_probe || over.vision_probe,
+            vision: over.vision.or(base.vision),
         })
     }
 

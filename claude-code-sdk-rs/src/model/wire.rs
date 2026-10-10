@@ -51,10 +51,26 @@ pub(crate) fn fold_late_system(messages: &[ChatMessage]) -> Vec<ChatMessage> {
 fn message_json(message: &ChatMessage, with_tools: bool, quirks: &EndpointQuirks) -> Value {
     let mut object = Map::new();
     object.insert("role".into(), json!(message.role.as_str()));
-    let content = match (&message.content, message.tool_calls.is_empty()) {
-        (Some(text), _) => Value::String(text.clone()),
-        (None, false) => Value::Null,
-        (None, true) => Value::String(String::new()),
+    let content = if message.images.is_empty() {
+        match (&message.content, message.tool_calls.is_empty()) {
+            (Some(text), _) => Value::String(text.clone()),
+            (None, false) => Value::Null,
+            (None, true) => Value::String(String::new()),
+        }
+    } else {
+        // A message with images is a list of parts: its text first, then one
+        // `image_url` part per image, the image inline as a `data:` URL.
+        let mut parts = Vec::with_capacity(message.images.len() + 1);
+        if let Some(text) = message.content.as_deref().filter(|text| !text.is_empty()) {
+            parts.push(json!({"type": "text", "text": text}));
+        }
+        parts.extend(
+            message
+                .images
+                .iter()
+                .map(|image| json!({"type": "image_url", "image_url": {"url": image.data_url()}})),
+        );
+        Value::Array(parts)
     };
     object.insert("content".into(), content);
     if message.role == Role::Assistant {
@@ -480,6 +496,42 @@ mod tests {
         );
         assert!(assistant.get("reasoning_content").is_none());
         assert_eq!(body["messages"][3]["tool_call_id"], "c1");
+    }
+
+    #[test]
+    fn a_message_with_images_is_a_list_of_parts_with_data_urls() {
+        let mut request = CompletionRequest::new(
+            "m",
+            vec![ChatMessage::user_with_images(
+                "what is this?",
+                vec![
+                    crate::model::ImagePart {
+                        media_type: "image/png".into(),
+                        data_base64: "AAAA".into(),
+                    },
+                    crate::model::ImagePart {
+                        media_type: "image/jpeg".into(),
+                        data_base64: "BBBB".into(),
+                    },
+                ],
+            )],
+        );
+        request.tools = vec![];
+        let body = build_request(&request, &EndpointQuirks::generic(), None);
+        let parts = body["messages"][0]["content"].as_array().unwrap();
+        assert_eq!(parts.len(), 3, "{parts:?}");
+        assert_eq!(parts[0], json!({"type": "text", "text": "what is this?"}));
+        assert_eq!(parts[1]["type"], "image_url");
+        assert_eq!(parts[1]["image_url"]["url"], "data:image/png;base64,AAAA");
+        assert_eq!(parts[2]["image_url"]["url"], "data:image/jpeg;base64,BBBB");
+        // Without text the list holds the images alone; without images the
+        // content stays a plain string (what every server accepts).
+        let mut bare = request.clone();
+        bare.messages[0].content = Some(String::new());
+        let body = build_request(&bare, &EndpointQuirks::generic(), None);
+        assert_eq!(body["messages"][0]["content"].as_array().unwrap().len(), 2);
+        let plain = build_request(&self::request(vec![]), &EndpointQuirks::generic(), None);
+        assert_eq!(plain["messages"][1]["content"], "hi");
     }
 
     #[test]

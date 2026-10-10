@@ -1105,3 +1105,201 @@ async fn localhost_name_works_with_the_system_resolver() {
     );
     assert_eq!(endpoint.models().await.unwrap().len(), 2);
 }
+
+// ---------------------------------------------------------------------------
+// Vision: the catalogue's word, the one-pixel probe, the instance's declaration
+// ---------------------------------------------------------------------------
+
+fn catalogue_route(modality: Option<&str>) -> Value {
+    let mut entry = json!({"id": "m", "max_model_len": 32768});
+    if let Some(modality) = modality {
+        entry["architecture"] = json!({"modality": modality});
+    }
+    json!({"method": "GET", "path": "/v1/models", "status": 200, "body": {"data": [entry]}})
+}
+
+/// The answer of a model that saw the pixel: matched on the `image_url` part.
+fn pixel_reply() -> Value {
+    let mut route = route_sse(&[
+        delta(json!({"content": "ok"})),
+        finish("stop"),
+        json!("[DONE]"),
+    ]);
+    route["body_contains"] = json!("image_url");
+    route
+}
+
+fn probing() -> EndpointQuirks {
+    let mut quirks = EndpointQuirks::generic();
+    quirks.vision_probe = true;
+    quirks
+}
+
+fn chat_bodies(server: &FakeOpenAi) -> Vec<Value> {
+    server
+        .requests_to("POST", "/v1/chat/completions")
+        .into_iter()
+        .map(|r| r["body"].clone())
+        .collect()
+}
+
+#[tokio::test]
+async fn the_catalogue_decides_vision_before_any_pixel_is_sent() {
+    for (modality, expected) in [("text+image->text", true), ("text->text", false)] {
+        let server = FakeOpenAi::start(json!([
+            probe_sse(true, None),
+            catalogue_route(Some(modality)),
+            pixel_reply()
+        ]));
+        let probe = endpoint(&server, probing()).probe("m").await.unwrap();
+        assert_eq!(probe.images, Some(expected), "{modality}");
+        // One request only, the tool probe: the pixel was never sent.
+        let bodies = chat_bodies(&server);
+        assert_eq!(bodies.len(), 1, "{modality}: {bodies:?}");
+        assert!(!bodies[0].to_string().contains("image_url"));
+    }
+}
+
+#[tokio::test]
+async fn a_silent_catalogue_gets_one_pixel_and_a_completion_means_vision() {
+    let server = FakeOpenAi::start(json!([
+        probe_sse(true, None),
+        catalogue_route(None),
+        pixel_reply()
+    ]));
+    let endpoint = endpoint(&server, probing());
+    let probe = endpoint.probe("m").await.unwrap();
+    assert_eq!(probe.images, Some(true));
+    let bodies = chat_bodies(&server);
+    assert_eq!(bodies.len(), 2, "{bodies:?}");
+    let pixel = &bodies[1];
+    let parts = pixel["messages"][0]["content"].as_array().unwrap();
+    assert_eq!(
+        parts[0],
+        json!({"type": "text", "text": nexus_claude::model::openai::PROBE_VISION_PROMPT})
+    );
+    assert_eq!(parts[1]["type"], "image_url");
+    let url = parts[1]["image_url"]["url"].as_str().unwrap();
+    assert_eq!(
+        url,
+        format!(
+            "data:image/png;base64,{}",
+            nexus_claude::model::openai::PROBE_PIXEL_PNG_BASE64
+        )
+    );
+    assert_eq!(pixel["max_tokens"], 16);
+    assert!(pixel.get("tools").is_none());
+    // Cached with the probe: asking again sends nothing.
+    assert_eq!(endpoint.probe("m").await.unwrap().images, Some(true));
+    assert_eq!(endpoint.probe_images("m").await, Some(true));
+    assert_eq!(chat_bodies(&server).len(), 2);
+}
+
+#[tokio::test]
+async fn only_a_refusal_naming_images_means_no_vision() {
+    let cases: [(u16, Value, Option<bool>); 6] = [
+        (
+            400,
+            json!({"error": {"message": "Invalid content type. image_url is only supported by certain models."}}),
+            Some(false),
+        ),
+        (
+            400,
+            json!({"error": {"message": "This model does not support image input"}}),
+            Some(false),
+        ),
+        // A 400 about something else, a bad key, a rate limit, an outage: the
+        // question stays open, the model is never called blind.
+        (
+            400,
+            json!({"error": {"message": "Unsupported parameter: 'max_tokens'"}}),
+            None,
+        ),
+        (401, json!({"error": {"message": "bad key"}}), None),
+        (429, json!({"error": {"message": "slow down"}}), None),
+        (503, json!({"error": {"message": "overloaded"}}), None),
+    ];
+    for (status, body, expected) in cases {
+        let server = FakeOpenAi::start(json!([
+            probe_sse(true, None),
+            catalogue_route(None),
+            post(status, json!({"body_contains": "image_url", "body": body}))
+        ]));
+        let probe = endpoint(&server, probing()).probe("m").await.unwrap();
+        assert!(probe.tools);
+        assert_eq!(probe.images, expected, "HTTP {status} {body}");
+        assert_eq!(chat_bodies(&server).len(), 2, "HTTP {status}");
+    }
+}
+
+#[tokio::test]
+async fn without_the_probe_the_declaration_speaks_and_the_catalogue_still_wins() {
+    let declared = |vision: Option<bool>| {
+        let mut quirks = EndpointQuirks::generic();
+        quirks.vision = vision;
+        quirks
+    };
+    // Nothing declared, nothing probed, a silent catalogue: nothing is claimed.
+    let server = FakeOpenAi::start(json!([probe_sse(true, None), catalogue_route(None)]));
+    let probe = endpoint(&server, declared(None)).probe("m").await.unwrap();
+    assert_eq!(probe.images, None);
+    assert_eq!(chat_bodies(&server).len(), 1);
+    // The instance declares vision for its models: taken, without a request.
+    let server = FakeOpenAi::start(json!([probe_sse(true, None), catalogue_route(None)]));
+    let probe = endpoint(&server, declared(Some(true)))
+        .probe("m")
+        .await
+        .unwrap();
+    assert_eq!(probe.images, Some(true));
+    assert_eq!(chat_bodies(&server).len(), 1);
+    // The catalogue knows better than the declaration.
+    let server = FakeOpenAi::start(json!([
+        probe_sse(true, None),
+        catalogue_route(Some("text->text"))
+    ]));
+    let probe = endpoint(&server, declared(Some(true)))
+        .probe("m")
+        .await
+        .unwrap();
+    assert_eq!(probe.images, Some(false));
+}
+
+#[tokio::test]
+async fn a_model_without_tools_is_still_asked_for_its_vision() {
+    let server = FakeOpenAi::start(json!([
+        probe_sse(false, None),
+        catalogue_route(None),
+        pixel_reply()
+    ]));
+    let endpoint = endpoint(&server, probing());
+    let error = expect_err(endpoint.probe("m").await);
+    assert_eq!(error, ProviderError::ModelNoTools { model: "m".into() });
+    assert_eq!(endpoint.probe_images("m").await, Some(true));
+    assert_eq!(chat_bodies(&server).len(), 2);
+    // Cached like the probe.
+    assert_eq!(endpoint.probe_images("m").await, Some(true));
+    assert_eq!(chat_bodies(&server).len(), 2);
+}
+
+#[tokio::test]
+async fn an_open_vision_question_is_asked_again_not_cached_as_unknown() {
+    // The pixel meets a rate limit first, then a completion.
+    let server = FakeOpenAi::start(json!([
+        catalogue_route(None),
+        post(
+            429,
+            json!({"body_contains": "image_url", "body": {"error": {"message": "slow down"}}})
+        ),
+        pixel_reply()
+    ]));
+    let endpoint = endpoint(&server, probing());
+    assert_eq!(endpoint.probe_images("m").await, None);
+    assert_eq!(endpoint.probe_images("m").await, Some(true));
+    // Established now: cached, nothing more is sent.
+    assert_eq!(endpoint.probe_images("m").await, Some(true));
+    let pixels = chat_bodies(&server)
+        .iter()
+        .filter(|body| body.to_string().contains("image_url"))
+        .count();
+    assert_eq!(pixels, 2);
+}

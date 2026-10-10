@@ -41,7 +41,7 @@ Règle transversale (contrainte `d79436cc`) : **une capacité absente rend `Prov
 ## 2. Traits
 
 ```rust
-pub const CONTRACT_VERSION: u32 = 4;
+pub const CONTRACT_VERSION: u32 = 5;
 
 pub type EventStream = Pin<Box<dyn Stream<Item = AgentEvent> + Send>>;
 
@@ -101,7 +101,7 @@ Types d'accompagnement :
 | `ModelInfo` | `{ id, display_name: Option<String>, context_window: Option<ContextWindow>, supports_tools: Option<bool>, supports_images: Option<bool>, supports_thinking: Option<bool>, is_default: bool, pricing: Option<ModelPrice> }` |
 | `ModelPrice` | `{ input_per_mtok, output_per_mtok, cache_read_per_mtok: Option, cache_write_per_mtok: Option }` en USD par million de tokens |
 | `TurnInput` | `{ blocks: Vec<InputBlock> }` ; `TurnInput::text(s)` |
-| `InputBlock` | `text { text } \| image { media_type, data_base64 }` — images hors v1 (A12) : refusées par `Unsupported { capability: "images" }` si `Capabilities.images == false` |
+| `InputBlock` | `text { text } \| image { media_type, data_base64 }` — refusées par `Unsupported { capability: "images" }` quand le modèle n'a pas la vision (`Capabilities.images == false` ; pour le natif, le modèle ACTIF, voir la règle `images` du §5) |
 | `PermissionDecision` | `allow { scope: once \| session \| always, updated_input: Option<Value> } \| deny { message: Option<String>, interrupt: bool }` — si `updated_input` est `None`, **l'adaptateur rejoue l'entrée d'origine** (le backend n'a plus à la conserver) |
 | `QuestionAnswer` | `{ answers: Vec<{ question: String, selected: Vec<String>, free_text: Option<String> }> } \| cancelled` |
 | `InterruptScope` | `turn_and_tools \| turn_only` |
@@ -276,12 +276,21 @@ Valeurs de référence (v1, à confirmer par la conformité de chaque adaptateur
 | subagents | nested | none | separate_thread | none |
 | compaction_signal | oui | oui | oui | non |
 | thinking | oui | selon modèle | oui | oui |
-| images | non en v1 (A12) | non | non | non |
+| images | non (A12) | selon modèle (v5 : catalogue, sonde d'un pixel en option, déclaration d'instance) | non | non |
 
-Règle `images` par moteur (A12) : `images` est `false` pour TOUS les moteurs en v1, quoi que le moteur annonce
-(`promptCapabilities.image` d'ACP, `supports_images` d'un modèle, entrée image de Codex, `ModelInfo.supports_images`).
-Un bloc `image` dans `send_turn` rend `Unsupported { capability: "images" }` ; une capacité réelle d'un moteur ne
-bascule `images` à `true` qu'avec une décision de contrat et un scénario `message_images` joué (et non replié).
+Règle `images` par moteur (A12, révisée en v5) : `images` est `false` pour Claude Code, Codex et ACP, quoi que le
+moteur annonce (`promptCapabilities.image` d'ACP, entrée image de Codex). Un bloc `image` dans `send_turn` rend
+`Unsupported { capability: "images" }` ; une capacité réelle d'un moteur ne bascule `images` à `true` qu'avec une
+décision de contrat et un scénario `message_images` joué (et non replié). **Décision v5 (natif)** : `images` est la
+vision du MODÈLE, jamais un « non » du harnais. `true` seulement si elle est établie, dans cet ordre : le catalogue
+`/models` la dit (`ModelInfo.supports_images` : `architecture.modality` « text+image->text » et
+`architecture.input_modalities` d'OpenRouter, listes `input_modalities` / `modalities`, liste `capabilities`
+contenant `vision`, booléens `supports_vision` / `supports_images` / `vision` ; une liste qui ne nomme pas l'image
+vaut `false`) ; sinon la sonde d'un pixel si l'instance l'active (`EndpointQuirks.vision_probe`, défaut non) ; sinon la
+déclaration de l'instance (`EndpointQuirks.vision: Option<bool>`). Rien de tout cela : inconnu, ce que `Capabilities`
+(un `bool`) rend `false` — l'inconnu reste distinct dans `ModelInfo.supports_images` / `EndpointProbe.images`
+(`Option<bool>`, `None`) et n'est pas mis en cache comme un « non » par la sonde. `message_images` est joué pour
+de vrai par `native_conformance` sur un modèle dont le catalogue dit la vision.
 | tools | oui | selon modèle (sonde) | oui | oui |
 | context_window | reported | configured / probed | configured | None |
 | set_model_live | oui (`set_model` de contrôle ; `before_turn` → `set_model` écrit avant l'entrée du tour) | oui (entre deux tours ; `before_turn` appliqué au tour qui commence, fenêtre et coût du modèle actif) | oui (par tour ; hooks `none` : `before_turn` jamais appelé) | non (directive → `model_directive_ignored` si les hooks étaient honorés ; ils ne le sont pas) |
@@ -302,8 +311,14 @@ bascule `images` à `true` qu'avec une décision de contrat et un scénario `mes
   `NativeConfig::hook_timeout` (30 s) est ignoré avec `provider_notice { kind: "hook_timeout" }` ; l'arrêt
   du tour l'abandonne aussi. Plus de `hooks_not_supported` pour le natif. `before_turn` est appelé par
   `run_turn` avant la lecture du modèle ; sa directive passe par `Core::apply_model`, comme `set_model` :
-  le modèle devient actif et `State.active_window` / `State.active_cost` sont recalculés depuis la sonde ou
-  le catalogue du provider (`ModelFacts::active` ; un modèle jamais vu est sondé une fois, au mieux). La
+  le modèle devient actif et `State.active_window` / `State.active_cost` / `State.active_images` sont recalculés
+  depuis la sonde ou le catalogue du provider (`ModelFacts::active` ; un modèle jamais vu est sondé une fois, au
+  mieux ; sa vision est demandée à part, `ModelEndpoint::probe_images`, quand il n'est pas sondé). `send_turn`
+  refuse une image si le modèle ACTIF n'a pas la vision ; si une directive `before_turn` rend actif un modèle sans
+  vision après l'acceptation, le tour se termine en `done { is_error, error: unsupported images }` sans rien
+  envoyer ni rien valider dans le transcript. L'historique écrit sur un modèle avec vision et rejoué à un modèle
+  sans : chaque image y devient `[image omitted: the active model has no vision] (<type>)` sur le fil (le
+  transcript la garde). La
   compaction (`maybe_compact`) et le coût du tour (`terminal_event`) lisent l'ACTIF, pas l'instantané : un
   modèle plus petit choisi pour un tour compacte là où celui d'ouverture ne compactait pas, un modèle sans
   prix rend `cost.usd = None` même si celui d'ouverture en avait un.
@@ -314,10 +329,21 @@ bascule `images` à `true` qu'avec une décision de contrat et un scénario `mes
   compaction automatique (l'erreur typée `context_too_small` sort quand l'endpoint refuse).
   `cost` : `free` si configuré, `priced` si le modèle a un prix, sinon `unknown`.
 - **Portées** : `once` et `session` (`always` n'a nulle part où être gardé) ; `always` répond
-  `Unsupported { permission_scope }`. `native_question`, `background_tasks`, `subagents`, `images`,
+  `Unsupported { permission_scope }`. `native_question`, `background_tasks`, `subagents`,
   `sandbox` : absents ; `cancel_tools(task)` → `Unsupported { background_tasks }`,
   `answer_question` → `Unsupported { native_question }`, mode `trust` accepté à
   l'ouverture et à chaud (la politique locale autorise tout appel que ne refuse pas un `deny`).
+- **Images (v5)** : un bloc `image` de `TurnInput` devient, dans le message utilisateur, une partie
+  `image_url` à URL `data:<type>;base64,…` après le texte joint (l'ordre entre blocs de texte et images n'est pas
+  conservé : le texte d'abord). Le transcript (mémoire ou fichier) garde l'image entière, sans masquage (une charge
+  base64 n'est pas de la prose). Compaction : les images de la queue gardée restent entières ; celles de la partie
+  résumée deviennent `[image <type>]` dans l'invite de résumé (jamais les pixels) et
+  `provider_notice { kind: "images_compacted", data: { count } }` le dit. Image d'un résultat d'outil MCP (bloc
+  `image` : `mimeType` `image/*` et `data`, ≤ 20 Mo de base64) : le fil OpenAI n'accepte les images que dans un
+  message `user`, donc pour un modèle actif AVEC vision le texte du message `tool` porte
+  `[image: attached in the next message]` et un message `user` « `[images returned by the tool call(s) <ids>]` » +
+  les parties `image_url` suit les résultats ; SANS vision le marqueur `[image content not shown]` reste seul.
+  L'événement `tool_result` reste du texte.
 - **Outils** : uniquement ceux des serveurs MCP de la session, offerts sous le nom
   `mcp__<serveur>__<outil>` (caractères hors `[A-Za-z0-9_-]` remplacés par `_`, 64 caractères au plus) ;
   `category: mcp`, `canonical` = ce nom. Règle d'exposition : un outil n'est pas offert si un `deny`
@@ -691,23 +717,33 @@ pub trait ModelEndpoint: Send + Sync {
     async fn models(&self) -> Result<Vec<ModelInfo>, ProviderError>;
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionStream, ProviderError>;
     async fn probe(&self, model: &str) -> Result<EndpointProbe, ProviderError>; // sonde d'outil, A30
+    async fn probe_images(&self, _model: &str) -> Option<bool> { None }         // v5 : vision seule
 }
 pub type CompletionStream = Pin<Box<dyn Stream<Item = Result<CompletionChunk, ProviderError>> + Send>>;
 ```
 
 - `CompletionRequest { model, messages: Vec<ChatMessage>, tools: Vec<ToolSpec>, max_tokens,
   temperature, parallel_tool_calls: Option<bool>, stream: bool }` ; `ChatMessage { role: system |
-  user | assistant | tool, content: Option<String>, reasoning: Option<String>, tool_calls,
-  tool_call_id }`.
+  user | assistant | tool, content: Option<String>, images: Vec<ImagePart { media_type, data_base64 }>
+  (v5, absent si vide), reasoning: Option<String>, tool_calls, tool_call_id }` ; un message avec images
+  part sur le fil en liste de parties (`text` puis `image_url` à URL `data:`).
 - `CompletionChunk` : `text(String) | reasoning(String) | tool_call(ToolCallChunk { id, name,
   arguments: String /* JSON entier, assemblé */ }) | usage(Usage) | finish(FinishReason)`. Des
   appels d'outils entiers ou fragmentés donnent le même `tool_call` (A39).
 - `EndpointProbe { tools: bool, parallel_tools: Option<bool>, reasoning_field: Option<String>,
-  context_window: Option<u64>, checked_at_ms }`, mise en cache par (instance, modèle).
+  context_window: Option<u64>, images: Option<bool> (v5), checked_at_ms }`, mise en cache par (instance,
+  modèle). `images` : catalogue, sinon sonde d'un pixel (`vision_probe`), sinon déclaration (`vision`) ;
+  `None` = inconnu. `probe_images(model)` répond la même chose pour un modèle sans outils (la sonde d'outil a
+  échoué) ou jamais sondé. Sonde d'un pixel (une requête : un PNG 1×1 en `image_url`, `max_tokens: 16`, sans
+  outils) : une complétion = vision ; un refus de la requête (400) qui nomme l'image ET un défaut de prise en
+  charge (« image_url is only supported by certain models », « does not support image input », « Unknown part
+  type: image_url », « vision capability », « not multimodal ») = pas de vision ; tout le reste (autre 400, dont
+  « invalid image » / « image too small » d'un serveur qui lit les images, 401, 429, 5xx, délai) = inconnu.
 - Quirks = drapeaux d'instance (`EndpointQuirks`) : `echo_reasoning_with_tools` (DeepSeek),
   `omit_tool_choice` (Ollama), `explicit_parallel_tool_calls: Option<bool>` (llama-server, NIM),
   `reasoning_field: reasoning_content | reasoning` (vLLM), `fold_late_system` (message système
-  tardif replié dans `system`), `tool_args_as_object`. Préréglages : `deepseek`, `vllm`, `ollama`,
+  tardif replié dans `system`), `tool_args_as_object`, `vision_probe` (v5, défaut non : l'opérateur choisit de
+  payer la requête), `vision: Option<bool>` (v5, déclaration). Préréglages : `deepseek`, `vllm`, `ollama`,
   `llama_server`, `nim`, `generic`.
 - Table de prix UNIQUE (`model::pricing::PriceTable`, A1) : coût = usage × prix, `None` sans prix.
 - HTTP : `reqwest` derrière la feature `provider-native` ; redirections désactivées ; identifiant
@@ -1045,7 +1081,11 @@ jeton, `add_dirs` ← `extra_dirs`, `env` ← `EnvSpec.set`, `cli_path` ← exte
   comme une erreur inconnue) ; **v4** = v3 + méthode à défaut `SessionHooks::before_turn(&TurnContext) ->
   TurnDirective` et ses deux types (ajout compatible : un hôte v3 n'implémente pas la méthode et rien ne
   change pour lui ; aucune forme sérialisée ne bouge : `tests/snapshots/agent_contract_v4.json` ne diffère
-  de v3 que par la version), scénario de conformité `directive_modele` (26 scénarios). Le fichier
+  de v3 que par la version), scénario de conformité `directive_modele` (26 scénarios) ; **v5** = v4 + méthode
+  à défaut `ModelEndpoint::probe_images(&str) -> Option<bool>` (ajout compatible : un endpoint v4 rend `None`,
+  inconnu) et décision `images` par modèle du natif (§5 ; champs optionnels `EndpointProbe.images`,
+  `ChatMessage.images`, `EndpointQuirks.vision_probe` / `vision`, hors formes listées ci-dessous :
+  `tests/snapshots/agent_contract_v5.json` ne diffère de v4 que par la version). Le fichier
   `tests/snapshots/agent_contract_v2.json` est conservé : le backend et le frontend, tant qu'ils sont en
   v2, le copient comme fixture.
   L'instantané v2 porte aussi `provider_instance_config` (natif avec préréglage, prix et extension ; ACP ; Claude Code) : une entrée d'instantané ajoutée pour une

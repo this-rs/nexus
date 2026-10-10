@@ -28,7 +28,8 @@
 //! | `secret_isolation` | yes: stdio servers get an allowlisted environment, credentials are resolved per request and never stored |
 //! | `sandbox` | none: information for the user, not a gate: `trust` opens like on every provider |
 //! | `hooks` | `in_protocol`: `before_tool` (after the exposure check, before the policy, so a replaced input is judged too), `after_tool` (only for a call that ran; its text reaches the model, not the `tool_result` event) and `before_compaction` (its text joins the summary instructions). A hook that does not answer within `NativeConfig::hook_timeout` is skipped with `provider_notice { hook_timeout }` |
-//! | `subagents`, `background_tasks`, `native_question`, `images` | no |
+//! | `images` | **per model**: what the catalogue says of its vision (`ModelInfo::supports_images`: OpenRouter `architecture.modality`, `input_modalities`, `capabilities`…), else the one-pixel probe when the instance sets `vision_probe`, else the instance's `vision` declaration; `false` when nothing said. A model without vision refuses an image turn with `Unsupported { images }`: the limit of the MODEL, never of the harness |
+//! | `subagents`, `background_tasks`, `native_question` | no |
 //!
 //! `capabilities()` is synchronous: it reads what was probed. Call
 //! [`NativeProvider::refresh_capabilities`] (or `catalog` then `open`) to fill it;
@@ -323,15 +324,29 @@ impl ModelFacts {
         }
     }
 
-    /// The window and the cost basis that govern a turn on `model`: what was
-    /// probed or catalogued. A model never seen is probed once, best effort
-    /// (the endpoint caches it); a probe that fails leaves the window unknown,
-    /// which means no automatic compaction, never an error for the caller.
-    pub(crate) async fn active(
-        &self,
-        endpoint: &dyn ModelEndpoint,
-        model: &str,
-    ) -> (Option<u64>, CostBasis) {
+    /// Whether `model` takes images: what the probe found (catalogue, pixel
+    /// probe or declaration, in that order), else what the catalogue read by
+    /// `catalog()` says of it; `false` when nothing said.
+    pub(crate) fn images(&self, model: &str, probe: Option<&EndpointProbe>) -> bool {
+        probe
+            .and_then(|probe| probe.images)
+            .or_else(|| {
+                self.catalog
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .iter()
+                    .find(|info| info.id == model)
+                    .and_then(|info| info.supports_images)
+            })
+            .unwrap_or(false)
+    }
+
+    /// The window, the cost basis and the vision that govern a turn on `model`:
+    /// what was probed or catalogued. A model never seen is probed once, best
+    /// effort (the endpoint caches it); a probe that fails leaves the window
+    /// unknown, which means no automatic compaction, and the vision unknown,
+    /// which means no image: never an error for the caller.
+    pub(crate) async fn active(&self, endpoint: &dyn ModelEndpoint, model: &str) -> ActiveFacts {
         let mut probe = self.probed(model);
         if probe.is_none() && self.config.context_window.is_none() {
             match endpoint.probe(model).await {
@@ -340,23 +355,47 @@ impl ModelFacts {
                     probe = Some(fresh);
                 },
                 Err(ProviderError::ModelNoTools { .. }) => {
-                    let fresh = EndpointProbe {
-                        tools: false,
-                        parallel_tools: None,
-                        reasoning_field: None,
-                        context_window: None,
-                        checked_at_ms: crate::agent::now_ms(),
-                    };
+                    let fresh = no_tools_probe(endpoint, model).await;
                     self.record_probe(model, fresh.clone());
                     probe = Some(fresh);
                 },
                 Err(_) => {},
             }
         }
-        (
-            self.context_window(model, probe.as_ref()).map(|w| w.value),
-            self.cost_basis(model),
-        )
+        // Not probed (the window is configured, or the probe failed): the vision
+        // is still asked on its own, from the catalogue (and the pixel probe when
+        // the instance allows it), cached by the endpoint.
+        let images = match &probe {
+            Some(_) => self.images(model, probe.as_ref()),
+            None => endpoint.probe_images(model).await.unwrap_or(false),
+        };
+        ActiveFacts {
+            window: self.context_window(model, probe.as_ref()).map(|w| w.value),
+            cost: self.cost_basis(model),
+            images,
+        }
+    }
+}
+
+/// What governs a turn on the active model (N-R1): its window (compaction), its
+/// cost basis (the cost of a turn) and its vision (image input).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct ActiveFacts {
+    pub(crate) window: Option<u64>,
+    pub(crate) cost: CostBasis,
+    pub(crate) images: bool,
+}
+
+/// The record of a model that refused tools. Its vision is asked on its own: a
+/// model without tools may still see images.
+async fn no_tools_probe(endpoint: &dyn ModelEndpoint, model: &str) -> EndpointProbe {
+    EndpointProbe {
+        tools: false,
+        parallel_tools: None,
+        reasoning_field: None,
+        context_window: None,
+        images: endpoint.probe_images(model).await,
+        checked_at_ms: crate::agent::now_ms(),
     }
 }
 
@@ -397,12 +436,8 @@ impl NativeProvider {
     pub async fn refresh_capabilities(&self, model: &str) -> Result<Capabilities, ProviderError> {
         let probe = match self.endpoint.probe(model).await {
             Ok(probe) => probe,
-            Err(ProviderError::ModelNoTools { .. }) => EndpointProbe {
-                tools: false,
-                parallel_tools: None,
-                reasoning_field: None,
-                context_window: None,
-                checked_at_ms: crate::agent::now_ms(),
+            Err(ProviderError::ModelNoTools { .. }) => {
+                no_tools_probe(self.endpoint.as_ref(), model).await
             },
             Err(error) => return Err(error),
         };
@@ -648,6 +683,7 @@ impl AgentProvider for NativeProvider {
             .is_some_and(|probe| probe.reasoning_field.is_some());
         capabilities.context_window = self.context_window(model, probe.as_ref());
         capabilities.cost = self.cost_basis(model);
+        capabilities.images = self.facts.images(model, probe.as_ref());
         capabilities
     }
 

@@ -13,7 +13,7 @@
 diagrams:
   - name: nexus-agent-contract
     file: nexus-agent-contract.mmd
-    verified: 2026-10-07
+    verified: 2026-10-10
     covers:
       - claude-code-sdk-rs/src/agent/*.rs
       - docs/agent-contract.md
@@ -21,7 +21,7 @@ diagrams:
       - claude-code-sdk-rs/tests/agent_registry.rs
   - name: nexus-agent-providers
     file: nexus-agent-providers.mmd
-    verified: 2026-10-07
+    verified: 2026-10-10
     covers:
       - docs/diagrams/nexus-agent-providers.mmd
       - docs/harness-consolidation-2026-10-05.md

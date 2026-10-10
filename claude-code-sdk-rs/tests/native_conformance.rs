@@ -4,8 +4,10 @@
 //! No network beyond 127.0.0.1.
 //!
 //! What the native harness declares absent is proven through its written
-//! fallback (§5): `images`, `native_question`, `background_tasks`, `subagents`,
-//! `hooks` and `sandbox`.
+//! fallback (§5): `native_question`, `background_tasks`, `subagents`, `hooks`
+//! and `sandbox`. `images` is the model's: with a catalogue that states no
+//! vision the fallback is verified, with one that states it `message_images`
+//! is played for real (the image reaches the fake, which answers only to it).
 //!
 //! `permission_hors_tour` needs a permission request with no turn running. The
 //! native harness raises one only from a tool call, and a turn whose stream was
@@ -32,7 +34,7 @@ use nexus_claude::providers::native::{
     MemoryTranscriptStore, NativeConfig, NativeProvider, TranscriptStore,
 };
 use nexus_claude::testkit::conformance::{
-    ConformanceTarget, Prepared, Scenario, ScenarioOutcome, run_all,
+    ConformanceTarget, Prepared, Scenario, ScenarioOutcome, run_all, run_scenario,
 };
 use serde_json::{Value, json};
 
@@ -62,14 +64,34 @@ fn echo(id: &'static str) -> (&'static str, &'static str, Value) {
     (id, "mcp__fake__echo", json!({"text": id}))
 }
 
+/// The catalogue of the fake: the window of `m`, and its vision when `vision`.
+fn catalogue(vision: bool) -> Value {
+    if !vision {
+        return models_route(128_000);
+    }
+    json!({"method": "GET", "path": "/v1/models", "status": 200,
+        "body": {"object": "list", "data": [
+            {"id": "m", "context_length": 128_000, "architecture": {"modality": "text+image->text"}},
+            {"id": "other"}]}})
+}
+
 /// The `fake_openai` routes of a scenario. Routes are consumed in order; the
 /// last one answers any request left over with plain text.
-fn script(scenario: Scenario) -> Vec<Value> {
+fn script(scenario: Scenario, vision: bool) -> Vec<Value> {
     let p = scenario.prompt();
     let p = Some(p.as_str());
     let tool = Some(TOOL_MARKER);
-    let mut routes = vec![probe_route(true), models_route(128_000)];
+    let mut routes = vec![probe_route(true), catalogue(vision)];
     let tool_call = |name: &'static str| ("c1", name, json!({"text": "x"}));
+    if vision && scenario == Scenario::MessageImages {
+        // Answered only to a request that carries the image part.
+        routes.push(text_reply(
+            Some("image_url"),
+            "the pixel is seen",
+            None,
+            Some((100, 10)),
+        ));
+    }
     match scenario {
         Scenario::AppelOutilResultat => {
             routes.push(tool_reply(p, &[echo("c1")], None, Some((120, 12))));
@@ -200,6 +222,8 @@ enum Route {
 
 struct NativeTarget {
     route: Route,
+    /// The catalogue of the fake states the vision of `m`.
+    vision: bool,
     base: Arc<dyn AgentProvider>,
     _base_server: FakeOpenAi,
 }
@@ -247,8 +271,8 @@ async fn from_registry(
 }
 
 impl NativeTarget {
-    async fn new(route: Route) -> Self {
-        let server = FakeOpenAi::start(json!([probe_route(true), models_route(128_000)]));
+    async fn new(route: Route, vision: bool) -> Self {
+        let server = FakeOpenAi::start(json!([probe_route(true), catalogue(vision)]));
         let provider: Arc<dyn AgentProvider> = match route {
             Route::Direct => {
                 let provider = Arc::new(NativeProvider::new(
@@ -267,6 +291,7 @@ impl NativeTarget {
         };
         Self {
             route,
+            vision,
             base: provider,
             _base_server: server,
         }
@@ -337,7 +362,7 @@ impl ConformanceTarget for NativeTarget {
     }
 
     async fn prepare(&self, scenario: Scenario) -> Option<Prepared> {
-        let server = FakeOpenAi::start(json!(script(scenario)));
+        let server = FakeOpenAi::start(json!(script(scenario, self.vision)));
         let store = Arc::new(MemoryTranscriptStore::new());
         let provider: Arc<dyn AgentProvider> = match self.route {
             Route::Direct => {
@@ -408,13 +433,31 @@ async fn a_native_instance_built_by_the_registry_passes_the_conformance_suite() 
     check_conformance(Route::Registry).await;
 }
 
+/// On a model whose catalogue states its vision, `message_images` is played for
+/// real: the image part reaches the model and its answer comes back.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_vision_model_plays_message_images_for_real() {
+    let target = NativeTarget::new(Route::Direct, true).await;
+    assert!(target.provider().capabilities(Some("m")).images);
+    let outcome = run_scenario(&target, Scenario::MessageImages).await;
+    assert_eq!(outcome, ScenarioOutcome::Passed, "{outcome:?}");
+    // The same catalogue without the vision: the fallback, verified.
+    let target = NativeTarget::new(Route::Direct, false).await;
+    assert!(!target.provider().capabilities(Some("m")).images);
+    assert_eq!(
+        run_scenario(&target, Scenario::MessageImages).await,
+        ScenarioOutcome::FallbackVerified
+    );
+}
+
 async fn check_conformance(route: Route) {
-    let target = NativeTarget::new(route).await;
+    let target = NativeTarget::new(route, false).await;
     let report = run_all(&target).await;
     eprintln!("{}", report.summary());
     report.assert_conformant();
 
-    // What the native harness does not have is proven through its fallback.
+    // What the native harness does not have is proven through its fallback
+    // (`images`: the catalogue of this fake states no vision for `m`).
     for absent in [
         Scenario::QuestionUtilisateur,
         Scenario::AnnulationTache,
