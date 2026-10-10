@@ -31,6 +31,7 @@
 //! | `env {name?}` | `readOnlyHint` | the names of its environment variables, and `name=value` for the one asked |
 //! | `argv` | `readOnlyHint` | its command-line arguments |
 //! | `big {n}` | `readOnlyHint` | a text of `n` characters |
+//! | `picture` | `readOnlyHint` | a text block and a 1×1 PNG `image` block |
 
 use std::collections::HashSet;
 use std::fs::OpenOptions;
@@ -58,6 +59,9 @@ fn log(event: Value) {
     }
 }
 
+/// A 1x1 transparent PNG (the `picture` tool).
+const PIXEL_PNG_BASE64: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
+
 fn tools_list() -> Value {
     let text_schema = json!({"type": "object", "properties": {"text": {"type": "string"}}});
     let none = json!({"type": "object", "properties": {}});
@@ -72,6 +76,7 @@ fn tools_list() -> Value {
         {"name": "env", "description": "Environment of the server", "inputSchema": {"type": "object", "properties": {"name": {"type": "string"}}}, "annotations": read_only},
         {"name": "argv", "description": "Arguments of the server", "inputSchema": none, "annotations": read_only},
         {"name": "big", "description": "A long text", "inputSchema": {"type": "object", "properties": {"n": {"type": "integer"}}}, "annotations": read_only},
+        {"name": "picture", "description": "A text line and a one-pixel PNG image block", "inputSchema": none, "annotations": read_only},
     ]})
 }
 
@@ -112,6 +117,10 @@ fn call_tool(id: u64, name: &str, args: &Value, shared: &Shared) -> Result<Value
             let n = args.get("n").and_then(Value::as_u64).unwrap_or(10) as usize;
             Ok(text_result("x".repeat(n)))
         },
+        "picture" => Ok(json!({"content": [
+            {"type": "text", "text": "here is the picture"},
+            {"type": "image", "mimeType": "image/png", "data": PIXEL_PNG_BASE64},
+        ]})),
         "slow" => {
             log(json!({"event": "slow_started"}));
             let limit: u64 = std::env::var("FAKE_MCP_SLOW_MAX_MS")

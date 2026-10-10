@@ -35,9 +35,9 @@ use super::transcript::TranscriptStore;
 use super::{ModelFacts, NativeConfig as Settings, r#loop};
 use crate::agent::{
     AgentEvent, AgentSession, CancelOutcome, CancelScope, Capabilities, CostBasis, EventStream,
-    InterruptOutcome, InterruptScope, PermissionDecision, PermissionScope, PolicyDecision,
-    PolicyMode, ProviderError, ProviderKind, QuestionAnswer, ResumeToken, SessionHooks,
-    SessionLimits, ToolPolicy, TurnInput,
+    InputBlock, InterruptOutcome, InterruptScope, PermissionDecision, PermissionScope,
+    PolicyDecision, PolicyMode, ProviderError, ProviderKind, QuestionAnswer, ResumeToken,
+    SessionHooks, SessionLimits, ToolPolicy, TurnInput,
 };
 use crate::model::{ChatMessage, ModelEndpoint};
 
@@ -110,6 +110,9 @@ pub(crate) struct State {
     pub(crate) active_window: Option<u64>,
     /// Cost basis of the model now active: what the cost of a turn reads.
     pub(crate) active_cost: CostBasis,
+    /// Vision of the model now active: whether an image may reach it (a turn's
+    /// input, a tool's image, the images of the history).
+    pub(crate) active_images: bool,
     /// Turns started so far (the index of the next one).
     pub(crate) turn_index: u32,
     /// The committed conversation.
@@ -218,6 +221,7 @@ impl Core {
             model: parts.model,
             active_window: parts.capabilities.context_window.map(|w| w.value),
             active_cost: parts.capabilities.cost,
+            active_images: parts.capabilities.images,
             turn_index: 0,
             messages: parts.messages,
             tokens_spent: 0,
@@ -272,19 +276,20 @@ impl Core {
         Ok(())
     }
 
-    /// Makes `model` the active model: the next turn runs on it, and the window
-    /// and cost basis that govern compaction and cost become its own. The
+    /// Makes `model` the active model: the next turn runs on it, and the window,
+    /// cost basis and vision that govern compaction, cost and images become its own. The
     /// capabilities snapshot of the session does not move (A4). Answers whether
     /// the model changed.
     pub(crate) async fn apply_model(&self, model: &str) -> bool {
         if self.lock().model == model {
             return false;
         }
-        let (window, cost) = self.facts.active(self.endpoint.as_ref(), model).await;
+        let facts = self.facts.active(self.endpoint.as_ref(), model).await;
         let mut state = self.lock();
         state.model = model.to_owned();
-        state.active_window = window;
-        state.active_cost = cost;
+        state.active_window = facts.window;
+        state.active_cost = facts.cost;
+        state.active_images = facts.images;
         true
     }
 
@@ -391,8 +396,22 @@ impl AgentSession for NativeSession {
 
     async fn send_turn(&self, input: TurnInput) -> Result<EventStream, ProviderError> {
         self.core.usable()?;
-        if input.has_images() && !self.capabilities.images {
+        // The ACTIVE model has no vision (the snapshot's, or the one `set_model`
+        // made active): its limit, stated as such.
+        if input.has_images() && !self.core.lock().active_images {
             return Err(ProviderError::unsupported("images"));
+        }
+        for block in &input.blocks {
+            if let InputBlock::Image {
+                media_type,
+                data_base64,
+            } = block
+                && (!media_type.starts_with("image/") || data_base64.trim().is_empty())
+            {
+                return Err(ProviderError::invalid(
+                    "an image block needs an image/* media type and a base64 payload",
+                ));
+            }
         }
         let signal = TurnSignal::new();
         let (sender, receiver) = mpsc::unbounded_channel();

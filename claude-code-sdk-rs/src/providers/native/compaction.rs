@@ -8,6 +8,11 @@
 //! Only automatic compaction exists: the contract has no manual trigger for the
 //! native harness. With an unknown context window nothing is compacted; the
 //! endpoint's refusal then surfaces as the typed `context_too_small`.
+//!
+//! **Images** of the kept tail stay whole. Those of the summarised part are
+//! rendered as `[image <media type>]` in the summarisation prompt (never the
+//! pixels: the summary is text) and the loop says so with
+//! `provider_notice { images_compacted }`; nothing is lost in silence.
 
 use futures::StreamExt;
 
@@ -22,6 +27,14 @@ pub const SUMMARY_MARKER: &str = "[Summary of the earlier conversation]";
 
 /// Longest content of one message in the summarisation prompt, in characters.
 const RENDER_LIMIT: usize = 4000;
+
+/// What one image is assumed to cost in the prompt, in tokens: a rough middle
+/// between a low-detail tile (about 85 on OpenAI) and a full-resolution image
+/// on a VL model (several thousand). The base64 size says nothing of it.
+pub const IMAGE_TOKEN_ESTIMATE: u64 = 1024;
+
+/// What an image becomes in the summarisation prompt (followed by its media type).
+pub const IMAGE_MARKER: &str = "[image";
 
 /// When and how much to compact.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -62,7 +75,12 @@ pub fn estimate_tokens(messages: &[ChatMessage]) -> u64 {
                     .sum::<usize>()
         })
         .sum();
-    (chars as u64).div_ceil(4)
+    (chars as u64).div_ceil(4) + count_images(messages) as u64 * IMAGE_TOKEN_ESTIMATE
+}
+
+/// Number of images carried by `messages`.
+pub fn count_images(messages: &[ChatMessage]) -> usize {
+    messages.iter().map(|message| message.images.len()).sum()
 }
 
 /// Whether a prompt of `prompt_tokens` calls for compaction in `window`.
@@ -112,6 +130,9 @@ pub fn render(older: &[ChatMessage]) -> String {
         if let Some(content) = &message.content {
             out.push(' ');
             out.push_str(&clip(content));
+        }
+        for image in &message.images {
+            out.push_str(&format!("\n{IMAGE_MARKER} {}]", image.media_type));
         }
         for call in &message.tool_calls {
             out.push_str(&format!(
@@ -185,7 +206,7 @@ pub fn apply(mut messages: Vec<ChatMessage>, split: usize, summary: &str) -> Vec
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::ToolCallChunk;
+    use crate::model::{ImagePart, ToolCallChunk};
 
     fn history() -> Vec<ChatMessage> {
         let mut call = ChatMessage::assistant_tool_calls(vec![ToolCallChunk {
@@ -275,5 +296,49 @@ mod tests {
     fn estimates_count_content_reasoning_and_calls() {
         let messages = vec![ChatMessage::assistant("abcdefgh").with_reasoning("abcd")];
         assert_eq!(estimate_tokens(&messages), 3);
+    }
+
+    fn pixel() -> ImagePart {
+        ImagePart {
+            media_type: "image/png".into(),
+            data_base64: "iVBORw0KGgo=".into(),
+        }
+    }
+
+    #[test]
+    fn images_are_estimated_per_image_not_per_base64_byte() {
+        let messages = vec![ChatMessage::user_with_images(
+            "look",
+            vec![pixel(), pixel()],
+        )];
+        assert_eq!(count_images(&messages), 2);
+        assert_eq!(estimate_tokens(&messages), 1 + 2 * IMAGE_TOKEN_ESTIMATE);
+    }
+
+    #[test]
+    fn a_summarised_image_is_rendered_as_a_marker_never_as_pixels() {
+        let older = vec![
+            ChatMessage::user_with_images("what is this?", vec![pixel()]),
+            ChatMessage::assistant("a pixel"),
+        ];
+        let text = render(&older);
+        assert!(
+            text.contains("[user] what is this?\n[image image/png]"),
+            "{text}"
+        );
+        assert!(!text.contains("iVBORw0KGgo="), "{text}");
+        let request = summary_request("m", &older, None, &CompactionConfig::default());
+        assert!(request.messages[1].images.is_empty());
+    }
+
+    #[test]
+    fn images_of_the_kept_tail_survive_compaction_whole() {
+        let mut messages = history();
+        messages.push(ChatMessage::user_with_images("and this?", vec![pixel()]));
+        messages.push(ChatMessage::assistant("another pixel"));
+        let split = split_point(&messages, 2).unwrap();
+        let compacted = apply(messages.clone(), split, "SUMMARY");
+        assert_eq!(compacted[1].images, vec![pixel()]);
+        assert_eq!(compacted[1..], messages[split..]);
     }
 }

@@ -13,7 +13,8 @@
 //! **No credential is persisted**: the file store masks credential-shaped
 //! fragments (`agent::redact`, applied by chunks so that long texts are not
 //! truncated) before writing. The in-memory store keeps the exact text (it
-//! never leaves the process).
+//! never leaves the process). **Images are kept as they are**: a base64 payload
+//! is a blob, not prose, and the masking of prose would mangle it.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};

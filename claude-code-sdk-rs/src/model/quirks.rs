@@ -62,6 +62,16 @@ pub struct EndpointQuirks {
     pub fold_late_system: bool,
     /// Send assistant tool-call `arguments` as a JSON object instead of a string.
     pub tool_args_as_object: bool,
+    /// When the catalogue says nothing about a model's vision, ask the model: one
+    /// tiny request with a one-pixel PNG. A completion means vision; a request
+    /// refusal (HTTP 400) that names images means none; anything else (another
+    /// 400, a rate limit, a timeout) decides nothing. Off by default: the operator
+    /// chooses to spend that request.
+    pub vision_probe: bool,
+    /// What to say of a model's vision when neither the catalogue nor the probe
+    /// said: `Some(true)` declares every model of the instance has it,
+    /// `Some(false)` that none has, `None` claims nothing (`images: false`).
+    pub vision: Option<bool>,
 }
 
 impl EndpointQuirks {
@@ -178,6 +188,13 @@ mod tests {
         let quirks: EndpointQuirks = serde_json::from_str(r#"{"omit_tool_choice":true}"#).unwrap();
         assert!(quirks.omit_tool_choice);
         assert_eq!(quirks.reasoning_field, ReasoningField::ReasoningContent);
+        // Vision is never claimed by default: no probe, nothing declared.
+        assert!(!quirks.vision_probe);
+        assert_eq!(quirks.vision, None);
+        let declared: EndpointQuirks =
+            serde_json::from_str(r#"{"vision_probe":true,"vision":false}"#).unwrap();
+        assert!(declared.vision_probe);
+        assert_eq!(declared.vision, Some(false));
         let json = serde_json::to_string(&EndpointQuirks::vllm()).unwrap();
         assert_eq!(
             serde_json::from_str::<EndpointQuirks>(&json).unwrap(),

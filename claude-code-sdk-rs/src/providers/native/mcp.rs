@@ -43,7 +43,7 @@ use tokio::process::{Child, ChildStdin, ChildStdout};
 use tokio::sync::oneshot;
 
 use crate::agent::{EnvSpec, McpServerSpec, ProviderError, redact};
-use crate::model::{DnsResolver, EndpointGuard, SseDecoder};
+use crate::model::{DnsResolver, EndpointGuard, ImagePart, SseDecoder};
 use crate::providers::lines::{BoundedLines, Line, too_long_error};
 use crate::transport::spawn::{EnvPolicy, isolated_command};
 
@@ -131,7 +131,18 @@ pub struct McpCallResult {
     /// The server flagged the result as an error (`isError`), or answered with a
     /// JSON-RPC error.
     pub is_error: bool,
+    /// The `image` blocks (an `image/*` type and a payload), in order. Each one
+    /// stands in `text` as [`IMAGE_NOT_SHOWN`]: the loop passes them to a model
+    /// with vision and leaves the marker alone for one without.
+    pub images: Vec<ImagePart>,
 }
+
+/// What an image block of a tool result becomes in its text.
+pub const IMAGE_NOT_SHOWN: &str = "[image content not shown]";
+
+/// Largest base64 payload of one tool image passed to the model (about 15 MB of
+/// image); a bigger one stays a marker.
+const MAX_TOOL_IMAGE_BASE64: usize = 20 * 1024 * 1024;
 
 /// Why a request got no answer.
 #[derive(Debug, Clone, PartialEq)]
@@ -317,6 +328,7 @@ impl McpClient {
             Err(McpError::Rpc { message }) => Ok(McpCallResult {
                 text: message,
                 is_error: true,
+                images: Vec::new(),
             }),
             Err(other) => Err(other),
         }
@@ -396,6 +408,7 @@ fn truncate_output(mut text: String, limit: usize) -> String {
 /// Turns a `tools/call` result into text for the model.
 pub fn parse_call_result(result: &Value, limit: usize) -> McpCallResult {
     let mut parts: Vec<String> = Vec::new();
+    let mut images = Vec::new();
     if let Some(blocks) = result.get("content").and_then(Value::as_array) {
         for block in blocks {
             match block.get("type").and_then(Value::as_str) {
@@ -407,6 +420,21 @@ pub fn parse_call_result(result: &Value, limit: usize) -> McpCallResult {
                             .unwrap_or_default()
                             .to_owned(),
                     );
+                },
+                Some("image") => {
+                    let media_type = block.get("mimeType").and_then(Value::as_str);
+                    let data = block.get("data").and_then(Value::as_str);
+                    if let (Some(media_type), Some(data)) = (media_type, data)
+                        && media_type.starts_with("image/")
+                        && !data.is_empty()
+                        && data.len() <= MAX_TOOL_IMAGE_BASE64
+                    {
+                        images.push(ImagePart {
+                            media_type: media_type.to_owned(),
+                            data_base64: data.to_owned(),
+                        });
+                    }
+                    parts.push(IMAGE_NOT_SHOWN.to_owned());
                 },
                 Some(other) => parts.push(format!("[{other} content not shown]")),
                 None => {},
@@ -424,6 +452,7 @@ pub fn parse_call_result(result: &Value, limit: usize) -> McpCallResult {
             .get("isError")
             .and_then(Value::as_bool)
             .unwrap_or(false),
+        images,
     }
 }
 
@@ -1161,6 +1190,28 @@ mod tests {
         );
         assert_eq!(result.text, "a\n[image content not shown]\nb");
         assert!(!result.is_error);
+        // The image itself is kept for a model with vision.
+        assert_eq!(
+            result.images,
+            vec![ImagePart {
+                media_type: "image/png".into(),
+                data_base64: "xx".into(),
+            }]
+        );
+        // A block that is not an image (or has no payload) is a marker only.
+        let odd = parse_call_result(
+            &json!({"content": [
+                {"type": "image", "data": "", "mimeType": "image/png"},
+                {"type": "image", "data": "xx", "mimeType": "application/pdf"},
+                {"type": "audio", "data": "xx", "mimeType": "audio/wav"},
+            ]}),
+            1000,
+        );
+        assert!(odd.images.is_empty());
+        assert_eq!(
+            odd.text,
+            "[image content not shown]\n[image content not shown]\n[audio content not shown]"
+        );
         let error = parse_call_result(
             &json!({"content": [{"type": "text", "text": "boom"}], "isError": true}),
             1000,

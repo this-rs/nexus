@@ -18,9 +18,9 @@ use fake_openai::FakeOpenAi;
 use futures::StreamExt;
 use native::*;
 use nexus_claude::agent::{
-    AgentEvent, AgentProvider, AgentSession, CancelScope, CostBasis, InterruptScope, ModelPrice,
-    PermissionDecision, PermissionScope, PolicyMode, ProviderError, ProviderKind, ResumeToken,
-    SessionSpec, StopReason, ToolOutput, ToolPattern, ToolPolicy, TurnInput,
+    AgentEvent, AgentProvider, AgentSession, CancelScope, CostBasis, InputBlock, InterruptScope,
+    ModelPrice, PermissionDecision, PermissionScope, PolicyMode, ProviderError, ProviderKind,
+    ResumeToken, SessionSpec, StopReason, ToolOutput, ToolPattern, ToolPolicy, TurnInput,
 };
 use nexus_claude::model::{EndpointQuirks, PriceTable};
 use nexus_claude::providers::native::{
@@ -54,17 +54,23 @@ impl Harness {
     async fn with(routes: Vec<Value>, tweak: impl FnOnce(&mut NativeConfig)) -> Self {
         let mut all = vec![probe_route(true), models_route(128_000)];
         all.extend(routes);
+        Self::raw(all, EndpointQuirks::deepseek(), tweak).await
+    }
+
+    /// Every route given, nothing prepended, on `quirks`.
+    async fn raw(
+        all: Vec<Value>,
+        quirks: EndpointQuirks,
+        tweak: impl FnOnce(&mut NativeConfig),
+    ) -> Self {
         let server = FakeOpenAi::start(json!(all));
         let mut config = NativeConfig::new("native-test");
         config.default_model = Some("m".to_owned());
         tweak(&mut config);
         let store = Arc::new(MemoryTranscriptStore::new());
         let provider = Arc::new(
-            NativeProvider::new(
-                config,
-                endpoint(server.base_url(), EndpointQuirks::deepseek()),
-            )
-            .with_transcript_store(store.clone()),
+            NativeProvider::new(config, endpoint(server.base_url(), quirks))
+                .with_transcript_store(store.clone()),
         );
         Self {
             server,
@@ -854,7 +860,7 @@ async fn deny_patterns_and_allow_lists_decide_what_the_model_is_offered() {
         }
     };
     let all = offered(ToolPolicy::new(PolicyMode::Ask)).await;
-    assert_eq!(all.len(), 9, "{all:?}");
+    assert_eq!(all.len(), 10, "{all:?}");
     // deny wins and hides the tool.
     let denied = offered(
         ToolPolicy::from_patterns(
@@ -867,7 +873,7 @@ async fn deny_patterns_and_allow_lists_decide_what_the_model_is_offered() {
     .await;
     assert!(!denied.contains(&"mcp__fake__write".to_owned()));
     assert!(!denied.contains(&"mcp__fake__die".to_owned()));
-    assert_eq!(denied.len(), 7);
+    assert_eq!(denied.len(), 8);
     // An allow list is an exposure list.
     let allowed = offered(
         ToolPolicy::from_patterns(PolicyMode::Ask, &["mcp__fake__echo"], &[] as &[&str]).unwrap(),
@@ -1582,7 +1588,7 @@ async fn with_strict_exposure_off_an_allow_list_only_pre_approves() {
         ToolPolicy::from_patterns(PolicyMode::Ask, &["mcp__fake__echo"], &[] as &[&str]).unwrap();
     let session = h.open(spec).await;
     turn(&*session, "list").await;
-    assert_eq!(offered_tools(h.chat().last().unwrap()).len(), 9);
+    assert_eq!(offered_tools(h.chat().last().unwrap()).len(), 10);
 }
 
 // ---------------------------------------------------------------------------
@@ -2138,4 +2144,454 @@ async fn a_before_turn_hook_that_never_answers_is_skipped_with_a_notice_and_the_
     )), "{events:?}");
     assert!(model_changes(&events).is_empty());
     assert_eq!(t.wire_models(), ["m"]);
+}
+
+// ---------------------------------------------------------------------------
+// Images: the vision of the MODEL, never a "no" of the harness
+// ---------------------------------------------------------------------------
+
+/// A 1×1 transparent PNG.
+const PIXEL: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
+
+fn image_turn(text: &str) -> TurnInput {
+    let mut input = TurnInput::text(text);
+    input.blocks.push(InputBlock::Image {
+        media_type: "image/png".to_owned(),
+        data_base64: PIXEL.to_owned(),
+    });
+    input
+}
+
+/// A catalogue that states the modality of `m` the way OpenRouter does.
+fn modality_route(modality: &str) -> Value {
+    json!({"method": "GET", "path": "/v1/models", "status": 200,
+        "body": {"data": [{"id": "m", "context_length": 128_000, "architecture": {"modality": modality}}]}})
+}
+
+fn result_text(events: &[AgentEvent]) -> String {
+    match done(events) {
+        AgentEvent::Done { result_text, .. } => result_text.clone().unwrap_or_default(),
+        other => panic!("expected done, got {other:?}"),
+    }
+}
+
+fn image_parts(body: &Value) -> Vec<String> {
+    body["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|m| m["content"].as_array())
+        .flatten()
+        .filter(|part| part["type"] == "image_url")
+        .map(|part| part["image_url"]["url"].as_str().unwrap().to_owned())
+        .collect()
+}
+
+#[tokio::test]
+async fn a_vision_model_sees_the_image_and_the_transcript_keeps_it() {
+    let h = Harness::raw(
+        vec![
+            probe_route(true),
+            modality_route("text+image->text"),
+            // The model answers one way when the request carries the image, and
+            // another when it does not: a dropped image is a different answer.
+            text_reply(Some("image_url"), "I see one pixel", None, Some((100, 5))),
+            text_reply(None, "no image here", None, Some((100, 5))),
+        ],
+        EndpointQuirks::deepseek(),
+        |_| {},
+    )
+    .await;
+    let caps = h.provider.refresh_capabilities("m").await.unwrap();
+    assert!(caps.images, "the catalogue states the vision of the model");
+    let session = h.open(h.spec()).await;
+    assert!(session.capabilities().images);
+
+    let events = collect(
+        session
+            .send_turn(image_turn("what is this?"))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(stop_reason(&events), StopReason::Completed);
+    assert_eq!(result_text(&events), "I see one pixel");
+    let requests = h.chat();
+    let parts = requests[0]["messages"][0]["content"].as_array().unwrap();
+    assert_eq!(parts[0], json!({"type": "text", "text": "what is this?"}));
+    assert_eq!(
+        parts[1],
+        json!({"type": "image_url", "image_url": {"url": format!("data:image/png;base64,{PIXEL}")}})
+    );
+    // The transcript keeps the image whole, and the next turn replays it.
+    let AgentEvent::Done {
+        provider_session_id: Some(id),
+        ..
+    } = done(&events)
+    else {
+        panic!("done carries the transcript id");
+    };
+    let saved = h.store.load(id).unwrap().unwrap();
+    assert_eq!(saved[0].images.len(), 1);
+    assert_eq!(saved[0].images[0].data_base64, PIXEL);
+    assert_eq!(saved[0].content.as_deref(), Some("what is this?"));
+    let events = turn(&*session, "and now?").await;
+    assert_eq!(stop_reason(&events), StopReason::Completed);
+    let replay = &h.chat()[1];
+    assert_eq!(image_parts(replay).len(), 1);
+    assert_eq!(replay["messages"][2]["content"], "and now?");
+}
+
+#[tokio::test]
+async fn a_model_without_vision_refuses_an_image_as_its_own_limit() {
+    let h = Harness::raw(
+        vec![
+            probe_route(true),
+            modality_route("text->text"),
+            text_reply(None, "text only", None, Some((100, 5))),
+        ],
+        EndpointQuirks::deepseek(),
+        |_| {},
+    )
+    .await;
+    let caps = h.provider.refresh_capabilities("m").await.unwrap();
+    assert!(!caps.images);
+    let listed = h.provider.catalog().await.unwrap();
+    assert_eq!(listed[0].supports_images, Some(false));
+    let session = h.open(h.spec()).await;
+    assert_eq!(
+        session.send_turn(image_turn("look")).await.err(),
+        Some(ProviderError::unsupported("images"))
+    );
+    // The refusal left no turn running, and nothing with an image reached the model.
+    let events = turn(&*session, "plain").await;
+    assert_eq!(result_text(&events), "text only");
+    let requests = h.chat();
+    assert_eq!(requests.len(), 1);
+    assert!(!requests[0].to_string().contains("image_url"));
+}
+
+#[tokio::test]
+async fn a_silent_catalogue_is_asked_with_one_pixel_only_when_the_instance_allows_it() {
+    let probing = || {
+        let mut quirks = EndpointQuirks::deepseek();
+        quirks.vision_probe = true;
+        quirks
+    };
+    // The model refuses the pixel, naming images: no vision.
+    let h = Harness::raw(
+        vec![
+            probe_route(true),
+            models_route(128_000),
+            status_reply(
+                Some("image_url"),
+                400,
+                json!({"error": {"message": "This model does not support image input"}}),
+            ),
+            text_reply(None, "ok", None, None),
+        ],
+        probing(),
+        |_| {},
+    )
+    .await;
+    assert!(!h.provider.refresh_capabilities("m").await.unwrap().images);
+    assert_eq!(h.chat().len(), 1, "the pixel request alone");
+    assert_eq!(image_parts(&h.chat()[0]).len(), 1);
+    // The model answers the pixel: vision.
+    let h = Harness::raw(
+        vec![
+            probe_route(true),
+            models_route(128_000),
+            text_reply(Some("image_url"), "a pixel", None, None),
+            // The pixel probe takes the route above; the turn gets this one.
+            text_reply(Some("look"), "a pixel", None, None),
+            text_reply(None, "ok", None, None),
+        ],
+        probing(),
+        |_| {},
+    )
+    .await;
+    assert!(h.provider.refresh_capabilities("m").await.unwrap().images);
+    let session = h.open(h.spec()).await;
+    let events = collect(session.send_turn(image_turn("look")).await.unwrap()).await;
+    assert_eq!(result_text(&events), "a pixel");
+    // Without the probe nothing is asked and nothing is claimed...
+    let h = Harness::new(vec![text_reply(None, "ok", None, None)]).await;
+    assert!(!h.provider.refresh_capabilities("m").await.unwrap().images);
+    assert!(h.chat().is_empty());
+    // ...unless the instance declares the vision of its models.
+    let mut declared = EndpointQuirks::deepseek();
+    declared.vision = Some(true);
+    let h = Harness::raw(
+        vec![
+            probe_route(true),
+            models_route(128_000),
+            text_reply(None, "ok", None, None),
+        ],
+        declared,
+        |_| {},
+    )
+    .await;
+    assert!(h.provider.refresh_capabilities("m").await.unwrap().images);
+    assert!(h.chat().is_empty());
+}
+
+#[tokio::test]
+async fn images_of_the_summarised_history_are_said_never_lost_in_silence() {
+    let h = Harness::raw(
+        vec![
+            probe_route(true),
+            modality_route("text+image->text"),
+            tool_reply(Some("image_url"), &[echo_call()], None, Some((100, 10))),
+            text_reply(Some(TOOL), "done one", None, Some((10_000, 10))),
+            text_reply(
+                Some("compacting the history"),
+                "THE SUMMARY",
+                None,
+                Some((50, 20)),
+            ),
+            text_reply(Some("second"), "after compaction", None, Some((300, 10))),
+        ],
+        EndpointQuirks::deepseek(),
+        |config| {
+            config.context_window = Some(12_000);
+            config.compaction.keep_recent = 2;
+        },
+    )
+    .await;
+    let log_dir = tempfile::tempdir().unwrap();
+    let session = h.open(h.spec_with_mcp(&log_path(&log_dir))).await;
+    let first = collect(session.send_turn(image_turn("look at this")).await.unwrap()).await;
+    assert_eq!(result_text(&first), "done one");
+    let second = turn(&*session, "second").await;
+    assert_eq!(result_text(&second), "after compaction");
+
+    // The compaction said what it did with the image.
+    let notice = second
+        .iter()
+        .find_map(|event| match event {
+            AgentEvent::ProviderNotice { kind, data } if kind == "images_compacted" => Some(data),
+            _ => None,
+        })
+        .expect("a provider_notice images_compacted");
+    assert_eq!(notice["count"], 1);
+    let phases: Vec<&AgentEvent> = second
+        .iter()
+        .filter(|e| matches!(e, AgentEvent::Compaction { .. }))
+        .collect();
+    assert_eq!(phases.len(), 2);
+    let requests = h.chat();
+    assert_eq!(requests.len(), 4, "{requests:?}");
+    // The summarisation prompt names the image and never carries its pixels.
+    let summary = requests[2]["messages"][1]["content"].as_str().unwrap();
+    assert!(summary.contains("[image image/png]"), "{summary}");
+    assert!(!summary.contains(PIXEL));
+    assert!(image_parts(&requests[2]).is_empty());
+    // After compaction the image is gone from the wire, with the summary in its place.
+    assert!(image_parts(&requests[3]).is_empty());
+    assert!(
+        requests[3]["messages"][0]["content"]
+            .as_str()
+            .unwrap()
+            .contains("THE SUMMARY")
+    );
+}
+
+#[tokio::test]
+async fn an_image_block_is_checked_before_the_turn_starts() {
+    let h = Harness::raw(
+        vec![
+            probe_route(true),
+            modality_route("text+image->text"),
+            text_reply(None, "ok", None, None),
+        ],
+        EndpointQuirks::deepseek(),
+        |_| {},
+    )
+    .await;
+    h.provider.refresh_capabilities("m").await.unwrap();
+    let session = h.open(h.spec()).await;
+    let mut input = TurnInput::text("look");
+    input.blocks.push(InputBlock::Image {
+        media_type: "application/pdf".to_owned(),
+        data_base64: PIXEL.to_owned(),
+    });
+    assert_eq!(
+        session
+            .send_turn(input)
+            .await
+            .err()
+            .map(|e| e.kind().to_owned()),
+        Some("invalid_request".to_owned())
+    );
+    // Nothing was started: a plain turn runs.
+    assert_eq!(result_text(&turn(&*session, "plain").await), "ok");
+    assert_eq!(h.chat().len(), 1);
+}
+
+/// A catalogue with `m` (vision) and `text` (no vision), OpenRouter style.
+fn vision_pair_route() -> Value {
+    json!({"method": "GET", "path": "/v1/models", "status": 200, "body": {"data": [
+        {"id": "m", "context_length": 128_000, "architecture": {"modality": "text+image->text"}},
+        {"id": "text", "context_length": 128_000, "architecture": {"modality": "text->text"}},
+    ]}})
+}
+
+#[tokio::test]
+async fn the_active_model_decides_images_after_set_model_and_the_history_says_what_it_lost() {
+    let h = Harness::raw(
+        vec![
+            probe_route(true),
+            vision_pair_route(),
+            text_reply(Some("image_url"), "I see one pixel", None, Some((100, 5))),
+            text_reply(Some("plain"), "text only", None, Some((100, 5))),
+            text_reply(None, "back on m", None, Some((100, 5))),
+        ],
+        EndpointQuirks::deepseek(),
+        |_| {},
+    )
+    .await;
+    let session = h.open(h.spec()).await;
+    assert!(session.capabilities().images);
+    let events = collect(session.send_turn(image_turn("look")).await.unwrap()).await;
+    assert_eq!(result_text(&events), "I see one pixel");
+
+    // `text` has no vision: an image turn is refused with the typed error, although
+    // the snapshot of the session (A4) still says what `m` could do.
+    session.set_model("text").await.unwrap();
+    assert!(session.capabilities().images);
+    assert_eq!(
+        session.send_turn(image_turn("again")).await.err(),
+        Some(ProviderError::unsupported("images"))
+    );
+    // A text turn on `text` replays the history without the pixels, with a marker.
+    let events = turn(&*session, "plain").await;
+    assert_eq!(result_text(&events), "text only");
+    let requests = h.chat();
+    let replay = requests.last().unwrap();
+    assert_eq!(replay["model"], "text");
+    assert!(image_parts(replay).is_empty(), "{replay}");
+    let first = replay["messages"][0]["content"].as_str().unwrap();
+    assert!(
+        first.starts_with("look\n[image omitted: the active model has no vision]"),
+        "{first}"
+    );
+
+    // Back on `m`: images are accepted again, and the history has its pixel back.
+    session.set_model("m").await.unwrap();
+    let events = collect(session.send_turn(image_turn("once more")).await.unwrap()).await;
+    assert_eq!(stop_reason(&events), StopReason::Completed);
+    let last = h.chat().last().unwrap().clone();
+    assert_eq!(last["model"], "m");
+    assert_eq!(image_parts(&last).len(), 2, "{last}");
+}
+
+#[tokio::test]
+async fn a_before_turn_switch_to_a_model_without_vision_fails_the_image_turn_typed() {
+    let h = Harness::raw(
+        vec![
+            probe_route(true),
+            vision_pair_route(),
+            text_reply(None, "should not be reached", None, Some((100, 5))),
+        ],
+        EndpointQuirks::deepseek(),
+        |_| {},
+    )
+    .await;
+    let hooks = Arc::new(ModelHooks {
+        model: Mutex::new(Some("text".to_owned())),
+        ..ModelHooks::default()
+    });
+    let mut spec = h.spec();
+    spec.hooks = Some(hooks as Arc<dyn SessionHooks>);
+    let session = h.open(spec).await;
+    // Accepted on `m` (vision), then the directive makes `text` active.
+    let events = collect(session.send_turn(image_turn("look")).await.unwrap()).await;
+    assert_eq!(model_changes(&events), ["text"]);
+    let AgentEvent::Done {
+        stop_reason,
+        is_error,
+        error,
+        ..
+    } = done(&events)
+    else {
+        panic!("expected done");
+    };
+    assert_eq!(*stop_reason, StopReason::Error);
+    assert!(*is_error);
+    assert_eq!(error.clone(), Some(ProviderError::unsupported("images")));
+    // Nothing reached the model.
+    assert!(h.chat().is_empty(), "{:?}", h.chat());
+}
+
+/// A turn whose model calls the `picture` tool of `fake_mcp` (a text and an image).
+fn picture_routes(modality: &str) -> Vec<Value> {
+    vec![
+        probe_route(true),
+        modality_route(modality),
+        tool_reply(
+            Some("show me"),
+            &[("c1", "mcp__fake__picture", json!({}))],
+            None,
+            Some((100, 10)),
+        ),
+        text_reply(Some(TOOL), "it is a pixel", None, Some((120, 10))),
+    ]
+}
+
+#[tokio::test]
+async fn a_tool_image_reaches_a_vision_model_in_a_user_message_after_the_results() {
+    let h = Harness::raw(
+        picture_routes("text+image->text"),
+        EndpointQuirks::deepseek(),
+        |_| {},
+    )
+    .await;
+    let log_dir = tempfile::tempdir().unwrap();
+    let session = h.open(h.spec_with_mcp(&log_path(&log_dir))).await;
+    let events = turn(&*session, "show me").await;
+    assert_eq!(result_text(&events), "it is a pixel");
+    let requests = h.chat();
+    assert_eq!(requests.len(), 2);
+    let messages = requests[1]["messages"].as_array().unwrap();
+    // user, assistant (tool call), tool result, then the user message with the image.
+    assert_eq!(messages.len(), 4, "{messages:?}");
+    assert_eq!(messages[2]["role"], "tool");
+    let result = messages[2]["content"].as_str().unwrap();
+    assert_eq!(
+        result,
+        "here is the picture\n[image: attached in the next message]"
+    );
+    assert_eq!(messages[3]["role"], "user");
+    let parts = messages[3]["content"].as_array().unwrap();
+    assert_eq!(
+        parts[0],
+        json!({"type": "text", "text": "[images returned by the tool call(s) c1]"})
+    );
+    assert_eq!(
+        parts[1]["image_url"]["url"],
+        format!("data:image/png;base64,{PIXEL}")
+    );
+}
+
+#[tokio::test]
+async fn a_tool_image_stays_a_marker_for_a_model_without_vision() {
+    let h = Harness::raw(
+        picture_routes("text->text"),
+        EndpointQuirks::deepseek(),
+        |_| {},
+    )
+    .await;
+    let log_dir = tempfile::tempdir().unwrap();
+    let session = h.open(h.spec_with_mcp(&log_path(&log_dir))).await;
+    let events = turn(&*session, "show me").await;
+    assert_eq!(result_text(&events), "it is a pixel");
+    let requests = h.chat();
+    let messages = requests[1]["messages"].as_array().unwrap();
+    assert_eq!(messages.len(), 3, "{messages:?}");
+    assert_eq!(
+        messages[2]["content"],
+        "here is the picture\n[image content not shown]"
+    );
+    assert!(!requests[1].to_string().contains("image_url"));
 }
