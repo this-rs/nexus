@@ -89,6 +89,10 @@ impl Staging {
         config
             .env
             .insert("FAKE_ACP_CANARY".to_owned(), CANARY.to_owned());
+        // Under `cargo llvm-cov`, the fake agent writes its profile where this variable
+        // says; the allowlist would drop it and every line of `fake_acp` the suite runs
+        // would be counted as never run. Absent outside coverage: inheriting it is a no-op.
+        config.env_inherit.push("LLVM_PROFILE_FILE".to_owned());
         config
     }
 
@@ -1186,6 +1190,49 @@ async fn a_json_rpc_error_ends_the_turn_with_a_classified_done_and_the_session_s
             retry_after_ms: None
         })
     );
+    assert_eq!(stop_of(&turn(&*session).await), StopReason::Completed);
+    session.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_malformed_prompt_result_ends_the_turn_with_a_protocol_error_and_the_session_survives() {
+    // The agent answers the prompt with a result that is not a `PromptResult` (its
+    // `stopReason` is a number). Written outside `sessions/`: every transcript there must
+    // be accepted by the types (`acp_schema_drift`), and this one is wrong on purpose.
+    let staging = Staging::new();
+    let path = staging.cwd.path().join("prompt_malformed.jsonl");
+    let include = |name: &str| json!({"op": "include", "file": transcript(name)}).to_string();
+    let lines = [
+        include("prelude"),
+        include("turn1_start"),
+        json!({"op": "reply", "to": "p1", "result": {"stopReason": 42}}).to_string(),
+        include("turn2_text"),
+    ];
+    std::fs::write(&path, lines.join("\n")).expect("the transcript is written");
+    let mut spec = staging.spec("plain");
+    spec.env
+        .set
+        .insert("FAKE_ACP_TRANSCRIPT".to_owned(), path.display().to_string());
+    let session = staging
+        .learned_provider()
+        .await
+        .open(spec)
+        .await
+        .expect("the session opens");
+    let events = turn(&*session).await;
+    let AgentEvent::Done {
+        stop_reason,
+        is_error,
+        error,
+        ..
+    } = done(&events)
+    else {
+        panic!("{events:?}");
+    };
+    assert_eq!(*stop_reason, StopReason::Error);
+    assert!(*is_error);
+    let shown = error.as_ref().expect("a typed error").to_string();
+    assert!(shown.contains("malformed session/prompt result"), "{shown}");
     assert_eq!(stop_of(&turn(&*session).await), StopReason::Completed);
     session.close().await.unwrap();
 }
