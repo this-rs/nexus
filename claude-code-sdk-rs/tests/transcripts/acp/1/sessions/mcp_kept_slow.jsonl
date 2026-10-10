@@ -6,4 +6,6 @@
 {"op":"include","file":"handshake.jsonl"}
 {"op":"wait_file","env":"FAKE_ACP_GATE","timeout_ms":20000}
 {"op":"expect","method":"session/new","reply":{"sessionId":"sess_kept"}}
-{"op":"include","file":"turn1_text.jsonl"}
+# Then the agent exits on its own: a session close is a SIGKILL, which would leave the
+# run of `wait_file` unmeasured under `cargo llvm-cov` (no profile written).
+{"op":"exit","code":0}

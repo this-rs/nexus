@@ -1658,3 +1658,29 @@ async fn a_concurrent_refusal_does_not_flip_a_session_that_kept_its_servers() {
     refused.close().await.unwrap();
     kept.close().await.unwrap();
 }
+
+/// An agent that exits during its handshake — it waited for a signal that never came,
+/// or its transcript was misused (no gate named) — fails the opening with an error:
+/// never a session, never a hang.
+#[tokio::test]
+async fn an_agent_that_exits_during_its_handshake_fails_the_opening() {
+    let staging = Staging::new();
+    let provider = staging.learned_provider().await;
+    let mut spec = with_po_server(staging.spec("gate_never_opens"));
+    spec.env.set.insert(
+        "FAKE_ACP_GATE".to_owned(),
+        staging.cwd.path().join("never").display().to_string(),
+    );
+    let opened = tokio::time::timeout(Duration::from_secs(10), provider.open(spec))
+        .await
+        .expect("no hang");
+    assert!(opened.is_err(), "the agent gave up waiting");
+    // No gate named: the agent refuses the directive and exits.
+    let opened = tokio::time::timeout(
+        Duration::from_secs(10),
+        provider.open(with_po_server(staging.spec("gate_never_opens"))),
+    )
+    .await
+    .expect("no hang");
+    assert!(opened.is_err(), "the agent exited at once");
+}
