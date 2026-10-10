@@ -1,0 +1,11 @@
+# An agent that takes the session's MCP servers, but answers `session/new` only once the
+# test says so (`wait_file` on FAKE_ACP_GATE): the window in which a concurrent opening
+# of the same instance is refused its servers (`mcp_refused.jsonl`) and teaches the
+# provider. A signal, not a delay: the order holds on a loaded runner. This session
+# kept its servers.
+{"op":"include","file":"handshake.jsonl"}
+{"op":"wait_file","env":"FAKE_ACP_GATE","timeout_ms":20000}
+{"op":"expect","method":"session/new","reply":{"sessionId":"sess_kept"}}
+# Then the agent exits on its own: a session close is a SIGKILL, which would leave the
+# run of `wait_file` unmeasured under `cargo llvm-cov` (no profile written).
+{"op":"exit","code":0}

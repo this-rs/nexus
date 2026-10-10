@@ -54,6 +54,8 @@
 //!   request (`expect` is compared with its `result`, `expect_error_code` with its
 //!   `error.code`).
 //! * `{"op":"emit","line":"raw text"}`, `{"op":"stderr","line":"…"}`, `{"op":"sleep","ms":N}`
+//! * `{"op":"wait_file","env":"FAKE_ACP_GATE"}` — wait until the file named by that
+//!   environment variable exists (the test creates it: a signal, not a delay).
 //! * `{"op":"spawn_child","own_group":true}` — start a `sleep 600` child (in its own
 //!   process group when asked) and record its pid.
 //! * `{"op":"wait_eof"}`, `{"op":"exit","code":N}`
@@ -350,6 +352,25 @@ impl Fake {
                 "sleep" => std::thread::sleep(Duration::from_millis(
                     directive.get("ms").and_then(Value::as_u64).unwrap_or(0),
                 )),
+                "wait_file" => {
+                    // Wait until the file the session's environment names exists: the test
+                    // creates it when the agent may go on (a signal, not a delay).
+                    let name = directive["env"].as_str().unwrap_or("");
+                    let Some(path) = std::env::var_os(name) else {
+                        die(
+                            &self.children,
+                            EXIT_BAD_DIRECTIVE,
+                            "wait_file: the variable is not set",
+                        );
+                    };
+                    let deadline = std::time::Instant::now() + self.wait(directive);
+                    while !Path::new(&path).exists() {
+                        if std::time::Instant::now() >= deadline {
+                            die(&self.children, EXIT_TIMEOUT, "wait_file: timed out");
+                        }
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                },
                 "spawn_child" => self.spawn_child(directive),
                 "wait_eof" => self.wait_eof(),
                 "exit" => {

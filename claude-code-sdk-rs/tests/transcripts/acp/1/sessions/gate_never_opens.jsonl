@@ -1,0 +1,6 @@
+# An agent that waits, during its handshake, for a signal that never comes
+# (`wait_file`, short timeout): it gives up and exits (96). The opening fails, typed,
+# instead of hanging.
+{"op":"include","file":"handshake.jsonl"}
+{"op":"wait_file","env":"FAKE_ACP_GATE","timeout_ms":200}
+{"op":"expect","method":"session/new","reply":{"sessionId":"sess_never"}}
