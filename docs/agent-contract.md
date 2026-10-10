@@ -511,8 +511,11 @@ transcriptions écrites depuis les pages publiques d'`agentclientprotocol.com`
   = false` le déclare d'avance (`per_session_mcp: false`, une session à qui l'on donne un serveur → `Unsupported
   { per_session_mcp }` avant tout lancement). Sinon le refus est **appris** : `session/new` (ou `session/load`) est
   redemandé UNE fois sans serveurs, la session s'ouvre et le dit (`provider_notice { mcp_servers_refused }`, serveurs
-  `refused` dans `session_started`, `per_session_mcp: false` dans ses capacités), puis le provider répond
-  `per_session_mcp: false` et refuse un serveur comme ci-dessus. Un autre refus n'est pas redemandé.
+  `refused` dans `session_started`, `per_session_mcp: false` dans ses capacités), puis ce provider répond
+  `per_session_mcp: false` et refuse un serveur comme ci-dessus. Appris **en mémoire** seulement, par valeur
+  d'`AcpProvider` (partagé par ses processus d'agent, perdu au redémarrage de l'hôte ou à la reconstruction de
+  l'instance) ; un hôte qui doit s'en souvenir le garde lui-même (les capacités de la session le disent). Un autre
+  refus n'est pas redemandé.
   `RpcError::detail` garde le texte de `data` (`details`, `message` ou chaîne), affiché dans l'erreur `protocol`.
 - **`context_window`** : celle de la configuration (`configured`), sinon `None`. **`set_model_live` = non** :
   `session/set_model` est instable, `set_model` → `Unsupported { set_model_live }` ; `SessionSpec::model` n'est
