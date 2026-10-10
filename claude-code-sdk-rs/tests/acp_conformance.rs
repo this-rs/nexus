@@ -1613,13 +1613,23 @@ async fn another_refusal_of_session_new_is_not_retried() {
 async fn a_concurrent_refusal_does_not_flip_a_session_that_kept_its_servers() {
     let staging = Staging::new();
     let provider = staging.learned_provider().await;
-    let kept = provider.open(with_po_server(staging.spec("mcp_kept_slow")));
+    // A answers its `session/new` only once B has been refused and taught the provider:
+    // the gate file is created after B's opening returns (a signal, not a delay).
+    let gate = staging.cwd.path().join("gate");
+    let mut kept_spec = with_po_server(staging.spec("mcp_kept_slow"));
+    kept_spec
+        .env
+        .set
+        .insert("FAKE_ACP_GATE".to_owned(), gate.display().to_string());
+    let kept = provider.open(kept_spec);
     let refused = async {
-        // A is past its checks and waiting for its `session/new`.
-        tokio::time::sleep(Duration::from_millis(200)).await;
-        provider
+        // A is past its checks (they run before its first await).
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let refused = provider
             .open(with_po_server(staging.spec("mcp_refused")))
-            .await
+            .await;
+        std::fs::write(&gate, b"go").expect("the gate");
+        refused
     };
     let (kept, refused) = tokio::join!(kept, refused);
     let refused = refused.expect("B opens without its servers");

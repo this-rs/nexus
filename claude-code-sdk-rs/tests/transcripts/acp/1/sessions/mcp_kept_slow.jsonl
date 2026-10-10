@@ -1,7 +1,9 @@
-# An agent that takes the session's MCP servers, but answers `session/new` late: the
-# window in which a concurrent opening of the same instance is refused its servers
-# (`mcp_refused.jsonl`) and teaches the provider. This session kept its servers.
+# An agent that takes the session's MCP servers, but answers `session/new` only once the
+# test says so (`wait_file` on FAKE_ACP_GATE): the window in which a concurrent opening
+# of the same instance is refused its servers (`mcp_refused.jsonl`) and teaches the
+# provider. A signal, not a delay: the order holds on a loaded runner. This session
+# kept its servers.
 {"op":"include","file":"handshake.jsonl"}
-{"op":"sleep","ms":1500}
+{"op":"wait_file","env":"FAKE_ACP_GATE","timeout_ms":20000}
 {"op":"expect","method":"session/new","reply":{"sessionId":"sess_kept"}}
 {"op":"include","file":"turn1_text.jsonl"}

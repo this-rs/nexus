@@ -539,7 +539,6 @@ impl AcpProvider {
                 // servers. What THIS handshake did decides: servers given and kept → yes,
                 // dropped → no; no server given → what the instance knows.
                 capabilities.per_session_mcp = session_carries_mcp(
-                    self.config.per_session_mcp,
                     !spec.mcp_servers.is_empty(),
                     handshake.mcp_dropped,
                     capabilities.per_session_mcp,
@@ -702,13 +701,11 @@ impl AcpProvider {
 /// `per_session_mcp` of ONE session: what its handshake did, not the instance's state at
 /// the time the session is built. A session given servers carries them unless the agent
 /// refused them in this very handshake (`dropped`); a session given none says what the
-/// instance knows (`instance`: configured and not learned refused).
-fn session_carries_mcp(configured: bool, given: bool, dropped: bool, instance: bool) -> bool {
-    if given {
-        configured && !dropped
-    } else {
-        instance
-    }
+/// instance knows (`instance`: configured and not learned refused). No `configured` term
+/// for a session given servers: one is refused before anything starts when the instance
+/// does not carry them (`Unsupported { per_session_mcp }` in `build`).
+fn session_carries_mcp(given: bool, dropped: bool, instance: bool) -> bool {
+    if given { !dropped } else { instance }
 }
 
 /// `serde_json::to_value` of a wire type (plain structs of strings, options and
@@ -911,6 +908,22 @@ impl AgentProvider for AcpProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Review of #87: a session given servers that its own handshake kept carries them,
+    /// whatever the instance learned meanwhile (a concurrent refusal); one dropped does
+    /// not; one given none says what the instance knows.
+    #[test]
+    fn a_session_carries_mcp_from_its_own_handshake() {
+        assert!(
+            session_carries_mcp(true, false, false),
+            "kept, instance learned a refusal"
+        );
+        assert!(session_carries_mcp(true, false, true));
+        assert!(!session_carries_mcp(true, true, false));
+        assert!(!session_carries_mcp(true, true, true));
+        assert!(session_carries_mcp(false, false, true));
+        assert!(!session_carries_mcp(false, false, false));
+    }
 
     /// `env` is documented "not for secrets", but an operator can still put one there:
     /// a log line that prints the configuration must not repeat it.
