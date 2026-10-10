@@ -23,10 +23,10 @@ use async_trait::async_trait;
 use futures::StreamExt;
 use nexus_claude::agent::{
     AgentEvent, AgentProvider, AgentSession, CancelScope, CompactionInfo, CompactionPhase,
-    CompactionTrigger, EventStream, HookVerdict, InterruptScope, McpServerSpec, ModelInfo,
-    PermissionDecision, PermissionScope, PolicyMode, ProviderError, ProviderKind, QuestionAnswer,
-    QuestionReply, ResumeToken, SessionHooks, SessionSpec, StopReason, ToolCallInfo, ToolCategory,
-    ToolResultInfo, TurnInput,
+    CompactionTrigger, EventStream, HookVerdict, InputBlock, InterruptScope, McpServerSpec,
+    ModelInfo, PermissionDecision, PermissionScope, PolicyMode, ProviderError, ProviderKind,
+    QuestionAnswer, QuestionReply, ResumeToken, SessionHooks, SessionSpec, StopReason,
+    ToolCallInfo, ToolCategory, ToolResultInfo, TurnInput,
 };
 use nexus_claude::providers::claude_code::{ClaudeCodeConfig, ClaudeCodeProvider};
 use nexus_claude::testkit::{ConformanceTarget, Prepared, Scenario, ScenarioOutcome, run_all};
@@ -133,9 +133,7 @@ fn interrupted_result() -> Value {
 
 const INTERRUPT_MARK: &str = r#""type":"interrupt""#;
 
-/// The transcript that stages a scenario as its documentation says. For the
-/// three capabilities absent in this slice (`tool_cancel`, `background_tasks`,
-/// `images`) the staging is a plain turn: the suite verifies the fallback.
+/// The transcript that stages a scenario as its documentation says.
 fn transcript_for(scenario: Scenario) -> Transcript {
     let script = match scenario {
         Scenario::TourTexteSimple
@@ -143,8 +141,15 @@ fn transcript_for(scenario: Scenario) -> Transcript {
         | Scenario::DirectiveModele
         | Scenario::ChangementPolitique
         | Scenario::Reprise
-        | Scenario::FinUsageCout
-        | Scenario::MessageImages => answer(begin(scenario), "bonjour"),
+        | Scenario::FinUsageCout => answer(begin(scenario), "bonjour"),
+        // The prompt and the image are blocks of one line: the fake waits for the
+        // image block (its exact shape is proved byte for byte below).
+        Scenario::MessageImages => answer(
+            Transcript::new()
+                .await_stdin_containing(r#"{"source":{"data":"iVBORw0KGgo"#)
+                .init("fake-session"),
+            "bonjour",
+        ),
         // A tool is a real child process of the fake; cancelling the tools
         // signals it, the tool ends in error and the turn goes on to its end.
         Scenario::AnnulationTourPreserve => answer(
@@ -406,14 +411,10 @@ async fn a_claude_code_passes_the_conformance_suite() {
     println!("{}", report.summary());
     report.assert_conformant();
 
-    // The capability this slice declares absent (images) had its FALLBACK
-    // verified; everything else played out for real.
+    // Every scenario played out for real, `message_images` included: no
+    // capability of this provider is absent, no fallback stands in.
     for (scenario, outcome) in &report.results {
-        let expected = match scenario {
-            Scenario::MessageImages => ScenarioOutcome::FallbackVerified,
-            _ => ScenarioOutcome::Passed,
-        };
-        assert_eq!(outcome, &expected, "{scenario}");
+        assert_eq!(outcome, &ScenarioOutcome::Passed, "{scenario}");
     }
 }
 
@@ -426,7 +427,7 @@ fn the_declared_capabilities_are_the_ones_of_this_slice() {
     assert!(capabilities.secret_isolation);
     assert!(capabilities.tool_cancel);
     assert!(capabilities.background_tasks);
-    assert!(!capabilities.images);
+    assert!(capabilities.images);
     assert_eq!(
         capabilities.permission_scopes,
         [
@@ -773,6 +774,92 @@ async fn a_before_turn_directive_writes_set_model_before_the_input_and_opens_the
     );
     session.close().await.unwrap();
     same.close().await.unwrap();
+}
+
+/// A 1×1 transparent PNG.
+const PIXEL_PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
+
+fn image_block(media_type: &str, data: &str) -> InputBlock {
+    InputBlock::Image {
+        media_type: media_type.into(),
+        data_base64: data.into(),
+    }
+}
+
+#[tokio::test]
+async fn a_turn_with_images_is_written_as_blocks_in_the_users_order_byte_for_byte() {
+    let (fake, provider, spec) = stage(until_closed(answer(
+        Transcript::new()
+            .await_stdin_containing("what is between")
+            .init("fake-session"),
+        "two pixels",
+    )));
+    let session = open(&provider, spec).await;
+    // Image first, text between, image last: the CLI gets them in this order.
+    let input = TurnInput {
+        blocks: vec![
+            image_block("image/png", PIXEL_PNG),
+            InputBlock::Text {
+                text: "what is between".into(),
+            },
+            image_block("image/webp", "UklGRg=="),
+        ],
+    };
+    let stream = session.send_turn(input).await.unwrap();
+    let events = read_turn(stream, |_| async {}).await;
+    assert_eq!(stop_reason(&events), Some(StopReason::Completed));
+    let lines = fake.stdin_lines();
+    assert_eq!(
+        lines[0],
+        format!(
+            r#"{{"type":"user","message":{{"content":[{{"source":{{"data":"{PIXEL_PNG}","media_type":"image/png","type":"base64"}},"type":"image"}},{{"text":"what is between","type":"text"}},{{"source":{{"data":"UklGRg==","media_type":"image/webp","type":"base64"}},"type":"image"}}],"role":"user"}},"parent_tool_use_id":null,"session_id":"default"}}"#
+        )
+    );
+    assert_eq!(lines.len(), 1, "nothing else was written: {lines:#?}");
+    session.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn an_image_the_cli_would_reject_is_refused_before_anything_is_written() {
+    let (fake, provider, spec) = stage(until_closed(answer(
+        Transcript::new()
+            .await_stdin_containing("after the refusals")
+            .init("fake-session"),
+        "ok",
+    )));
+    let session = open(&provider, spec).await;
+    let too_big = "A".repeat((5 * 1024 * 1024 / 3 + 1) * 4);
+    for (media_type, data) in [
+        ("image/tiff", PIXEL_PNG),
+        ("image/png", "data:image/png;base64,AAAA"),
+        ("image/png", ""),
+        ("image/png", too_big.as_str()),
+    ] {
+        let mut input = TurnInput::text("look");
+        input.blocks.push(image_block(media_type, data));
+        assert!(
+            matches!(
+                session.send_turn(input).await.err(),
+                Some(ProviderError::InvalidRequest { .. })
+            ),
+            "{media_type} / {} bytes of payload",
+            data.len()
+        );
+    }
+    // No turn was left open, and nothing reached the CLI before this one.
+    let stream = session
+        .send_turn(TurnInput::text("after the refusals"))
+        .await
+        .unwrap();
+    let events = read_turn(stream, |_| async {}).await;
+    assert_eq!(stop_reason(&events), Some(StopReason::Completed));
+    assert_eq!(
+        fake.stdin_lines(),
+        [
+            r#"{"type":"user","message":{"content":"after the refusals","role":"user"},"parent_tool_use_id":null,"session_id":"default"}"#
+        ]
+    );
+    session.close().await.unwrap();
 }
 
 #[tokio::test]
@@ -1324,7 +1411,7 @@ async fn a_refused_turn_writes_nothing_and_close_ends_the_running_turn() {
         media_type: "image/png".into(),
         data_base64: "AAAA".into(),
     });
-    // The turn in progress is refused first; the image would be refused next.
+    // The turn in progress is refused first, before the image is even looked at.
     assert_eq!(
         session.send_turn(image).await.err(),
         Some(ProviderError::TurnInProgress)

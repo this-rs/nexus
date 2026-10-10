@@ -276,9 +276,9 @@ Valeurs de référence (v1, à confirmer par la conformité de chaque adaptateur
 | subagents | nested | none | separate_thread | none |
 | compaction_signal | oui | oui | oui | non |
 | thinking | oui | selon modèle | oui | oui |
-| images | non (A12) | selon modèle (v5 : catalogue, sonde d'un pixel en option, déclaration d'instance) | non | non |
+| images | oui (A12 révisée : blocs de contenu dans l'ordre de l'utilisateur, local et SSH) | selon modèle (v5 : catalogue, sonde d'un pixel en option, déclaration d'instance) | non | non |
 
-Règle `images` par moteur (A12, révisée en v5) : `images` est `false` pour Claude Code, Codex et ACP, quoi que le
+Règle `images` par moteur (A12, révisée en v5, puis pour Claude Code) : `images` est `false` pour Codex et ACP, quoi que le
 moteur annonce (`promptCapabilities.image` d'ACP, entrée image de Codex). Un bloc `image` dans `send_turn` rend
 `Unsupported { capability: "images" }` ; une capacité réelle d'un moteur ne bascule `images` à `true` qu'avec une
 décision de contrat et un scénario `message_images` joué (et non replié). **Décision v5 (natif)** : `images` est la
@@ -290,7 +290,18 @@ vaut `false`) ; sinon la sonde d'un pixel si l'instance l'active (`EndpointQuirk
 déclaration de l'instance (`EndpointQuirks.vision: Option<bool>`). Rien de tout cela : inconnu, ce que `Capabilities`
 (un `bool`) rend `false` — l'inconnu reste distinct dans `ModelInfo.supports_images` / `EndpointProbe.images`
 (`Option<bool>`, `None`) et n'est pas mis en cache comme un « non » par la sonde. `message_images` est joué pour
-de vrai par `native_conformance` sur un modèle dont le catalogue dit la vision.
+de vrai par `native_conformance` sur un modèle dont le catalogue dit la vision. **Décision Claude Code** : `images` est
+`true`, instance locale ET distante (SSH : le même stream-json passe sur stdin). Un tour avec au moins une image est écrit
+par `InteractiveClient::send_message_blocks` : un message `user` dont `content` est la liste des blocs DANS L'ORDRE de
+`TurnInput.blocks` (texte `{type:text,text}`, image `{type:image,source:{type:base64,media_type,data}}` ; un bloc de
+texte vide est omis) — contrairement au natif, le CLI prend texte et images entrelacés. Avant d'écrire, chaque image est
+vérifiée (`providers/claude_code/input.rs`) : `media_type` parmi `image/png`, `image/jpeg`, `image/gif`, `image/webp`
+(les types de `UserContentBlock::Image` et du `Read` de `nexus-tools`), `data_base64` en base64 standard complété sans
+préfixe `data:` ni blanc, au plus 5 Mio décodés (`MAX_IMAGE_BYTES` du `Read` de `nexus-tools`, limite par image de l'API
+Anthropic derrière le CLI) ; sinon `InvalidRequest`, rien n'est écrit et aucun tour n'est ouvert. Un tour de texte seul
+reste la chaîne `content: "<texte>"` d'avant, octet pour octet. `message_images` est joué (et non replié) par
+`claude_code_conformance` ; le bloc traverse le faux ssh (`claude_code_remote`). Changement de VALEUR d'une capacité
+sur un provider, aucune forme sérialisée ne bouge : `CONTRACT_VERSION` reste 5 (§16).
 | tools | oui | selon modèle (sonde) | oui | oui |
 | context_window | reported | configured / probed | configured | None |
 | set_model_live | oui (`set_model` de contrôle ; `before_turn` → `set_model` écrit avant l'entrée du tour) | oui (entre deux tours ; `before_turn` appliqué au tour qui commence, fenêtre et coût du modèle actif) | oui (par tour ; hooks `none` : `before_turn` jamais appelé) | non (directive → `model_directive_ignored` si les hooks étaient honorés ; ils ne le sont pas) |
@@ -1090,6 +1101,8 @@ jeton, `add_dirs` ← `extra_dirs`, `env` ← `EnvSpec.set`, `cli_path` ← exte
   v2, le copient comme fixture.
   L'instantané v2 porte aussi `provider_instance_config` (natif avec préréglage, prix et extension ; ACP ; Claude Code) : une entrée d'instantané ajoutée pour une
   forme que le registre sérialisait déjà, **sans changement de forme ni de `CONTRACT_VERSION`**.
+  De même, `images` passe à `true` pour Claude Code (§5, A12 révisée) : une VALEUR de capacité d'un provider change,
+  pas une forme ni une signature, **sans changement de `CONTRACT_VERSION`**.
 - `agent::CONTRACT_VERSION: u32`. Monte de 1 à chaque changement d'une forme sérialisée
   (`AgentEvent`, `Capabilities`, `ProviderError`, `ToolPolicy`, `ResumeToken`) ou d'une signature de
   trait. Les instantanés JSON de `tests/agent_contract_snapshots.rs` portent la version : changer
@@ -1130,7 +1143,7 @@ jeton, `add_dirs` ← `extra_dirs`, `env` ← `EnvSpec.set`, `cli_path` ← exte
   ```json
   {"interactive_permissions":true,"permission_scopes":["once","session","always"],"sandbox":"none",
    "secret_isolation":true,"per_session_mcp":true,"hooks":"in_protocol","subagents":"nested",
-   "compaction_signal":true,"thinking":true,"images":false,"tools":true,
+   "compaction_signal":true,"thinking":true,"images":true,"tools":true,
    "context_window":{"value":200000,"source":"reported"},"set_model_live":true,
    "native_question":true,"tool_cancel":true,"background_tasks":true,"resume":true,"cost":"reported"}
   ```

@@ -87,8 +87,9 @@ impl ClaudeCodeConfig {
     /// Capabilities of this instance for a model (`None`: the default model):
     /// the "Claude Code" column of contract §5.
     ///
-    /// One value differs from that column, its fallback verified by the
-    /// conformance suite: `images` is `false` in v1 (A12). `tool_cancel` and
+    /// `images` is declared, local and over SSH (A12, revised): the CLI takes
+    /// image blocks on stdin, and the conformance suite plays `message_images`
+    /// for real ([`super::input`] checks each image first). `tool_cancel` and
     /// `background_tasks` are declared: the session signals the CLI's
     /// descendants ([`super::cancel`]) and keeps a table of background tasks
     /// ([`super::tasks`]). `secret_isolation` is declared only when the instance
@@ -116,7 +117,7 @@ impl ClaudeCodeConfig {
         capabilities.subagents = SubagentSupport::Nested;
         capabilities.compaction_signal = true;
         capabilities.thinking = true;
-        capabilities.images = false;
+        capabilities.images = true;
         capabilities.tools = true;
         capabilities.context_window = model
             .and_then(|model| self.models.iter().find(|info| info.id == model))
@@ -346,7 +347,7 @@ mod tests {
                 "subagents": "nested",
                 "compaction_signal": true,
                 "thinking": true,
-                "images": false,
+                "images": true,
                 "tools": true,
                 "set_model_live": true,
                 "native_question": true,
