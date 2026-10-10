@@ -848,13 +848,24 @@ async fn a_timeout_of_the_auto_retry_is_a_timeout() {
             400,
             json!({"body": {"error": {"message": THINKING_REFUSAL}}})
         ),
-        post(200, json!({"body": "late", "delay_ms": 1500}))
+        // Never answered within the test: only the client's timeout ends the retry.
+        post(200, json!({"body": "late", "delay_ms": 60_000}))
     ]));
+    // The timeout applies to the FIRST request too: it must leave a loaded runner all the
+    // time it needs to answer the refusal. 300 ms did not on Windows CI (one request seen:
+    // the first one had timed out, the retry was never sent).
     let (endpoint, _) = endpoint_with(server.base_url(), EndpointQuirks::generic(), |c| {
-        c.response_timeout = Duration::from_millis(300)
+        c.response_timeout = Duration::from_secs(3)
     });
     let error = expect_err(endpoint.probe("m").await);
     assert!(matches!(error, ProviderError::Timeout { .. }), "{error:?}");
+    // The fake records a request once it has read it: wait for that, not for a margin.
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while server.requests_to("POST", "/v1/chat/completions").len() < 2
+        && std::time::Instant::now() < deadline
+    {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
     assert_eq!(server.requests_to("POST", "/v1/chat/completions").len(), 2);
 }
 
