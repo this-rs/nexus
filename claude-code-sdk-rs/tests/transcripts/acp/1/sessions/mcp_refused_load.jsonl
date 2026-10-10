@@ -2,3 +2,6 @@
 # asserts the same rule on load and resume). NOT run against a real agent.
 {"op":"expect","method":"initialize","reply":{"protocolVersion":1,"agentCapabilities":{"loadSession":true,"promptCapabilities":{"image":true,"audio":false,"embeddedContext":true},"mcpCapabilities":{"http":false,"sse":false}},"agentInfo":{"name":"openclaw-acp","title":"OpenClaw ACP Gateway","version":"2026.9.9"},"authMethods":[]}}
 {"op":"expect","method":"session/load","refuse_mcp_servers":true,"reply":null}
+# Then the agent exits on its own: a session close is a SIGKILL, which would leave the
+# run of `refuse_mcp_servers` unmeasured under `cargo llvm-cov` (no profile written).
+{"op":"exit","code":0}

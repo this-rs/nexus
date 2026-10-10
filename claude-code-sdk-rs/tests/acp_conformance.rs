@@ -89,6 +89,10 @@ impl Staging {
         config
             .env
             .insert("FAKE_ACP_CANARY".to_owned(), CANARY.to_owned());
+        // Under `cargo llvm-cov`, the fake agent writes its profile where this variable
+        // says; the allowlist would drop it and every line of `fake_acp` the suite runs
+        // would be counted as never run. Absent outside coverage: inheriting it is a no-op.
+        config.env_inherit.push("LLVM_PROFILE_FILE".to_owned());
         config
     }
 
@@ -1186,6 +1190,28 @@ async fn a_json_rpc_error_ends_the_turn_with_a_classified_done_and_the_session_s
             retry_after_ms: None
         })
     );
+    assert_eq!(stop_of(&turn(&*session).await), StopReason::Completed);
+    session.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_malformed_prompt_result_ends_the_turn_with_a_protocol_error_and_the_session_survives() {
+    let staging = Staging::new();
+    let session = staging.open("prompt_malforme").await;
+    let events = turn(&*session).await;
+    let AgentEvent::Done {
+        stop_reason,
+        is_error,
+        error,
+        ..
+    } = done(&events)
+    else {
+        panic!("{events:?}");
+    };
+    assert_eq!(*stop_reason, StopReason::Error);
+    assert!(*is_error);
+    let shown = error.as_ref().expect("a typed error").to_string();
+    assert!(shown.contains("malformed session/prompt result"), "{shown}");
     assert_eq!(stop_of(&turn(&*session).await), StopReason::Completed);
     session.close().await.unwrap();
 }

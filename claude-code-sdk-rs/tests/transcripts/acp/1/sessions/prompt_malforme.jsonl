@@ -1,0 +1,6 @@
+# The agent answers the prompt with a result that is not a `PromptResult` (its
+# `stopReason` is a number): the turn ends in a typed protocol error, the session survives.
+{"op":"include","file":"prelude.jsonl"}
+{"op":"include","file":"turn1_start.jsonl"}
+{"op":"reply","to":"p1","result":{"stopReason":42}}
+{"op":"include","file":"turn2_text.jsonl"}
