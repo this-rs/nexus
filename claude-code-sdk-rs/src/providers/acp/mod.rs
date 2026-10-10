@@ -272,12 +272,16 @@ struct Handshake {
 /// `mcpServers` ([`map::refuses_mcp_servers`]) is asked ONCE more without them: the
 /// session opens without its servers, says so (`provider_notice { mcp_servers_refused }`,
 /// the servers `refused` in `session_started`, `per_session_mcp: false` in its
-/// capabilities), and the provider keeps it learned: from then on `per_session_mcp` is
-/// `false` and a session given a server is `Unsupported { per_session_mcp }`.
+/// capabilities), and THIS provider value keeps it learned: from then on
+/// `per_session_mcp` is `false` and a session given a server is
+/// `Unsupported { per_session_mcp }`. Learned in memory only: a new `AcpProvider` (a
+/// restarted host, a rebuilt instance) starts from the configuration again; a host that
+/// must remember it persists it itself (the session's capabilities say it).
 pub struct AcpProvider {
     config: Arc<AcpConfig>,
     learned: Mutex<Option<Learned>>,
-    /// The agent refused per-session MCP servers once (kept across processes).
+    /// The agent refused per-session MCP servers once. Shared by the sessions (one agent
+    /// process each) of this provider value, in memory: not persisted.
     mcp_refused: AtomicBool,
     shared: Arc<Shared>,
 }
