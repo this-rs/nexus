@@ -10,20 +10,23 @@
 //! - [`policy_map`]: neutral policy ↔ Claude Code modes, tool categories (§6);
 //! - [`map_events`]: `Message` → `AgentEvent`, the public [`map_message`] (§14.1);
 //! - [`error_map`]: failures → `ProviderError` (§7);
+//! - [`input`]: a turn's input → the CLI's user message, images checked (§5);
 //! - [`options`]: instance configuration, `SessionSpec` → `ClaudeCodeOptions`,
 //!   the six permission modes at launch (§6);
 //! - [`cancel`]: the CLI's process tree — descendants, signals, pid claim (§10);
 //! - [`tasks`]: the table of background tasks behind `background_tasks` (§4);
 //! - [`session`]: the provider, the session and its pump (§9).
 //!
-//! # What this slice does not do yet
+//! # Images
 //!
-//! `images` is declared absent (A12): a turn carrying an image is refused with
-//! `Unsupported { images }`.
+//! `images` is declared, local and over SSH (A12, revised): a turn with an image
+//! is written as content blocks in the user's order, after the checks of
+//! [`input`]; a text-only turn is the same string message as before.
 
 pub mod cancel;
 pub mod control;
 pub mod error_map;
+pub mod input;
 pub mod map_events;
 pub mod options;
 pub mod policy_map;

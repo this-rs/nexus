@@ -44,6 +44,7 @@ use tracing::{debug, warn};
 
 use super::cancel;
 use super::control::{self, InboundControl, PermissionRequest};
+use super::input;
 use super::map_events::{MapState, compaction_trigger, map_message, permission_event};
 use super::options::{ClaudeCodeConfig, build_options, ignored_extension_keys};
 use super::policy_map::{canonical_name, neutral_to_native, tool_category};
@@ -1030,7 +1031,7 @@ impl AgentSession for ClaudeCodeSession {
     }
 
     async fn send_turn(&self, input: TurnInput) -> Result<EventStream, ProviderError> {
-        let receiver = {
+        let (receiver, blocks) = {
             let mut state = self.core.lock();
             Core::check_usable(&state)?;
             if state.turn.is_some() {
@@ -1039,17 +1040,29 @@ impl AgentSession for ClaudeCodeSession {
             if input.has_images() && !self.core.capabilities.images {
                 return Err(ProviderError::unsupported("images"));
             }
+            // A turn with an image is checked before it opens: refused, nothing
+            // is written and no turn is running.
+            let blocks = if input.has_images() {
+                Some(input::content_blocks(&input)?)
+            } else {
+                None
+            };
             let (sender, receiver) = mpsc::unbounded_channel();
             state.turn = Some(sender);
             state.map.set_interrupt_requested(false);
-            receiver
+            (receiver, blocks)
         };
         let text = input.joined_text();
         if let Err(error) = self.before_turn(text.len()).await {
             self.core.lock().turn = None;
             return Err(error);
         }
-        let sent = self.client.lock().await.send_message(text).await;
+        // Text only: the string message, unchanged. With an image: the blocks,
+        // in the user's order.
+        let sent = match blocks {
+            None => self.client.lock().await.send_message(text).await,
+            Some(blocks) => self.client.lock().await.send_message_blocks(blocks).await,
+        };
         if let Err(error) = sent {
             // Nothing reached the CLI: no turn is running.
             self.core.lock().turn = None;

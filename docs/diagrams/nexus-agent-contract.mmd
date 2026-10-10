@@ -2,7 +2,7 @@
 %% covers: claude-code-sdk-rs/src/agent/*.rs, docs/agent-contract.md, claude-code-sdk-rs/tests/agent_contract_snapshots.rs, claude-code-sdk-rs/tests/agent_registry.rs
 %% verified: 2026-10-10
 %% ---
-%% ETAT (2026-10-10, CONTRACT_VERSION = 5 : + ModelEndpoint::probe_images à défaut, décision images par modèle du natif — instantané v5 identique à v4 hors version ; v4 : + SessionHooks::before_turn, TurnContext, TurnDirective) ; au 2026-10-05 : `claude-code-sdk-rs/src/agent/` existe : types, traits ET registre (registry.rs) ;
+%% ETAT (2026-10-10, CONTRACT_VERSION = 5 : + ModelEndpoint::probe_images à défaut, décision images par modèle du natif — instantané v5 identique à v4 hors version ; Claude Code images = true, local et SSH (A12 révisée : une valeur de capacité, aucune forme, version inchangée) ; v4 : + SessionHooks::before_turn, TurnContext, TurnDirective) ; au 2026-10-05 : `claude-code-sdk-rs/src/agent/` existe : types, traits ET registre (registry.rs) ;
 %%   des providers l'implémentent (claude_code, native, codex, acp : voir nexus-agent-providers). Vérifié par : cargo test -p nexus-claude --lib agent:: ;
 %%   cargo test -p nexus-claude --test agent_contract_snapshots (instantané tests/snapshots/agent_contract_v2.json) ; cargo test -p nexus-claude --doc agent.
 %%   Les lignes « PROUVE » et « SOURCES LUES » ci-dessous décrivent l'état AVANT (58e27e6) et restent pour la partie « code antérieur au module agent/ ».

@@ -20,7 +20,7 @@ use std::time::Duration;
 
 use futures::StreamExt;
 use nexus_claude::agent::{
-    AgentEvent, AgentProvider, AgentSession, HealthStatus, McpServerSpec, PolicyMode,
+    AgentEvent, AgentProvider, AgentSession, HealthStatus, InputBlock, McpServerSpec, PolicyMode,
     ProviderError, ProviderHealth, ResumeToken, SessionSpec, StopReason, ToolPolicy, TurnInput,
 };
 use nexus_claude::providers::claude_code::{ClaudeCodeConfig, ClaudeCodeProvider};
@@ -418,4 +418,58 @@ async fn a_stand_in_that_never_starts_is_reported_after_a_bounded_wait() {
         "{:?}",
         started.elapsed()
     );
+}
+
+#[tokio::test]
+async fn an_image_crosses_the_ssh_channel_as_a_content_block() {
+    const PIXEL_PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
+    let transcript = Transcript::new()
+        .await_stdin_containing("describe the far pixel")
+        .init("remote-session-img")
+        .assistant_text("a pixel")
+        .result_ok("done")
+        .wait_eof_for(10_000);
+    let s = stage(transcript, |_| {});
+    assert!(
+        s.provider.capabilities(None).images,
+        "the remote CLI reads the same stream-json"
+    );
+    let session = tokio::time::timeout(WAIT, s.provider.open(s.spec.clone()))
+        .await
+        .unwrap()
+        .expect("a remote session opens");
+    let input = TurnInput {
+        blocks: vec![
+            InputBlock::Text {
+                text: "describe the far pixel".into(),
+            },
+            InputBlock::Image {
+                media_type: "image/png".into(),
+                data_base64: PIXEL_PNG.into(),
+            },
+        ],
+    };
+    let mut stream = session.send_turn(input).await.unwrap();
+    let mut events = Vec::new();
+    while let Some(event) = tokio::time::timeout(WAIT, stream.next())
+        .await
+        .expect("in time")
+    {
+        events.push(event);
+    }
+    assert!(matches!(
+        events.last(),
+        Some(AgentEvent::Done {
+            stop_reason: StopReason::Completed,
+            ..
+        })
+    ));
+    // What fake_claude read, on the far side of the stand-in ssh.
+    assert_eq!(
+        s.fake.stdin_lines()[0],
+        format!(
+            r#"{{"type":"user","message":{{"content":[{{"text":"describe the far pixel","type":"text"}},{{"source":{{"data":"{PIXEL_PNG}","media_type":"image/png","type":"base64"}},"type":"image"}}],"role":"user"}},"parent_tool_use_id":null,"session_id":"default"}}"#
+        )
+    );
+    session.close().await.unwrap();
 }
