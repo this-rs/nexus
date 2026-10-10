@@ -131,19 +131,22 @@ impl Tool for BashTool {
                 Ok(started) => started,
                 Err(message) => return ToolResult::error(message),
             };
-            adopt(
+            let task = adopt(
                 &state,
                 id.clone(),
+                "shell",
                 command,
                 output.clone(),
                 running,
                 self.config.max_output_bytes,
+                context.notifier.clone(),
             );
             return ToolResult::ok(format!(
                 "Command running in background with ID: {id}. Output is being written to: {}. \
                  To check interim output, use Read on that file path; to stop it, use TaskStop.",
                 output.display()
-            ));
+            ))
+            .with_structured(task.structured());
         }
 
         let cwd_file = self.config.output_dir.join(format!("{}.cwd", new_id()));

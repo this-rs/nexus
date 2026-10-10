@@ -813,8 +813,17 @@ async fn run_one(
 ) -> Run {
     let mut context = Vec::new();
     let mut images = Vec::new();
-    let (content, is_error, fatal) =
-        execute(core, signal, call, &token, &mut context, &mut images).await;
+    let mut task = None;
+    let (content, is_error, fatal) = execute(
+        core,
+        signal,
+        call,
+        &token,
+        &mut context,
+        &mut images,
+        &mut task,
+    )
+    .await;
     core.end_tool(&call.id);
     core.emit(AgentEvent::ToolResult {
         id: call.id.clone(),
@@ -823,6 +832,10 @@ async fn run_one(
         seq: None,
         parent: None,
     });
+    // The task the call started or stopped, once its result is out: `background_tasks` follows.
+    if let Some(structured) = task {
+        core.track_task(&structured, &call.id);
+    }
     Run {
         content,
         context,
@@ -899,6 +912,16 @@ async fn ask(
     }
 }
 
+/// Whether a result of this tool may report a background task: `Bash`, `Monitor` or `TaskStop`
+/// of the session's `nexus` server, never a tool of another server.
+fn is_task_tool(entry: &ToolEntry) -> bool {
+    entry.server == super::tools::NEXUS_TOOLS_SERVER
+        && matches!(
+            entry.canonical.as_deref(),
+            Some("Bash" | "Monitor" | "TaskStop")
+        )
+}
+
 /// Runs one call: `(content for the model, is_error, fatal)`.
 async fn execute(
     core: &Core,
@@ -907,6 +930,7 @@ async fn execute(
     token: &CancelToken,
     context: &mut Vec<String>,
     images: &mut Vec<ImagePart>,
+    task: &mut Option<Value>,
 ) -> (String, bool, Option<ProviderError>) {
     let fail = |message: &str| (message.to_owned(), true, None);
     let Some(entry) = core.registry.get(&call.name) else {
@@ -980,6 +1004,9 @@ async fn execute(
     let (content, is_error, fatal) = match client.call_tool(&entry.tool, input, cancelled).await {
         Ok(result) => {
             *images = result.images;
+            if is_task_tool(entry) {
+                *task = result.structured;
+            }
             (result.text, result.is_error, None)
         },
         Err(McpError::Cancelled) => return (stopped_message(signal, token), true, None),

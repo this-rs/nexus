@@ -18,6 +18,8 @@ struct Wire {
     served: tokio::task::JoinHandle<()>,
     /// Notifications that arrived while a call was waiting for its answer.
     backlog: std::collections::VecDeque<Value>,
+    /// The `nexus-tools/tasks` notifications (a task ended), kept apart from the monitor's lines.
+    tasks: Vec<Value>,
     _dir: tempfile::TempDir,
 }
 
@@ -43,6 +45,7 @@ fn start() -> Wire {
         from_server: BufReader::new(from_server),
         served,
         backlog: std::collections::VecDeque::new(),
+        tasks: Vec::new(),
         _dir: dir,
     }
 }
@@ -62,7 +65,7 @@ impl Wire {
         self.read_wire().await
     }
 
-    async fn read_wire(&mut self) -> Value {
+    async fn read_raw(&mut self) -> Value {
         let mut line = String::new();
         tokio::time::timeout(
             Duration::from_secs(15),
@@ -72,6 +75,31 @@ impl Wire {
         .expect("a message in time")
         .unwrap();
         serde_json::from_str(&line).unwrap_or_else(|e| panic!("not JSON ({e}): {line:?}"))
+    }
+
+    async fn read_wire(&mut self) -> Value {
+        loop {
+            let message = self.read_raw().await;
+            if message["params"]["logger"] == "nexus-tools/tasks" {
+                self.tasks.push(message);
+                continue;
+            }
+            return message;
+        }
+    }
+
+    /// The next `nexus-tools/tasks` notification (other messages read meanwhile are kept).
+    async fn task_end(&mut self) -> Value {
+        loop {
+            if !self.tasks.is_empty() {
+                return self.tasks.remove(0);
+            }
+            let message = self.read_raw().await;
+            if message["params"]["logger"] == "nexus-tools/tasks" {
+                return message;
+            }
+            self.backlog.push_back(message);
+        }
     }
 
     /// Calls a tool and returns its answer plus every notification that came before it.
@@ -155,6 +183,11 @@ async fn task_stop_ends_a_monitor_and_the_end_is_reported() {
             break;
         }
     }
+    // And the harness's signal: one `nexus-tools/tasks` end, in the contract's vocabulary.
+    let end = wire.task_end().await;
+    assert_eq!(end["params"]["data"]["task_id"], json!(id), "{end}");
+    assert_eq!(end["params"]["data"]["event"], "ended", "{end}");
+    assert_eq!(end["params"]["data"]["status"], "killed", "{end}");
 }
 
 #[tokio::test]

@@ -20,6 +20,16 @@
 //! the turn carries on to its normal end. Tokens are registered **before** the
 //! `tool_call` event is emitted, so a consumer that reacts to that event never
 //! races the registration.
+//!
+//! # Background tasks (§4, §10)
+//!
+//! A session whose `nexus` server serves `Bash` declares `background_tasks`. What that
+//! server reports in the structured content of `Bash` (`run_in_background`), `Monitor`
+//! and `TaskStop` results, and the task ends it notifies, keep the table of the
+//! session's tasks (`tasks.rs`): every change routes a complete `background_tasks`
+//! snapshot, every `Monitor` line a `task_update { progress }`. `cancel_tools(task { id
+//! })` calls that server's `TaskStop` (the task's process group is ended); a running
+//! turn goes on.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -30,14 +40,16 @@ use tokio::sync::{Notify, mpsc, oneshot};
 
 use super::cancel::CancelToken;
 use super::mcp::McpClient;
+use super::tasks::{self as background, TaskTable};
 use super::tools::{ToolEntry, ToolRegistry};
 use super::transcript::TranscriptStore;
 use super::{ModelFacts, NativeConfig as Settings, r#loop};
+use crate::agent::BackgroundTaskStatus;
 use crate::agent::{
     AgentEvent, AgentSession, CancelOutcome, CancelScope, Capabilities, CostBasis, EventStream,
     InputBlock, InterruptOutcome, InterruptScope, PermissionDecision, PermissionScope,
-    PolicyDecision, PolicyMode, ProviderError, ProviderKind, QuestionAnswer, ResumeToken,
-    SessionHooks, SessionLimits, ToolPolicy, TurnInput,
+    PolicyDecision, PolicyMode, ProcessDiagnostic, ProviderError, ProviderKind, QuestionAnswer,
+    ResumeToken, SessionHooks, SessionLimits, TaskPhase, ToolPolicy, TurnInput,
 };
 use crate::model::{ChatMessage, ModelEndpoint};
 
@@ -122,6 +134,8 @@ pub(crate) struct State {
     pub(crate) usd_spent: f64,
     /// Size of the last prompt the endpoint reported, since the last compaction.
     pub(crate) last_prompt_tokens: Option<u64>,
+    /// The background tasks `nexus-tools` runs for the session (§4 `background_tasks`).
+    pub(crate) tasks: TaskTable,
 }
 
 impl State {
@@ -227,6 +241,7 @@ impl Core {
             tokens_spent: 0,
             usd_spent: 0.0,
             last_prompt_tokens: None,
+            tasks: TaskTable::default(),
         };
         for event in parts.initial_events {
             state.push_out_of_band(event);
@@ -341,6 +356,108 @@ impl Core {
     pub(crate) fn mark_dead(&self, error: ProviderError) {
         self.lock().dead.get_or_insert(error);
     }
+
+    /// Routes the complete table of background tasks.
+    fn route_tasks(&self, mut state: MutexGuard<'_, State>) {
+        let tasks = state.tasks.snapshot();
+        let out_of_band = state.route(AgentEvent::BackgroundTasks { tasks });
+        drop(state);
+        if out_of_band {
+            self.wake.notify_waiters();
+        }
+    }
+
+    /// Records what the session's `nexus` server said of a background task in a result
+    /// (`structuredContent.background_task` of `Bash`, `Monitor` or `TaskStop`), the task being
+    /// started by `tool_call_id` when it is new, and routes the table when it changed. Returns
+    /// the report. Nothing without `background_tasks`.
+    pub(crate) fn track_task(
+        &self,
+        structured: &Value,
+        tool_call_id: &str,
+    ) -> Option<background::Reported> {
+        if !self.capabilities.background_tasks {
+            return None;
+        }
+        let reported = background::reported(structured)?;
+        let mut state = self.lock();
+        if state.tasks.record(reported.clone(), tool_call_id, now_ms()) {
+            self.route_tasks(state);
+        }
+        Some(reported)
+    }
+
+    /// A notification the session's `nexus` server sent on its own: the end of a background
+    /// task updates the table; a `Monitor` line becomes a `task_update { progress }`.
+    pub(crate) fn server_notification(&self, notification: &Value) {
+        if !self.capabilities.background_tasks {
+            return;
+        }
+        if let Some((id, status)) = background::ended(notification) {
+            let mut state = self.lock();
+            if state.tasks.end(&id, status) {
+                self.route_tasks(state);
+            }
+        } else if let Some((id, line)) = background::monitor_line(notification) {
+            let tool_call_id = self
+                .lock()
+                .tasks
+                .get(&id)
+                .and_then(|task| task.tool_call_id.clone());
+            self.emit(AgentEvent::TaskUpdate {
+                phase: TaskPhase::Progress,
+                task_id: Some(id.clone()),
+                tool_call_id,
+                description: None,
+                status: None,
+                summary: Some(line.clone()),
+                event_id: None,
+                data: json!({ "task_id": id, "line": line }),
+            });
+        }
+    }
+
+    /// Stops a running background task through the `TaskStop` of the session's `nexus` server
+    /// (which ends the task's whole process group) and records what it answers.
+    async fn stop_task(&self, id: &str) -> Result<CancelOutcome, ProviderError> {
+        let client = self
+            .mcp
+            .get(super::tools::NEXUS_TOOLS_SERVER)
+            .ok_or_else(|| ProviderError::protocol("the tools server is not connected"))?;
+        let result = client
+            .call_tool("TaskStop", json!({ "task_id": id }), std::future::pending())
+            .await
+            .map_err(super::mcp::McpError::into_provider)?;
+        if result.is_error {
+            return Err(ProviderError::protocol(format!(
+                "TaskStop failed: {}",
+                crate::agent::redact(&result.text)
+            )));
+        }
+        let reported = result
+            .structured
+            .as_ref()
+            .and_then(|structured| self.track_task(structured, ""));
+        let killed = reported
+            .as_ref()
+            .is_some_and(|task| task.status == BackgroundTaskStatus::Killed);
+        Ok(CancelOutcome {
+            tools_cancelled: u32::from(killed),
+            diagnostic: killed.then(|| ProcessDiagnostic {
+                pid: None,
+                killed_pids: reported.and_then(|task| task.pid).into_iter().collect(),
+            }),
+        })
+    }
+}
+
+/// Milliseconds since the Unix epoch.
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| {
+            u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)
+        })
 }
 
 enum OutOfBandNext {
@@ -475,7 +592,8 @@ impl AgentSession for NativeSession {
         if self.core.is_closed() {
             return Err(ProviderError::Closed);
         }
-        // Without background tasks, `turn_only` and `turn_and_tools` stop the same things.
+        // Background tasks are not tools of the turn: both scopes spare them (`cancel_tools(task)`
+        // stops one), so `turn_only` and `turn_and_tools` stop the same things.
         let (signal, tools) = {
             let state = self.core.lock();
             (state.signal.clone(), state.inflight.len() as u32)
@@ -510,7 +628,25 @@ impl AgentSession for NativeSession {
                     diagnostic: None,
                 })
             },
-            _ => Err(ProviderError::unsupported("background_tasks")),
+            CancelScope::Task { id } => {
+                if !self.capabilities.background_tasks {
+                    return Err(ProviderError::unsupported("background_tasks"));
+                }
+                let status = self.core.lock().tasks.get(&id).map(|task| task.status);
+                match status {
+                    None => Err(ProviderError::invalid(format!(
+                        "unknown background task `{id}`"
+                    ))),
+                    // Already over: nothing to stop, nothing changes.
+                    Some(status) if status != BackgroundTaskStatus::Running => {
+                        Ok(CancelOutcome::default())
+                    },
+                    Some(_) => self.core.stop_task(&id).await,
+                }
+            },
+            // `CancelScope` is `#[non_exhaustive]`.
+            #[allow(unreachable_patterns)]
+            _ => Err(ProviderError::unsupported("cancel_scope")),
         }
     }
 

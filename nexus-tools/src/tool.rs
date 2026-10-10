@@ -43,6 +43,11 @@ pub struct ToolResult {
     pub is_error: bool,
     /// Images that go with the text (`Read` of a picture): MCP image content blocks.
     pub images: Vec<ImageBlock>,
+    /// Machine-readable facts about the call, for the client rather than the model (MCP
+    /// `structuredContent`). The text stays what the model reads. `Bash` (`run_in_background`),
+    /// `Monitor` and `TaskStop` put a `background_task` object here: how the harness tracks the
+    /// tasks of a session without reading the text.
+    pub structured: Option<Value>,
 }
 
 /// An image result: base64 data and its media type.
@@ -61,6 +66,7 @@ impl ToolResult {
             text: text.into(),
             is_error: false,
             images: Vec::new(),
+            structured: None,
         }
     }
 
@@ -71,12 +77,20 @@ impl ToolResult {
         self
     }
 
+    /// Adds machine-readable content (MCP `structuredContent`).
+    #[must_use]
+    pub fn with_structured(mut self, structured: Value) -> Self {
+        self.structured = Some(structured);
+        self
+    }
+
     /// A failed result.
     pub fn error(text: impl Into<String>) -> Self {
         Self {
             text: text.into(),
             is_error: true,
             images: Vec::new(),
+            structured: None,
         }
     }
 }

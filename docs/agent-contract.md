@@ -307,7 +307,7 @@ sur un provider, aucune forme sérialisée ne bouge : `CONTRACT_VERSION` reste 5
 | set_model_live | oui (`set_model` de contrôle ; `before_turn` → `set_model` écrit avant l'entrée du tour) | oui (entre deux tours ; `before_turn` appliqué au tour qui commence, fenêtre et coût du modèle actif) | oui (par tour ; hooks `none` : `before_turn` jamais appelé) | non (directive → `model_directive_ignored` si les hooks étaient honorés ; ils ne le sont pas) |
 | native_question | oui (`AskUserQuestion`) | non | non (expérimental) | non |
 | tool_cancel | oui (par PID, dans l'adaptateur) | oui (jeton d'annulation) | non | non |
-| background_tasks | oui | non | non | non |
+| background_tasks | oui | oui quand la session a le `Bash` de son serveur `nexus` (`nexus-tools` ; `capabilities(modèle)` : `default_tools` configuré et modèle à outils) | non | non |
 | resume | oui | oui (transcript) | oui | selon `loadSession` |
 | cost | reported (subscription si OAuth) | priced / free / unknown | unknown (tokens seuls, A40) | reported si `Cost` présent, sinon unknown |
 
@@ -340,10 +340,25 @@ sur un provider, aucune forme sérialisée ne bouge : `CONTRACT_VERSION` reste 5
   compaction automatique (l'erreur typée `context_too_small` sort quand l'endpoint refuse).
   `cost` : `free` si configuré, `priced` si le modèle a un prix, sinon `unknown`.
 - **Portées** : `once` et `session` (`always` n'a nulle part où être gardé) ; `always` répond
-  `Unsupported { permission_scope }`. `native_question`, `background_tasks`, `subagents`,
-  `sandbox` : absents ; `cancel_tools(task)` → `Unsupported { background_tasks }`,
+  `Unsupported { permission_scope }`. `native_question`, `subagents`, `sandbox` : absents ;
   `answer_question` → `Unsupported { native_question }`, mode `trust` accepté à
   l'ouverture et à chaud (la politique locale autorise tout appel que ne refuse pas un `deny`).
+- **Tâches de fond** : `background_tasks` est vrai pour une session dont le serveur `nexus` (`nexus-tools`)
+  sert `Bash` (le cas par défaut : `capabilities(modèle)` le dit quand `default_tools` est configuré et que le
+  modèle appelle des outils ; une politique qui retire `Bash` le rend faux pour la session, sinon
+  `cancel_tools(task)` → `Unsupported { background_tasks }`). La table des tâches (`providers/native/tasks.rs`)
+  ne lit jamais le texte du modèle : `structuredContent.background_task` `{ id, kind, command, output_file, pid,
+  status }` des résultats `Bash` (`run_in_background`), `Monitor` et `TaskStop` du serveur `nexus` (un autre
+  serveur n'est pas lu), et la notification `notifications/message` du logger `nexus-tools/tasks`
+  `{ task_id, event: "ended", status, exit_code }` (stdio seulement). L'`id` est celui de `nexus-tools`,
+  `tool_call_id` l'appel qui a lancé la tâche, `pid` le groupe de processus. Chaque changement émet un
+  `background_tasks` COMPLET (après le `tool_result` de l'appel, ou hors tour) ; une ligne de `Monitor`
+  (logger `nexus-tools/monitor`) émet `task_update { phase: progress, task_id, summary: ligne }`.
+  `cancel_tools(task { id })` appelle le `TaskStop` du serveur `nexus` (le groupe de processus est tué, puis
+  `background_tasks` avec `status: killed`) et rend `tools_cancelled: 1` (`killed_pids` = le groupe) ; une
+  tâche déjà finie rend 0, un id inconnu `invalid_request` ; un tour en cours continue. `TaskStop` est dans
+  le `--tools` du processus dès que `Bash` ou `Monitor` y est (le modèle ne se le voit offrir que si la
+  politique l'expose). Les deux portées d'`interrupt` épargnent les tâches de fond.
 - **Images (v5)** : un bloc `image` de `TurnInput` devient, dans le message utilisateur, une partie
   `image_url` à URL `data:<type>;base64,…` après le texte joint (l'ordre entre blocs de texte et images n'est pas
   conservé : le texte d'abord). Le transcript (mémoire ou fichier) garde l'image entière, sans masquage (une charge
@@ -1103,6 +1118,9 @@ jeton, `add_dirs` ← `extra_dirs`, `env` ← `EnvSpec.set`, `cli_path` ← exte
   forme que le registre sérialisait déjà, **sans changement de forme ni de `CONTRACT_VERSION`**.
   De même, `images` passe à `true` pour Claude Code (§5, A12 révisée) : une VALEUR de capacité d'un provider change,
   pas une forme ni une signature, **sans changement de `CONTRACT_VERSION`**.
+  De même, `background_tasks` passe à `true` pour le natif quand la session a le `Bash` de `nexus-tools` (§5) :
+  une VALEUR de capacité, aucune forme sérialisée ne bouge (le `structuredContent` de `nexus-tools` est un
+  protocole MCP entre le harnais et son serveur, hors contrat), **sans changement de `CONTRACT_VERSION`**.
 - `agent::CONTRACT_VERSION: u32`. Monte de 1 à chaque changement d'une forme sérialisée
   (`AgentEvent`, `Capabilities`, `ProviderError`, `ToolPolicy`, `ResumeToken`) ou d'une signature de
   trait. Les instantanés JSON de `tests/agent_contract_snapshots.rs` portent la version : changer

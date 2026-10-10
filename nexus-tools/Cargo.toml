@@ -78,7 +78,7 @@ webpki-roots = { version = "0.26", optional = true }
 nix = { version = "0.30", default-features = false, features = ["signal"] }
 
 [dev-dependencies]
-nexus-claude = { path = "../claude-code-sdk-rs", features = ["provider-native"] }
+nexus-claude = { path = "../claude-code-sdk-rs", features = ["provider-native", "testkit"] }
 tempfile = "3"
 futures = "0.3"
 rcgen = { version = "0.13", default-features = false, features = ["ring", "pem"] }

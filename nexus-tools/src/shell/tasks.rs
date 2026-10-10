@@ -25,6 +25,19 @@ pub enum Status {
     Stopped,
 }
 
+impl Status {
+    /// The state in the vocabulary of the agent contract's `BackgroundTaskStatus`:
+    /// `running`, `completed` (exit code 0), `failed` (any other code) or `killed`.
+    pub fn state(self) -> &'static str {
+        match self {
+            Self::Running => "running",
+            Self::Exited(0) => "completed",
+            Self::Exited(_) => "failed",
+            Self::Stopped => "killed",
+        }
+    }
+}
+
 impl std::fmt::Display for Status {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -38,6 +51,8 @@ impl std::fmt::Display for Status {
 /// One background command.
 pub struct Task {
     pub id: String,
+    /// `shell` (`Bash` with `run_in_background`) or `monitor` (`Monitor`).
+    pub kind: &'static str,
     pub command: String,
     pub output: PathBuf,
     pgid: u32,
@@ -46,6 +61,20 @@ pub struct Task {
 }
 
 impl Task {
+    /// What `Bash` (`run_in_background`), `Monitor` and `TaskStop` put in their
+    /// `structuredContent`: `{"background_task": {id, kind, command, output_file, pid, status}}`.
+    /// The harness reads it to track the task; the model reads the text.
+    pub fn structured(&self) -> Value {
+        json!({"background_task": {
+            "id": self.id,
+            "kind": self.kind,
+            "command": self.command,
+            "output_file": self.output.display().to_string(),
+            "pid": self.pgid,
+            "status": self.status().state(),
+        }})
+    }
+
     pub fn status(&self) -> Status {
         *self.status.lock().unwrap_or_else(PoisonError::into_inner)
     }
@@ -122,16 +151,26 @@ pub fn new_id() -> String {
 }
 
 /// Registers a started command as a background task and watches it end.
+///
+/// When it ends (on its own, by `TaskStop`, a timeout or the end of the session) and the
+/// transport has a notification channel, the client gets one `notifications/message` from the
+/// logger `nexus-tools/tasks` with `{task_id, event: "ended", status, exit_code}` (`status` in
+/// the contract's vocabulary, see [`Status::state`]): how a harness learns that a task it tracks
+/// is over without polling.
+#[allow(clippy::too_many_arguments)]
 pub fn adopt(
     state: &ShellState,
     id: String,
+    kind: &'static str,
     command: &str,
     output: PathBuf,
     running: Running,
     max_output_bytes: u64,
+    notifier: Option<Notifier>,
 ) -> Arc<Task> {
     let task = Arc::new(Task {
         id: id.clone(),
+        kind,
         command: command.to_owned(),
         output,
         pgid: running.pgid,
@@ -156,6 +195,23 @@ pub fn adopt(
             Err(_) => -1,
         };
         watched.set(Status::Exited(code), true);
+        if let Some(notifier) = notifier {
+            let status = watched.status();
+            let exit_code = match status {
+                Status::Exited(code) => Some(code),
+                _ => None,
+            };
+            notifier.notify(json!({
+                "jsonrpc": "2.0",
+                "method": "notifications/message",
+                "params": {"level": "info", "logger": "nexus-tools/tasks", "data": {
+                    "task_id": watched.id,
+                    "event": "ended",
+                    "status": status.state(),
+                    "exit_code": exit_code,
+                }}
+            }));
+        }
     });
     task
 }
@@ -218,13 +274,15 @@ impl Tool for TaskStopTool {
             return ToolResult::ok(format!(
                 "Task {id} is not running (status: {}). Nothing to stop.",
                 task.status()
-            ));
+            ))
+            .with_structured(task.structured());
         }
         task.stop().await;
         ToolResult::ok(format!(
             "Successfully stopped task: {id} ({})",
             task.command
         ))
+        .with_structured(task.structured())
     }
 }
 
@@ -306,15 +364,17 @@ impl Tool for MonitorTool {
             Ok(started) => started,
             Err(message) => return ToolResult::error(message),
         };
+        let notifier = context.notifier.clone();
         let task = adopt(
             &state,
             id.clone(),
+            "monitor",
             command,
             output.clone(),
             running,
             self.config.max_output_bytes,
+            notifier.clone(),
         );
-        let notifier = context.notifier.clone();
         tokio::spawn(stream(
             Arc::clone(&task),
             notifier.clone(),
@@ -331,6 +391,7 @@ impl Tool for MonitorTool {
             "Monitor started with ID: {id}. {how} Output is also written to: {}. Stop it with TaskStop.",
             output.display()
         ))
+        .with_structured(task.structured())
     }
 }
 
