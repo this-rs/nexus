@@ -570,6 +570,88 @@ async fn probe_without_tool_call_is_model_no_tools() {
     assert_eq!(error, ProviderError::ModelNoTools { model: "m".into() });
 }
 
+/// A reasoning model (DeepSeek V4 style) that fills its token budget with
+/// `reasoning_content` and ends with `finish_reason=length` is not "no tools":
+/// the probe never saw an answer. One retry with a larger budget before concluding.
+#[tokio::test]
+async fn probe_truncated_in_reasoning_retries_with_a_larger_budget() {
+    // First attempt: reasoning only, cut off by `length`, no tool call seen.
+    let truncated = route_sse(&[
+        delta(json!({"reasoning_content": "thinking very hard"})),
+        delta(json!({"reasoning_content": "almost there"})),
+        finish("length"),
+        json!("[DONE]"),
+    ]);
+    // Second attempt: with a larger budget, the model calls the tool.
+    let server = FakeOpenAi::start(json!([
+        truncated,
+        probe_sse(true, Some("reasoning_content")),
+        models_route()
+    ]));
+    let probe = endpoint(&server, EndpointQuirks::deepseek())
+        .probe("deepseek-v4-pro")
+        .await
+        .expect("the retry succeeds");
+    assert!(probe.tools);
+    let sent = server.requests_to("POST", "/v1/chat/completions");
+    assert_eq!(sent.len(), 2, "the probe retries once on truncation");
+    let first_budget = sent[0]["body"]["max_tokens"].as_u64().unwrap();
+    let second_budget = sent[1]["body"]["max_tokens"].as_u64().unwrap();
+    assert!(
+        second_budget > first_budget,
+        "the retry asks for more tokens (first={first_budget}, second={second_budget})"
+    );
+}
+
+/// Truncation on BOTH attempts: the model really consumes the available budget
+/// without ever calling a tool. The probe concludes `ModelNoTools` only then — the
+/// old behavior is preserved as a last resort, never after a single truncated shot.
+#[tokio::test]
+async fn probe_truncated_twice_concludes_no_tools() {
+    let truncated = || {
+        route_sse(&[
+            delta(json!({"reasoning_content": "lots of thinking"})),
+            finish("length"),
+            json!("[DONE]"),
+        ])
+    };
+    let server = FakeOpenAi::start(json!([truncated(), truncated()]));
+    let error = expect_err(
+        endpoint(&server, EndpointQuirks::deepseek())
+            .probe("deepseek-v4-pro")
+            .await,
+    );
+    assert_eq!(
+        error,
+        ProviderError::ModelNoTools {
+            model: "deepseek-v4-pro".into(),
+        }
+    );
+    assert_eq!(
+        server.requests_to("POST", "/v1/chat/completions").len(),
+        2,
+        "the probe tries twice before concluding"
+    );
+}
+
+/// A probe that stopped cleanly (`finish=stop`) and did not call the tool is
+/// `ModelNoTools` in ONE shot: no retry wasted on a model that answered without tools.
+#[tokio::test]
+async fn probe_that_stopped_without_a_tool_call_is_not_retried() {
+    let server = FakeOpenAi::start(json!([probe_sse(false, None), probe_sse(false, None)]));
+    let error = expect_err(
+        endpoint(&server, EndpointQuirks::generic())
+            .probe("m")
+            .await,
+    );
+    assert_eq!(error, ProviderError::ModelNoTools { model: "m".into() });
+    assert_eq!(
+        server.requests_to("POST", "/v1/chat/completions").len(),
+        1,
+        "finish=stop is a final answer, not a candidate for retry"
+    );
+}
+
 #[tokio::test]
 async fn probe_refused_by_the_server_with_a_tools_message_is_model_no_tools() {
     let server = FakeOpenAi::start(json!([post(
