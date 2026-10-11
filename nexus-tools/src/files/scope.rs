@@ -52,7 +52,11 @@ impl Scope {
         for dir in extra {
             roots.push(std::fs::canonicalize(dir)?);
         }
-        Ok(Self { cwd, roots, unscoped: false })
+        Ok(Self {
+            cwd,
+            roots,
+            unscoped: false,
+        })
     }
 
     /// The same scope with the roots no longer enforced: `resolve` still normalises the
