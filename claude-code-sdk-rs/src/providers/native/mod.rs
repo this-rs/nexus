@@ -31,7 +31,8 @@
 //! | `hooks` | `in_protocol`: `before_tool` (after the exposure check, before the policy, so a replaced input is judged too), `after_tool` (only for a call that ran; its text reaches the model, not the `tool_result` event) and `before_compaction` (its text joins the summary instructions). A hook that does not answer within `NativeConfig::hook_timeout` is skipped with `provider_notice { hook_timeout }` |
 //! | `images` | **per model**: what the catalogue says of its vision (`ModelInfo::supports_images`: OpenRouter `architecture.modality`, `input_modalities`, `capabilities`…), else the one-pixel probe when the instance sets `vision_probe`, else the instance's `vision` declaration; `false` when nothing said. A model without vision refuses an image turn with `Unsupported { images }`: the limit of the MODEL, never of the harness |
 //! | `background_tasks` | the session's `nexus` server serves `Bash` (by default, `default_tools` and a model with tools: what `capabilities(model)` says); tasks tracked from the structured results and notifications of `nexus-tools`, `cancel_tools(task)` through its `TaskStop` (see `session.rs`) |
-//! | `subagents`, `native_question` | no |
+//! | `native_question` | when `NativeConfig::ask_user_question` is set and the model calls tools: the harness offers its own `AskUserQuestion` (see [`builtin`]), answered by the next turn |
+//! | `subagents` | `none`: no event carries `parent`. A host whose hooks say `runs_subagents()` gets an `Agent` tool whose calls it runs (its child session, A18); never offered to a child session ([`builtin`]) |
 //!
 //! `capabilities()` is synchronous: it reads what was probed. Call
 //! [`NativeProvider::refresh_capabilities`] (or `catalog` then `open`) to fill it;
@@ -67,6 +68,7 @@ use crate::agent::{
 use crate::model::{ChatMessage, EndpointProbe, ModelEndpoint, PriceTable};
 
 pub mod browser;
+pub mod builtin;
 pub mod cancel;
 pub mod compaction;
 pub mod r#loop;
@@ -202,6 +204,10 @@ pub struct NativeConfig {
     pub browser: Option<BrowserTools>,
     /// How long a host hook may take before the harness goes on without it.
     pub hook_timeout: std::time::Duration,
+    /// Offer the model `AskUserQuestion` (see [`builtin`]): the host renders the `question`
+    /// it emits and sends the user's answer as the next turn. Off by default: a host that
+    /// cannot show a question must not let the model wait for an answer.
+    pub ask_user_question: bool,
 }
 
 impl NativeConfig {
@@ -238,6 +244,7 @@ impl NativeConfig {
             default_tools: None,
             browser: None,
             hook_timeout: Self::DEFAULT_HOOK_TIMEOUT,
+            ask_user_question: false,
         }
     }
 }
@@ -576,6 +583,24 @@ impl NativeProvider {
                     status: "connected".to_owned(),
                 });
             }
+            // The harness's own tools (P18, `builtin.rs`): the question for a host that shows it,
+            // the sub-agent for a host that runs one, never for a child session (depth 1, A17).
+            if capabilities.native_question {
+                registry.insert(builtin::ask_user_question_entry())?;
+            }
+            let is_child = spec
+                .lineage
+                .as_ref()
+                .is_some_and(|lineage| lineage.depth > 0);
+            if capabilities.tools
+                && !is_child
+                && spec
+                    .hooks
+                    .as_ref()
+                    .is_some_and(|hooks| hooks.runs_subagents())
+            {
+                registry.insert(builtin::agent_entry())?;
+            }
             Ok::<(), ProviderError>(())
         }
         .await;
@@ -707,6 +732,8 @@ impl AgentProvider for NativeProvider {
         capabilities.images = self.facts.images(model, probe.as_ref());
         // Sessions get `nexus-tools` (and its `Bash`) by default: each one says whether it has it.
         capabilities.background_tasks = capabilities.tools && self.config.default_tools.is_some();
+        // The harness's own question tool (P18), for a model that can call it.
+        capabilities.native_question = capabilities.tools && self.config.ask_user_question;
         capabilities
     }
 

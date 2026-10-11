@@ -585,7 +585,14 @@ impl AgentSession for NativeSession {
         _answer: QuestionAnswer,
     ) -> Result<(), ProviderError> {
         self.core.usable()?;
-        Err(ProviderError::unsupported("native_question"))
+        // The harness's question (P18) is answered by a turn (`reply: turn`), never by a call.
+        Err(ProviderError::unsupported(
+            if self.core.capabilities.native_question {
+                "answer_question"
+            } else {
+                "native_question"
+            },
+        ))
     }
 
     async fn interrupt(&self, _scope: InterruptScope) -> Result<InterruptOutcome, ProviderError> {

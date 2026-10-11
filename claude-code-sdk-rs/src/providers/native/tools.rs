@@ -41,6 +41,7 @@ use std::collections::BTreeMap;
 
 use serde_json::Value;
 
+use super::builtin::BuiltinTool;
 use crate::agent::{PolicyMode, ProviderError, ToolCategory, ToolPolicy};
 use crate::model::ToolSpec;
 
@@ -156,6 +157,9 @@ pub struct ToolEntry {
     /// What the tool does, for the policy: read, edit, search, command, web; `Read` for a
     /// read-only tool of another server and `Mcp` for the rest.
     pub category: ToolCategory,
+    /// Set for a tool of the harness itself (`AskUserQuestion`, `Agent`, see `builtin.rs`): it
+    /// has no server, and is offered under its own name.
+    pub builtin: Option<BuiltinTool>,
 }
 
 impl ToolEntry {
@@ -188,6 +192,28 @@ impl ToolEntry {
                 (None, None) if read_only => ToolCategory::Read,
                 (None, None) => ToolCategory::Mcp,
             },
+            builtin: None,
+        }
+    }
+
+    /// The entry of a tool of the harness itself, offered as `name` (no `mcp__` prefix).
+    pub fn builtin(
+        kind: BuiltinTool,
+        name: &str,
+        description: String,
+        schema: Value,
+        category: ToolCategory,
+    ) -> Self {
+        Self {
+            name: name.to_owned(),
+            server: String::new(),
+            tool: name.to_owned(),
+            description,
+            schema,
+            read_only: true,
+            canonical: Some(name.to_owned()),
+            category,
+            builtin: Some(kind),
         }
     }
 
@@ -199,6 +225,9 @@ impl ToolEntry {
     /// What a pattern's argument is matched against: the primary argument of a canonical
     /// tool (the command, the path, the domain of the URL), the whole input for the others.
     pub fn primary_argument(&self, input: &Value) -> Option<String> {
+        if self.builtin.is_some() {
+            return Some(input.to_string());
+        }
         let Some(canonical) = self.canonical.as_deref() else {
             return Some(input.to_string());
         };

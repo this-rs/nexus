@@ -273,7 +273,7 @@ Valeurs de référence (v1, à confirmer par la conformité de chaque adaptateur
 | secret_isolation | oui (env en liste blanche, MCP hors argv) | oui | oui (`env_vars` par nom) | oui (env par JSON stdio) |
 | per_session_mcp | oui | oui | oui (un processus par session) | oui, sauf `AcpConfig::per_session_mcp = false` ou refus appris (`openclaw acp`) |
 | hooks | in_protocol | in_protocol (boucle locale) | command | none |
-| subagents | nested | none | separate_thread | none |
+| subagents | nested | none (outil `Agent` du harnais quand l'hôte le sert : `SessionHooks::run_subagent`, repli A18) | separate_thread | none |
 | compaction_signal | oui | oui | oui | non |
 | thinking | oui | selon modèle | oui | oui |
 | images | oui (A12 révisée : blocs de contenu dans l'ordre de l'utilisateur, local et SSH) | selon modèle (v5 : catalogue, sonde d'un pixel en option, déclaration d'instance) | non | non |
@@ -305,7 +305,7 @@ sur un provider, aucune forme sérialisée ne bouge : `CONTRACT_VERSION` reste 5
 | tools | oui | selon modèle (sonde) | oui | oui |
 | context_window | reported | configured / probed | configured | None |
 | set_model_live | oui (`set_model` de contrôle ; `before_turn` → `set_model` écrit avant l'entrée du tour) | oui (entre deux tours ; `before_turn` appliqué au tour qui commence, fenêtre et coût du modèle actif) | oui (par tour ; hooks `none` : `before_turn` jamais appelé) | non (directive → `model_directive_ignored` si les hooks étaient honorés ; ils ne le sont pas) |
-| native_question | oui (`AskUserQuestion`) | non | non (expérimental) | non |
+| native_question | oui (`AskUserQuestion`) | oui si `NativeConfig::ask_user_question` et modèle à outils (`AskUserQuestion` du harnais, `reply: turn`) | non (expérimental) | non |
 | tool_cancel | oui (par PID, dans l'adaptateur ; Unix et local seulement : par SSH ou hors Unix, non, et `cancel_tools` → `Unsupported { tool_cancel }`) | oui (jeton d'annulation) | non | non |
 | background_tasks | oui | oui quand la session a le `Bash` de son serveur `nexus` (`nexus-tools` ; `capabilities(modèle)` : `default_tools` configuré et modèle à outils) | non | non |
 | resume | oui | oui (transcript) | oui | selon `loadSession` |
@@ -340,9 +340,25 @@ sur un provider, aucune forme sérialisée ne bouge : `CONTRACT_VERSION` reste 5
   compaction automatique (l'erreur typée `context_too_small` sort quand l'endpoint refuse).
   `cost` : `free` si configuré, `priced` si le modèle a un prix, sinon `unknown`.
 - **Portées** : `once` et `session` (`always` n'a nulle part où être gardé) ; `always` répond
-  `Unsupported { permission_scope }`. `native_question`, `subagents`, `sandbox` : absents ;
-  `answer_question` → `Unsupported { native_question }`, mode `trust` accepté à
+  `Unsupported { permission_scope }`. `subagents`, `sandbox` : absents ; `native_question` : voir ci-dessous ;
+  `answer_question` → `Unsupported { native_question }` (`Unsupported { answer_question }` quand le harnais a
+  sa question : elle se répond par un tour), mode `trust` accepté à
   l'ouverture et à chaud (la politique locale autorise tout appel que ne refuse pas un `deny`).
+- **Outils du harnais (P18, `providers/native/builtin.rs`)** : deux outils sans serveur, sous les noms et formes
+  d'entrée de Claude Code, soumis à la règle d'exposition (un `deny` les retire, une liste `allow` doit les nommer,
+  lecture seule pour `plan_only`) et aux hooks `before_tool` / `after_tool`, jamais à une demande de permission.
+  `AskUserQuestion` est offert quand l'hôte le demande (`NativeConfig::ask_user_question`, défaut non : un hôte qui
+  ne montre pas la question ne doit pas laisser le modèle attendre) à un modèle à outils, ce que dit
+  `native_question` ; un appel émet `question { reply: turn }` (`question_id` = `q_<id de l'appel>`,
+  `tool_call_id` = l'appel, `questions` lues comme pour Claude Code), le résultat dit au modèle que la réponse
+  viendra au prochain message, et le tour se termine en `done completed` une fois les appels de l'étape finis
+  (A45 : la réponse est un tour). `Agent` est offert quand les hooks de la session disent `runs_subagents()`, à un
+  modèle à outils, jamais à une session enfant (`lineage.depth > 0` : profondeur 1, A17) ; un appel attend
+  `SessionHooks::run_subagent(SubagentRequest { tool_call_id, description, prompt, subagent_type, input })`,
+  sans la limite `hook_timeout` (la limite du tour s'applique), et sa réponse est le `tool_result` (`Err` : un
+  résultat en erreur, le tour continue) ; l'arrêt du tour ou l'annulation de l'appel abandonne le futur, ce qui
+  dit à l'hôte d'arrêter le sous-agent. `subagents` reste `none` : aucun événement ne porte `parent`, le
+  sous-agent est la session enfant de l'hôte (A18).
 - **Tâches de fond** : `background_tasks` est vrai pour une session dont le serveur `nexus` (`nexus-tools`)
   sert `Bash` (le cas par défaut : `capabilities(modèle)` le dit quand `default_tools` est configuré et que le
   modèle appelle des outils ; une politique qui retire `Bash` le rend faux pour la session, sinon

@@ -11,6 +11,7 @@
 //! | Cause | Event |
 //! |---|---|
 //! | a message without tool call | `done completed` (`max_tokens` / `refusal` if the endpoint said so) |
+//! | a step that called `AskUserQuestion` (once its calls are done) | `done completed`: the answer is the next turn (A45) |
 //! | `max_turns` / `max_tool_iterations` reached | `done max_turns` |
 //! | token or USD budget spent | `done budget_exceeded` |
 //! | `interrupt` | `done interrupted` |
@@ -30,6 +31,7 @@ use futures::future::join_all;
 use serde_json::{Value, json};
 use tokio::sync::oneshot;
 
+use super::builtin::{self, BuiltinTool};
 use super::cancel::CancelToken;
 use super::compaction::{
     apply, count_images, estimate_tokens, should_compact, split_point, summarise, summary_request,
@@ -40,8 +42,8 @@ use super::tools::{ToolEntry, ToolRegistry};
 use crate::agent::{
     AgentEvent, CompactionInfo, CompactionPhase, CompactionTrigger, Cost, CostBasis, DeltaKind,
     HookVerdict, InputBlock, ModelUsage, PermissionDecision, PolicyDecision, ProviderError,
-    StopReason, ToolCallInfo, ToolCategory, ToolOutput, ToolResultInfo, TurnContext, TurnInput,
-    Usage,
+    QuestionReply, StopReason, ToolCallInfo, ToolCategory, ToolOutput, ToolResultInfo, TurnContext,
+    TurnInput, Usage,
 };
 use crate::model::{
     ChatMessage, CompletionChunk, CompletionRequest, FinishReason, ImagePart, Role, ToolCallChunk,
@@ -394,9 +396,14 @@ async fn iterate(
         messages.push(assistant(&step.text, &step.reasoning, calls.clone()));
         let ran = run_tools(core, signal, &calls).await;
         push_results(core, messages, &calls, &ran);
+        let asked = ran.iter().any(|run| run.ends_turn);
         if let Some(fatal) = ran.into_iter().find_map(|run| run.fatal) {
             core.mark_dead(fatal.clone());
             return Outcome::Fatal(fatal);
+        }
+        // A question was put to the user: the turn ends here, the answer is the next one (A45).
+        if asked {
+            return Outcome::Stop(StopKind::Completed, Some(step.text));
         }
     }
 }
@@ -762,6 +769,9 @@ struct Run {
     context: Vec<String>,
     /// Images the tool returned (MCP `image` blocks): for a model with vision.
     images: Vec<ImagePart>,
+    /// The call asked the user a question (`AskUserQuestion`): the turn ends once the step's
+    /// calls are done, the answer being the next turn (A45).
+    ends_turn: bool,
     fatal: Option<ProviderError>,
 }
 
@@ -814,14 +824,18 @@ async fn run_one(
     let mut context = Vec::new();
     let mut images = Vec::new();
     let mut task = None;
+    let mut ends_turn = false;
     let (content, is_error, fatal) = execute(
         core,
         signal,
         call,
         &token,
-        &mut context,
-        &mut images,
-        &mut task,
+        Outputs {
+            context: &mut context,
+            images: &mut images,
+            task: &mut task,
+            ends_turn: &mut ends_turn,
+        },
     )
     .await;
     core.end_tool(&call.id);
@@ -840,6 +854,7 @@ async fn run_one(
         content,
         context,
         images,
+        ends_turn,
         fatal,
     }
 }
@@ -922,16 +937,28 @@ fn is_task_tool(entry: &ToolEntry) -> bool {
         )
 }
 
+/// What a call produces besides its result text.
+struct Outputs<'a> {
+    context: &'a mut Vec<String>,
+    images: &'a mut Vec<ImagePart>,
+    task: &'a mut Option<Value>,
+    ends_turn: &'a mut bool,
+}
+
 /// Runs one call: `(content for the model, is_error, fatal)`.
 async fn execute(
     core: &Core,
     signal: &TurnSignal,
     call: &ToolCallChunk,
     token: &CancelToken,
-    context: &mut Vec<String>,
-    images: &mut Vec<ImagePart>,
-    task: &mut Option<Value>,
+    out: Outputs<'_>,
 ) -> (String, bool, Option<ProviderError>) {
+    let Outputs {
+        context,
+        images,
+        task,
+        ends_turn,
+    } = out;
     let fail = |message: &str| (message.to_owned(), true, None);
     let Some(entry) = core.registry.get(&call.name) else {
         return fail("unknown tool");
@@ -974,6 +1001,22 @@ async fn execute(
         if signal.token.is_cancelled() || token.is_cancelled() {
             return (stopped_message(signal, token), true, None);
         }
+    }
+    // The harness's own tools ask no permission and reach no server (`builtin.rs`).
+    if let Some(kind) = entry.builtin {
+        let ran_input = input.clone();
+        let (content, is_error) = match kind {
+            BuiltinTool::AskUserQuestion => ask_user(core, call, input, ends_turn),
+            BuiltinTool::Agent => match run_subagent(core, signal, call, token, &input).await {
+                Some(outcome) => outcome,
+                None => return (stopped_message(signal, token), true, None),
+            },
+        };
+        after_tool(
+            core, signal, call, entry, ran_input, &content, is_error, context,
+        )
+        .await;
+        return (content, is_error, None);
     }
     match core.decide(entry, &input) {
         PolicyDecision::Allow => {},
@@ -1020,25 +1063,95 @@ async fn execute(
         Err(McpError::Failed(error)) => (format!("tool call failed: {error}"), true, None),
         Err(McpError::Rpc { message }) => (message, true, None),
     };
-    if let Some(hooks) = &core.hooks {
-        let info = ToolResultInfo {
-            call: ToolCallInfo {
-                id: Some(call.id.clone()),
-                name: call.name.clone(),
-                canonical: entry.canonical.clone(),
-                category: entry.category,
-                input: ran_input,
-            },
-            output: Value::String(content.clone()),
-            is_error,
-        };
-        if let Some(Some(text)) =
-            hook_call(core, signal, "after_tool", hooks.after_tool(&info)).await
-        {
-            context.push(text);
-        }
-    }
+    after_tool(
+        core, signal, call, entry, ran_input, &content, is_error, context,
+    )
+    .await;
     (content, is_error, fatal)
+}
+
+/// What the host adds after a call that ran (`after_tool`): pushed to `context`.
+#[allow(clippy::too_many_arguments)]
+async fn after_tool(
+    core: &Core,
+    signal: &TurnSignal,
+    call: &ToolCallChunk,
+    entry: &ToolEntry,
+    ran_input: Value,
+    content: &str,
+    is_error: bool,
+    context: &mut Vec<String>,
+) {
+    let Some(hooks) = &core.hooks else {
+        return;
+    };
+    let info = ToolResultInfo {
+        call: ToolCallInfo {
+            id: Some(call.id.clone()),
+            name: call.name.clone(),
+            canonical: entry.canonical.clone(),
+            category: entry.category,
+            input: ran_input,
+        },
+        output: Value::String(content.to_owned()),
+        is_error,
+    };
+    if let Some(Some(text)) = hook_call(core, signal, "after_tool", hooks.after_tool(&info)).await {
+        context.push(text);
+    }
+}
+
+/// `AskUserQuestion`: the question goes to the host (`question { reply: turn }`) and the turn
+/// will end after this step (A45). A call without a readable question is an error result, and
+/// the turn goes on.
+fn ask_user(
+    core: &Core,
+    call: &ToolCallChunk,
+    input: Value,
+    ends_turn: &mut bool,
+) -> (String, bool) {
+    match builtin::questions(&input) {
+        Err(reason) => (reason, true),
+        Ok(questions) => {
+            core.emit(AgentEvent::Question {
+                question_id: format!("q_{}", call.id),
+                tool_call_id: Some(call.id.clone()),
+                reply: QuestionReply::Turn,
+                questions,
+                input,
+                parent: None,
+            });
+            *ends_turn = true;
+            (builtin::QUESTION_ASKED.to_owned(), false)
+        },
+    }
+}
+
+/// `Agent`: the host runs the sub-agent (A18). `None` when the turn was interrupted or the call
+/// cancelled meanwhile: the future is dropped, which tells the host to stop it. Not bounded by
+/// the hook timeout (a sub-agent takes as long as its work; the turn timeout still applies).
+async fn run_subagent(
+    core: &Core,
+    signal: &TurnSignal,
+    call: &ToolCallChunk,
+    token: &CancelToken,
+    input: &Value,
+) -> Option<(String, bool)> {
+    let request = match builtin::subagent_request(&call.id, input) {
+        Ok(request) => request,
+        Err(reason) => return Some((reason, true)),
+    };
+    let Some(hooks) = &core.hooks else {
+        return Some(("this host runs no sub-agent".to_owned(), true));
+    };
+    tokio::select! {
+        outcome = hooks.run_subagent(&request) => Some(match outcome {
+            Ok(text) => (text, false),
+            Err(message) => (message, true),
+        }),
+        () = signal.token.cancelled() => None,
+        () = token.cancelled() => None,
+    }
 }
 
 /// The tool result as the model reads it: the output, then what hooks added.
