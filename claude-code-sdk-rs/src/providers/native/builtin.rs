@@ -7,20 +7,31 @@
 //! | `AskUserQuestion` | `NativeConfig::ask_user_question` and a model with tools (`native_question`) | emits `question { reply: turn }`, answers the model that the reply comes as the next user message, and **ends the turn** once the step's calls are done (decision A45: the answer is a user turn) |
 //! | `Agent` | the session's hooks say `runs_subagents()`, a model with tools, and the session is not a child (`lineage.depth == 0` or no lineage) | awaits `SessionHooks::run_subagent` (decision A18: the host's child session), whose answer is the `tool_result` |
 //!
-//! Both are subject to the exposure rule like any tool (a `deny` names them, an allow-list
-//! must name them, both are read-only for `plan_only`) and to `before_tool` / `after_tool`.
+//! Policy, as on Claude Code:
+//! - a `deny` refuses them: a bare `Agent` (or `Task`, its other name) / `AskUserQuestion`
+//!   hides the tool; a pattern with an argument is judged at the call on Claude Code's argument,
+//!   the `subagent_type` (`Agent(Explore)`), and fails closed when the call names none
+//!   ([`denied`]); the input judged is the one `before_tool` left;
+//! - an allow-list does not hide them (on Claude Code it only approves, and these tools ask
+//!   nothing), and `plan_only` keeps them (neither changes anything by itself);
+//! - `before_tool` / `after_tool` apply; a `before_tool` deny means no question and no sub-agent.
+//!
 //! Neither asks for a permission: the question is a question, and the sub-agent is bounded by
-//! the host, whose child session is never more permissive than its parent (A17).
+//! the host, whose child session is never more permissive than its parent (A17). The host also
+//! bounds how many sub-agents run at once and what they spend: the harness passes every call
+//! on, concurrently within a step, and does not count a sub-agent's cost in the parent's budget.
 
 use serde_json::{Value, json};
 
 use super::tools::ToolEntry;
-use crate::agent::{QuestionSpec, SubagentRequest, ToolCategory};
+use crate::agent::{QuestionSpec, SubagentRequest, ToolCategory, ToolPolicy};
 
 /// Name of the question tool, as Claude Code names it.
 pub const ASK_USER_QUESTION_TOOL: &str = "AskUserQuestion";
 /// Name of the sub-agent tool, as Claude Code names it.
 pub const AGENT_TOOL: &str = "Agent";
+/// The other name Claude Code gives the sub-agent tool: a policy pattern may use it.
+pub const AGENT_ALIAS: &str = "Task";
 
 /// What the model reads back from a question it asked.
 pub const QUESTION_ASKED: &str = "The question was shown to the user. Their answer will \
@@ -106,6 +117,37 @@ pub fn agent_entry() -> ToolEntry {
         }),
         ToolCategory::Agent,
     )
+}
+
+/// The argument a policy pattern is matched against, in Claude Code's form: the
+/// `subagent_type` of an `Agent` call (`Agent(Explore)`), nothing for a question.
+pub fn primary_argument(kind: BuiltinTool, input: &Value) -> Option<String> {
+    match kind {
+        BuiltinTool::Agent => input
+            .get("subagent_type")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|kind| !kind.is_empty())
+            .map(str::to_owned),
+        BuiltinTool::AskUserQuestion => None,
+    }
+}
+
+/// Whether a `deny` pattern of `policy` refuses this call: any of the tool's names (`Agent`
+/// and its alias `Task`), the argument of [`primary_argument`], and fail closed when there is
+/// none (`Agent(Explore)` refuses an `Agent` call that names no type). The rest of the policy
+/// does not apply: these tools never ask for a permission, and `plan_only` keeps them.
+pub fn denied(policy: &ToolPolicy, entry: &ToolEntry, input: &Value) -> bool {
+    let Some(kind) = entry.builtin else {
+        return false;
+    };
+    let arg = primary_argument(kind, input);
+    entry.names().any(|name| {
+        policy
+            .deny
+            .iter()
+            .any(|pattern| pattern.matches_closed(name, arg.as_deref()))
+    })
 }
 
 /// The questions of an `AskUserQuestion` input, or why the call is refused.

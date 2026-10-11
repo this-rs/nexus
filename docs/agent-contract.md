@@ -345,8 +345,14 @@ sur un provider, aucune forme sérialisée ne bouge : `CONTRACT_VERSION` reste 5
   sa question : elle se répond par un tour), mode `trust` accepté à
   l'ouverture et à chaud (la politique locale autorise tout appel que ne refuse pas un `deny`).
 - **Outils du harnais (P18, `providers/native/builtin.rs`)** : deux outils sans serveur, sous les noms et formes
-  d'entrée de Claude Code, soumis à la règle d'exposition (un `deny` les retire, une liste `allow` doit les nommer,
-  lecture seule pour `plan_only`) et aux hooks `before_tool` / `after_tool`, jamais à une demande de permission.
+  d'entrée de Claude Code, jamais soumis à une demande de permission. Politique comme sur Claude Code : un `deny` nu
+  (`Agent`, ou `Task` son autre nom, `AskUserQuestion`) retire l'outil ; un `deny` à argument est jugé à l'appel sur
+  l'argument de Claude Code, le `subagent_type` (`Agent(Explore)`), en échec fermé quand l'appel n'en nomme pas
+  (`builtin::denied`, sur l'entrée laissée par `before_tool`) ; une liste `allow` ne les masque pas (sur Claude Code elle
+  ne fait qu'approuver) et `plan_only` les garde ; `before_tool` / `after_tool` s'appliquent (un refus de `before_tool` :
+  ni question, ni sous-agent). L'hôte borne le nombre de sous-agents simultanés et leur dépense : le harnais transmet
+  chaque appel (en parallèle dans une étape) sans compter leur coût dans le budget du parent ; une session enfant
+  du même harnais doit être ouverte avec `lineage.depth >= 1` (seule garde de récursion du harnais).
   `AskUserQuestion` est offert quand l'hôte le demande (`NativeConfig::ask_user_question`, défaut non : un hôte qui
   ne montre pas la question ne doit pas laisser le modèle attendre) à un modèle à outils, ce que dit
   `native_question` ; un appel émet `question { reply: turn }` (`question_id` = `q_<id de l'appel>`,

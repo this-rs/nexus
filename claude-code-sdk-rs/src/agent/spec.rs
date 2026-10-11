@@ -296,6 +296,10 @@ pub trait SessionHooks: Send + Sync {
     /// (`Capabilities::subagents` is `None`) then offers the model an `Agent` tool whose calls
     /// go to [`Self::run_subagent`] (decision A18: the host's fallback is a child session).
     /// Asked once, when the session opens. `false` by default: no `Agent` tool.
+    ///
+    /// The harness refuses the tool to a session whose `lineage.depth` is 1 or more; nothing
+    /// else stops recursion. A host that opens the sub-agent as a session of the same harness
+    /// gives it a `lineage` with `depth >= 1`, or hooks that answer `false` here.
     fn runs_subagents(&self) -> bool {
         false
     }
@@ -306,6 +310,10 @@ pub trait SessionHooks: Send + Sync {
     /// Unlike the other hooks it is not bounded by the hook timeout: a sub-agent takes as
     /// long as its work. The harness drops the future when the turn is interrupted or the
     /// call cancelled; the host stops the sub-agent then.
+    ///
+    /// The host bounds how many sub-agents run at once and what they spend: the harness passes
+    /// every call on (concurrently when the model makes several in one step) and does not count
+    /// a sub-agent's cost in the parent session's budget.
     async fn run_subagent(&self, _request: &SubagentRequest) -> Result<String, String> {
         Err("this host runs no sub-agent".to_owned())
     }

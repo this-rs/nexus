@@ -1002,8 +1002,12 @@ async fn execute(
             return (stopped_message(signal, token), true, None);
         }
     }
-    // The harness's own tools ask no permission and reach no server (`builtin.rs`).
+    // The harness's own tools ask no permission and reach no server (`builtin.rs`); a `deny`
+    // still refuses them, judged on the input the hooks left (an argument included).
     if let Some(kind) = entry.builtin {
+        if builtin::denied(&core.lock().policy, entry, &input) {
+            return fail("permission denied by policy");
+        }
         let ran_input = input.clone();
         let (content, is_error) = match kind {
             BuiltinTool::AskUserQuestion => ask_user(core, call, input, ends_turn),

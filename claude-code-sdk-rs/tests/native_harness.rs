@@ -2608,6 +2608,8 @@ struct SubagentHost {
     takes: Duration,
     asked: std::sync::Mutex<Vec<nexus_claude::agent::SubagentRequest>>,
     dropped: std::sync::atomic::AtomicBool,
+    /// `before_tool` refuses every call.
+    deny_before: bool,
 }
 
 impl SubagentHost {
@@ -2617,6 +2619,17 @@ impl SubagentHost {
             takes,
             asked: std::sync::Mutex::new(Vec::new()),
             dropped: std::sync::atomic::AtomicBool::new(false),
+            deny_before: false,
+        })
+    }
+
+    fn denying() -> Arc<Self> {
+        Arc::new(Self {
+            answer: Ok("never".to_owned()),
+            takes: Duration::ZERO,
+            asked: std::sync::Mutex::new(Vec::new()),
+            dropped: std::sync::atomic::AtomicBool::new(false),
+            deny_before: true,
         })
     }
 }
@@ -2633,6 +2646,19 @@ impl Drop for DropFlag<'_> {
 
 #[async_trait::async_trait]
 impl nexus_claude::agent::SessionHooks for SubagentHost {
+    async fn before_tool(
+        &self,
+        _call: &nexus_claude::agent::ToolCallInfo,
+    ) -> nexus_claude::agent::HookVerdict {
+        if self.deny_before {
+            nexus_claude::agent::HookVerdict::Deny {
+                reason: "DENIED-BY-HOOK".to_owned(),
+            }
+        } else {
+            nexus_claude::agent::HookVerdict::Continue
+        }
+    }
+
     fn runs_subagents(&self) -> bool {
         true
     }
@@ -2913,4 +2939,160 @@ async fn a_question_without_questions_is_an_error_result_and_the_turn_goes_on() 
     );
     assert!(tool_results(&events)[0].1);
     assert_eq!(h.chat().len(), 2, "the turn went on to a second request");
+}
+
+fn typed_agent_call(id: &'static str, kind: Option<&str>) -> (&'static str, &'static str, Value) {
+    let mut input = json!({"description": "look", "prompt": "Look around"});
+    if let Some(kind) = kind {
+        input["subagent_type"] = json!(kind);
+    }
+    (id, "Agent", input)
+}
+
+#[tokio::test]
+async fn a_deny_with_an_argument_refuses_that_subagent_type_and_fails_closed_without_one() {
+    let h = Harness::new(vec![
+        tool_reply(
+            Some("delegate"),
+            &[
+                typed_agent_call("a1", Some("Explore")),
+                typed_agent_call("a3", None),
+            ],
+            None,
+            None,
+        ),
+        tool_reply(
+            Some(TOOL),
+            &[typed_agent_call("a2", Some("general-purpose"))],
+            None,
+            None,
+        ),
+        text_reply(Some(TOOL), "done", None, None),
+    ])
+    .await;
+    let host = SubagentHost::new(Ok("RAN"), Duration::ZERO);
+    let mut spec = h.spec();
+    spec.hooks = Some(host.clone());
+    spec.policy =
+        ToolPolicy::from_patterns(PolicyMode::Ask, &[] as &[&str], &["Agent(Explore)"]).unwrap();
+    let session = h.open(spec).await;
+    let events = turn(&*session, "delegate").await;
+    assert_eq!(stop_reason(&events), StopReason::Completed);
+    let results = tool_results(&events);
+    let of = |id: &str| results.iter().find(|r| r.0 == id).cloned().unwrap();
+    assert!(
+        of("a1").1 && of("a1").2.contains("denied by policy"),
+        "{results:?}"
+    );
+    assert!(
+        of("a3").1,
+        "no subagent_type: the deny applies (fail closed): {results:?}"
+    );
+    assert_eq!(of("a2"), ("a2".to_owned(), false, "RAN".to_owned()));
+    let asked: Vec<Option<String>> = host
+        .asked
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|r| r.subagent_type.clone())
+        .collect();
+    assert_eq!(asked, vec![Some("general-purpose".to_owned())]);
+    // Still offered: a deny with an argument judges calls, it does not hide the tool.
+    assert!(offered_tools(&h.chat()[0]).contains(&"Agent".to_owned()));
+}
+
+#[tokio::test]
+async fn a_bare_deny_hides_the_tool_by_its_name_or_its_alias_and_an_allow_list_does_not() {
+    let h = Harness::with(
+        vec![
+            text_reply(Some("one"), "1", None, None),
+            text_reply(Some("two"), "2", None, None),
+            text_reply(Some("three"), "3", None, None),
+            text_reply(Some("four"), "4", None, None),
+        ],
+        |config| config.ask_user_question = true,
+    )
+    .await;
+    let dir = tempfile::tempdir().unwrap();
+    let open = |deny: &'static [&'static str], allow: &'static [&'static str], mode: PolicyMode| {
+        let mut spec = h.spec_with_mcp(&log_path(&dir));
+        spec.hooks = Some(SubagentHost::new(Ok("x"), Duration::ZERO));
+        spec.policy = ToolPolicy::from_patterns(mode, allow, deny).unwrap();
+        spec
+    };
+    for (spec, text) in [
+        (
+            open(&["Agent", "AskUserQuestion"], &[], PolicyMode::Ask),
+            "one",
+        ),
+        (open(&["Task"], &[], PolicyMode::Ask), "two"),
+        (open(&[], &["mcp__fake__echo"], PolicyMode::Ask), "three"),
+        (open(&[], &[], PolicyMode::PlanOnly), "four"),
+    ] {
+        let session = h.open(spec).await;
+        turn(&*session, text).await;
+    }
+    let chat = h.chat();
+    let offered: Vec<Vec<String>> = chat.iter().map(offered_tools).collect();
+    let has = |i: usize, tool: &str| offered[i].contains(&tool.to_owned());
+    assert!(
+        !has(0, "Agent") && !has(0, "AskUserQuestion"),
+        "{:?}",
+        offered[0]
+    );
+    assert!(
+        !has(1, "Agent") && has(1, "AskUserQuestion"),
+        "{:?}",
+        offered[1]
+    );
+    // The allow-list exposes only echo of the MCP tools, and keeps the harness's own.
+    assert!(
+        has(2, "Agent") && has(2, "AskUserQuestion"),
+        "{:?}",
+        offered[2]
+    );
+    assert!(!has(2, "mcp__fake__write"));
+    assert!(
+        has(3, "Agent") && has(3, "AskUserQuestion"),
+        "{:?}",
+        offered[3]
+    );
+}
+
+#[tokio::test]
+async fn a_before_tool_deny_means_no_question_and_no_subagent() {
+    let h = Harness::with(
+        vec![
+            tool_reply(
+                Some("go"),
+                &[question_call("q1"), agent_call("a1")],
+                None,
+                None,
+            ),
+            text_reply(Some(TOOL), "went on", None, None),
+        ],
+        |config| config.ask_user_question = true,
+    )
+    .await;
+    let host = SubagentHost::denying();
+    let mut spec = h.spec();
+    spec.hooks = Some(host.clone());
+    let session = h.open(spec).await;
+    let events = turn(&*session, "go").await;
+    assert_eq!(stop_reason(&events), StopReason::Completed);
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::Question { .. }))
+    );
+    assert!(host.asked.lock().unwrap().is_empty());
+    let results = tool_results(&events);
+    assert!(
+        results
+            .iter()
+            .all(|r| r.1 && r.2.contains("DENIED-BY-HOOK")),
+        "{results:?}"
+    );
+    // No question was asked, so the turn did not end on it.
+    assert_eq!(h.chat().len(), 2);
 }
