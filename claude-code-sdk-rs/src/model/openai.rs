@@ -33,8 +33,8 @@ use super::quirks::EndpointQuirks;
 use super::sse::SseDecoder;
 use super::wire::{self, PROBE_TOOL, StreamParser};
 use super::{
-    ChatMessage, CompletionChunk, CompletionRequest, CompletionStream, EndpointProbe, ImagePart,
-    ModelEndpoint, ToolSpec,
+    ChatMessage, CompletionChunk, CompletionRequest, CompletionStream, EndpointProbe, FinishReason,
+    ImagePart, ModelEndpoint, ToolSpec,
 };
 use crate::agent::credentials::WipedText;
 use crate::agent::{
@@ -316,6 +316,48 @@ impl OpenAiEndpoint {
         }
         Some(true)
     }
+
+    /// Runs one tool-call probe attempt with the given token budget and reports
+    /// `(called, finish, field)`. A forced `tool_choice` is tried first and
+    /// retried with `auto` if the server refuses the forcing (`InvalidRequest`),
+    /// since reasoning models in thinking mode refuse the forcing without saying
+    /// anything about tools (see `probe` for the policy).
+    async fn probe_attempt(
+        &self,
+        model: &str,
+        max_tokens: u32,
+    ) -> Result<(bool, Option<FinishReason>, SharedField), ProviderError> {
+        let no_tools = || ProviderError::ModelNoTools {
+            model: model.to_string(),
+        };
+        let mut request =
+            CompletionRequest::new(model, vec![ChatMessage::user("Call the ping tool now.")]);
+        request.tools = vec![ToolSpec {
+            name: PROBE_TOOL.into(),
+            description: "Connectivity check: call it once, with no arguments.".into(),
+            parameters: json!({"type": "object", "properties": {}}),
+        }];
+        request.max_tokens = Some(max_tokens);
+        request.temperature = Some(0.0);
+        let forced =
+            !self.config.quirks.omit_tool_choice && !self.config.quirks.no_forced_tool_choice;
+        let first = self.start(request.clone(), Some(PROBE_TOOL)).await;
+        let started = match first {
+            Err(ProviderError::InvalidRequest { .. }) if forced => self.start(request, None).await,
+            other => other,
+        };
+        let (mut stream, field) = started.map_err(|error| tools_refusal(error, &no_tools))?;
+        let mut called = false;
+        let mut finish: Option<FinishReason> = None;
+        while let Some(item) = stream.next().await {
+            match item.map_err(|error| tools_refusal(error, &no_tools))? {
+                CompletionChunk::ToolCall(call) if call.name == PROBE_TOOL => called = true,
+                CompletionChunk::Finish(reason) => finish = Some(reason),
+                _ => {},
+            }
+        }
+        Ok((called, finish, field))
+    }
 }
 
 /// The server refused the REQUEST (not the key, not the load) and said why in
@@ -438,42 +480,31 @@ impl ModelEndpoint for OpenAiEndpoint {
         if let Some(hit) = self.cached_probe(model) {
             return Ok(hit);
         }
-        let mut request =
-            CompletionRequest::new(model, vec![ChatMessage::user("Call the ping tool now.")]);
-        request.tools = vec![ToolSpec {
-            name: PROBE_TOOL.into(),
-            description: "Connectivity check: call it once, with no arguments.".into(),
-            parameters: json!({"type": "object", "properties": {}}),
-        }];
-        // A reasoning model thinks before it calls: room for that, or the budget
-        // ends in the reasoning and the probe sees "no tool call".
-        request.max_tokens = Some(4096);
-        request.temperature = Some(0.0);
         let no_tools = || ProviderError::ModelNoTools {
             model: model.to_string(),
         };
-        // Forcing the tool is a convenience, not what is being asked: a 400 to the
-        // FORCED probe is a refusal of the forcing as often as of tools (reasoning
-        // models in thinking mode: DeepSeek, Anthropic, Qwen, Kimi..., each with its
-        // own wording), so the model is asked again with `auto` before anything is
-        // concluded. Only that answer says whether the model has tools.
-        let forced =
-            !self.config.quirks.omit_tool_choice && !self.config.quirks.no_forced_tool_choice;
-        let first = self.start(request.clone(), Some(PROBE_TOOL)).await;
-        let started = match first {
-            Err(ProviderError::InvalidRequest { .. }) if forced => self.start(request, None).await,
-            other => other,
-        };
-        let (mut stream, field) = started.map_err(|error| tools_refusal(error, &no_tools))?;
-        let mut called = false;
-        while let Some(item) = stream.next().await {
-            match item.map_err(|error| tools_refusal(error, &no_tools))? {
-                CompletionChunk::ToolCall(call) if call.name == PROBE_TOOL => called = true,
-                _ => {},
+        // A reasoning model thinks before it calls: a first budget wide enough for
+        // most of them (DeepSeek, Qwen3, Kimi, GLM, …), doubled once on truncation.
+        // A single very large budget would hide the signal; two attempts tell the
+        // "no tools" case from the "no budget to answer" one.
+        const BUDGETS: [u32; 2] = [4096, 8192];
+        let field: SharedField;
+        let mut attempt = 0usize;
+        loop {
+            let budget = BUDGETS[attempt];
+            let (called, finish, this_field) = self.probe_attempt(model, budget).await?;
+            if called {
+                field = this_field;
+                break;
             }
-        }
-        if !called {
-            return Err(no_tools());
+            // Only `finish=length` is retried: the model was cut off before any tool
+            // call. `finish=stop` means the model answered, deliberately, without
+            // calling a tool — that is the "no tools" answer and is not retried.
+            let truncated = finish == Some(FinishReason::Length);
+            attempt += 1;
+            if !truncated || attempt >= BUDGETS.len() {
+                return Err(no_tools());
+            }
         }
         // The catalogue is best effort: a failure here does not fail the probe.
         let listed = self
