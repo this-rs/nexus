@@ -406,6 +406,52 @@ pub struct QuestionSpec {
     pub multi_select: bool,
 }
 
+impl QuestionSpec {
+    /// Lenient reading of the `questions` of an `AskUserQuestion` input: a question
+    /// without a `question` string is dropped, an option may be an object or a bare label, `multiSelect` or
+    /// `multi_select`. Shared by every harness that has the tool (Claude Code's, the native one).
+    pub fn parse_list(input: &Value) -> Vec<QuestionSpec> {
+        let text =
+            |value: &Value, key: &str| value.get(key).and_then(Value::as_str).map(str::to_owned);
+        input
+            .get("questions")
+            .and_then(Value::as_array)
+            .map(|questions| {
+                questions
+                    .iter()
+                    .filter_map(|question| {
+                        Some(QuestionSpec {
+                            question: text(question, "question")?,
+                            header: text(question, "header"),
+                            options: question
+                                .get("options")
+                                .and_then(Value::as_array)
+                                .map(|options| {
+                                    options
+                                        .iter()
+                                        .filter_map(|option| {
+                                            let label = text(option, "label")
+                                                .or_else(|| option.as_str().map(str::to_owned))?;
+                                            Some(QuestionOption {
+                                                label,
+                                                description: text(option, "description"),
+                                            })
+                                        })
+                                        .collect()
+                                })
+                                .unwrap_or_default(),
+                            multi_select: question
+                                .get("multiSelect")
+                                .or_else(|| question.get("multi_select"))
+                                .and_then(Value::as_bool)
+                                .unwrap_or(false),
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+}
 /// One suggested answer.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QuestionOption {

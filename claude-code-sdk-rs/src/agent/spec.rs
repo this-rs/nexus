@@ -291,6 +291,62 @@ pub trait SessionHooks: Send + Sync {
     async fn before_turn(&self, _ctx: &TurnContext) -> TurnDirective {
         TurnDirective::default()
     }
+
+    /// Whether the host runs sub-agents for this session: a harness that has none of its own
+    /// (`Capabilities::subagents` is `None`) then offers the model an `Agent` tool whose calls
+    /// go to [`Self::run_subagent`] (decision A18: the host's fallback is a child session).
+    /// Asked once, when the session opens. `false` by default: no `Agent` tool.
+    ///
+    /// The harness refuses the tool to a session whose `lineage.depth` is 1 or more; nothing
+    /// else stops recursion. A host that opens the sub-agent as a session of the same harness
+    /// gives it a `lineage` with `depth >= 1`, or hooks that answer `false` here.
+    fn runs_subagents(&self) -> bool {
+        false
+    }
+
+    /// Runs one sub-agent to its end and returns what it answered (`Ok`), or why it could
+    /// not run or failed (`Err`); either becomes the `tool_result` of the `Agent` call.
+    ///
+    /// Unlike the other hooks it is not bounded by the hook timeout: a sub-agent takes as
+    /// long as its work. The harness drops the future when the turn is interrupted or the
+    /// call cancelled; the host stops the sub-agent then.
+    ///
+    /// The host bounds how many sub-agents run at once and what they spend: the harness passes
+    /// every call on (concurrently when the model makes several in one step) and does not count
+    /// a sub-agent's cost in the parent session's budget.
+    async fn run_subagent(&self, _request: &SubagentRequest) -> Result<String, String> {
+        Err("this host runs no sub-agent".to_owned())
+    }
+}
+
+/// What the model asked of a sub-agent through the `Agent` tool (see
+/// [`SessionHooks::run_subagent`]).
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub struct SubagentRequest {
+    /// The `tool_call` that asked for it.
+    pub tool_call_id: String,
+    /// A short description of the task (3–5 words), when the model gave one.
+    pub description: Option<String>,
+    /// The task, in full: the sub-agent's first message.
+    pub prompt: String,
+    /// The kind of agent asked for, when the model named one.
+    pub subagent_type: Option<String>,
+    /// The call's input as the model wrote it.
+    pub input: Value,
+}
+
+impl SubagentRequest {
+    /// A request for `prompt`, asked by the call `tool_call_id`.
+    pub fn new(tool_call_id: impl Into<String>, prompt: impl Into<String>) -> Self {
+        Self {
+            tool_call_id: tool_call_id.into(),
+            description: None,
+            prompt: prompt.into(),
+            subagent_type: None,
+            input: Value::Null,
+        }
+    }
 }
 
 /// The turn about to start, as a `before_turn` hook sees it.

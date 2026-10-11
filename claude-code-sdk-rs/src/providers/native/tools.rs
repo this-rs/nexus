@@ -30,7 +30,8 @@
 //!    `readOnlyHint: true`) — an `allow` entry cannot lift plan mode;
 //! 3. strict exposure (the default) and the policy has a non-empty `allow` list
 //!    that matches none of its names: **an allow-list is an exposure list**, a
-//!    tool it does not name is not offered at all.
+//!    tool it does not name is not offered at all (not for the harness's own
+//!    `AskUserQuestion` and `Agent`, which ask no permission: see `builtin.rs`).
 //!
 //! With an empty `allow` every other tool is offered and the mode decides, call
 //! by call, between running it, asking, and refusing (`ToolPolicy::decide`). A
@@ -41,6 +42,7 @@ use std::collections::BTreeMap;
 
 use serde_json::Value;
 
+use super::builtin::BuiltinTool;
 use crate::agent::{PolicyMode, ProviderError, ToolCategory, ToolPolicy};
 use crate::model::ToolSpec;
 
@@ -156,6 +158,9 @@ pub struct ToolEntry {
     /// What the tool does, for the policy: read, edit, search, command, web; `Read` for a
     /// read-only tool of another server and `Mcp` for the rest.
     pub category: ToolCategory,
+    /// Set for a tool of the harness itself (`AskUserQuestion`, `Agent`, see `builtin.rs`): it
+    /// has no server, and is offered under its own name.
+    pub builtin: Option<BuiltinTool>,
 }
 
 impl ToolEntry {
@@ -188,17 +193,51 @@ impl ToolEntry {
                 (None, None) if read_only => ToolCategory::Read,
                 (None, None) => ToolCategory::Mcp,
             },
+            builtin: None,
+        }
+    }
+
+    /// The entry of a tool of the harness itself, offered as `name` (no `mcp__` prefix).
+    pub fn builtin(
+        kind: BuiltinTool,
+        name: &str,
+        description: String,
+        schema: Value,
+        category: ToolCategory,
+    ) -> Self {
+        Self {
+            name: name.to_owned(),
+            server: String::new(),
+            tool: name.to_owned(),
+            description,
+            schema,
+            read_only: true,
+            canonical: Some(name.to_owned()),
+            category,
+            builtin: Some(kind),
         }
     }
 
     /// Every name a policy pattern may match this tool by: the offered name, then the canonical.
+    /// `Agent` also answers to `Task`, its other name in Claude Code (a policy written either
+    /// way applies).
     pub fn names(&self) -> impl Iterator<Item = &str> {
-        std::iter::once(self.name.as_str()).chain(self.canonical.as_deref())
+        let alias =
+            (self.builtin == Some(BuiltinTool::Agent)).then_some(super::builtin::AGENT_ALIAS);
+        std::iter::once(self.name.as_str())
+            .chain(self.canonical.as_deref())
+            .chain(alias)
     }
 
     /// What a pattern's argument is matched against: the primary argument of a canonical
     /// tool (the command, the path, the domain of the URL), the whole input for the others.
     pub fn primary_argument(&self, input: &Value) -> Option<String> {
+        // A tool of the harness: its Claude Code argument (`Agent(Explore)` names the
+        // `subagent_type`), `None` when there is none: a deny with an argument then applies
+        // (fail closed, `ToolPattern::matches_closed`).
+        if let Some(kind) = self.builtin {
+            return super::builtin::primary_argument(kind, input);
+        }
         let Some(canonical) = self.canonical.as_deref() else {
             return Some(input.to_string());
         };
@@ -298,7 +337,10 @@ impl ToolRegistry {
         if policy.mode == PolicyMode::PlanOnly && !entry.read_only {
             return false;
         }
+        // The harness's own tools ask no permission: an allow-list (which on Claude Code only
+        // approves) does not hide them, as Claude Code keeps them; a `deny` does.
         if strict
+            && entry.builtin.is_none()
             && !policy.allow.is_empty()
             && !policy
                 .allow

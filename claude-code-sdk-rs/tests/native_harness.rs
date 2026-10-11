@@ -2595,3 +2595,504 @@ async fn a_tool_image_stays_a_marker_for_a_model_without_vision() {
     );
     assert!(!requests[1].to_string().contains("image_url"));
 }
+
+// ---------------------------------------------------------------------------
+// The harness's own tools (P18): AskUserQuestion and Agent
+// ---------------------------------------------------------------------------
+
+/// A host that runs sub-agents: answers every `Agent` call with `answer`, records the
+/// requests, and notices when a sub-agent's future is dropped before its end.
+struct SubagentHost {
+    answer: Result<String, String>,
+    /// How long a sub-agent takes.
+    takes: Duration,
+    asked: std::sync::Mutex<Vec<nexus_claude::agent::SubagentRequest>>,
+    dropped: std::sync::atomic::AtomicBool,
+    /// `before_tool` refuses every call.
+    deny_before: bool,
+}
+
+impl SubagentHost {
+    fn new(answer: Result<&str, &str>, takes: Duration) -> Arc<Self> {
+        Arc::new(Self {
+            answer: answer.map(str::to_owned).map_err(str::to_owned),
+            takes,
+            asked: std::sync::Mutex::new(Vec::new()),
+            dropped: std::sync::atomic::AtomicBool::new(false),
+            deny_before: false,
+        })
+    }
+
+    fn denying() -> Arc<Self> {
+        Arc::new(Self {
+            answer: Ok("never".to_owned()),
+            takes: Duration::ZERO,
+            asked: std::sync::Mutex::new(Vec::new()),
+            dropped: std::sync::atomic::AtomicBool::new(false),
+            deny_before: true,
+        })
+    }
+}
+
+struct DropFlag<'a>(&'a std::sync::atomic::AtomicBool, bool);
+
+impl Drop for DropFlag<'_> {
+    fn drop(&mut self) {
+        if !self.1 {
+            self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl nexus_claude::agent::SessionHooks for SubagentHost {
+    async fn before_tool(
+        &self,
+        _call: &nexus_claude::agent::ToolCallInfo,
+    ) -> nexus_claude::agent::HookVerdict {
+        if self.deny_before {
+            nexus_claude::agent::HookVerdict::Deny {
+                reason: "DENIED-BY-HOOK".to_owned(),
+            }
+        } else {
+            nexus_claude::agent::HookVerdict::Continue
+        }
+    }
+
+    fn runs_subagents(&self) -> bool {
+        true
+    }
+
+    async fn run_subagent(
+        &self,
+        request: &nexus_claude::agent::SubagentRequest,
+    ) -> Result<String, String> {
+        self.asked.lock().unwrap().push(request.clone());
+        let mut flag = DropFlag(&self.dropped, false);
+        tokio::time::sleep(self.takes).await;
+        flag.1 = true;
+        self.answer.clone()
+    }
+}
+
+fn agent_call(id: &'static str) -> (&'static str, &'static str, Value) {
+    (
+        id,
+        "Agent",
+        json!({"description": "find the spec", "prompt": "Find where the spec is built"}),
+    )
+}
+
+#[tokio::test]
+async fn a_host_that_runs_subagents_gives_the_model_an_agent_tool_whose_answer_is_the_result() {
+    let h = Harness::new(vec![
+        tool_reply(Some("delegate"), &[agent_call("a1")], None, None),
+        text_reply(Some(TOOL), "the sub-agent found it", None, None),
+    ])
+    .await;
+    let host = SubagentHost::new(Ok("SPEC-IS-IN-manager.rs"), Duration::ZERO);
+    let mut spec = h.spec();
+    spec.hooks = Some(host.clone());
+    let session = h.open(spec).await;
+    let events = turn(&*session, "delegate the search").await;
+    assert_eq!(stop_reason(&events), StopReason::Completed);
+    let call = events
+        .iter()
+        .find_map(|e| match e {
+            AgentEvent::ToolCall { name, category, .. } if name == "Agent" => Some(*category),
+            _ => None,
+        })
+        .expect("the Agent call is announced");
+    assert_eq!(call, nexus_claude::agent::ToolCategory::Agent);
+    assert_eq!(
+        tool_results(&events),
+        vec![("a1".to_owned(), false, "SPEC-IS-IN-manager.rs".to_owned())]
+    );
+    let asked = host.asked.lock().unwrap().clone();
+    assert_eq!(asked.len(), 1);
+    assert_eq!(asked[0].prompt, "Find where the spec is built");
+    assert_eq!(asked[0].description.as_deref(), Some("find the spec"));
+    assert_eq!(asked[0].tool_call_id, "a1");
+    let chat = h.chat();
+    assert!(offered_tools(&chat[0]).contains(&"Agent".to_owned()));
+    assert!(chat[1].to_string().contains("SPEC-IS-IN-manager.rs"));
+}
+
+#[tokio::test]
+async fn a_failed_subagent_is_an_error_result_and_the_turn_goes_on() {
+    let h = Harness::new(vec![
+        tool_reply(Some("delegate"), &[agent_call("a1")], None, None),
+        text_reply(Some(TOOL), "carried on", None, None),
+    ])
+    .await;
+    let host = SubagentHost::new(Err("too many sub-agents"), Duration::ZERO);
+    let mut spec = h.spec();
+    spec.hooks = Some(host);
+    let session = h.open(spec).await;
+    let events = turn(&*session, "delegate the search").await;
+    assert_eq!(stop_reason(&events), StopReason::Completed);
+    assert_eq!(
+        tool_results(&events),
+        vec![("a1".to_owned(), true, "too many sub-agents".to_owned())]
+    );
+}
+
+#[tokio::test]
+async fn no_agent_tool_without_a_host_that_runs_subagents_nor_for_a_child_session() {
+    let h = Harness::new(vec![
+        text_reply(Some("first"), "one", None, None),
+        text_reply(Some("second"), "two", None, None),
+        text_reply(Some("third"), "three", None, None),
+    ])
+    .await;
+    let dir = tempfile::tempdir().unwrap();
+    // No hooks: no Agent (the other tools are there).
+    let session = h.open(h.spec_with_mcp(&log_path(&dir))).await;
+    turn(&*session, "first").await;
+    // A child session (depth 1) never gets it, even from a host that runs sub-agents (A17).
+    let mut child = h.spec_with_mcp(&log_path(&dir));
+    child.hooks = Some(SubagentHost::new(Ok("x"), Duration::ZERO));
+    child.lineage = Some(nexus_claude::agent::Lineage {
+        parent_session_id: "parent".to_owned(),
+        root_session_id: "parent".to_owned(),
+        depth: 1,
+        spawned_by: "conversation".to_owned(),
+    });
+    let session = h.open(child).await;
+    turn(&*session, "second").await;
+    // The same host at depth 0 gives it: the guard is the lineage, nothing else.
+    let mut top = h.spec_with_mcp(&log_path(&dir));
+    top.hooks = Some(SubagentHost::new(Ok("x"), Duration::ZERO));
+    let session = h.open(top).await;
+    turn(&*session, "third").await;
+    let chat = h.chat();
+    assert_eq!(chat.len(), 3);
+    for body in &chat[..2] {
+        let offered = offered_tools(body);
+        assert!(!offered.is_empty(), "the MCP tools are offered");
+        assert!(!offered.contains(&"Agent".to_owned()), "{offered:?}");
+    }
+    assert!(offered_tools(&chat[2]).contains(&"Agent".to_owned()));
+}
+
+#[tokio::test]
+async fn an_interruption_drops_the_running_subagent() {
+    let h = Harness::new(vec![tool_reply(
+        Some("delegate"),
+        &[agent_call("a1")],
+        None,
+        None,
+    )])
+    .await;
+    let host = SubagentHost::new(Ok("never"), Duration::from_secs(60));
+    let mut spec = h.spec();
+    spec.hooks = Some(host.clone());
+    let session = h.open(spec).await;
+    let mut stream = session
+        .send_turn(TurnInput::text("delegate the search"))
+        .await
+        .unwrap();
+    let mut events = Vec::new();
+    while let Some(event) = stream.next().await {
+        if matches!(&event, AgentEvent::ToolCall { name, .. } if name == "Agent") {
+            // Let the host start the sub-agent, then interrupt the turn.
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            session
+                .interrupt(InterruptScope::TurnAndTools)
+                .await
+                .unwrap();
+        }
+        let end = matches!(event, AgentEvent::Done { .. } | AgentEvent::Error { .. });
+        events.push(event);
+        if end {
+            break;
+        }
+    }
+    assert_eq!(stop_reason(&events), StopReason::Interrupted);
+    let results = tool_results(&events);
+    assert_eq!(results.len(), 1);
+    assert!(results[0].1, "the cut call is an error: {results:?}");
+    assert!(host.dropped.load(std::sync::atomic::Ordering::SeqCst));
+}
+
+fn question_call(id: &'static str) -> (&'static str, &'static str, Value) {
+    (
+        id,
+        "AskUserQuestion",
+        json!({"questions": [{"question": "Which database?", "header": "DB",
+            "options": [{"label": "Postgres", "description": "the server"}, {"label": "SQLite"}]}]}),
+    )
+}
+
+#[tokio::test]
+async fn ask_user_question_puts_the_question_to_the_host_ends_the_turn_and_the_answer_is_the_next_turn()
+ {
+    let h = Harness::with(
+        vec![
+            tool_reply(Some("pick a database"), &[question_call("q1")], None, None),
+            text_reply(Some("Postgres please"), "going with Postgres", None, None),
+        ],
+        |config| config.ask_user_question = true,
+    )
+    .await;
+    assert!(
+        h.provider
+            .refresh_capabilities("m")
+            .await
+            .unwrap()
+            .native_question,
+        "a model with tools has the harness's question"
+    );
+    let session = h.open(h.spec()).await;
+    let events = turn(&*session, "pick a database").await;
+    assert_eq!(stop_reason(&events), StopReason::Completed);
+    let (question_id, reply, questions, tool_call_id) = events
+        .iter()
+        .find_map(|e| match e {
+            AgentEvent::Question {
+                question_id,
+                reply,
+                questions,
+                tool_call_id,
+                ..
+            } => Some((
+                question_id.clone(),
+                *reply,
+                questions.clone(),
+                tool_call_id.clone(),
+            )),
+            _ => None,
+        })
+        .expect("the question reaches the host");
+    assert_eq!(reply, nexus_claude::agent::QuestionReply::Turn);
+    assert_eq!(tool_call_id.as_deref(), Some("q1"));
+    assert_eq!(questions[0].question, "Which database?");
+    assert_eq!(questions[0].options.len(), 2);
+    // Answered by a turn, never by a call.
+    let refused = session
+        .answer_question(&question_id, nexus_claude::agent::QuestionAnswer::Cancelled)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&refused, ProviderError::Unsupported { capability } if capability == "answer_question"),
+        "{refused:?}"
+    );
+    // The turn ended on the question: one request only, the model did not go on alone.
+    assert_eq!(h.chat().len(), 1);
+    let (_, is_error, said) = &tool_results(&events)[0];
+    assert!(!is_error && said.contains("next user message"));
+    // The answer is the next turn, after the question and its result in the history.
+    let events = turn(&*session, "Postgres please").await;
+    assert_eq!(stop_reason(&events), StopReason::Completed);
+    let chat = h.chat();
+    assert_eq!(chat.len(), 2);
+    let messages = chat[1]["messages"].as_array().unwrap();
+    let roles: Vec<&str> = messages.iter().filter_map(|m| m["role"].as_str()).collect();
+    assert_eq!(roles, vec!["user", "assistant", "tool", "user"]);
+    assert!(offered_tools(&chat[0]).contains(&"AskUserQuestion".to_owned()));
+}
+
+#[tokio::test]
+async fn ask_user_question_is_not_offered_unless_the_host_asks_for_it() {
+    let h = Harness::new(vec![text_reply(Some("hello"), "hi", None, None)]).await;
+    assert!(
+        !h.provider
+            .refresh_capabilities("m")
+            .await
+            .unwrap()
+            .native_question
+    );
+    let session = h.open(h.spec()).await;
+    turn(&*session, "hello").await;
+    assert!(!offered_tools(&h.chat()[0]).contains(&"AskUserQuestion".to_owned()));
+    // And a question call without the tool is refused, without any question event.
+    let refused = session
+        .answer_question("q", nexus_claude::agent::QuestionAnswer::Cancelled)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&refused, ProviderError::Unsupported { capability } if capability == "native_question")
+    );
+}
+
+#[tokio::test]
+async fn a_question_without_questions_is_an_error_result_and_the_turn_goes_on() {
+    let h = Harness::with(
+        vec![
+            tool_reply(
+                Some("pick"),
+                &[("q1", "AskUserQuestion", json!({"questions": []}))],
+                None,
+                None,
+            ),
+            text_reply(Some(TOOL), "asked nothing", None, None),
+        ],
+        |config| config.ask_user_question = true,
+    )
+    .await;
+    let session = h.open(h.spec()).await;
+    let events = turn(&*session, "pick").await;
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::Question { .. }))
+    );
+    assert!(tool_results(&events)[0].1);
+    assert_eq!(h.chat().len(), 2, "the turn went on to a second request");
+}
+
+fn typed_agent_call(id: &'static str, kind: Option<&str>) -> (&'static str, &'static str, Value) {
+    let mut input = json!({"description": "look", "prompt": "Look around"});
+    if let Some(kind) = kind {
+        input["subagent_type"] = json!(kind);
+    }
+    (id, "Agent", input)
+}
+
+#[tokio::test]
+async fn a_deny_with_an_argument_refuses_that_subagent_type_and_fails_closed_without_one() {
+    let h = Harness::new(vec![
+        tool_reply(
+            Some("delegate"),
+            &[
+                typed_agent_call("a1", Some("Explore")),
+                typed_agent_call("a3", None),
+            ],
+            None,
+            None,
+        ),
+        tool_reply(
+            Some(TOOL),
+            &[typed_agent_call("a2", Some("general-purpose"))],
+            None,
+            None,
+        ),
+        text_reply(Some(TOOL), "done", None, None),
+    ])
+    .await;
+    let host = SubagentHost::new(Ok("RAN"), Duration::ZERO);
+    let mut spec = h.spec();
+    spec.hooks = Some(host.clone());
+    spec.policy =
+        ToolPolicy::from_patterns(PolicyMode::Ask, &[] as &[&str], &["Agent(Explore)"]).unwrap();
+    let session = h.open(spec).await;
+    let events = turn(&*session, "delegate").await;
+    assert_eq!(stop_reason(&events), StopReason::Completed);
+    let results = tool_results(&events);
+    let of = |id: &str| results.iter().find(|r| r.0 == id).cloned().unwrap();
+    assert!(
+        of("a1").1 && of("a1").2.contains("denied by policy"),
+        "{results:?}"
+    );
+    assert!(
+        of("a3").1,
+        "no subagent_type: the deny applies (fail closed): {results:?}"
+    );
+    assert_eq!(of("a2"), ("a2".to_owned(), false, "RAN".to_owned()));
+    let asked: Vec<Option<String>> = host
+        .asked
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|r| r.subagent_type.clone())
+        .collect();
+    assert_eq!(asked, vec![Some("general-purpose".to_owned())]);
+    // Still offered: a deny with an argument judges calls, it does not hide the tool.
+    assert!(offered_tools(&h.chat()[0]).contains(&"Agent".to_owned()));
+}
+
+#[tokio::test]
+async fn a_bare_deny_hides_the_tool_by_its_name_or_its_alias_and_an_allow_list_does_not() {
+    let h = Harness::with(
+        vec![
+            text_reply(Some("one"), "1", None, None),
+            text_reply(Some("two"), "2", None, None),
+            text_reply(Some("three"), "3", None, None),
+            text_reply(Some("four"), "4", None, None),
+        ],
+        |config| config.ask_user_question = true,
+    )
+    .await;
+    let dir = tempfile::tempdir().unwrap();
+    let open = |deny: &'static [&'static str], allow: &'static [&'static str], mode: PolicyMode| {
+        let mut spec = h.spec_with_mcp(&log_path(&dir));
+        spec.hooks = Some(SubagentHost::new(Ok("x"), Duration::ZERO));
+        spec.policy = ToolPolicy::from_patterns(mode, allow, deny).unwrap();
+        spec
+    };
+    for (spec, text) in [
+        (
+            open(&["Agent", "AskUserQuestion"], &[], PolicyMode::Ask),
+            "one",
+        ),
+        (open(&["Task"], &[], PolicyMode::Ask), "two"),
+        (open(&[], &["mcp__fake__echo"], PolicyMode::Ask), "three"),
+        (open(&[], &[], PolicyMode::PlanOnly), "four"),
+    ] {
+        let session = h.open(spec).await;
+        turn(&*session, text).await;
+    }
+    let chat = h.chat();
+    let offered: Vec<Vec<String>> = chat.iter().map(offered_tools).collect();
+    let has = |i: usize, tool: &str| offered[i].contains(&tool.to_owned());
+    assert!(
+        !has(0, "Agent") && !has(0, "AskUserQuestion"),
+        "{:?}",
+        offered[0]
+    );
+    assert!(
+        !has(1, "Agent") && has(1, "AskUserQuestion"),
+        "{:?}",
+        offered[1]
+    );
+    // The allow-list exposes only echo of the MCP tools, and keeps the harness's own.
+    assert!(
+        has(2, "Agent") && has(2, "AskUserQuestion"),
+        "{:?}",
+        offered[2]
+    );
+    assert!(!has(2, "mcp__fake__write"));
+    assert!(
+        has(3, "Agent") && has(3, "AskUserQuestion"),
+        "{:?}",
+        offered[3]
+    );
+}
+
+#[tokio::test]
+async fn a_before_tool_deny_means_no_question_and_no_subagent() {
+    let h = Harness::with(
+        vec![
+            tool_reply(
+                Some("go"),
+                &[question_call("q1"), agent_call("a1")],
+                None,
+                None,
+            ),
+            text_reply(Some(TOOL), "went on", None, None),
+        ],
+        |config| config.ask_user_question = true,
+    )
+    .await;
+    let host = SubagentHost::denying();
+    let mut spec = h.spec();
+    spec.hooks = Some(host.clone());
+    let session = h.open(spec).await;
+    let events = turn(&*session, "go").await;
+    assert_eq!(stop_reason(&events), StopReason::Completed);
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::Question { .. }))
+    );
+    assert!(host.asked.lock().unwrap().is_empty());
+    let results = tool_results(&events);
+    assert!(
+        results
+            .iter()
+            .all(|r| r.1 && r.2.contains("DENIED-BY-HOOK")),
+        "{results:?}"
+    );
+    // No question was asked, so the turn did not end on it.
+    assert_eq!(h.chat().len(), 2);
+}

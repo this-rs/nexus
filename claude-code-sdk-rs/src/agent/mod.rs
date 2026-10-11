@@ -56,8 +56,9 @@ pub use resume::ResumeToken;
 pub use spec::{
     CancelOutcome, CancelScope, CompactionInfo, EnvSpec, HookVerdict, InputBlock, InterruptOutcome,
     InterruptScope, Lineage, McpServerSpec, PermissionDecision, ProcessDiagnostic, QuestionAnswer,
-    QuestionAnswerItem, SessionHooks, SessionLimits, SessionSpec, SystemPromptMode,
-    SystemPromptSpec, ToolCallInfo, ToolResultInfo, TurnContext, TurnDirective, TurnInput,
+    QuestionAnswerItem, SessionHooks, SessionLimits, SessionSpec, SubagentRequest,
+    SystemPromptMode, SystemPromptSpec, ToolCallInfo, ToolResultInfo, TurnContext, TurnDirective,
+    TurnInput,
 };
 
 /// Version of the contract. Goes up by one whenever a serialised shape

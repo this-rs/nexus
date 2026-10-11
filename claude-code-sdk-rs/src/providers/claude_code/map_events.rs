@@ -15,8 +15,8 @@ use super::error_map::classify_result_error;
 use super::policy_map::{canonical_name, native_to_neutral, tool_category};
 use crate::agent::{
     AgentEvent, BackgroundTask, BackgroundTaskKind, CompactionPhase, CompactionTrigger, Cost,
-    CostBasis, DeltaKind, McpServerStatus, ModelUsage, PermissionScope, QuestionOption,
-    QuestionReply, QuestionSpec, StopReason, TaskPhase, ToolOutput, Usage,
+    CostBasis, DeltaKind, McpServerStatus, ModelUsage, PermissionScope, QuestionReply,
+    QuestionSpec, StopReason, TaskPhase, ToolOutput, Usage,
 };
 use crate::types::{ContentBlock, ContentValue, Message, StreamDelta, StreamEventData};
 
@@ -475,44 +475,7 @@ fn map_usage(usage: &Value) -> Usage {
 
 /// Lenient reading of `AskUserQuestion`'s `questions`.
 fn question_specs(input: &Value) -> Vec<QuestionSpec> {
-    input
-        .get("questions")
-        .and_then(Value::as_array)
-        .map(|questions| {
-            questions
-                .iter()
-                .filter_map(|question| {
-                    Some(QuestionSpec {
-                        question: owned_at(question, &["question"])?,
-                        header: owned_at(question, &["header"]),
-                        options: question
-                            .get("options")
-                            .and_then(Value::as_array)
-                            .map(|options| {
-                                options
-                                    .iter()
-                                    .filter_map(|option| {
-                                        // An option is an object, or a bare label.
-                                        let label = owned_at(option, &["label"])
-                                            .or_else(|| option.as_str().map(str::to_owned))?;
-                                        Some(QuestionOption {
-                                            label,
-                                            description: owned_at(option, &["description"]),
-                                        })
-                                    })
-                                    .collect()
-                            })
-                            .unwrap_or_default(),
-                        multi_select: question
-                            .get("multiSelect")
-                            .or_else(|| question.get("multi_select"))
-                            .and_then(Value::as_bool)
-                            .unwrap_or(false),
-                    })
-                })
-                .collect()
-        })
-        .unwrap_or_default()
+    QuestionSpec::parse_list(input)
 }
 
 /// Projects a `can_use_tool` control request (§14.1, the two control rows):
@@ -550,7 +513,7 @@ pub fn permission_event(request: &PermissionRequest, state: &MapState) -> AgentE
 mod tests {
     use super::*;
     use crate::agent::BackgroundTaskStatus;
-    use crate::agent::{PolicyMode, ToolCategory};
+    use crate::agent::{PolicyMode, QuestionOption, ToolCategory};
 
     fn message(value: Value) -> Message {
         crate::message_parser::parse_message(value)

@@ -10,6 +10,8 @@
 //! `annulation_tache` is played for real in `nexus-tools/tests/native_e2e.rs`. `images` is the model's: with a catalogue that states no
 //! vision the fallback is verified, with one that states it `message_images`
 //! is played for real (the image reaches the fake, which answers only to it).
+//! `native_question` is the host's choice (`NativeConfig::ask_user_question`, off here):
+//! with it on, `question_utilisateur` is played for real on the harness's `AskUserQuestion`.
 //!
 //! `permission_hors_tour` needs a permission request with no turn running. The
 //! native harness raises one only from a tool call, and a turn whose stream was
@@ -173,6 +175,21 @@ fn script(scenario: Scenario, vision: bool) -> Vec<Value> {
             routes.push(busy_reply(p));
             routes.push(text_reply(p, "the second turn", None, Some((100, 10))));
         },
+        Scenario::QuestionUtilisateur => {
+            // Only reached with `ask_user_question` on (the harness's question, P18); without
+            // it the scenario plays its fallback and never sends this prompt.
+            routes.push(tool_reply(
+                p,
+                &[(
+                    "q1",
+                    "AskUserQuestion",
+                    json!({"questions": [{"question": "Which one?", "header": "Pick",
+                        "options": [{"label": "A"}, {"label": "B"}]}]}),
+                )],
+                None,
+                Some((100, 10)),
+            ));
+        },
         Scenario::ErreurRetryable => {
             routes.push(status_reply(
                 p,
@@ -224,6 +241,8 @@ enum Route {
 
 struct NativeTarget {
     route: Route,
+    /// The harness offers its `AskUserQuestion` (`NativeConfig::ask_user_question`, P18).
+    questions: bool,
     /// The catalogue of the fake states the vision of `m`.
     vision: bool,
     base: Arc<dyn AgentProvider>,
@@ -274,11 +293,17 @@ async fn from_registry(
 
 impl NativeTarget {
     async fn new(route: Route, vision: bool) -> Self {
+        Self::with_questions(route, vision, false).await
+    }
+
+    async fn with_questions(route: Route, vision: bool, questions: bool) -> Self {
         let server = FakeOpenAi::start(json!([probe_route(true), catalogue(vision)]));
         let provider: Arc<dyn AgentProvider> = match route {
             Route::Direct => {
+                let mut config = config(None);
+                config.ask_user_question = questions;
                 let provider = Arc::new(NativeProvider::new(
-                    config(None),
+                    config,
                     endpoint(server.base_url(), EndpointQuirks::deepseek()),
                 ));
                 provider
@@ -293,6 +318,7 @@ impl NativeTarget {
         };
         Self {
             route,
+            questions,
             vision,
             base: provider,
             _base_server: server,
@@ -368,9 +394,11 @@ impl ConformanceTarget for NativeTarget {
         let store = Arc::new(MemoryTranscriptStore::new());
         let provider: Arc<dyn AgentProvider> = match self.route {
             Route::Direct => {
+                let mut config = config(Some(scenario));
+                config.ask_user_question = self.questions;
                 let provider = Arc::new(
                     NativeProvider::new(
-                        config(Some(scenario)),
+                        config,
                         endpoint(server.base_url(), EndpointQuirks::deepseek()),
                     )
                     .with_transcript_store(store.clone()),
@@ -450,6 +478,17 @@ async fn a_vision_model_plays_message_images_for_real() {
         run_scenario(&target, Scenario::MessageImages).await,
         ScenarioOutcome::FallbackVerified
     );
+}
+
+/// With the harness's own `AskUserQuestion` (P18), `question_utilisateur` is played for
+/// real in reply mode `turn`: the question reaches the host, the turn ends by itself and the
+/// answer is a second turn.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_harness_question_plays_question_utilisateur_for_real() {
+    let target = NativeTarget::with_questions(Route::Direct, false, true).await;
+    assert!(target.provider().capabilities(Some("m")).native_question);
+    let outcome = run_scenario(&target, Scenario::QuestionUtilisateur).await;
+    assert_eq!(outcome, ScenarioOutcome::Passed, "{outcome:?}");
 }
 
 async fn check_conformance(route: Route) {
