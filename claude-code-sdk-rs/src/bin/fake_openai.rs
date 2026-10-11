@@ -251,6 +251,10 @@ fn respond(stream: &mut TcpStream, route: &Route) -> std::io::Result<()> {
     stream.flush()
 }
 
+/// One lock for the request log: each entry is written whole, by one `write_all`, so two
+/// requests logged at the same time never interleave inside a line.
+static LOG: Mutex<()> = Mutex::new(());
+
 fn log_request(request: &Request) {
     let Ok(path) = std::env::var("FAKE_OPENAI_REQUESTS_OUT") else {
         return;
@@ -264,8 +268,14 @@ fn log_request(request: &Request) {
         "authorization_present": request.headers.iter().any(|(n, _)| n == "authorization"),
         "body": body,
     });
+    // `writeln!` on a `File` issues one write per formatted piece: concurrent requests
+    // interleaved inside a line and the test lost both entries.
+    let line = format!("{entry}\n");
+    let _guard = LOG
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
-        let _ = writeln!(file, "{entry}");
+        let _ = file.write_all(line.as_bytes());
     }
 }
 
@@ -341,5 +351,94 @@ fn main() {
     for stream in listener.incoming().flatten() {
         let (routes, used) = (Arc::clone(&routes), Arc::clone(&used));
         thread::spawn(move || handle(stream, routes, used));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn request(n: usize, filler: &str) -> Request {
+        Request {
+            method: "POST".to_string(),
+            path: "/v1/chat/completions".to_string(),
+            headers: vec![
+                ("authorization".to_string(), "Bearer secret".to_string()),
+                ("content-type".to_string(), "application/json".to_string()),
+            ],
+            body: json!({ "n": n, "filler": filler }).to_string().into_bytes(),
+        }
+    }
+
+    fn entries(path: &std::path::Path) -> Vec<Value> {
+        std::fs::read_to_string(path)
+            .unwrap_or_default()
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("each logged line is whole JSON"))
+            .collect()
+    }
+
+    /// One test owns `FAKE_OPENAI_REQUESTS_OUT` for the whole binary: the variable is
+    /// process-wide, so the cases run in sequence here instead of racing as separate tests.
+    #[test]
+    fn log_request_writes_each_entry_whole_even_under_concurrency_and_poison() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("requests.jsonl");
+
+        // No variable: nothing is logged.
+        // SAFETY: the only test in this binary that touches the environment.
+        unsafe { std::env::remove_var("FAKE_OPENAI_REQUESTS_OUT") };
+        log_request(&request(0, "x"));
+        assert!(!path.exists());
+
+        // SAFETY: as above.
+        unsafe { std::env::set_var("FAKE_OPENAI_REQUESTS_OUT", &path) };
+
+        // Concurrent requests with large bodies: every line parses and none is lost.
+        let filler = "token ".repeat(2_000);
+        let n = 32;
+        let threads: Vec<_> = (0..n)
+            .map(|i| {
+                let filler = filler.clone();
+                thread::spawn(move || log_request(&request(i, &filler)))
+            })
+            .collect();
+        for t in threads {
+            t.join().unwrap();
+        }
+        let logged = entries(&path);
+        assert_eq!(logged.len(), n);
+        let mut seen: Vec<u64> = logged
+            .iter()
+            .map(|e| e["body"]["n"].as_u64().unwrap())
+            .collect();
+        seen.sort_unstable();
+        assert_eq!(seen, (0..n as u64).collect::<Vec<_>>());
+        let first = &logged[0];
+        assert_eq!(first["method"], "POST");
+        assert_eq!(first["path"], "/v1/chat/completions");
+        assert_eq!(first["authorization_present"], true);
+        assert_eq!(first["headers"], json!(["authorization", "content-type"]));
+        assert!(
+            !first.to_string().contains("secret"),
+            "header values are never logged"
+        );
+
+        // A writer that panicked while holding the lock does not stop the log.
+        let _ = thread::spawn(|| {
+            let _guard = LOG.lock().unwrap();
+            panic!("poison the request log lock");
+        })
+        .join();
+        assert!(LOG.is_poisoned());
+        let mut not_json = request(n, "");
+        not_json.body = b"not json".to_vec();
+        log_request(&not_json);
+        let logged = entries(&path);
+        assert_eq!(logged.len(), n + 1);
+        assert_eq!(logged[n]["body"], "not json");
+
+        // SAFETY: as above.
+        unsafe { std::env::remove_var("FAKE_OPENAI_REQUESTS_OUT") };
     }
 }
