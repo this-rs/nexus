@@ -595,19 +595,17 @@ async fn probe_truncated_in_reasoning_retries_with_a_larger_budget() {
     assert!(probe.tools);
     let sent = server.requests_to("POST", "/v1/chat/completions");
     assert_eq!(sent.len(), 2, "the probe retries once on truncation");
-    let first_budget = sent[0]["body"]["max_tokens"].as_u64().unwrap();
-    let second_budget = sent[1]["body"]["max_tokens"].as_u64().unwrap();
-    assert!(
-        second_budget > first_budget,
-        "the retry asks for more tokens (first={first_budget}, second={second_budget})"
-    );
+    // The budgets are part of the contract (latency at opening): 4096, then 8192.
+    assert_eq!(sent[0]["body"]["max_tokens"], 4096);
+    assert_eq!(sent[1]["body"]["max_tokens"], 8192);
 }
 
-/// Truncation on BOTH attempts: the model really consumes the available budget
-/// without ever calling a tool. The probe concludes `ModelNoTools` only then — the
-/// old behavior is preserved as a last resort, never after a single truncated shot.
+/// Truncation on BOTH attempts: the model consumed every budget without an answer.
+/// Nothing is known about its tools: the probe is INCONCLUSIVE (a `Protocol` error,
+/// never `ModelNoTools`, which the provider records for the life of the process),
+/// and nothing is cached: the next probe asks again.
 #[tokio::test]
-async fn probe_truncated_twice_concludes_no_tools() {
+async fn probe_truncated_twice_is_inconclusive_and_not_cached() {
     let truncated = || {
         route_sse(&[
             delta(json!({"reasoning_content": "lots of thinking"})),
@@ -615,23 +613,83 @@ async fn probe_truncated_twice_concludes_no_tools() {
             json!("[DONE]"),
         ])
     };
-    let server = FakeOpenAi::start(json!([truncated(), truncated()]));
-    let error = expect_err(
-        endpoint(&server, EndpointQuirks::deepseek())
-            .probe("deepseek-v4-pro")
-            .await,
-    );
-    assert_eq!(
-        error,
-        ProviderError::ModelNoTools {
-            model: "deepseek-v4-pro".into(),
-        }
+    let server = FakeOpenAi::start(json!([
+        truncated(),
+        truncated(),
+        probe_sse(true, Some("reasoning_content")),
+        models_route()
+    ]));
+    let endpoint = endpoint(&server, EndpointQuirks::deepseek());
+    let error = expect_err(endpoint.probe("deepseek-v4-pro").await);
+    assert!(
+        matches!(&error, ProviderError::Protocol { detail } if detail.contains("inconclusive")),
+        "{error:?}"
     );
     assert_eq!(
         server.requests_to("POST", "/v1/chat/completions").len(),
         2,
-        "the probe tries twice before concluding"
+        "the probe tries twice before giving up"
     );
+    // Not cached: the next probe asks the server again, and concludes this time.
+    let probe = endpoint.probe("deepseek-v4-pro").await.unwrap();
+    assert!(probe.tools);
+    assert_eq!(server.requests_to("POST", "/v1/chat/completions").len(), 3);
+}
+
+/// A stream that closes on `[DONE]` without any `finish_reason`, after reasoning
+/// only: the parser synthesises `stop`, but the model never answered. Retried like
+/// a truncation, not concluded "no tools".
+#[tokio::test]
+async fn probe_ended_without_finish_reason_nor_text_is_retried() {
+    let silent = route_sse(&[
+        delta(json!({"reasoning_content": "thinking"})),
+        json!("[DONE]"),
+    ]);
+    let server = FakeOpenAi::start(json!([
+        silent,
+        probe_sse(true, Some("reasoning_content")),
+        models_route()
+    ]));
+    let probe = endpoint(&server, EndpointQuirks::deepseek())
+        .probe("deepseek-v4-pro")
+        .await
+        .expect("the retry succeeds");
+    assert!(probe.tools);
+    assert_eq!(server.requests_to("POST", "/v1/chat/completions").len(), 2);
+}
+
+/// A `generic` instance (forcing allowed) on a thinking model: the forced
+/// `tool_choice` is refused (400), `auto` is truncated (`length`), and the retry
+/// goes straight to `auto` with the larger budget: the refused forcing is not sent
+/// again. Exactly three requests.
+#[tokio::test]
+async fn probe_retry_after_a_refused_forcing_reuses_auto() {
+    let server = FakeOpenAi::start(json!([
+        post(
+            400,
+            json!({"body": {"error": {"message": THINKING_REFUSAL}}})
+        ),
+        route_sse(&[
+            delta(json!({"reasoning_content": "thinking"})),
+            finish("length"),
+            json!("[DONE]"),
+        ]),
+        probe_sse(true, Some("reasoning_content")),
+        models_route()
+    ]));
+    let probe = endpoint(&server, EndpointQuirks::generic())
+        .probe("deepseek-v4-pro")
+        .await
+        .expect("the retry with auto succeeds");
+    assert!(probe.tools);
+    assert_eq!(probe.reasoning_field.as_deref(), Some("reasoning_content"));
+    let sent = server.requests_to("POST", "/v1/chat/completions");
+    assert_eq!(sent.len(), 3, "forced, auto, auto: never forced twice");
+    assert_eq!(sent[0]["body"]["tool_choice"]["function"]["name"], "ping");
+    assert_eq!(sent[1]["body"]["tool_choice"], "auto");
+    assert_eq!(sent[2]["body"]["tool_choice"], "auto");
+    assert_eq!(sent[1]["body"]["max_tokens"], 4096);
+    assert_eq!(sent[2]["body"]["max_tokens"], 8192);
 }
 
 /// A probe that stopped cleanly (`finish=stop`) and did not call the tool is

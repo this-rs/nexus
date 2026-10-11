@@ -474,6 +474,52 @@ async fn a_model_without_tools_refuses_mcp_servers_and_still_runs_plain_turns() 
     assert!(chat.last().unwrap().get("tools").is_none());
 }
 
+/// A reasoning model that runs out of budget on every probe attempt is not
+/// recorded as "no tools": the probe is inconclusive, the session that needs tools
+/// is refused for this opening only, and the next probe finds the tools.
+#[tokio::test]
+async fn an_inconclusive_probe_records_nothing_and_the_next_one_finds_the_tools() {
+    let truncated = || {
+        json!({"method": "POST", "path": "/v1/chat/completions", "status": 200,
+            "body_contains": "Call the ping tool now",
+            "sse": [delta(json!({"reasoning_content": "thinking"})), finish("length"), "[DONE]"]})
+    };
+    let server = FakeOpenAi::start(json!([
+        truncated(),
+        truncated(),
+        truncated(),
+        truncated(),
+        probe_route(true),
+        models_route(8192),
+    ]));
+    let mut config = NativeConfig::new("native-test");
+    config.default_model = Some("m".to_owned());
+    let provider = NativeProvider::new(
+        config,
+        endpoint(server.base_url(), EndpointQuirks::deepseek()),
+    );
+    let error = provider.refresh_capabilities("m").await.unwrap_err();
+    assert!(
+        matches!(&error, ProviderError::Protocol { detail } if detail.contains("inconclusive")),
+        "{error:?}"
+    );
+    assert!(!provider.capabilities(Some("m")).tools, "nothing claimed");
+    // A session that needs tools: refused for this opening, not as `ModelNoTools`.
+    let dir = tempfile::tempdir().unwrap();
+    let mut with_mcp = SessionSpec::new(dir.path());
+    with_mcp.model = Some("m".to_owned());
+    with_mcp.mcp_servers.insert("fake".into(), stdio_mcp(None));
+    let refused = provider.open(with_mcp).await.err().expect("refused");
+    assert!(
+        matches!(&refused, ProviderError::Protocol { .. }),
+        "{refused:?}"
+    );
+    // Nothing was recorded: the next probe asks again and finds the tools.
+    let caps = provider.refresh_capabilities("m").await.unwrap();
+    assert!(caps.tools);
+    assert_eq!(server.requests_to("POST", "/v1/chat/completions").len(), 5);
+}
+
 // ---------------------------------------------------------------------------
 // Budgets (A21)
 // ---------------------------------------------------------------------------
