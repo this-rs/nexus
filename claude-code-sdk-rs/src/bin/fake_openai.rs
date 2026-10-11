@@ -251,6 +251,10 @@ fn respond(stream: &mut TcpStream, route: &Route) -> std::io::Result<()> {
     stream.flush()
 }
 
+/// One lock for the request log: each entry is written whole, by one `write_all`, so two
+/// requests logged at the same time never interleave inside a line.
+static LOG: Mutex<()> = Mutex::new(());
+
 fn log_request(request: &Request) {
     let Ok(path) = std::env::var("FAKE_OPENAI_REQUESTS_OUT") else {
         return;
@@ -264,8 +268,14 @@ fn log_request(request: &Request) {
         "authorization_present": request.headers.iter().any(|(n, _)| n == "authorization"),
         "body": body,
     });
+    // `writeln!` on a `File` issues one write per formatted piece: concurrent requests
+    // interleaved inside a line and the test lost both entries.
+    let line = format!("{entry}\n");
+    let _guard = LOG
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
-        let _ = writeln!(file, "{entry}");
+        let _ = file.write_all(line.as_bytes());
     }
 }
 

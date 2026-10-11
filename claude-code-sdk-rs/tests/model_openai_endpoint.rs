@@ -1314,3 +1314,43 @@ async fn an_open_vision_question_is_asked_again_not_cached_as_unknown() {
         .count();
     assert_eq!(pixels, 2);
 }
+
+/// The fake's request log keeps one whole line per request even when many arrive at
+/// once: tests that count requests (the backend's probe bounds) must not lose any.
+/// Before, `writeln!` wrote each entry in pieces and concurrent entries interleaved.
+#[test]
+fn the_fake_logs_every_concurrent_request_on_its_own_line() {
+    use std::io::{Read, Write};
+    let server = FakeOpenAi::start(json!([
+        {"method": "POST", "path": "/v1/chat/completions", "status": 200, "body": "{}"}
+    ]));
+    let port = server.port();
+    let n = 32;
+    let threads: Vec<_> = (0..n)
+        .map(|i| {
+            std::thread::spawn(move || {
+                // Many small tokens: many formatted pieces per log entry.
+                let body = json!({"id": i, "filler": vec!["x"; 2_000]}).to_string();
+                let mut stream = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+                write!(
+                    stream,
+                    "POST /v1/chat/completions HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+                    body.len()
+                )
+                .unwrap();
+                let mut answer = String::new();
+                let _ = stream.read_to_string(&mut answer);
+            })
+        })
+        .collect();
+    for thread in threads {
+        thread.join().unwrap();
+    }
+    let mut ids: Vec<i64> = server
+        .requests()
+        .iter()
+        .filter_map(|r| r["body"]["id"].as_i64())
+        .collect();
+    ids.sort_unstable();
+    assert_eq!(ids, (0..n).collect::<Vec<i64>>());
+}
