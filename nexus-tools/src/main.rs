@@ -11,7 +11,9 @@
 //! scope and `--tools` the only tools it serves, listed or called, whatever the profile or the
 //! client asks (an intersection with a signed profile, never wider). `--trust-harness` (no
 //! signed profile: the harness is the only client and enforces the policy) is refused with
-//! `--listen`: a socket is not a private pipe.
+//! `--listen`: a socket is not a private pipe. `--unscoped` (a session already in trust mode)
+//! keeps the directories as anchors but stops enforcing them — git worktrees made by another
+//! harness stay reachable; it is likewise stdio-only.
 //!
 //! Secrets arrive in the **environment**, never on the command line: `NEXUS_TOOLS_KEY` (the
 //! token signing key, at least 32 bytes) and `NEXUS_TOOLS_PROFILE` (the session's token).
@@ -30,7 +32,7 @@ use nexus_tools::{Profile, Server, Session, SigningKey, ToolRegistry, serve_line
 use tokio::io::BufReader;
 
 const USAGE: &str = "usage: nexus-tools [--listen ADDR] [--allow-origin ORIGIN]... \
-[--max-output-chars N] [--cwd DIR] [--add-dir DIR]... [--backup-dir DIR] [--search-engine SPEC]... [--search-allow-private] [--brave-endpoint URL] [--tools NAME,...]... [--unrestricted | --trust-harness]\n\
+[--max-output-chars N] [--cwd DIR] [--add-dir DIR]... [--unscoped] [--backup-dir DIR] [--search-engine SPEC]... [--search-allow-private] [--brave-endpoint URL] [--tools NAME,...]... [--unrestricted | --trust-harness]\n\
 environment: NEXUS_TOOLS_KEY (signing key, >= 32 bytes), NEXUS_TOOLS_PROFILE (stdio token), \
 NEXUS_TOOLS_LOG";
 
@@ -43,6 +45,8 @@ struct Options {
     trust_harness: bool,
     cwd: Option<std::path::PathBuf>,
     add_dirs: Vec<std::path::PathBuf>,
+    /// The file scope is resolved but not enforced (trust mode): stdio only.
+    unscoped: bool,
     backup_dir: Option<std::path::PathBuf>,
     /// `brave:ENVVAR`, `searxng:URL` or `html`, in the order they are tried.
     search_engines: Vec<String>,
@@ -56,6 +60,10 @@ struct Options {
 /// The one-line reason `--trust-harness` and `--listen` do not go together.
 const TRUST_HARNESS_IS_STDIO: &str =
     "--trust-harness is for one harness over a private pipe; it cannot be combined with --listen";
+
+/// The one-line reason `--unscoped` and `--listen` do not go together.
+const UNSCOPED_IS_STDIO: &str = "--unscoped is for one trusted session over a private pipe; it \
+cannot be combined with --listen";
 
 fn fail(message: &str) -> ExitCode {
     eprintln!("nexus-tools: {message}");
@@ -71,6 +79,7 @@ fn parse_args() -> Result<Options, String> {
         trust_harness: false,
         cwd: None,
         add_dirs: Vec::new(),
+        unscoped: false,
         backup_dir: None,
         search_engines: Vec::new(),
         search_allow_private: false,
@@ -96,6 +105,7 @@ fn parse_args() -> Result<Options, String> {
             },
             "--cwd" => options.cwd = Some(value("--cwd")?.into()),
             "--add-dir" => options.add_dirs.push(value("--add-dir")?.into()),
+            "--unscoped" => options.unscoped = true,
             "--backup-dir" => options.backup_dir = Some(value("--backup-dir")?.into()),
             "--search-engine" => options.search_engines.push(value("--search-engine")?),
             "--search-allow-private" => options.search_allow_private = true,
@@ -130,6 +140,9 @@ fn parse_args() -> Result<Options, String> {
     if options.trust_harness && options.listen.is_some() {
         return Err(TRUST_HARNESS_IS_STDIO.to_owned());
     }
+    if options.unscoped && options.listen.is_some() {
+        return Err(UNSCOPED_IS_STDIO.to_owned());
+    }
     Ok(options)
 }
 
@@ -145,8 +158,14 @@ fn registry(options: &Options) -> Result<ToolRegistry, String> {
         .map_err(|e| format!("cannot create {}: {e}", output_dir.display()))?;
     let mut extra = options.add_dirs.clone();
     extra.push(output_dir.clone());
-    let scope =
+    let mut scope =
         Scope::new(&cwd, extra).map_err(|e| format!("cannot use the session directories: {e}"))?;
+    // Trust mode (`--unscoped`): the directories still anchor relative paths, but the
+    // session may follow paths outside them — e.g. a git worktree created by another
+    // harness of the same conversation.
+    if options.unscoped {
+        scope = scope.without_bounds();
+    }
     let mut files = FileConfig::new(scope);
     if let Some(dir) = &options.backup_dir {
         files = files.with_backup_dir(dir);

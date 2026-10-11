@@ -552,6 +552,44 @@ async fn an_additional_directory_is_part_of_the_scope() {
     assert_eq!(r.text, "1\textra\n2\t");
 }
 
+/// `--unscoped` (trust mode): the roots are not enforced — a worktree created by
+/// another harness, outside the launch directories, can be read and written.
+#[tokio::test]
+async fn an_unscoped_session_reaches_outside_every_root() {
+    let outside = tempfile::tempdir().unwrap();
+    std::fs::write(outside.path().join("w.txt"), "worktree\n").unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let scope = Scope::new(dir.path(), []).unwrap().without_bounds();
+    let registry = register(ToolRegistry::new(), &FileConfig::new(scope));
+    let profile = nexus_tools::Profile::unrestricted("s");
+    let context = CallContext::new("s", Arc::new(SessionState::default()));
+    let read = registry
+        .resolve(&profile, "Read")
+        .unwrap()
+        .call(
+            &context,
+            json!({"file_path": outside.path().join("w.txt").display().to_string()}),
+        )
+        .await;
+    assert_eq!(read.text, "1\tworktree\n2\t");
+    let write = registry
+        .resolve(&profile, "Write")
+        .unwrap()
+        .call(
+            &context,
+            json!({
+                "file_path": outside.path().join("new.txt").display().to_string(),
+                "content": "created outside\n",
+            }),
+        )
+        .await;
+    assert!(!write.is_error, "{}", write.text);
+    assert_eq!(
+        std::fs::read_to_string(outside.path().join("new.txt")).unwrap(),
+        "created outside\n"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Atomic writes
 // ---------------------------------------------------------------------------

@@ -12,6 +12,11 @@ use std::path::{Component, Path, PathBuf};
 pub struct Scope {
     cwd: PathBuf,
     roots: Vec<PathBuf>,
+    /// `--unscoped`: paths are still resolved (symlinks, `..`) but the roots are not
+    /// enforced. For a session whose permission mode already trusts everything
+    /// (`trust`/`bypassPermissions`): it may then follow git worktrees created by
+    /// another harness outside its launch directories.
+    unscoped: bool,
 }
 
 /// A path that cannot be used.
@@ -47,7 +52,16 @@ impl Scope {
         for dir in extra {
             roots.push(std::fs::canonicalize(dir)?);
         }
-        Ok(Self { cwd, roots })
+        Ok(Self { cwd, roots, unscoped: false })
+    }
+
+    /// The same scope with the roots no longer enforced: `resolve` still normalises the
+    /// path against the real filesystem, but accepts it wherever it lands. Reserved for a
+    /// session already in trust mode.
+    #[must_use]
+    pub fn without_bounds(mut self) -> Self {
+        self.unscoped = true;
+        self
     }
 
     /// The working directory (relative paths start here).
@@ -87,7 +101,7 @@ impl Scope {
                 },
             }
         }
-        if self.roots.iter().any(|root| resolved.starts_with(root)) {
+        if self.unscoped || self.roots.iter().any(|root| resolved.starts_with(root)) {
             Ok(resolved)
         } else {
             Err(ScopeError::Outside(path.to_owned()))
