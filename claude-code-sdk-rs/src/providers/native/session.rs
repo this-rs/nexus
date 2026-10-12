@@ -136,6 +136,11 @@ pub(crate) struct State {
     pub(crate) last_prompt_tokens: Option<u64>,
     /// The background tasks `nexus-tools` runs for the session (§4 `background_tasks`).
     pub(crate) tasks: TaskTable,
+    /// What the model must be told at the start of the next turn: why the last one
+    /// ended when the model could not see it (a turn time limit). Cleared by the turn
+    /// that commits it, in its user message (never the system prompt: the cached prefix
+    /// stays as it is).
+    pub(crate) pending_note: Option<String>,
 }
 
 impl State {
@@ -246,6 +251,7 @@ impl Core {
             usd_spent: 0.0,
             last_prompt_tokens: None,
             tasks: TaskTable::default(),
+            pending_note: None,
         };
         for event in parts.initial_events {
             state.push_out_of_band(event);
