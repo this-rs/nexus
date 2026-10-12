@@ -33,8 +33,8 @@ use super::backend::{SearchBackend, SearchError, SearchHit, SearchQuery};
 use super::util::plain_text;
 
 /// Executable names looked for on the `PATH` when the engine is named without a path: the
-/// distribution that ships `serp` first, then the plain name.
-pub const OBSCURA_NAMES: [&str; 2] = ["dsh-obscura-nav", "obscura"];
+/// distributions that ship `serp` first (`obscura-server`, built from `obscura/`), then the plain name.
+pub const OBSCURA_NAMES: [&str; 3] = ["obscura-server", "dsh-obscura-nav", "obscura"];
 
 /// How long one query may take: Obscura starts a browser and loads a results page.
 pub const OBSCURA_TIMEOUT: Duration = Duration::from_secs(30);
@@ -259,7 +259,7 @@ impl SearchBackend for ObscuraBackend {
             Ok(child) => child,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 return Err(SearchError::NotConfigured(format!(
-                    "the Obscura executable `{}` is not installed (install dsh-obscura-nav, or name it with --search-engine obscura:/path/to/binary)",
+                    "the Obscura executable `{}` is not installed (install obscura-server, or name it with --search-engine obscura:/path/to/binary)",
                     self.program.display()
                 )));
             },

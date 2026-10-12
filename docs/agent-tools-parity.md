@@ -193,6 +193,8 @@ Tout se compile avec `cargo`.
   l'appel du binaire `rg` pour `Grep`.
 - **Vérification automatique** (étape 3 de N17) : refuser dans `nexus-tools` un `build.rs` externe et
   une crate `-sys` qui n'est pas listée.
+- **Exceptions documentées**, chacune derrière une feature désactivée par défaut et vérifiée par
+  `tests/dependency_policy.rs` : `tls` (ring, décision `91083af7`) et `obscura` (ci-dessous).
 
 ### Le navigateur : Obscura
 
@@ -203,6 +205,23 @@ contient pas une page hostile qui exploiterait V8. **Décision proposée** : ne 
 comme serveur MCP externe optionnel (`obscura mcp`), sans dépendance de build chez nous, mode furtif
 désactivé, réseau privé interdit, outils d'interaction soumis à approbation. Voir N23 ; **à valider
 par l'utilisateur**.
+
+**Révisé le 12/10/2026 (décision 1e9d7501, demande de l'utilisateur : un binaire « stand alone et
+fonctionnel »)** : le fork d'Obscura est versé dans le dépôt (`obscura/`, Apache-2.0, NOTICE amont
+conservé) et **embarqué** dans `nexus-tools` derrière la feature `obscura`, activée dans les builds de
+release, désactivée par défaut (un `cargo build` ordinaire reste en Rust seul). Correction de la mesure
+ci-dessus : V8 n'est **pas** compilé depuis les sources, rusty_v8 télécharge une **bibliothèque
+statique précompilée** ; la variante furtive n'est pas construite. Ce que la feature apporte, et rien
+d'autre (test `with_obscura_the_only_exceptions_are_the_documented_ones`) : `bindgen` et `clang-sys`
+(dépendances de build de `v8`, utilisées seulement pour une compilation depuis les sources,
+`V8_FROM_SOURCE`, jamais activée), `ring` et `cc` (rustls, comme `tls`), `prettyplease` (un `links`
+sans bibliothèque), `linux-raw-sys` (appels système Linux en Rust). La bibliothèque V8 est épinglée
+(`v8 = "=137.3.0"`) et son empreinte SHA-256 vérifiée avant le build (`scripts/rusty-v8-cache.sh`,
+qui la dépose dans le cache de rusty_v8 : aucun téléchargement non vérifié au build). Le navigateur
+tourne dans le binaire `nexus-tools` mais jamais dans le processus du harnais : la recherche sur un
+fil à elle, les outils `browser_*` dans `nexus-tools obscura mcp`, un processus que le harnais
+attache comme avant (`BrowserTools::embedded_in_nexus_tools`). Furtif et réseau privé restent
+refusés ; annulation et délai arrêtent le JavaScript de la page (`IsolateHandle::terminate_execution`).
 
 ## 5. Ce que ce document ne règle pas
 
@@ -331,7 +350,7 @@ un **trait** (`SearchBackend`) avec plusieurs moteurs, essayés dans l'ordre con
 | API à clé (forme Brave) | `brave:NOM_DE_VARIABLE` | la clé est lue dans l'environnement du serveur ; seul le **nom** est configuré |
 | SearXNG auto-hébergé | `searxng:URL` | le format JSON doit être activé dans l'instance ; adresse privée : `--search-allow-private` |
 | HTML d'un moteur sans clé | `html` | **fragile**, désactivé par défaut, avertissement au démarrage, conditions du moteur à respecter |
-| Obscura (`dsh-obscura-nav serp`), sans clé | `obscura:CHEMIN` ou `obscura` | exécutable **externe** (V8 hors de notre build, N17) ; `obscura` seul le cherche sur le `PATH` (`dsh-obscura-nav` puis `obscura`) ; voir ci-dessous |
+| Obscura, sans clé | `obscura` ou `obscura:CHEMIN` | avec la feature `obscura` (release), `obscura` seul est le moteur **embarqué**, dans le processus ; sinon, et avec `obscura:CHEMIN`, un exécutable **externe** (`obscura` seul le cherche sur le `PATH` : `obscura-server`, `dsh-obscura-nav`, puis `obscura`) ; voir ci-dessous |
 | Navigateur MCP externe | N23 | pour les pages qui exigent du JavaScript |
 
 Garanties : domaines autorisés/bloqués appliqués **après** le moteur ; URL équivalentes fusionnées ; repli,
@@ -352,6 +371,17 @@ nomme (et un avertissement au démarrage pour `obscura` introuvable sur le `PATH
 `https://html.duckduckgo.com` : c'est l'origine à laquelle un projet consent. Tests : `tests/search_obscura.rs` (script
 factice ; le golden `tests/data/obscura_serp.json` est une réponse du vrai `dsh-obscura-nav serp`, enregistrée une fois)
 et `tests/server_binary.rs` (de bout en bout par `--search-engine`). Le vrai binaire n'est jamais requis par les tests.
+
+**Le moteur `obscura` embarqué** (feature `obscura`, `src/search/obscura_embedded.rs`, `src/obscura.rs`). Même
+contrat que l'exécutable externe : un navigateur neuf par requête, 30 s, 2 Mio, la réponse relue par la même
+fonction (`parse_serp`). La requête tourne sur un **fil à elle** avec son propre runtime (un isolat V8 appartient
+au fil qui l'a créé). Requête annulée ou délai dépassé : chaque isolat du fil reçoit `terminate_execution`
+(sûr depuis un autre fil) et le travail est abandonné à son prochain `await`, ses chargements avec lui ; une
+page bloquée dans une boucle synchrone s'arrête aussitôt, pas après le chien de garde de 5 s d'Obscura. Le
+navigateur refuse de démarrer si `OBSCURA_ALLOW_PRIVATE_NETWORK` le demande dans l'environnement de
+`nexus-tools`. Tests hors réseau (`tests/obscura_embedded.rs`, pages `data:`) : page de résultats figée,
+délai, annulation (le fil disparaît en moins de 2 s), `nexus-tools obscura mcp` (appel annulé sans réponse,
+appel au-delà du délai = erreur) ; la vraie recherche est un test `#[ignore]` lancé à la main.
 
 Écarts avec Claude Code : pas de synthèse par un second modèle (le modèle de la session lit les résultats) ;
 pas de moteur par défaut (`obscura` est le moteur sans clé recommandé, à nommer) ; https passe par la feature `tls` (§6) ; sans elle seuls les moteurs en `http` (SearXNG sur un réseau privé) fonctionnent.

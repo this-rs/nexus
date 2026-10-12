@@ -314,6 +314,11 @@ async fn a_cancelled_search_kills_its_whole_group() {
 
 #[test]
 fn the_executable_is_found_on_a_path_under_its_distribution_name_first() {
+    // `obscura-server` (built from obscura/) comes before the older `dsh-obscura-nav`.
+    let first = tempfile::tempdir().unwrap();
+    let server = first.path().join("obscura-server");
+    std::fs::write(&server, "#!/bin/sh\n").unwrap();
+    std::fs::set_permissions(&server, std::fs::Permissions::from_mode(0o755)).unwrap();
     let a = tempfile::tempdir().unwrap();
     let b = tempfile::tempdir().unwrap();
     for (dir, name) in [(a.path(), "obscura"), (b.path(), "dsh-obscura-nav")] {
@@ -329,6 +334,8 @@ fn the_executable_is_found_on_a_path_under_its_distribution_name_first() {
         ObscuraBackend::locate_in(&only_a).unwrap().program(),
         a.path().join("obscura")
     );
+    let all = std::env::join_paths([a.path(), b.path(), first.path()]).unwrap();
+    assert_eq!(ObscuraBackend::locate_in(&all).unwrap().program(), server);
     let empty = tempfile::tempdir().unwrap();
     assert!(ObscuraBackend::locate_in(&std::env::join_paths([empty.path()]).unwrap()).is_none());
 }

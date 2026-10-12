@@ -193,6 +193,31 @@ pub struct WatchdogToken {
     fired: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
+thread_local! {
+    static ISOLATE_OBSERVER: RefCell<Option<Box<dyn Fn(&IsolateHandle)>>> = const { RefCell::new(None) };
+}
+
+/// (nexus) Calls `observer` with the handle of every V8 isolate created **on this thread** from
+/// now on, until [`clear_isolate_observer`]. An embedder that runs the browser on a thread of its
+/// own keeps these handles to end the isolates' JavaScript from another thread
+/// (`IsolateHandle::terminate_execution` is thread-safe) when the work is cancelled.
+pub fn set_isolate_observer(observer: impl Fn(&IsolateHandle) + 'static) {
+    ISOLATE_OBSERVER.with(|slot| *slot.borrow_mut() = Some(Box::new(observer)));
+}
+
+/// (nexus) Stops the observer set by [`set_isolate_observer`] on this thread.
+pub fn clear_isolate_observer() {
+    ISOLATE_OBSERVER.with(|slot| *slot.borrow_mut() = None);
+}
+
+fn notify_isolate_observer(handle: &IsolateHandle) {
+    ISOLATE_OBSERVER.with(|slot| {
+        if let Some(observer) = slot.borrow().as_ref() {
+            observer(handle);
+        }
+    });
+}
+
 /// Arm a V8 termination watchdog directly from an isolate handle, with no
 /// runtime borrow. The CDP dispatcher uses this to bound every command so a
 /// hung page cannot hold this connection's V8 lock forever. Pair with
@@ -322,6 +347,7 @@ impl ObscuraJsRuntime {
             }
 
             let isolate_handle = runtime.v8_isolate().thread_safe_handle();
+            notify_isolate_observer(&isolate_handle);
             let heap_limit_state = std::sync::Arc::new(HeapLimitState::default());
             install_heap_limit_guard(
                 &mut runtime,

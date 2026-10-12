@@ -13,6 +13,8 @@ mod canon;
 mod engine;
 mod html;
 mod obscura;
+#[cfg(feature = "obscura")]
+mod obscura_embedded;
 mod resilience;
 mod searxng;
 mod secret;
@@ -25,6 +27,8 @@ pub use canon::{canonical, permitted};
 pub use engine::{Answer, Engine, EngineError, Protection};
 pub use html::{DDG_HTML_ENDPOINT, HtmlBackend};
 pub use obscura::{OBSCURA_NAMES, OBSCURA_TIMEOUT, ObscuraBackend, parse_serp};
+#[cfg(feature = "obscura")]
+pub use obscura_embedded::{EmbeddedObscuraBackend, OBSCURA_SERP_ENDPOINT};
 pub use resilience::{Breaker, Limiter};
 pub use searxng::SearxngBackend;
 pub use secret::{KeySource, Secret};

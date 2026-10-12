@@ -37,6 +37,12 @@ test-tools = []
 # release binary is built with it. tests/dependency_policy.rs checks the closure without it is
 # Rust only and that with it `ring` is the only exception.
 tls = ["dep:tokio-rustls", "dep:rustls", "dep:webpki-roots"]
+# Obscura embedded (decision 1e9d7501): the keyless `obscura` search engine and the browser
+# (`nexus-tools obscura mcp`) run inside this binary, no external program. It links V8 (rusty_v8: a
+# prebuilt static library, downloaded at build time, pinned and checksum-verified; see
+# obscura/README.md), so it is the documented exception to N17 and OFF by default: a plain
+# `cargo build` stays Rust-only. The release binary is built with `tls,obscura`.
+obscura = ["dep:obscura-mcp", "dep:obscura-js"]
 
 # Rust only, by decision N17: nothing here may need a C or C++ toolchain, Node, Python or a
 # browser at build or run time.
@@ -72,6 +78,8 @@ lopdf = { version = "0.45", default-features = false }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"], optional = true }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"], optional = true }
 webpki-roots = { version = "0.26", optional = true }
+obscura-mcp = { path = "../obscura/crates/obscura-mcp", optional = true }
+obscura-js = { path = "../obscura/crates/obscura-js", optional = true }
 
 # Signals to a process group: Unix only (the shell tools are).
 [target.'cfg(unix)'.dependencies]
@@ -106,3 +114,7 @@ required-features = ["tls", "test-tools"]
 [[test]]
 name = "search_conformance"
 required-features = ["test-tools"]
+
+[[test]]
+name = "obscura_embedded"
+required-features = ["obscura"]

@@ -34,8 +34,9 @@ struct RpcMessage {
     params: Value,
 }
 
+/// One JSON-RPC answer, ready to be written as a line.
 #[derive(Serialize)]
-struct RpcResponse {
+pub struct RpcResponse {
     jsonrpc: &'static str,
     id: Value,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -145,7 +146,8 @@ impl BrowserState {
         self.tabs.remove(tab_id).is_some()
     }
 
-    fn has_active_page_runtime(&self) -> bool {
+    /// Whether the active tab has a JavaScript runtime whose tasks need pumping between calls.
+    pub fn has_active_page_runtime(&self) -> bool {
         self.active_tab
             .as_ref()
             .and_then(|tab_id| self.tabs.get(tab_id))
@@ -156,7 +158,7 @@ impl BrowserState {
     /// consume any navigation that task queued. MCP owns its pages continuously,
     /// so leaving either half for the next tool call strands timers, fetches,
     /// and location/form/click navigations while the transport waits on stdin.
-    async fn advance_active_page_tasks(&mut self) -> Result<bool, String> {
+    pub async fn advance_active_page_tasks(&mut self) -> Result<bool, String> {
         let page = self.page_mut();
         let reached_idle = page.run_autonomous_event_loop_turn().await?;
         let navigated = page
@@ -174,6 +176,14 @@ impl BrowserState {
     /// interactable, so the attribute survives across calls as long as
     /// the page isn't re-rendered without it. Returns `Err` if the ref
     /// hasn't been registered (caller must call browser_snapshot first).
+    /// (nexus) Clears the V8 termination an embedder requested on every tab's isolate (a
+    /// cancelled or timed-out call), so the next call can run JavaScript again.
+    pub fn clear_termination(&mut self) {
+        for page in self.tabs.values_mut() {
+            page.cancel_v8_termination();
+        }
+    }
+
     fn ref_to_selector(&self, r: &str) -> Result<String, String> {
         if !self.interactive_refs.contains_key(r) {
             return Err(format!(
@@ -184,7 +194,9 @@ impl BrowserState {
     }
 }
 
-pub(crate) async fn dispatch(method: &str, id: Value, params: &Value, state: &mut BrowserState) -> RpcResponse {
+/// Answers one JSON-RPC request (`initialize`, `tools/list`, `tools/call`…) against `state`.
+/// (nexus) Public so an embedder can run its own transport (cancellation, time limits).
+pub async fn dispatch(method: &str, id: Value, params: &Value, state: &mut BrowserState) -> RpcResponse {
     match method {
         "initialize" => handle_initialize(id, params),
         "ping" => RpcResponse::ok(id, json!({})),
@@ -1963,6 +1975,16 @@ pub async fn serp_search(
         }
         other => return Err(format!("unsupported search engine: {other}")),
     };
+    serp_search_at(state, &url, max_results).await
+}
+
+/// (nexus) [`serp_search`] against a results page at `url`, already built: a DuckDuckGo HTML
+/// results page, or a fixed copy of one in tests.
+pub async fn serp_search_at(
+    state: &mut BrowserState,
+    url: &str,
+    max_results: usize,
+) -> Result<Vec<SerpResult>, String> {
 
     // Navigation invalidates the ref table (a new document). Clearing first
     // keeps the borrow of `state` single and short.
@@ -1993,7 +2015,7 @@ pub async fn serp_search(
     })()"#;
     let val = {
         let page = state.page_mut();
-        page.navigate_with_wait(&url, obscura_browser::lifecycle::WaitUntil::Load)
+        page.navigate_with_wait(url, obscura_browser::lifecycle::WaitUntil::Load)
             .await
             .map_err(|e| format!("web search navigation failed: {e}"))?;
         page.evaluate(js)

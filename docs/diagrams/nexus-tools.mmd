@@ -59,6 +59,7 @@ flowchart TD
     end
 
     subgraph search["WebSearch — search/*.rs (N22)"]
+        OBEMB["✅ moteur obscura EMBARQUÉ (feature obscura, `--search-engine obscura` sans chemin) — search/obscura_embedded.rs :<br/>serp_search_at d'Obscura sur un fil à lui (run_isolated), navigateur neuf par requête, 30 s, 2 Mio, relu par parse_serp<br/><i>vérifié : tests/obscura_embedded.rs — page de résultats figée, délai et annulation (fil disparu en moins de 2 s, avant le chien de garde de 5 s d'Obscura) ; vraie recherche #[ignore]</i>"]
         direction TB
         TRAIT["✅ trait SearchBackend + moteurs essayés dans l'ordre : repli sur panne,<br/>disjoncteur (N échecs consécutifs, demi-ouvert, une sonde), limitation de débit,<br/>quota et clé refusée ne comptent pas comme panne<br/><i>vérifié : tests/search_core.rs, horloge injectée ; 4 mutations rouges</i>"]
         FILTER["✅ domaines autorisés/bloqués appliqués APRÈS le moteur (un moteur qui renvoie un domaine bloqué<br/>est démenti) ; URL canoniques fusionnées (schéma, www, fragment, paramètres de suivi) ;<br/>mode étendu : plusieurs requêtes fusionnées par rang réciproque, standard : une seule"]
@@ -66,7 +67,7 @@ flowchart TD
         ENGINES["✅ trois moteurs, une même suite contre fake_search : API à clé (forme Brave),<br/>SearXNG auto-hébergé, HTML sans clé (fragile, désactivé par défaut, nommé explicitement)<br/><i>vérifié : tests/search_conformance.rs</i>"]
         KEYS["✅ clé par RÉFÉRENCE (variable d'environnement ou fichier), jamais en clair : en-tête seulement,<br/>absente de l'URL, du Debug, des erreurs, de la sortie et de stderr ; une clé collée à la place<br/>d'un nom est refusée sans être répétée<br/><i>vérifié : mutations « clé dans l'URL » et « Debug affiche la clé » rouges</i>"]
         STLS["✅ les moteurs en https passent par le même connecteur"]
-        OBSERP["✅ moteur obscura, sans clé : exécutable EXTERNE (`--search-engine obscura:CHEMIN`, ou `obscura` cherché sur le PATH :<br/>dsh-obscura-nav puis obscura), lancé `serp --max-results N -- REQUÊTE` sans shell, requête = un seul argument ;<br/>groupe de processus tué au délai (30 s), à l'annulation et au-delà de 2 Mio de sortie (bad_response) ; stderr vidé au-delà de 16 Kio ; environnement en liste blanche, OBSCURA_ALLOW_PRIVATE_NETWORK=0 ;<br/>exécutable absent = erreur not_configured qui le nomme ; JSON {url,title,snippet} → mêmes filtres de domaines<br/><i>vérifié : tests/search_obscura.rs (script factice COMMITÉ tests/data/fake_obscura.sh, lié par test — jamais écrit puis exécuté, ETXTBSY sous Linux — + golden tests/data/obscura_serp.json enregistré sur le vrai binaire), tests/server_binary.rs</i>"]
+        OBSERP["✅ moteur obscura, sans clé : exécutable EXTERNE (`--search-engine obscura:CHEMIN`, ou `obscura` cherché sur le PATH sans la feature obscura :<br/>obscura-server, dsh-obscura-nav puis obscura), lancé `serp --max-results N -- REQUÊTE` sans shell, requête = un seul argument ;<br/>groupe de processus tué au délai (30 s), à l'annulation et au-delà de 2 Mio de sortie (bad_response) ; stderr vidé au-delà de 16 Kio ; environnement en liste blanche, OBSCURA_ALLOW_PRIVATE_NETWORK=0 ;<br/>exécutable absent = erreur not_configured qui le nomme ; JSON {url,title,snippet} → mêmes filtres de domaines<br/><i>vérifié : tests/search_obscura.rs (script factice COMMITÉ tests/data/fake_obscura.sh, lié par test — jamais écrit puis exécuté, ETXTBSY sous Linux — + golden tests/data/obscura_serp.json enregistré sur le vrai binaire), tests/server_binary.rs</i>"]
     end
 
     subgraph bench["Banc de parité — tests/parity_replay.rs (N25)"]
@@ -77,12 +78,13 @@ flowchart TD
         WIRED["✅ chaque outil traverse le vrai NativeProvider : Write, Read, Edit, Glob, Grep, NotebookEdit, Bash, WebFetch (SSRF refusée de bout en bout), WebSearch ;<br/>événements au nom canonique ; politique par motifs à la Claude Code ; outil hors profil jamais exécuté ; aucune variable de l'hôte dans une commande ; fin de session = commandes arrêtées ; tâche de fond suivie (snapshot background_tasks, fin notifiée → completed), cancel_tools(task) tue le groupe, scénario de conformité annulation_tache JOUÉ<br/><i>vérifié : tests/native_e2e.rs (15 tests ; les 3 du suivi rouges sans le changement)</i>"]
     end
 
-    subgraph browser["Navigateur optionnel — N23 (attaché, jamais compilé)"]
+    subgraph browser["Navigateur optionnel — N23 (attaché ; embarqué derrière la feature obscura)"]
         OBSCURA["✅ Obscura = serveur MCP externe `obscura mcp` (V8/C++ hors de notre build et de notre processus) : absent → aucun outil browser_*, notice, appel refusé ;<br/>jamais --stealth ni --allow-private-network, OBSCURA_ALLOW_PRIVATE_NETWORK=0 ; lectures sans approbation, navigation et interactions demandent ; destination privée refusée avant toute demande<br/><i>vérifié : tests/native_browser.rs contre fake_obscura (liste d'outils de la documentation) ; 3 mutations rouges</i><br/>🟠 jamais joué contre un vrai Obscura (test #[ignore] écrit, binaire absent)"]
+        EMBED["✅ feature obscura (décision 1e9d7501) — obscura.rs : Obscura DANS nexus-tools, jamais dans le harnais<br/>run_isolated : un fil par travail (runtime à lui, isolats V8 observés) ; délai ou annulation → terminate_execution sur chaque isolat + future abandonnée<br/>`nexus-tools obscura mcp` : outils browser_* d'Obscura (dispatch), chaque appel borné (chien de garde sur un autre fil, 30 s), annulable (notifications/cancelled → pas de réponse), 2 Mio max ;<br/>refus de --stealth, --allow-private-network et d'OBSCURA_ALLOW_PRIVATE_NETWORK vrai ; --capabilities dit obscura:true<br/><i>vérifié : tests/obscura_embedded.rs (pages data:, hors réseau)</i>"]
     end
 
     subgraph suite["Politique de dépendances — tests/dependency_policy.rs"]
-        DEPS["✅ la fermeture de nexus-tools se compile avec Rust seul :<br/>pas de links, pas de cc/cmake/bindgen, -sys limités aux liaisons de plateforme<br/><i>vérifié : cinq cas factices rouges, puis la vraie fermeture</i>"]
+        DEPS["✅ la fermeture de nexus-tools se compile avec Rust seul :<br/>pas de links, pas de cc/cmake/bindgen, -sys limités aux liaisons de plateforme<br/><i>vérifié : cinq cas factices rouges, puis la vraie fermeture</i><br/>exceptions documentées : tls (ring, cc) ; obscura (bindgen, clang-sys, ring, cc, prettyplease, linux-raw-sys — V8 précompilé, épinglé, empreinte vérifiée par scripts/rusty-v8-cache.sh), mesurées sur la fermeture réelle (cargo tree -p)"]
     end
 
     LATER["🟠 N23 Obscura (MCP externe)"]
@@ -119,6 +121,9 @@ flowchart TD
     ENGINES --> KEYS
     ENGINES -.-> STLS
     TRAIT --> OBSERP
+    TRAIT --> OBEMB
+    OBEMB --> EMBED
+    OBEMB --> FILTER
     OBSERP --> FILTER
     PROFILE --> SSRF
     SSRF --> PIN

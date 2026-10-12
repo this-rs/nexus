@@ -17,6 +17,10 @@ fn binary() -> Command {
     command
         .env_clear()
         .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        // Under `cargo llvm-cov`, where the binary writes its coverage profile: without this, the
+        // cleared environment sends it to the working directory and the coverage job never sees
+        // what the binary ran. Absent in an ordinary run.
+        .envs(std::env::vars_os().filter(|(k, _)| k.to_string_lossy().starts_with("LLVM_PROFILE")))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -350,6 +354,8 @@ fn the_obscura_engine_is_named_by_path_and_answers_through_websearch() {
     );
 }
 
+// With the `obscura` feature, `obscura` alone is the embedded engine (tests/obscura_embedded.rs).
+#[cfg(not(feature = "obscura"))]
 #[test]
 fn obscura_alone_without_an_executable_on_the_path_warns_and_websearch_says_why() {
     let empty = tempfile::tempdir().unwrap();
@@ -374,4 +380,32 @@ fn obscura_alone_without_an_executable_on_the_path_warns_and_websearch_says_why(
     let text = answers[1]["result"]["content"][0]["text"].as_str().unwrap();
     assert_eq!(answers[1]["result"]["isError"], true, "{text}");
     assert!(text.contains("not installed"), "{text}");
+}
+
+#[test]
+fn capabilities_say_what_the_build_carries() {
+    let out = binary().arg("--capabilities").output().unwrap();
+    assert!(out.status.success());
+    let caps: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(caps["version"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(caps["tls"], cfg!(feature = "tls"));
+    assert_eq!(caps["obscura"], cfg!(feature = "obscura"));
+}
+
+// Without the feature, `nexus-tools obscura …` says so instead of running anything
+// (tests/obscura_embedded.rs covers the build that has it).
+#[cfg(not(feature = "obscura"))]
+#[test]
+fn the_obscura_subcommand_says_the_browser_is_not_embedded_in_this_build() {
+    for args in [
+        &["obscura", "mcp"][..],
+        &["obscura", "serp", "q"][..],
+        &["obscura"][..],
+    ] {
+        let out = binary().args(args).output().unwrap();
+        assert_eq!(out.status.code(), Some(2), "{args:?}");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(stderr.contains("without the `obscura` feature"), "{stderr}");
+        assert!(out.stdout.is_empty());
+    }
 }
