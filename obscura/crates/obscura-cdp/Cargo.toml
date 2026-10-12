@@ -1,0 +1,38 @@
+[package]
+name = "obscura-cdp"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/h4ckf0r0day/obscura"
+
+[features]
+default = []
+# Enable Page.captureScreenshot via obscura-render. Propagates render to
+# obscura-browser so Page::screenshot is available.
+render = ["obscura-browser/render", "dep:image", "dep:png"]
+
+[dependencies]
+obscura-dom = { path = "../obscura-dom" }
+obscura-browser = { path = "../obscura-browser" }
+obscura-js = { path = "../obscura-js" }
+tokio = { version = "1", features = ["full"] }
+tokio-tungstenite = { version = "0.26" }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1" }
+url = { version = "2" }
+uuid = { version = "1", features = ["v4"] }
+tracing = { version = "0.1" }
+thiserror = { version = "2" }
+anyhow = { version = "1" }
+base64 = { version = "0.22" }
+futures-util = "0.3"
+obscura-net = { path = "../obscura-net" }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"], optional = true }
+png = { version = "0.18", optional = true }
+
+[target.'cfg(target_env = "gnu")'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+tokio-tungstenite = { version = "0.26" }
+futures-util = "0.3"

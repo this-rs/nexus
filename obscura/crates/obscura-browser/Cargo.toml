@@ -1,0 +1,25 @@
+[package]
+name = "obscura-browser"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/h4ckf0r0day/obscura"
+
+[features]
+default = []
+stealth = ["obscura-net/stealth", "obscura-js/stealth"]
+render = ["obscura-js/render", "dep:image"]
+
+[dependencies]
+obscura-dom = { path = "../obscura-dom" }
+obscura-net = { path = "../obscura-net" }
+obscura-js = { path = "../obscura-js" }
+tokio = { version = "1", features = ["full"] }
+futures = "0.3"
+url = { version = "2" }
+tracing = { version = "0.1" }
+thiserror = { version = "2" }
+anyhow = { version = "1" }
+serde_json = { version = "1" }
+base64 = { version = "0.22" }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"], optional = true }

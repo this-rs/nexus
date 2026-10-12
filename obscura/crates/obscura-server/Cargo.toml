@@ -1,0 +1,22 @@
+[package]
+name = "obscura-server"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/this-rs/nexus"
+description = "Obscura's MCP browser server and keyless web search as one command (`mcp`, `serp`)"
+publish = false
+
+[[bin]]
+name = "obscura-server"
+path = "src/main.rs"
+
+[dependencies]
+obscura-mcp = { path = "../obscura-mcp" }
+obscura-browser = { path = "../obscura-browser" }
+tokio = { version = "1", features = ["full"] }
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1" }
+anyhow = { version = "1" }
+url = { version = "2" }

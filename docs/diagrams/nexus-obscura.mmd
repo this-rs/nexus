@@ -1,0 +1,34 @@
+%% name: nexus-obscura
+%% covers: obscura/crates/**, obscura/vendor/**
+%% verified: 2026-10-12
+%% ---
+%% PROUVE : comment le fork d'Obscura (Apache-2.0, obscura/NOTICE) est rangé dans le workspace
+%%   nexus, ce qui le compile et ce qui ne le compile pas.
+%% SOURCES LUES : Cargo.toml (members, default-members, exclude, [patch.crates-io]),
+%%   obscura/crates/obscura-server/src/main.rs (mcp, serp), obscura/crates/obscura-mcp/src/lib.rs
+%%   (run, serp_search), obscura/crates/obscura-js/Cargo.toml (deno_core -> v8),
+%%   nexus-tools/src/search/obscura.rs (moteur externe obscura:<chemin>).
+%% NON ETABLI : le comportement du navigateur lui-même (code amont, ses propres tests) ; aucun test
+%%   nexus n'exécute Obscura en CI à ce stade.
+%% LEGENDE : ✅ vérifié (commande nommée)  🟠 décidé, non écrit  ⚪ hors de ce dépôt
+flowchart TD
+    subgraph ws["workspace nexus (Cargo.toml)"]
+        direction TB
+        defaults["✅ default-members<br/>claude-code-api · nexus-claude · nexus-tools · xtask<br/><i>cargo build / test / CI : jamais V8<br/>(cargo tree -i v8 : aucun paquet)</i>"]
+        obs["✅ membres NON par défaut : obscura/crates/*<br/>compilés seulement par nom<br/><i>cargo build -p obscura-server</i>"]
+        patch["✅ [patch.crates-io]<br/>taffy, cosmic-text → obscura/vendor/<br/>(exclus du workspace)"]
+    end
+
+    server["obscura-server<br/>mcp : outils browser_* (stdio)<br/>serp : recherche sans clé → JSON {url,title,snippet}"]
+    mcp["obscura-mcp<br/>run() · serp_search()<br/>html.duckduckgo.com/html"]
+    browser["obscura-browser · obscura-dom · obscura-net<br/>(protection SSRF active par défaut)"]
+    js["obscura-js → deno_core 0.350 → v8 137.3<br/>⚪ lib statique précompilée (rusty_v8) téléchargée au build"]
+
+    obs --> server --> mcp --> browser --> js
+    patch -.-> obs
+
+    ext["✅ nexus-tools --search-engine obscura:&lt;chemin&gt;<br/>(#96) lance &lt;chemin&gt; serp --max-results N -- requête"]
+    ext -->|"processus externe"| server
+
+    fmt["✅ cargo fmt-nexus (CI)<br/>ne reformate pas obscura/ : le format amont est gardé"]
+    fmt -.-> defaults

@@ -1,0 +1,47 @@
+dsh-obscura-nav
+Copyright 2026 dsh-obscura-nav contributors
+
+This product includes software developed as part of the Obscura project
+(https://github.com/h4ckf0r0day/obscura), licensed under the Apache License,
+Version 2.0:
+
+  Copyright 2026 Obscura contributors
+
+  Licensed under the Apache License, Version 2.0 (the "License");
+  you may not use this file except in compliance with the License.
+  You may obtain a copy of the License at
+
+      http://www.apache.org/licenses/LICENSE-2.0
+
+  Unless required by applicable law or agreed to in writing, software
+  distributed under the License is distributed on an "AS IS" BASIS,
+  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+  See the License for the specific language governing permissions and
+  limitations under the License.
+
+The following crates under crates/ are vendored from Obscura and remain under
+their original Apache-2.0 license (see crates/<name>/Cargo.toml and the
+top-level LICENSE file):
+
+  obscura, obscura-browser, obscura-cdp, obscura-dom, obscura-js,
+  obscura-mcp, obscura-net, obscura-render
+
+Local modifications to the vendored tree (the "DSH delta"):
+  - crates/obscura-mcp/src/lib.rs: added `browser_web_search` MCP tool and the
+    public `serp_search`/`SerpResult` helpers (keyless SERP search).
+  - crates/dsh-obscura-server/: new crate providing the `mcp` and `serp`
+    command-line entry points.
+
+Third-party vendored dependencies under vendor/ (taffy, cosmic-text) keep their
+own licenses as distributed by Obscura.
+
+Modifications Copyright 2026 FFS SASU
+
+This tree is vendored into the nexus repository (https://github.com/this-rs/nexus)
+under obscura/. Further modifications there:
+  - crates/dsh-obscura-server/ renamed crates/obscura-server/ (binary
+    `obscura-server`, same `mcp` and `serp` subcommands); its harness-specific
+    integration pieces (installer, web-seam bridge, profile patches) removed.
+  - crates/obscura-mcp/src/lib.rs: MCP serverInfo name set to `obscura`.
+  - Cargo.toml of every crate: workspace-inherited keys and dependencies
+    written out explicitly, as the crates are members of the nexus workspace.

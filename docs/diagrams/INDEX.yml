@@ -8,7 +8,7 @@
 # than implicit; binaries, `mod.rs` and re-exporting `lib.rs`
 # files legitimately live there.
 #
-# 18 diagrams, 344/194 source files claimed, 4 unclaimed.
+# 19 diagrams, 570/340 source files claimed, 4 unclaimed.
 
 diagrams:
   - name: nexus-agent-contract
@@ -100,10 +100,16 @@ diagrams:
       - claude-code-api/src/core/storage/*.rs
   - name: nexus-ci-pipeline
     file: nexus-ci-pipeline.mmd
-    verified: 2026-10-09
+    verified: 2026-10-12
     covers:
       - .github/workflows/ci.yml
       - .github/workflows/release.yml
+  - name: nexus-obscura
+    file: nexus-obscura.mmd
+    verified: 2026-10-12
+    covers:
+      - obscura/crates/**
+      - obscura/vendor/**
   - name: nexus-sdk-client
     file: nexus-sdk-client.mmd
     verified: 2026-10-01

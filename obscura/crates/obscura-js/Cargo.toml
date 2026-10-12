@@ -1,0 +1,54 @@
+[package]
+name = "obscura-js"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/h4ckf0r0day/obscura"
+
+[features]
+default = []
+# Builds obscura-net with its stealth (wreq) HTTP client and lets scripted
+# fetch()/XHR be routed through it so JS-level requests carry the same Chrome
+# TLS fingerprint and client hints as stealth navigation.
+stealth = ["obscura-net/stealth"]
+# Builds the obscura-render layout layer and exposes real box geometry to JS
+# (getBoundingClientRect, elementFromPoint, offset*), and with paint enabled,
+# rasterizes screenshots. Off by default so the scraping build stays lean.
+render = ["dep:obscura-render", "obscura-render/paint"]
+
+[build-dependencies]
+deno_core = "0.350"
+
+[dependencies]
+obscura-dom = { path = "../obscura-dom" }
+obscura-net = { path = "../obscura-net" }
+deno_core = "0.350"
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1" }
+url = { version = "2" }
+# document.domain must reject public suffixes (including private suffixes such
+# as github.io), not just compare dotted strings.  `psl` embeds the Mozilla
+# Public Suffix List and adds no runtime I/O.
+psl = "2"
+tracing = { version = "0.1" }
+thiserror = { version = "2" }
+anyhow = { version = "1" }
+reqwest = { version = "0.12", features = ["gzip", "brotli", "deflate", "rustls-tls", "socks"], default-features = false }
+html5ever = { version = "0.39" }
+deno_error = "0.6"
+base64 = { version = "0.22" }
+sha1 = "0.10"
+sha2 = "0.10"
+# WebCrypto (crypto.subtle) primitives. RustCrypto, pure Rust, no CMake/OpenSSL,
+# and they unify on the digest 0.10 / cipher 0.4 stack already in the tree.
+hmac = "0.12"
+aes = "0.8"
+aes-gcm = "0.10"
+cbc = { version = "0.1", features = ["alloc"] }
+ctr = "0.9"
+pbkdf2 = { version = "0.12", default-features = false, features = ["hmac"] }
+hkdf = "0.12"
+# CSPRNG for getRandomValues / randomUUID (replaces Math.random).
+getrandom = "0.2"
+obscura-render = { path = "../obscura-render", optional = true }

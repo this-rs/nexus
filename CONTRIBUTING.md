@@ -34,8 +34,8 @@ cargo llvm-cov --all-features
 ### Code Quality
 
 ```bash
-# Format code
-cargo fmt --all
+# Format code (the nexus crates; `--all` would also reformat the vendored obscura/)
+cargo fmt-nexus
 
 # Run lints
 cargo clippy --all-targets --all-features -- -D warnings
