@@ -130,7 +130,7 @@ impl Harness {
             .collect();
         allowed.extend(extra.iter().map(|name| format!("mcp__po__{name}")));
         spec.policy =
-            ToolPolicy::from_patterns(PolicyMode::Trust, &allowed, &[] as &[&str]).unwrap();
+            ToolPolicy::from_patterns(PolicyMode::Trust, &allowed, &[] as &[String]).unwrap();
         spec
     }
 
@@ -202,7 +202,11 @@ async fn the_cache_reads_reported_by_the_endpoint_reach_the_done_usage_and_its_c
         vec![
             // OpenAI form: `prompt_tokens_details.cached_tokens`.
             chat_route(call_events(
-                &[("c1", "mcp__po__task", json!({"action": "get", "task_id": "t1"}))],
+                &[(
+                    "c1",
+                    "mcp__po__task",
+                    json!({"action": "get", "task_id": "t1"}),
+                )],
                 Some(json!({"choices": [], "usage": {
                     "prompt_tokens": 1000, "completion_tokens": 40, "total_tokens": 1040,
                     "prompt_tokens_details": {"cached_tokens": 600}}})),
@@ -309,7 +313,10 @@ fn assert_prefix_stable(requests: &[Value]) {
             && !std::mem::take(&mut compacted)
             && let Some(why) = prefix_break(prev, request)
         {
-            panic!("prefix broken between request {} and {index}: {why}", index - 1);
+            panic!(
+                "prefix broken between request {} and {index}: {why}",
+                index - 1
+            );
         }
         previous = Some(request);
     }
@@ -319,9 +326,21 @@ fn assert_prefix_stable(requests: &[Value]) {
 /// three (a backend reopens a session that way), and the system prompt each
 /// opening is given by `system_of(opening)`.
 async fn multi_turn_requests(system_of: impl Fn(usize) -> String) -> Vec<Value> {
-    let task = ("c1", "mcp__po__task", json!({"action": "get", "task_id": "t1"}));
-    let step = ("c2", "mcp__po__step", json!({"action": "create", "task_id": "t1"}));
-    let note = ("c3", "mcp__po__note", json!({"action": "search", "query": "cache"}));
+    let task = (
+        "c1",
+        "mcp__po__task",
+        json!({"action": "get", "task_id": "t1"}),
+    );
+    let step = (
+        "c2",
+        "mcp__po__step",
+        json!({"action": "create", "task_id": "t1"}),
+    );
+    let note = (
+        "c3",
+        "mcp__po__note",
+        json!({"action": "search", "query": "cache"}),
+    );
     let h = Harness::new(
         vec![
             chat_route(call_events(&[task.clone()], None)),
@@ -376,7 +395,10 @@ async fn every_request_starts_with_the_previous_one_across_turns_tools_and_a_res
 #[should_panic(expected = "prefix broken between request 3 and 4: message 0 (\"system\") changed")]
 async fn the_prefix_check_fails_when_a_timestamp_is_injected_into_the_system_prompt() {
     let requests = multi_turn_requests(|opening| {
-        format!("{SYSTEM}\nCurrent time: 2026-10-12T09:{:02}:00Z", 15 + opening)
+        format!(
+            "{SYSTEM}\nCurrent time: 2026-10-12T09:{:02}:00Z",
+            15 + opening
+        )
     })
     .await;
     assert_prefix_stable(&requests);
@@ -386,8 +408,10 @@ async fn the_prefix_check_fails_when_a_timestamp_is_injected_into_the_system_pro
 /// a new prefix, and the check says so only there.
 #[tokio::test]
 async fn compaction_is_the_declared_exception_and_the_prefix_holds_again_after_it() {
-    let usage = |prompt: u64| json!({"choices": [], "usage": {
-        "prompt_tokens": prompt, "completion_tokens": 10, "total_tokens": prompt + 10}});
+    let usage = |prompt: u64| {
+        json!({"choices": [], "usage": {
+        "prompt_tokens": prompt, "completion_tokens": 10, "total_tokens": prompt + 10}})
+    };
     let h = Harness::new(
         vec![
             chat_route(call_events(
@@ -477,7 +501,10 @@ async fn a_resumed_session_sends_the_same_request_as_the_live_one() {
     let resumed = second_turn_request(true, "a plain sentence").await;
     assert_eq!(first_difference(&live, &resumed), None);
     assert_eq!(canon(&live), canon(&resumed));
-    assert!(canon(&resumed).contains("I need the tools."), "reasoning kept");
+    assert!(
+        canon(&resumed).contains("I need the tools."),
+        "reasoning kept"
+    );
 }
 
 /// MEASURED, NOT WANTED: the file transcript masks what looks like a credential
@@ -618,11 +645,19 @@ async fn deepseek_serves_every_request_after_the_first_from_its_prefix_cache() {
         let cached: u64 = log_field(line, "cached_tokens")
             .and_then(|v| v.parse().ok())
             .unwrap_or(0);
-        assert!(cached > 0, "a request after the first missed the cache: {line}");
+        assert!(
+            cached > 0,
+            "a request after the first missed the cache: {line}"
+        );
     }
     let hashes: std::collections::BTreeSet<_> = lines
         .iter()
-        .map(|line| (log_field(line, "system_hash"), log_field(line, "tools_hash")))
+        .map(|line| {
+            (
+                log_field(line, "system_hash"),
+                log_field(line, "tools_hash"),
+            )
+        })
         .collect();
     assert_eq!(hashes.len(), 1, "the prefix fingerprint moved: {lines:?}");
 }
@@ -638,8 +673,18 @@ fn tokens(bytes: usize) -> usize {
 /// A filler of `bytes` bytes, deterministic, word-like (a tool result).
 fn filler(seed: &str, bytes: usize) -> String {
     let words = [
-        "task", "step", "plan", "note", "pending", "completed", "cache", "prefix", "turn",
-        "decision", "commit", "context",
+        "task",
+        "step",
+        "plan",
+        "note",
+        "pending",
+        "completed",
+        "cache",
+        "prefix",
+        "turn",
+        "decision",
+        "commit",
+        "context",
     ];
     let mut text = format!("{seed}:");
     let mut i = seed.len();
@@ -656,18 +701,106 @@ fn filler(seed: &str, bytes: usize) -> String {
 /// `action` enum, a dozen documented parameters each. Deterministic.
 fn po_tools() -> Value {
     let tools: [(&str, &[&str]); 12] = [
-        ("project", &["list", "get", "create", "update", "sync", "get_roadmap"]),
-        ("plan", &["list", "get", "create", "update_status", "get_dependency_graph", "get_critical_path"]),
-        ("task", &["list", "get", "create", "update", "get_next", "get_context", "get_blockers"]),
-        ("step", &["list", "create", "update", "get", "delete", "get_progress"]),
-        ("note", &["list", "get", "create", "update", "search", "search_semantic", "link_to_entity"]),
-        ("decision", &["add", "get", "update", "search", "search_semantic", "get_affecting"]),
+        (
+            "project",
+            &["list", "get", "create", "update", "sync", "get_roadmap"],
+        ),
+        (
+            "plan",
+            &[
+                "list",
+                "get",
+                "create",
+                "update_status",
+                "get_dependency_graph",
+                "get_critical_path",
+            ],
+        ),
+        (
+            "task",
+            &[
+                "list",
+                "get",
+                "create",
+                "update",
+                "get_next",
+                "get_context",
+                "get_blockers",
+            ],
+        ),
+        (
+            "step",
+            &["list", "create", "update", "get", "delete", "get_progress"],
+        ),
+        (
+            "note",
+            &[
+                "list",
+                "get",
+                "create",
+                "update",
+                "search",
+                "search_semantic",
+                "link_to_entity",
+            ],
+        ),
+        (
+            "decision",
+            &[
+                "add",
+                "get",
+                "update",
+                "search",
+                "search_semantic",
+                "get_affecting",
+            ],
+        ),
         ("constraint", &["list", "add", "get", "update", "delete"]),
-        ("commit", &["create", "link_to_task", "link_to_plan", "get_task_commits", "get_file_history"]),
-        ("code", &["search", "get_file_symbols", "find_references", "get_call_graph", "analyze_impact"]),
-        ("workspace", &["list", "get", "get_overview", "list_projects", "add_project"]),
-        ("milestone", &["list", "get", "create", "update", "get_progress", "add_task"]),
-        ("skill", &["list", "get", "create", "activate", "get_members"]),
+        (
+            "commit",
+            &[
+                "create",
+                "link_to_task",
+                "link_to_plan",
+                "get_task_commits",
+                "get_file_history",
+            ],
+        ),
+        (
+            "code",
+            &[
+                "search",
+                "get_file_symbols",
+                "find_references",
+                "get_call_graph",
+                "analyze_impact",
+            ],
+        ),
+        (
+            "workspace",
+            &[
+                "list",
+                "get",
+                "get_overview",
+                "list_projects",
+                "add_project",
+            ],
+        ),
+        (
+            "milestone",
+            &[
+                "list",
+                "get",
+                "create",
+                "update",
+                "get_progress",
+                "add_task",
+            ],
+        ),
+        (
+            "skill",
+            &["list", "get", "create", "activate", "get_members"],
+        ),
     ];
     let params = [
         ("project_id", "string", "Project UUID"),
@@ -675,11 +808,23 @@ fn po_tools() -> Value {
         ("task_id", "string", "Task UUID"),
         ("step_id", "string", "Step UUID"),
         ("title", "string", "Title (create)"),
-        ("description", "string", "Free text description (create/update)"),
-        ("status", "string", "Status: pending, in_progress, blocked, completed, failed"),
+        (
+            "description",
+            "string",
+            "Free text description (create/update)",
+        ),
+        (
+            "status",
+            "string",
+            "Status: pending, in_progress, blocked, completed, failed",
+        ),
         ("query", "string", "Search query (search actions)"),
         ("limit", "integer", "Maximum number of items returned"),
-        ("offset", "integer", "Items skipped before the first one returned"),
+        (
+            "offset",
+            "integer",
+            "Items skipped before the first one returned",
+        ),
         ("tags", "array", "Tags attached to the entity"),
         ("priority", "integer", "Priority, higher runs first"),
     ];
@@ -714,42 +859,112 @@ fn po_tools() -> Value {
 }
 
 /// The ten turns: `(user text, rounds of tool calls, final answer)`.
-fn scenario() -> Vec<(&'static str, Vec<Vec<(String, &'static str, Value)>>, String)> {
+fn scenario() -> Vec<(
+    &'static str,
+    Vec<Vec<(String, &'static str, Value)>>,
+    String,
+)> {
     let call = |id: &str, tool: &'static str, args: Value| (id.to_owned(), tool, args);
     vec![
-        ("What plans are in progress?",
-            vec![vec![call("a1", "mcp__po__plan", json!({"action": "list", "status": "in_progress"}))]],
-            filler("answer-1", 400)),
-        ("Give me the context of the next task of the first plan.",
-            vec![vec![call("b1", "mcp__po__task", json!({"action": "get_next", "plan_id": "p1"}))],
-                 vec![call("b2", "mcp__po__task", json!({"action": "get_context", "task_id": "t1"}))]],
-            filler("answer-2", 600)),
-        ("Split it in two steps.",
-            vec![vec![call("c1", "mcp__po__step", json!({"action": "create", "task_id": "t1", "description": "measure"})),
-                      call("c2", "mcp__po__step", json!({"action": "create", "task_id": "t1", "description": "compare"}))]],
-            filler("answer-3", 200)),
-        ("Any notes about prompt caching?",
-            vec![vec![call("d1", "mcp__po__note", json!({"action": "search_semantic", "query": "prompt cache"}))]],
-            filler("answer-4", 500)),
-        ("Where is the usage parsed in the code?",
-            vec![vec![call("e1", "mcp__po__code", json!({"action": "search", "query": "parse_usage"}))]],
-            filler("answer-5", 400)),
-        ("Explain the difference between input and cached tokens.",
+        (
+            "What plans are in progress?",
+            vec![vec![call(
+                "a1",
+                "mcp__po__plan",
+                json!({"action": "list", "status": "in_progress"}),
+            )]],
+            filler("answer-1", 400),
+        ),
+        (
+            "Give me the context of the next task of the first plan.",
+            vec![
+                vec![call(
+                    "b1",
+                    "mcp__po__task",
+                    json!({"action": "get_next", "plan_id": "p1"}),
+                )],
+                vec![call(
+                    "b2",
+                    "mcp__po__task",
+                    json!({"action": "get_context", "task_id": "t1"}),
+                )],
+            ],
+            filler("answer-2", 600),
+        ),
+        (
+            "Split it in two steps.",
+            vec![vec![
+                call(
+                    "c1",
+                    "mcp__po__step",
+                    json!({"action": "create", "task_id": "t1", "description": "measure"}),
+                ),
+                call(
+                    "c2",
+                    "mcp__po__step",
+                    json!({"action": "create", "task_id": "t1", "description": "compare"}),
+                ),
+            ]],
+            filler("answer-3", 200),
+        ),
+        (
+            "Any notes about prompt caching?",
+            vec![vec![call(
+                "d1",
+                "mcp__po__note",
+                json!({"action": "search_semantic", "query": "prompt cache"}),
+            )]],
+            filler("answer-4", 500),
+        ),
+        (
+            "Where is the usage parsed in the code?",
+            vec![vec![call(
+                "e1",
+                "mcp__po__code",
+                json!({"action": "search", "query": "parse_usage"}),
+            )]],
+            filler("answer-5", 400),
+        ),
+        (
+            "Explain the difference between input and cached tokens.",
             vec![],
-            filler("answer-6", 900)),
-        ("Mark the task in progress.",
-            vec![vec![call("g1", "mcp__po__task", json!({"action": "update", "task_id": "t1", "status": "in_progress"}))]],
-            filler("answer-7", 120)),
-        ("Record the commit abc123 and link it to the task.",
-            vec![vec![call("h1", "mcp__po__commit", json!({"action": "create", "query": "abc123"}))],
-                 vec![call("h2", "mcp__po__commit", json!({"action": "link_to_task", "task_id": "t1"}))]],
-            filler("answer-8", 150)),
-        ("Record the decision to measure before optimising.",
-            vec![vec![call("i1", "mcp__po__decision", json!({"action": "add", "description": "measure first"}))]],
-            filler("answer-9", 200)),
-        ("Summarise what we did.",
-            vec![],
-            filler("answer-10", 700)),
+            filler("answer-6", 900),
+        ),
+        (
+            "Mark the task in progress.",
+            vec![vec![call(
+                "g1",
+                "mcp__po__task",
+                json!({"action": "update", "task_id": "t1", "status": "in_progress"}),
+            )]],
+            filler("answer-7", 120),
+        ),
+        (
+            "Record the commit abc123 and link it to the task.",
+            vec![
+                vec![call(
+                    "h1",
+                    "mcp__po__commit",
+                    json!({"action": "create", "query": "abc123"}),
+                )],
+                vec![call(
+                    "h2",
+                    "mcp__po__commit",
+                    json!({"action": "link_to_task", "task_id": "t1"}),
+                )],
+            ],
+            filler("answer-8", 150),
+        ),
+        (
+            "Record the decision to measure before optimising.",
+            vec![vec![call(
+                "i1",
+                "mcp__po__decision",
+                json!({"action": "add", "description": "measure first"}),
+            )]],
+            filler("answer-9", 200),
+        ),
+        ("Summarise what we did.", vec![], filler("answer-10", 700)),
     ]
 }
 
@@ -776,7 +991,11 @@ fn common_prefix_bytes(prev: &Value, next: &Value) -> usize {
     for (old, new) in before.iter().zip(after) {
         let (old, new) = (canon(old), canon(new));
         if old != new {
-            shared += old.bytes().zip(new.bytes()).take_while(|(a, b)| a == b).count();
+            shared += old
+                .bytes()
+                .zip(new.bytes())
+                .take_while(|(a, b)| a == b)
+                .count();
             break;
         }
         shared += new.len();

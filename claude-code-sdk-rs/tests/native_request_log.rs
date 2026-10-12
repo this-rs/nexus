@@ -17,8 +17,8 @@ use std::sync::{Arc, Mutex};
 use fake_openai::FakeOpenAi;
 use native::*;
 use nexus_claude::agent::{
-    AgentEvent, AgentProvider, SessionSpec, StopReason, SystemPromptMode, SystemPromptSpec,
-    TurnInput,
+    AgentEvent, AgentProvider, AgentSession, PolicyMode, SessionSpec, StopReason, SystemPromptMode,
+    SystemPromptSpec, ToolPolicy, TurnInput,
 };
 use nexus_claude::model::EndpointQuirks;
 use nexus_claude::providers::native::{MemoryTranscriptStore, NativeConfig, NativeProvider};
@@ -83,6 +83,26 @@ async fn run_turn(
     log_dir: &tempfile::TempDir,
     host_session_id: &str,
 ) -> Vec<AgentEvent> {
+    let session = open(server, log_dir, host_session_id, |_| {}).await;
+    send(&*session, "look").await
+}
+
+async fn send(session: &dyn AgentSession, text: &str) -> Vec<AgentEvent> {
+    collect(
+        session
+            .send_turn(TurnInput::text(text))
+            .await
+            .expect("send_turn"),
+    )
+    .await
+}
+
+async fn open(
+    server: &FakeOpenAi,
+    log_dir: &tempfile::TempDir,
+    host_session_id: &str,
+    tweak: impl FnOnce(&mut SessionSpec),
+) -> Arc<dyn AgentSession> {
     let mut config = NativeConfig::new("native-test");
     config.default_model = Some("m".to_owned());
     let provider = NativeProvider::new(
@@ -105,14 +125,8 @@ async fn run_turn(
         "native".to_owned(),
         json!({ "host_session_id": host_session_id }),
     );
-    let session = provider.open(spec).await.expect("open");
-    collect(
-        session
-            .send_turn(TurnInput::text("look"))
-            .await
-            .expect("send_turn"),
-    )
-    .await
+    tweak(&mut spec);
+    provider.open(spec).await.expect("open")
 }
 
 #[tokio::test]
@@ -171,6 +185,10 @@ async fn every_model_request_is_logged_with_its_usage_cache_latency_and_prefix_f
             field(line, name);
         }
     }
+    // The second request extends the first byte for byte (the first has nothing to extend).
+    assert!(!lines[0].contains("extends_previous"), "{}", lines[0]);
+    assert!(lines[1].contains("extends_previous=true"), "{}", lines[1]);
+    field(&lines[1], "prefix_hash");
     // Same system prompt, same tools: the prefix fingerprint does not move.
     for name in ["system_hash", "tools_hash"] {
         assert_eq!(field(&lines[0], name), field(&lines[1], name), "{name}");
@@ -194,4 +212,35 @@ async fn every_model_request_is_logged_with_its_usage_cache_latency_and_prefix_f
     assert!(lines[0].contains("host_session_id=\"-\""), "{}", lines[0]);
     assert!(lines[0].contains("usage_reported=true"), "{}", lines[0]);
     assert!(logs.lines("forged").is_empty());
+
+    // MEASURED HAZARD (DeepSeek): the reasoning is echoed only when the request offers
+    // tools. A policy that leaves no tool (here plan_only over an allow list of one
+    // writing tool) re-serialises the EARLIER assistant messages without it: the history
+    // no longer extends the previous request, the cache breaks there.
+    logs.clear();
+    let write = ("w1", "mcp__fake__write", json!({"text": "x"}));
+    let server = FakeOpenAi::start(json!([
+        probe_route(true),
+        models_route(128_000),
+        tool_reply(Some("look"), &[write], Some("plan it"), Some((100, 5))),
+        text_reply(Some("\"role\":\"tool\""), "written", None, Some((120, 5))),
+        text_reply(Some("after"), "ok", None, Some((130, 5))),
+    ]));
+    let session = open(&server, &log_dir, "s-plan", |spec| {
+        spec.policy =
+            ToolPolicy::from_patterns(PolicyMode::Trust, &["mcp__fake__write"], &[] as &[&str])
+                .unwrap();
+    })
+    .await;
+    send(&*session, "look").await;
+    session
+        .set_policy_mode(PolicyMode::PlanOnly, None)
+        .await
+        .expect("plan only");
+    send(&*session, "after").await;
+    let lines = logs.lines("native model request");
+    assert_eq!(lines.len(), 3, "{lines:?}");
+    assert!(lines[1].contains("extends_previous=true"), "{}", lines[1]);
+    assert!(lines[2].contains("tools=0"), "{}", lines[2]);
+    assert!(lines[2].contains("extends_previous=false"), "{}", lines[2]);
 }

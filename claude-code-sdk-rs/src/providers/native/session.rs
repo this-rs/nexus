@@ -134,6 +134,9 @@ pub(crate) struct State {
     pub(crate) usd_spent: f64,
     /// Size of the last prompt the endpoint reported, since the last compaction.
     pub(crate) last_prompt_tokens: Option<u64>,
+    /// The wire messages of the last model request: how many, and the hash of them all
+    /// (the request log says whether the next request extends it).
+    pub(crate) last_wire: Option<(usize, u64)>,
     /// The background tasks `nexus-tools` runs for the session (§4 `background_tasks`).
     pub(crate) tasks: TaskTable,
 }
@@ -245,6 +248,7 @@ impl Core {
             tokens_spent: 0,
             usd_spent: 0.0,
             last_prompt_tokens: None,
+            last_wire: None,
             tasks: TaskTable::default(),
         };
         for event in parts.initial_events {
