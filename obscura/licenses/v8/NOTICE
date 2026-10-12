@@ -1,0 +1,33 @@
+V8, as linked into nexus-tools by its `obscura` feature
+========================================================
+
+nexus-tools' `obscura` feature links V8 through rusty_v8 (crate `v8` 137.3.0, MIT), as the
+prebuilt static library of the rusty_v8 v137.3.0 GitHub release (librusty_v8_release_<target>.a,
+rusty_v8_release_x86_64-pc-windows-msvc.lib). That library contains V8 and the third-party code
+V8 is built with; their license texts are the LICENSE.* files of this directory, taken verbatim
+from the commits the rusty_v8 v137.3.0 tag pins:
+
+  LICENSE.rusty_v8         github.com/denoland/rusty_v8 @ v137.3.0, LICENSE
+  LICENSE.v8-main          github.com/denoland/v8 @ f68bbb6cda689a14d019a6a60cc93963724e7c35, LICENSE
+  LICENSE.v8-v8            same commit, LICENSE.v8
+  LICENSE.v8-fdlibm        same commit, LICENSE.fdlibm
+  LICENSE.v8-strongtalk    same commit, LICENSE.strongtalk
+  LICENSE.icu              chromium.googlesource.com/chromium/deps/icu @ 4c8cc4b365a505ce35be1e0bd488476c5f79805d
+  LICENSE.abseil-cpp       chromium.googlesource.com/chromium/src/third_party/abseil-cpp @ 91f1a3775e4c509c3eadd4870fc9929c0021e6e3
+  LICENSE.libc++           llvm-project/libcxx (Chromium mirror) @ 917609c669e43edc850eeb192a342434a54e1dfd, LICENSE.TXT
+  LICENSE.libc++abi        llvm-project/libcxxabi (Chromium mirror) @ f2a7f2987f9dcdf8b04c2d8cd4dcb186641a7c3e, LICENSE.TXT
+  LICENSE.libunwind        llvm-project/libunwind (Chromium mirror) @ 81e2cb40a70de2b6978e6d8658891ded9a77f7e3, LICENSE.TXT
+  LICENSE.llvm-libc        llvm-project/libc (Chromium mirror) @ 912274164f0877ca917c06e8484ad3be1784833a, LICENSE.TXT
+  LICENSE.fast_float       github.com/fastfloat/fast_float (Chromium mirror) @ cb1d42aaa1e14b09e1452cfdef373d051b8c02a4, LICENSE-MIT
+  LICENSE.highway          github.com/google/highway (Chromium mirror) @ 00fe003dac355b979f36157f9407c7c46448958e, LICENSE
+  LICENSE.simdutf          chromium.googlesource.com/chromium/src/third_party/simdutf @ 62d1cfb62967c0076c997a10d54d50f9571fb8e9, LICENSE-MIT
+  LICENSE.fp16             github.com/Maratyszcza/FP16 @ 0a92994d729ff76a58f692d3028ca1b64b145d91, LICENSE
+
+ICU data comes from the crate deno_core_icudata (its own license, reported with the crates).
+Not included: build-only submodules of rusty_v8 (googletest, jinja2, markupsafe, build tools).
+PartitionAlloc (Chromium, BSD-3-Clause, no LICENSE file in its repository) is not listed: whether
+the prebuilt library contains it is not established here.
+
+To refresh for another V8: the submodule commits are listed by
+`gh api "repos/denoland/rusty_v8/contents/third_party?ref=vX"` (and .../third_party/<name> for the
+nested `src` submodules), the V8 commit by `.../contents/v8?ref=vX`.

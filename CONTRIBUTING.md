@@ -21,14 +21,14 @@ cargo build
 
 ```bash
 # Run all tests
-cargo test --all-features
+cargo test --features "$(scripts/nexus-features.sh)"
 
 # Run specific package tests
 cargo test -p nexus-claude
 cargo test -p claude-code-api
 
 # Run with coverage
-cargo llvm-cov --all-features
+cargo llvm-cov --features "$(scripts/nexus-features.sh)"
 ```
 
 ### Code Quality
@@ -37,11 +37,16 @@ cargo llvm-cov --all-features
 # Format code (the nexus crates; `--all` would also reformat the vendored obscura/)
 cargo fmt-nexus
 
+# `--all-features` would also enable nexus-tools' `obscura` feature, which compiles the vendored
+# Obscura and links V8; scripts/nexus-features.sh lists every other feature (what CI uses).
+# The obscura build: scripts/rusty-v8-cache.sh first (pinned, checksum-verified V8), then
+# cargo test --target "$(rustc -vV | sed -n 's/^host: //p')" -p nexus-tools --features tls,test-tools,obscura
+
 # Run lints
-cargo clippy --all-targets --all-features -- -D warnings
+cargo clippy --all-targets --features "$(scripts/nexus-features.sh)" -- -D warnings
 
 # Check documentation
-cargo doc --all-features --no-deps
+cargo doc --features "$(scripts/nexus-features.sh)" --no-deps
 ```
 
 ## Git Workflow

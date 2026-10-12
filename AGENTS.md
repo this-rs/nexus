@@ -17,7 +17,7 @@
 - Run API server: `RUST_LOG=info cargo run -p claude-code-api --bin claude-code-api` (alias: `--bin ccapi`).
 - Quick start script: `script/run.sh` (builds release and runs).
 - Test all crates: `cargo test` (or per crate: `cargo test -p claude-code-api`).
-- Lint/format: `cargo fmt-nexus` (not `cargo fmt --all`: it would reformat the vendored `obscura/`) and `cargo clippy --all-targets --all-features -D warnings`.
+- Lint/format: `cargo fmt-nexus` (not `cargo fmt --all`: it would reformat the vendored `obscura/`) and `cargo clippy --all-targets --features "$(scripts/nexus-features.sh)" -D warnings`.
 - Docker: `docker build -t claude-code-api . && docker run --rm -p 8080:8080 --env-file .env claude-code-api`.
 
 ## Coding Style & Naming Conventions

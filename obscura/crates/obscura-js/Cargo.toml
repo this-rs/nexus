@@ -17,12 +17,16 @@ stealth = ["obscura-net/stealth"]
 render = ["dep:obscura-render", "obscura-render/paint"]
 
 [build-dependencies]
-deno_core = "0.350"
+# Exact pins (nexus): Cargo.lock is not committed in nexus, and deno_core fixes the V8 release
+# whose prebuilt static library is downloaded at build time (obscura/README.md, "V8").
+deno_core = "=0.350.0"
 
 [dependencies]
 obscura-dom = { path = "../obscura-dom" }
 obscura-net = { path = "../obscura-net" }
-deno_core = "0.350"
+deno_core = "=0.350.0"
+# Not used directly: pins the V8 release (and so the prebuilt library and its checksum) to 137.3.0.
+v8 = "=137.3.0"
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1" }

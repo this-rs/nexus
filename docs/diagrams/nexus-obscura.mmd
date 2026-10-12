@@ -7,9 +7,10 @@
 %% SOURCES LUES : Cargo.toml (members, default-members, exclude, [patch.crates-io]),
 %%   obscura/crates/obscura-server/src/main.rs (mcp, serp), obscura/crates/obscura-mcp/src/lib.rs
 %%   (run, serp_search), obscura/crates/obscura-js/Cargo.toml (deno_core -> v8),
-%%   nexus-tools/src/search/obscura.rs (moteur externe obscura:<chemin>).
-%% NON ETABLI : le comportement du navigateur lui-même (code amont, ses propres tests) ; aucun test
-%%   nexus n'exécute Obscura en CI à ce stade.
+%%   nexus-tools/src/search/obscura.rs (moteur externe obscura:<chemin>), nexus-tools/src/obscura.rs et
+%%   search/obscura_embedded.rs (feature obscura), obscura-js/src/runtime.rs (set_isolate_observer).
+%% NON ETABLI : le comportement du navigateur lui-même au-delà de ses propres tests (le job CI
+%%   `obscura` les lance, Linux) ; les cibles de release autres que macOS arm64 et Linux x64.
 %% LEGENDE : ✅ vérifié (commande nommée)  🟠 décidé, non écrit  ⚪ hors de ce dépôt
 flowchart TD
     subgraph ws["workspace nexus (Cargo.toml)"]
@@ -29,6 +30,13 @@ flowchart TD
 
     ext["✅ nexus-tools --search-engine obscura:&lt;chemin&gt;<br/>(#96) lance &lt;chemin&gt; serp --max-results N -- requête"]
     ext -->|"processus externe"| server
+
+    feat["✅ nexus-tools, feature obscura (décision 1e9d7501)<br/>moteur embarqué : serp_search_at sur un fil à lui<br/>`nexus-tools obscura mcp` : dispatch() d'obscura-mcp, chaque appel borné et annulable<br/><i>tests/obscura_embedded.rs</i>"]
+    feat -->|"dans le binaire nexus-tools"| mcp
+    obs_observer["✅ obscura-js : set_isolate_observer (fil courant)<br/>→ nexus-tools garde les IsolateHandle et termine le JavaScript à l'annulation"]
+    feat -.-> obs_observer
+    pin["✅ V8 épinglé : deno_core =0.350.0, v8 =137.3.0<br/>archive précompilée vérifiée par SHA-256 (scripts/rusty-v8-cache.sh → cache de rusty_v8)<br/>render (polices, captures) NON lié par la feature"]
+    js -.-> pin
 
     fmt["✅ cargo fmt-nexus (CI)<br/>ne reformate pas obscura/ : le format amont est gardé"]
     fmt -.-> defaults

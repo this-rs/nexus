@@ -5,7 +5,12 @@
 //! nexus-tools --unrestricted       # stdio, every tool, development only
 //! nexus-tools --listen 127.0.0.1:0 # HTTP; every request carries a bearer token
 //! nexus-tools --trust-harness --cwd DIR --tools Read,Grep  # one harness session, stdio only
+//! nexus-tools --capabilities        # {"version":…,"tls":…,"obscura":…}, what this build carries
+//! nexus-tools obscura mcp           # `obscura` feature: the embedded browser's browser_* tools
 //! ```
+//!
+//! With the `obscura` feature, `--search-engine obscura` (no path) is the engine embedded in this
+//! process; `obscura:PATH` stays an external executable.
 //!
 //! One process per session, bounded at launch (N27): `--cwd`/`--add-dir` are its whole file
 //! scope and `--tools` the only tools it serves, listed or called, whatever the profile or the
@@ -46,6 +51,8 @@ use tokio::io::BufReader;
 
 const USAGE: &str = "usage: nexus-tools [--listen ADDR] [--allow-origin ORIGIN]... \
 [--max-output-chars N] [--cwd DIR] [--add-dir DIR]... [--deny-path PATH]... [--unscoped] [--backup-dir DIR] [--search-engine SPEC]... [--search-allow-private] [--brave-endpoint URL] [--tools NAME,...]... [--unrestricted | --trust-harness]\n\
+       nexus-tools --version | --capabilities\n\
+       nexus-tools obscura (mcp|serp) ...   (a build with the `obscura` feature: the embedded browser)\n\
 environment: NEXUS_TOOLS_KEY (signing key, >= 32 bytes), NEXUS_TOOLS_PROFILE (stdio token), \
 NEXUS_TOOLS_LOG";
 
@@ -148,6 +155,11 @@ fn parse_args() -> Result<Options, String> {
             "--trust-harness" => options.trust_harness = true,
             "--version" => {
                 println!("nexus-tools {}", env!("CARGO_PKG_VERSION"));
+                std::process::exit(0);
+            },
+            // What this build carries, for the backend that launches it (one JSON line).
+            "--capabilities" => {
+                println!("{}", capabilities());
                 std::process::exit(0);
             },
             "--help" | "-h" => {
@@ -255,9 +267,11 @@ fn is_variable_name(text: &str) -> bool {
 /// the environment variable that holds it. `html` (a keyless, fragile scraper) is built only
 /// because it was named.
 fn search_engine(options: &Options) -> Result<nexus_tools::search::Engine, String> {
+    #[cfg(not(feature = "obscura"))]
+    use nexus_tools::search::OBSCURA_NAMES;
     use nexus_tools::search::{
         BRAVE_ENDPOINT, DDG_HTML_ENDPOINT, Engine, HtmlBackend, KeySource, KeyedApiBackend,
-        OBSCURA_NAMES, ObscuraBackend, Protection, SearxngBackend,
+        ObscuraBackend, Protection, SearxngBackend,
     };
     use nexus_tools::web::{FetchConfig, Fetcher, SystemClock};
     let fetcher = || {
@@ -291,6 +305,13 @@ fn search_engine(options: &Options) -> Result<nexus_tools::search::Engine, Strin
             Some(("obscura", path)) if !path.is_empty() => {
                 engine.with_backend(ObscuraBackend::new(path), protection)
             },
+            // Built with the `obscura` feature: the engine runs in this process.
+            #[cfg(feature = "obscura")]
+            None if spec == "obscura" => engine.with_backend(
+                nexus_tools::search::EmbeddedObscuraBackend::new(),
+                protection,
+            ),
+            #[cfg(not(feature = "obscura"))]
             None if spec == "obscura" => {
                 let backend = ObscuraBackend::locate().unwrap_or_else(|| {
                     eprintln!(
@@ -337,6 +358,11 @@ fn now() -> u64 {
 }
 
 fn main() -> ExitCode {
+    // `nexus-tools obscura …`: the embedded browser on its own (`mcp`, `serp`).
+    let mut argv = std::env::args().skip(1);
+    if argv.next().as_deref() == Some("obscura") {
+        return obscura_command(argv.collect());
+    }
     let options = match parse_args() {
         Ok(options) => options,
         Err(message) => return fail(&message),
@@ -439,4 +465,24 @@ async fn run(options: Options) -> ExitCode {
     )
     .await;
     ExitCode::SUCCESS
+}
+
+/// `--capabilities`: the build's version and features, as one JSON object.
+fn capabilities() -> String {
+    serde_json::json!({
+        "version": env!("CARGO_PKG_VERSION"),
+        "tls": cfg!(feature = "tls"),
+        "obscura": cfg!(feature = "obscura"),
+    })
+    .to_string()
+}
+
+#[cfg(feature = "obscura")]
+fn obscura_command(args: Vec<String>) -> ExitCode {
+    nexus_tools::obscura::main(args)
+}
+
+#[cfg(not(feature = "obscura"))]
+fn obscura_command(_args: Vec<String>) -> ExitCode {
+    fail("this nexus-tools was built without the `obscura` feature: the browser is not embedded")
 }

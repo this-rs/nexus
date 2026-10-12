@@ -169,16 +169,16 @@ Reusable action for Rust toolchain setup with caching.
 cargo fmt-nexus -- --check   # the nexus crates; --all would include the vendored obscura/
 
 # Clippy
-cargo clippy --all-targets --all-features -- -D warnings
+cargo clippy --all-targets --features "$(scripts/nexus-features.sh)" -- -D warnings
 
 # Tests
-cargo test --all-features
+cargo test --features "$(scripts/nexus-features.sh)"
 
 # Doc tests
-cargo test --doc --all-features
+cargo test --doc --features "$(scripts/nexus-features.sh)"
 
 # Documentation
-cargo doc --all-features --no-deps
+cargo doc --features "$(scripts/nexus-features.sh)" --no-deps
 
 # Security audit
 cargo deny check
@@ -191,8 +191,8 @@ Consider adding a pre-commit hook:
 ```bash
 #!/bin/sh
 cargo fmt-nexus -- --check   # the nexus crates; --all would include the vendored obscura/
-cargo clippy --all-targets --all-features -- -D warnings
-cargo test --all-features
+cargo clippy --all-targets --features "$(scripts/nexus-features.sh)" -- -D warnings
+cargo test --features "$(scripts/nexus-features.sh)"
 ```
 
 ## Troubleshooting

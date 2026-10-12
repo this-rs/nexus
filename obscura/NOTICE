@@ -45,3 +45,12 @@ under obscura/. Further modifications there:
   - crates/obscura-mcp/src/lib.rs: MCP serverInfo name set to `obscura`.
   - Cargo.toml of every crate: workspace-inherited keys and dependencies
     written out explicitly, as the crates are members of the nexus workspace.
+  - crates/obscura-js: a thread-local isolate observer (set_isolate_observer,
+    clear_isolate_observer) so an embedder can terminate a cancelled page's
+    JavaScript from another thread; deno_core and v8 pinned to exact versions.
+  - crates/obscura-mcp: dispatch, RpcResponse and BrowserState's page-task
+    pump made public, BrowserState::clear_termination added, and
+    serp_search_at (serp_search against a results page given by URL), so
+    nexus-tools can run the browser in process with its own transport.
+  - crates/obscura-render: tests/layout_test.rs, whose fixtures are not
+    vendored, gated behind a feature nothing enables.

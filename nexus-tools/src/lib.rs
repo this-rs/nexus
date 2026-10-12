@@ -4,7 +4,8 @@
 //! This crate is that server for the tools every coding agent needs (files, shell, web,
 //! search), at parity with those of Claude Code (plan Nexus N17 to N25,
 //! `docs/agent-tools-parity.md`). **Rust only, by decision**: nothing in this crate's
-//! dependency tree needs a C or C++ toolchain, Node, Python or a browser.
+//! dependency tree needs a C or C++ toolchain, Node, Python or a browser — except behind the
+//! `obscura` feature (off by default), which embeds the Obscura browser and V8 (decision 1e9d7501).
 //!
 //! This is the skeleton the tools plug into: the protocol, the registry, the **profile** a
 //! session is limited to (a tool outside it is never listed and never run, decision A35), the
@@ -16,6 +17,8 @@ pub mod fake_search;
 pub mod files;
 pub mod http;
 pub mod limits;
+#[cfg(feature = "obscura")]
+pub mod obscura;
 pub mod profile;
 pub mod protocol;
 pub mod registry;

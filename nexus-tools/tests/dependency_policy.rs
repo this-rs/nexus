@@ -315,3 +315,85 @@ fn nexus_tools_compiles_with_the_rust_toolchain_alone() {
         found.join("\n  ")
     );
 }
+
+/// The exceptions the `obscura` feature brings (decision 1e9d7501: the release binary embeds the
+/// Obscura browser and its V8). The rule, not the crate list, is what the decision accepted:
+/// V8 arrives as a **prebuilt** static library (rusty_v8), pinned and checksum-verified
+/// (scripts/rusty-v8-cache.sh); no C or C++ source is compiled for it. `bindgen` and
+/// `clang-sys` are in the closure only because the `v8` build script can build V8 from source
+/// (`V8_FROM_SOURCE`), which nothing here sets. A crate outside this list is a new exception and
+/// needs its own decision.
+const OBSCURA_EXCEPTIONS: &[&str] = &[
+    "bindgen drives a native toolchain (build dependency of v8, used only by V8_FROM_SOURCE)",
+    "clang-sys links libclang (bindgen's; loaded only when bindgen runs)",
+    "ring links its native library (rustls, as behind `tls`, decision 91083af7)",
+    "cc drives a native toolchain (ring's build dependency)",
+    "prettyplease declares `links` only to publish its version to bindgen; Rust only",
+    "linux-raw-sys is Linux syscall numbers and types in Rust (rustix, via tempfile and which); builds nothing",
+];
+
+/// The package names `cargo build -p nexus-tools --features …` really compiles, every platform
+/// included. `cargo metadata` resolves features for the whole workspace at once, so with the
+/// Obscura members its graph shows crates nexus-tools never builds (claude-code-api's TLS stack
+/// shares `reqwest` with Obscura); `cargo tree -p` resolves for nexus-tools alone.
+fn built_package_names(features: &[&str]) -> std::collections::BTreeSet<String> {
+    let output = Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".into()))
+        .args([
+            "tree",
+            "-p",
+            "nexus-tools",
+            "-e",
+            "normal,build",
+            "--target",
+            "all",
+        ])
+        .args(["--prefix", "none", "--format", "{p}"])
+        .args(features.iter().flat_map(|f| ["--features", f]))
+        .arg("--manifest-path")
+        .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml"))
+        .output()
+        .expect("cargo tree runs");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| line.split_whitespace().next())
+        .map(str::to_owned)
+        .collect()
+}
+
+#[test]
+fn with_obscura_the_only_exceptions_are_the_documented_ones() {
+    let built = built_package_names(&["obscura"]);
+    assert!(
+        built.contains("v8"),
+        "the obscura feature no longer links V8"
+    );
+    let found: Vec<String> = closure_violations(&["obscura"])
+        .into_iter()
+        .filter(|v| built.contains(v.split_whitespace().next().unwrap_or_default()))
+        .collect();
+    let names: Vec<String> = found
+        .iter()
+        .map(|v| v.split_whitespace().next().unwrap_or_default().to_owned())
+        .collect();
+    let allowed: Vec<String> = OBSCURA_EXCEPTIONS
+        .iter()
+        .map(|v| v.split_whitespace().next().unwrap_or_default().to_owned())
+        .collect();
+    for name in &names {
+        assert!(
+            allowed.contains(name),
+            "`{name}` is a new non-Rust dependency behind `obscura`: {found:?}"
+        );
+    }
+    for name in &allowed {
+        assert!(
+            names.contains(name),
+            "the exception list is stale: {name} no longer shows up behind `obscura`: {found:?}"
+        );
+    }
+}

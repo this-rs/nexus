@@ -1,10 +1,13 @@
-//! The optional browser (N23): Obscura attached as an **external MCP server**, never compiled in.
+//! The optional browser (N23): Obscura attached as an **MCP server of its own process**, never
+//! inside the harness.
 //!
-//! Obscura runs JavaScript through V8, built from C++ sources; embedding it would put a C++
-//! toolchain in our build and V8 in our process (its own documentation says it does not contain a
-//! hostile page that exploits V8). So it is a separate executable the operator installs and
-//! authorises (`BrowserTools` configured on the instance), launched like any MCP server —
-//! empty environment, allow-list, a `HOME` of its own — and spoken to over stdio.
+//! Obscura runs JavaScript through V8 (its own documentation says it does not contain a hostile
+//! page that exploits V8), so it never runs in the harness's process. It is either a separate
+//! executable the operator installs (`obscura mcp`), or the copy embedded in a `nexus-tools`
+//! built with its `obscura` feature (`nexus-tools obscura mcp`, decision 1e9d7501:
+//! [`BrowserTools::embedded_in_nexus_tools`]). Either way it is authorised per instance
+//! (`BrowserTools` configured), launched like any MCP server — empty environment, allow-list, a
+//! `HOME` of its own — and spoken to over stdio.
 //!
 //! What this module decides:
 //! - **Absent is absent.** No executable, no `browser_*` tool and a typed notice; never a tool
@@ -36,8 +39,11 @@ const FORBIDDEN_FLAGS: &[&str] = &["--stealth", "--allow-private-network"];
 /// How to start the browser.
 #[derive(Debug, Clone)]
 pub struct BrowserTools {
-    /// The `obscura` executable.
+    /// The executable: `obscura`, or a `nexus-tools` that embeds it.
     pub program: PathBuf,
+    /// What starts the MCP server: `mcp` for `obscura`, `obscura mcp` for a nexus-tools that
+    /// embeds it.
+    command: Vec<String>,
     args: Vec<String>,
     /// Environment of the server, on top of the safe defaults.
     pub env: BTreeMap<String, String>,
@@ -48,6 +54,19 @@ impl BrowserTools {
     pub fn new(program: impl Into<PathBuf>) -> Self {
         Self {
             program: program.into(),
+            command: vec!["mcp".to_owned()],
+            args: Vec::new(),
+            env: BTreeMap::new(),
+        }
+    }
+
+    /// The browser embedded in a `nexus-tools` built with its `obscura` feature, started as
+    /// `nexus-tools obscura mcp`: the same `browser_*` tools, no Obscura to install. Whether that
+    /// build embeds it is for the caller to know (`nexus-tools --capabilities`).
+    pub fn embedded_in_nexus_tools(program: impl Into<PathBuf>) -> Self {
+        Self {
+            program: program.into(),
+            command: vec!["obscura".to_owned(), "mcp".to_owned()],
             args: Vec::new(),
             env: BTreeMap::new(),
         }
@@ -90,7 +109,7 @@ impl BrowserTools {
 
     /// The MCP server entry.
     pub fn server(&self) -> McpServerSpec {
-        let mut args = vec!["mcp".to_owned()];
+        let mut args = self.command.clone();
         args.extend(self.args.iter().cloned());
         let mut env = BTreeMap::new();
         env.insert("OBSCURA_ALLOW_PRIVATE_NETWORK".to_owned(), "0".to_owned());
@@ -239,6 +258,24 @@ mod tests {
             panic!()
         };
         assert_eq!(env["OBSCURA_ALLOW_PRIVATE_NETWORK"], "0");
+    }
+
+    #[test]
+    fn the_browser_embedded_in_nexus_tools_is_started_as_obscura_mcp_with_the_same_guards() {
+        let tools = BrowserTools::embedded_in_nexus_tools("/opt/nexus-tools")
+            .with_args(["--user-agent", "x"])
+            .unwrap();
+        let McpServerSpec::Stdio { command, args, env } = tools.server() else {
+            panic!()
+        };
+        assert_eq!(command, "/opt/nexus-tools");
+        assert_eq!(args, ["obscura", "mcp", "--user-agent", "x"]);
+        assert_eq!(env["OBSCURA_ALLOW_PRIVATE_NETWORK"], "0");
+        assert!(
+            BrowserTools::embedded_in_nexus_tools("/opt/nexus-tools")
+                .with_args(["--stealth"])
+                .is_err()
+        );
     }
 
     #[test]

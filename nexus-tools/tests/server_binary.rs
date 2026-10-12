@@ -350,6 +350,8 @@ fn the_obscura_engine_is_named_by_path_and_answers_through_websearch() {
     );
 }
 
+// With the `obscura` feature, `obscura` alone is the embedded engine (tests/obscura_embedded.rs).
+#[cfg(not(feature = "obscura"))]
 #[test]
 fn obscura_alone_without_an_executable_on_the_path_warns_and_websearch_says_why() {
     let empty = tempfile::tempdir().unwrap();
