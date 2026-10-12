@@ -20,6 +20,10 @@ pub struct Profile {
     pub session_id: String,
     /// The tools the session may use.
     pub tools: ToolSet,
+    /// The signed token says the file scope of this session may be lifted (`unscoped` claim):
+    /// the server then accepts `--unscoped`, and refuses it otherwise. Only a signed token sets
+    /// it; the development and harness profiles never do.
+    pub unscoped: bool,
 }
 
 impl Profile {
@@ -32,6 +36,7 @@ impl Profile {
         Self {
             session_id: session_id.into(),
             tools: ToolSet::Only(tools.into_iter().map(Into::into).collect()),
+            unscoped: false,
         }
     }
 
@@ -40,7 +45,15 @@ impl Profile {
         Self {
             session_id: session_id.into(),
             tools: ToolSet::All,
+            unscoped: false,
         }
+    }
+
+    /// The same profile, allowed (or not) to run with its file scope lifted.
+    #[must_use]
+    pub fn with_unscoped(mut self, unscoped: bool) -> Self {
+        self.unscoped = unscoped;
+        self
     }
 
     /// Whether `name` is one of the tools of this profile.

@@ -6,7 +6,10 @@
 //!   allow-list and a `HOME` of its own: no secret of the host reaches it by inheritance;
 //! - a timeout, a stop, a cancelled call and the end of the session kill the **whole group**;
 //! - the working directory persists across calls of a session, and a `cd` that leaves the
-//!   session's scope is undone.
+//!   session's scope is undone. In an unscoped session (`--unscoped`, trust mode) the roots are
+//!   not enforced, so a `cd` anywhere is kept; a `cd` into a denied place (`--deny-path`,
+//!   `/proc/<pid>/environ`) is still undone. Undoing a `cd` only chooses where the NEXT command
+//!   starts: the command that ran the `cd` has already run there.
 //!
 //! It is **not a sandbox**. A shell can read any file its operating-system user can read;
 //! the scope confines the file tools, not what `cat /etc/passwd` does. The protection is

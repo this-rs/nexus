@@ -35,6 +35,7 @@ fn profile_token(tools: &[&str]) -> String {
             sid: "bin".into(),
             tools: tools.iter().map(|t| (*t).to_owned()).collect(),
             exp,
+            unscoped: false,
         },
     )
 }

@@ -17,6 +17,7 @@ mod write;
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 pub use edit::EditTool;
 pub use notebook::NotebookEditTool;
@@ -34,22 +35,39 @@ use crate::tool::{CallContext, ToolResult};
 /// PDFs have their own, smaller limits.
 pub const MAX_TEXT_FILE_BYTES: u64 = 64 * 1024 * 1024;
 
+/// How long one `Glob` or `Grep` may walk when the scope is unscoped (`--unscoped`). A bounded
+/// scope walks only its own directories; an unscoped one can be pointed at `/` and would walk
+/// the whole disk. Past this, the walk stops and the answer says it is partial.
+pub const UNSCOPED_SEARCH_TIME_LIMIT: Duration = Duration::from_secs(30);
+
 /// What every file tool shares: where it may go, and where backups go (if anywhere).
 #[derive(Debug, Clone)]
 pub struct FileConfig {
     pub(crate) scope: Arc<Scope>,
     pub(crate) backup_dir: Option<PathBuf>,
     pub(crate) max_text_bytes: u64,
+    /// How long one `Glob` or `Grep` may walk; `None`: until the walk ends.
+    pub(crate) search_time_limit: Option<Duration>,
 }
 
 impl FileConfig {
-    /// Files confined to `scope`, no backups.
+    /// Files confined to `scope`, no backups. An unscoped scope gets a time limit on its
+    /// searches ([`UNSCOPED_SEARCH_TIME_LIMIT`]).
     pub fn new(scope: Scope) -> Self {
+        let search_time_limit = scope.is_unscoped().then_some(UNSCOPED_SEARCH_TIME_LIMIT);
         Self {
             scope: Arc::new(scope),
             backup_dir: None,
             max_text_bytes: MAX_TEXT_FILE_BYTES,
+            search_time_limit,
         }
+    }
+
+    /// Replaces how long one `Glob` or `Grep` may walk (`None`: no limit).
+    #[must_use]
+    pub fn with_search_time_limit(mut self, limit: Option<Duration>) -> Self {
+        self.search_time_limit = limit;
+        self
     }
 
     /// The scope, shared with the other tools of the session.

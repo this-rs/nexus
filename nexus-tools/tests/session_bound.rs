@@ -50,6 +50,11 @@ fn text_of(path: &Path) -> String {
 }
 
 fn profile_token(tools: &[&str]) -> String {
+    profile_token_with(tools, false)
+}
+
+/// A signed profile; `unscoped`: it carries the claim that lets `--unscoped` lift the scope.
+fn profile_token_with(tools: &[&str], unscoped: bool) -> String {
     let exp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
@@ -61,6 +66,7 @@ fn profile_token(tools: &[&str]) -> String {
             sid: "bound".into(),
             tools: tools.iter().map(|t| (*t).to_owned()).collect(),
             exp,
+            unscoped,
         },
     )
 }
@@ -175,6 +181,164 @@ fn trust_harness_cannot_be_combined_with_listen() {
     let mut stdout = String::new();
     std::io::Read::read_to_string(&mut child.stdout.take().unwrap(), &mut stdout).unwrap();
     assert!(!stdout.contains("LISTENING"), "{stdout}");
+}
+
+// ---------------------------------------------------------------------------
+// --unscoped: stdio only, signed for, and the deny list still holds
+// ---------------------------------------------------------------------------
+
+/// The exit code and stderr of a launch that must refuse to start (killed if it serves instead).
+fn refused_to_start(mut command: Command) -> (Option<i32>, String) {
+    let mut child = command.spawn().unwrap();
+    let status = exit_within(&mut child, Duration::from_secs(10))
+        .expect("the server must refuse to start, it served instead");
+    let mut stderr = String::new();
+    std::io::Read::read_to_string(&mut child.stderr.take().unwrap(), &mut stderr).unwrap();
+    (status.code(), stderr)
+}
+
+#[test]
+fn unscoped_cannot_be_combined_with_listen() {
+    let mut command = binary(&["--unscoped", "--listen", "127.0.0.1:0"]);
+    command.env("NEXUS_TOOLS_KEY", KEY);
+    let (code, stderr) = refused_to_start(command);
+    assert_eq!(code, Some(2), "{stderr}");
+    assert!(
+        stderr.contains(
+            "--unscoped is for one trusted session over a private pipe; it cannot be combined with --listen"
+        ),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn unscoped_without_a_signed_claim_refuses_to_start() {
+    let (_temp, cwd) = dir();
+    let cwd = cwd.to_str().unwrap();
+    // No signed profile at all: the harness and development profiles never carry the claim.
+    for extra in ["--trust-harness", "--unrestricted"] {
+        let mut command = binary(&["--unscoped", "--cwd", cwd, extra]);
+        command.stdin(Stdio::null());
+        let (code, stderr) = refused_to_start(command);
+        assert_eq!(code, Some(2), "{extra}: {stderr}");
+        assert!(stderr.contains("unscoped claim"), "{extra}: {stderr}");
+    }
+    // A signed profile without the claim.
+    let mut command = binary(&["--unscoped", "--cwd", cwd]);
+    command
+        .stdin(Stdio::null())
+        .env("NEXUS_TOOLS_KEY", KEY)
+        .env("NEXUS_TOOLS_PROFILE", profile_token_with(&["Read"], false));
+    let (code, stderr) = refused_to_start(command);
+    assert_eq!(code, Some(2), "{stderr}");
+    assert!(stderr.contains("unscoped claim"), "{stderr}");
+}
+
+#[test]
+fn a_relative_deny_path_refuses_to_start() {
+    let (_temp, cwd) = dir();
+    let mut command = binary(&[
+        "--trust-harness",
+        "--cwd",
+        cwd.to_str().unwrap(),
+        "--deny-path",
+        "relative/dir",
+    ]);
+    command.stdin(Stdio::null());
+    let (code, stderr) = refused_to_start(command);
+    assert_eq!(code, Some(2), "{stderr}");
+    assert!(stderr.contains("--deny-path"), "{stderr}");
+}
+
+/// The launch line the backend builds for a trust session: the flag, the claim and the deny list.
+/// The roots are lifted (a worktree outside them is read and written), the deny list is not;
+/// the same claim without the flag keeps the scope.
+#[test]
+fn unscoped_with_the_signed_claim_lifts_the_roots_but_keeps_the_deny_list() {
+    let (_tr, root) = dir();
+    let (_tw, worktree) = dir();
+    let (_th, home) = dir();
+    let ssh = home.join(".ssh");
+    std::fs::create_dir_all(&ssh).unwrap();
+    std::fs::write(ssh.join("id_ed25519"), "PRIVATE KEY\n").unwrap();
+    std::fs::write(worktree.join("w.txt"), "worktree\n").unwrap();
+    let read =
+        |id: u64, path: &Path| call(id, "Read", json!({"file_path": path.display().to_string()}));
+    let launch = |unscoped: bool| {
+        let mut args = vec![
+            "--cwd",
+            root.to_str().unwrap(),
+            "--deny-path",
+            ssh.to_str().unwrap(),
+            "--tools",
+            "Read,Write",
+        ];
+        if unscoped {
+            args.push("--unscoped");
+        }
+        let mut command = binary(&args);
+        command.env("NEXUS_TOOLS_KEY", KEY).env(
+            "NEXUS_TOOLS_PROFILE",
+            profile_token_with(&["Read", "Write"], true),
+        );
+        command.spawn().unwrap()
+    };
+
+    let answers = talk(
+        launch(true),
+        &[
+            read(1, &worktree.join("w.txt")),
+            call(
+                2,
+                "Write",
+                json!({"file_path": worktree.join("new.txt").display().to_string(), "content": "made\n"}),
+            ),
+            read(3, &ssh.join("id_ed25519")),
+        ],
+    );
+    let (text, is_error) = result_text(&answers[0]);
+    assert!(!is_error && text.contains("worktree"), "{text}");
+    let (text, is_error) = result_text(&answers[1]);
+    assert!(!is_error, "{text}");
+    assert_eq!(text_of(&worktree.join("new.txt")), "made\n");
+    let (text, is_error) = result_text(&answers[2]);
+    assert!(is_error && text.contains("may never access"), "{text}");
+    assert!(!text.contains("PRIVATE KEY"), "{text}");
+
+    // The claim alone does not lift anything.
+    let answers = talk(launch(false), &[read(1, &worktree.join("w.txt"))]);
+    let (text, is_error) = result_text(&answers[0]);
+    assert!(
+        is_error && text.contains("outside the directories"),
+        "{text}"
+    );
+}
+
+#[test]
+fn a_deny_path_holds_in_a_bounded_session_too() {
+    let (_temp, home) = dir();
+    let vault = home.join("vault");
+    std::fs::create_dir_all(&vault).unwrap();
+    std::fs::write(vault.join("store"), "sealed\n").unwrap();
+    let child = binary(&[
+        "--trust-harness",
+        "--cwd",
+        home.to_str().unwrap(),
+        "--deny-path",
+        vault.to_str().unwrap(),
+    ])
+    .spawn()
+    .unwrap();
+    let answers = talk(
+        child,
+        &[call(
+            1,
+            "Read",
+            json!({"file_path": vault.join("store").display().to_string()}),
+        )],
+    );
+    let (text, is_error) = result_text(&answers[0]);
+    assert!(is_error && text.contains("may never access"), "{text}");
 }
 
 // ---------------------------------------------------------------------------
