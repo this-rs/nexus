@@ -158,6 +158,10 @@ fn binary() -> Command {
     command
         .env_clear()
         .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        // Under `cargo llvm-cov`, where the binary writes its coverage profile: without this, the
+        // cleared environment sends it to the working directory and the coverage job never sees
+        // what the binary ran. Absent in an ordinary run.
+        .envs(std::env::vars_os().filter(|(k, _)| k.to_string_lossy().starts_with("LLVM_PROFILE")))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
