@@ -10,11 +10,20 @@
 //! `reasoning_content`. The wire layer (`model::wire`) decides whether to send
 //! it back; the transcript never discards it, and neither does compaction.
 //!
-//! **No credential is persisted**: the file store masks credential-shaped
-//! fragments (`agent::redact`, applied by chunks so that long texts are not
-//! truncated) before writing. The in-memory store keeps the exact text (it
-//! never leaves the process). **Images are kept as they are**: a base64 payload
-//! is a blob, not prose, and the masking of prose would mangle it.
+//! **The resume transcript is faithful** (decision CTX6): the file store writes
+//! the messages as they are, so a resumed session replays the very request the
+//! live one sent (the endpoint's prefix cache still serves it, and a tool-call
+//! argument comes back as the JSON the model wrote). Masking by SHAPE (a field
+//! named like a credential, a long word) corrupted the history and is gone from
+//! this path. Secrets at rest are protected by the FILE: `0600` files in a `0700`
+//! directory, the modes enforced at every save and repaired at load. The only
+//! masking is by VALUE: the values the host declares in a [`KnownSecrets`]
+//! ([`FileTranscriptStore::with_known_secrets`]) are replaced in contents and
+//! reasoning, never inside tool-call arguments (they are replayed as JSON). What
+//! is shown or logged goes through [`masked_for_display`], which still masks by
+//! shape: that copy is never replayed.
+//!
+//! **Images are kept as they are**: a base64 payload is a blob, not prose.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -22,7 +31,7 @@ use std::sync::{Mutex, PoisonError};
 
 use serde::{Deserialize, Serialize};
 
-use crate::agent::{ProviderError, redact};
+use crate::agent::{KnownSecrets, ProviderError, redact};
 use crate::model::ChatMessage;
 
 /// Version written in a persisted transcript.
@@ -90,16 +99,30 @@ struct Persisted {
     messages: Vec<ChatMessage>,
 }
 
-/// Transcripts kept as `<dir>/<id>.json`, files `0600` in a directory `0700`.
+/// Transcripts kept as `<dir>/<id>.json`, files `0600` in a directory `0700`,
+/// written as they are (byte-faithful resume) except for the values of
+/// [`KnownSecrets`] (see the module documentation).
 #[derive(Debug, Clone)]
 pub struct FileTranscriptStore {
     dir: PathBuf,
+    known: KnownSecrets,
 }
 
 impl FileTranscriptStore {
     /// A store under `dir`; the directory is created (`0700`) at the first save.
     pub fn new(dir: impl Into<PathBuf>) -> Self {
-        Self { dir: dir.into() }
+        Self {
+            dir: dir.into(),
+            known: KnownSecrets::new(),
+        }
+    }
+
+    /// Masks the values of `known` (shared with the host, which fills it, e.g.
+    /// through [`KnownSecrets::recording`]) in contents and reasoning before
+    /// writing. Tool-call arguments are never touched: they are replayed as JSON.
+    pub fn with_known_secrets(mut self, known: KnownSecrets) -> Self {
+        self.known = known;
+        self
     }
 
     /// The directory the transcripts live in.
@@ -128,6 +151,9 @@ impl TranscriptStore for FileTranscriptStore {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(error) => return Err(io_error("read", &error)),
         };
+        // A file left readable by others (copied, restored, written by an older
+        // build) is made owner-only again.
+        make_owner_only(&path).map_err(|e| io_error("permission repair", &e))?;
         let persisted: Persisted = serde_json::from_slice(&bytes)
             .map_err(|_| ProviderError::invalid("the transcript file is not valid"))?;
         if persisted.version != TRANSCRIPT_FORMAT_VERSION {
@@ -144,7 +170,10 @@ impl TranscriptStore for FileTranscriptStore {
         create_private_dir(&self.dir).map_err(|e| io_error("directory creation", &e))?;
         let persisted = Persisted {
             version: TRANSCRIPT_FORMAT_VERSION,
-            messages: messages.iter().map(scrub_message).collect(),
+            messages: messages
+                .iter()
+                .map(|message| mask_known_values(message, &self.known))
+                .collect(),
         };
         let bytes = serde_json::to_vec(&persisted)
             .map_err(|_| ProviderError::protocol("the transcript is not serialisable"))?;
@@ -159,6 +188,14 @@ impl TranscriptStore for FileTranscriptStore {
         let mut file = options
             .open(&temporary)
             .map_err(|e| io_error("write", &e))?;
+        // `mode` applies only when the file is created: a leftover temporary
+        // file keeps its own mode unless it is set here, before any byte.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            file.set_permissions(std::fs::Permissions::from_mode(0o600))
+                .map_err(|e| io_error("write", &e))?;
+        }
         file.write_all(&bytes).map_err(|e| io_error("write", &e))?;
         file.sync_all().map_err(|e| io_error("write", &e))?;
         drop(file);
@@ -174,6 +211,33 @@ fn create_private_dir(dir: &Path) -> std::io::Result<()> {
         std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
     }
     Ok(())
+}
+
+fn make_owner_only(path: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(path)?.permissions().mode();
+        if mode & 0o077 != 0 {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+    Ok(())
+}
+
+/// The message as written to the resume transcript: the known secret values are
+/// masked in the contents and the reasoning; everything else, tool-call
+/// arguments first, is kept byte for byte.
+fn mask_known_values(message: &ChatMessage, known: &KnownSecrets) -> ChatMessage {
+    let mut message = message.clone();
+    if known.is_empty() {
+        return message;
+    }
+    message.content = message.content.as_deref().map(|text| known.mask(text));
+    message.reasoning = message.reasoning.as_deref().map(|text| known.mask(text));
+    message
 }
 
 /// Longest run of text handed to `redact` at once (it truncates at 512 bytes).
@@ -217,6 +281,14 @@ pub fn scrub_text(text: &str) -> String {
         flush(&mut chunk, &mut out);
     }
     out
+}
+
+/// A copy of `messages` fit to SHOW or LOG: credential-shaped fragments are
+/// masked ([`scrub_text`], by shape, failing closed) in contents, reasoning and
+/// tool-call arguments. Never replay it: it is not the conversation (an argument
+/// can come out as invalid JSON); the resume transcript is the store's.
+pub fn masked_for_display(messages: &[ChatMessage]) -> Vec<ChatMessage> {
+    messages.iter().map(scrub_message).collect()
 }
 
 fn scrub_message(message: &ChatMessage) -> ChatMessage {
@@ -296,25 +368,91 @@ mod tests {
         }
     }
 
+    /// Text that only LOOKS like a credential, a long word and a tool-call argument
+    /// all come back byte for byte: the resume transcript is the conversation.
+    fn shaped_like_secrets() -> Vec<ChatMessage> {
+        let blob = format!("/{}", "segment/".repeat(60));
+        let arguments = serde_json::json!({ "text": blob, "input_tokens": 12, "api_key": "k" });
+        vec![
+            ChatMessage::user(r#"{"input_tokens":12,"max_tokens":3} Bearer abc.def"#),
+            ChatMessage::assistant_tool_calls(vec![ToolCallChunk {
+                id: "c1".into(),
+                name: "mcp__fake__echo".into(),
+                arguments: arguments.to_string(),
+            }]),
+            ChatMessage::tool("c1", format!("{blob} postgres://admin:pw@db/x")),
+        ]
+    }
+
     #[test]
-    fn the_file_store_masks_credentials_and_keeps_long_texts_whole() {
+    fn the_file_store_writes_the_conversation_byte_for_byte() {
         let dir = tempfile::tempdir().unwrap();
         let store = FileTranscriptStore::new(dir.path());
-        let long = "word ".repeat(600);
+        store.save("t", &shaped_like_secrets()).unwrap();
+        assert_eq!(store.load("t").unwrap(), Some(shaped_like_secrets()));
+        let back = store.load("t").unwrap().unwrap();
+        serde_json::from_str::<serde_json::Value>(&back[1].tool_calls[0].arguments)
+            .expect("the argument is still JSON");
+    }
+
+    #[test]
+    fn the_file_store_masks_the_known_values_but_never_inside_arguments() {
+        let dir = tempfile::tempdir().unwrap();
+        let known = KnownSecrets::new();
+        let store = FileTranscriptStore::new(dir.path()).with_known_secrets(known.clone());
+        known.register(&crate::agent::Secret::new("vault-value-0c4f2e"));
+        let arguments = r#"{"key":"vault-value-0c4f2e"}"#;
+        let mut call = ChatMessage::assistant_tool_calls(vec![ToolCallChunk {
+            id: "c1".into(),
+            name: "mcp__fake__echo".into(),
+            arguments: arguments.into(),
+        }]);
+        call.reasoning = Some("the key is vault-value-0c4f2e".into());
         let messages = vec![
-            ChatMessage::user("curl -H 'Authorization: Bearer sk-live-SECRETVALUE1234' now"),
-            ChatMessage::tool(
-                "c1",
-                format!("db at postgres://admin:hunter2pass@db/x\n{long}"),
-            ),
+            ChatMessage::user("use vault-value-0c4f2e, input_tokens=12"),
+            call,
+            ChatMessage::tool("c1", "echo vault-value-0c4f2e"),
         ];
         store.save("t", &messages).unwrap();
-        let raw = std::fs::read_to_string(store.dir().join("t.json")).unwrap();
-        assert!(!raw.contains("SECRETVALUE1234"), "{raw}");
-        assert!(!raw.contains("hunter2pass"), "{raw}");
         let back = store.load("t").unwrap().unwrap();
-        // The long text is not truncated to 512 bytes.
-        assert!(back[1].content.as_deref().unwrap().len() > 2500);
+        assert_eq!(
+            back[0].content.as_deref(),
+            Some("use <redacted>, input_tokens=12")
+        );
+        assert_eq!(back[1].reasoning.as_deref(), Some("the key is <redacted>"));
+        assert_eq!(back[2].content.as_deref(), Some("echo <redacted>"));
+        assert_eq!(back[1].tool_calls[0].arguments, arguments);
+    }
+
+    #[test]
+    fn the_display_copy_masks_by_shape_and_the_store_does_not() {
+        let shown = masked_for_display(&shaped_like_secrets());
+        let text = serde_json::to_string(&shown).unwrap();
+        assert!(text.contains("<redacted"), "{text}");
+        assert!(!text.contains("abc.def"), "{text}");
+        assert!(!text.contains("admin:pw"), "{text}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_leftover_or_restored_file_is_made_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let store = FileTranscriptStore::new(dir.path().join("t"));
+        store.save("x", &sample()).unwrap();
+        let wide = std::fs::Permissions::from_mode(0o644);
+        // A temporary file left readable by an interrupted write is narrowed before use.
+        std::fs::write(store.dir().join(".x.tmp"), b"").unwrap();
+        std::fs::set_permissions(store.dir().join(".x.tmp"), wide.clone()).unwrap();
+        std::fs::set_permissions(store.dir(), std::fs::Permissions::from_mode(0o755)).unwrap();
+        store.save("x", &sample()).unwrap();
+        let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&store.dir().join("x.json")), 0o600);
+        assert_eq!(mode(store.dir()), 0o700);
+        // A file restored with wide modes is narrowed when it is read.
+        std::fs::set_permissions(store.dir().join("x.json"), wide).unwrap();
+        assert_eq!(store.load("x").unwrap(), Some(sample()));
+        assert_eq!(mode(&store.dir().join("x.json")), 0o600);
     }
 
     #[test]
