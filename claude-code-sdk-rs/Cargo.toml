@@ -7,7 +7,7 @@ authors = [
     "Original: ZhangHanDong <psiace@outlook.com>",
     "Fork: Théotime Rivière"
 ]
-license = "MIT"
+license.workspace = true
 description = "Claude Code SDK for Rust with persistent memory and autonomous context retrieval. Fork of cc-sdk."
 repository = "https://github.com/this-rs/nexus"
 documentation = "https://docs.rs/nexus-claude"
