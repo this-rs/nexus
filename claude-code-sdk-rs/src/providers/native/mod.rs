@@ -636,6 +636,7 @@ impl NativeProvider {
             mcp_servers: statuses,
             cwd: Some(spec.cwd.display().to_string()),
         });
+        let host_session_id = host_session_id(&spec);
         let SessionSpec {
             cwd,
             system_prompt,
@@ -662,6 +663,7 @@ impl NativeProvider {
             cwd,
             hooks,
             transcript_id,
+            host_session_id,
             store: Arc::clone(&self.store),
             policy,
             model,
@@ -759,6 +761,24 @@ impl AgentProvider for NativeProvider {
             .ok_or_else(|| ProviderError::invalid("unknown transcript: nothing to resume"))?;
         self.build(spec, Some((id, messages))).await
     }
+}
+
+/// `extensions.native.host_session_id`: the host's id of the session, written in the
+/// request log so a model request can be tied to the host's conversation. Bounded and
+/// printable only (it goes into a log line).
+fn host_session_id(spec: &SessionSpec) -> Option<String> {
+    spec.extensions
+        .get("native")?
+        .get("host_session_id")?
+        .as_str()
+        .filter(|id| {
+            !id.is_empty()
+                && id.len() <= 128
+                && id
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || "-_.:".contains(c))
+        })
+        .map(str::to_owned)
 }
 
 #[cfg(test)]
