@@ -240,10 +240,16 @@ jobs:
       - name: Test nexus-tools with obscura
         run: cargo test --target x86_64-unknown-linux-gnu -p nexus-tools --features tls,test-tools,obscura
 
+      # One process per test (nextest): upstream's tests set process-wide V8 flags and environment
+      # variables, and fail when `cargo test` runs them side by side in one process (measured: 1209
+      # pass under nextest; under `cargo test`, 8 fail or abort on "Check failed: !IsFrozen()").
       # `paint`: obscura-render's unit tests read fields that exist only with it.
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+
       - name: Test the Obscura crates
         run: >-
-          cargo test --target x86_64-unknown-linux-gnu -p obscura -p obscura-browser -p obscura-cdp -p obscura-cli -p obscura-dom
+          cargo nextest run --target x86_64-unknown-linux-gnu -p obscura -p obscura-browser -p obscura-cdp -p obscura-cli -p obscura-dom
           -p obscura-js -p obscura-mcp -p obscura-net -p obscura-render -p obscura-server
           --features obscura-render/paint
 

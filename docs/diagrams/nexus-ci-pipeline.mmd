@@ -13,7 +13,7 @@ flowchart TD
         push --> test["test matrix\nmacOS stable · Windows stable\nLinux beta + nightly (advisory)\ncargo test (build + doc tests)"]
         push --> cov["ubuntu stable: test + coverage\ncargo llvm-cov (the one run of the suite)\n+ doc tests + logic-only report"]
         push --> docs["docs\ncargo doc"]
-        push --> obscura["obscura (Linux)\nV8 épinglé, SHA-256 vérifié (scripts/rusty-v8-cache.sh)\nclippy + test nexus-tools --features obscura\n+ cargo test des crates obscura/ (--target explicite)"]
+        push --> obscura["obscura (Linux)\nV8 épinglé, SHA-256 vérifié (scripts/rusty-v8-cache.sh)\nclippy + test nexus-tools --features obscura\n+ cargo nextest des crates obscura/ (un processus par test, --target explicite)"]
         push --> msrv["MSRV 1.88\ncargo check"]
 
         fmt --> ok{CI Success}
