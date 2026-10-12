@@ -331,6 +331,7 @@ un **trait** (`SearchBackend`) avec plusieurs moteurs, essayés dans l'ordre con
 | API à clé (forme Brave) | `brave:NOM_DE_VARIABLE` | la clé est lue dans l'environnement du serveur ; seul le **nom** est configuré |
 | SearXNG auto-hébergé | `searxng:URL` | le format JSON doit être activé dans l'instance ; adresse privée : `--search-allow-private` |
 | HTML d'un moteur sans clé | `html` | **fragile**, désactivé par défaut, avertissement au démarrage, conditions du moteur à respecter |
+| Obscura (`dsh-obscura-nav serp`), sans clé | `obscura:CHEMIN` ou `obscura` | exécutable **externe** (V8 hors de notre build, N17) ; `obscura` seul le cherche sur le `PATH` (`dsh-obscura-nav` puis `obscura`) ; voir ci-dessous |
 | Navigateur MCP externe | N23 | pour les pages qui exigent du JavaScript |
 
 Garanties : domaines autorisés/bloqués appliqués **après** le moteur ; URL équivalentes fusionnées ; repli,
@@ -339,8 +340,21 @@ disjoncteur ; mode `standard` = une requête, `extended` = plusieurs variantes (
 `additional_queries`, sinon mots-clés et phrase exacte) fusionnées par rang réciproque ; résultats étiquetés
 **données non fiables**. Aucun appel de modèle caché. L'outil n'est enregistré que si un moteur est configuré.
 
+**Le moteur `obscura`.** Chaque requête lance `<programme> serp --max-results N -- <requête>` : pas de shell, la requête
+est **un seul argument** placé après `--` (une requête qui commence par `-` n'est pas une option ; `;`, `$(...)`, les
+guillemets restent du texte). Le programme tourne dans son propre groupe de processus, tué en entier au délai (30 s) et
+quand l'appel est abandonné (requête annulée, session close). Environnement en liste blanche (`PATH`, locale, `TZ`),
+`OBSCURA_ALLOW_PRIVATE_NETWORK=0` imposé (vérifié une fois sur le vrai `dsh-obscura-nav serp` : il répond sans `HOME` ni
+`TMPDIR`). Sortie plafonnée à 2 Mio : au-delà, le groupe est tué aussitôt et l'erreur est `bad_response` (pas un délai
+dépassé) ; l'erreur standard est gardée sur 16 Kio et le reste vidé, pour ne jamais bloquer le programme. La réponse (tableau JSON `{url, title, snippet}`) passe par les mêmes filtres de
+domaines, la même fusion et le même étiquetage que les autres moteurs. Exécutable absent : erreur `not_configured` qui le
+nomme (et un avertissement au démarrage pour `obscura` introuvable sur le `PATH`). Le moteur atteint
+`https://html.duckduckgo.com` : c'est l'origine à laquelle un projet consent. Tests : `tests/search_obscura.rs` (script
+factice ; le golden `tests/data/obscura_serp.json` est une réponse du vrai `dsh-obscura-nav serp`, enregistrée une fois)
+et `tests/server_binary.rs` (de bout en bout par `--search-engine`). Le vrai binaire n'est jamais requis par les tests.
+
 Écarts avec Claude Code : pas de synthèse par un second modèle (le modèle de la session lit les résultats) ;
-pas de moteur par défaut ; https passe par la feature `tls` (§6) ; sans elle seuls les moteurs en `http` (SearXNG sur un réseau privé) fonctionnent.
+pas de moteur par défaut (`obscura` est le moteur sans clé recommandé, à nommer) ; https passe par la feature `tls` (§6) ; sans elle seuls les moteurs en `http` (SearXNG sur un réseau privé) fonctionnent.
 
 ## 8. Le banc de parité rejoué (N25)
 

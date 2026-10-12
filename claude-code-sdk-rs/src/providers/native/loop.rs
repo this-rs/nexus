@@ -15,13 +15,16 @@
 //! | `max_turns` / `max_tool_iterations` reached | `done max_turns` |
 //! | token or USD budget spent | `done budget_exceeded` |
 //! | `interrupt` | `done interrupted` |
-//! | endpoint failure (classified), turn timeout | `done { is_error, error }`: usage and cost are kept |
+//! | endpoint failure (classified) | `done { is_error, error }`: usage and cost are kept |
+//! | `limits.turn_timeout_ms` elapsed (only when set: no cap by default) | `provider_notice { turn_time_limit }`, then `done { error_timeout, error: timeout }` |
 //! | an MCP server process died | `error { process_exited }`: the session is dead |
 //! | `close` | `error { closed }` |
 //!
 //! A turn that fails or is closed leaves the transcript as it was before the
 //! turn (nothing half-done is committed); a turn that completes, hits a limit or
-//! is interrupted commits its messages.
+//! is interrupted commits its messages. A turn stopped by its time limit commits
+//! them too, and the next turn's user message starts with a `[system]` line that
+//! says so (the model never sees the terminal event: without it, it guesses).
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -122,7 +125,9 @@ pub(crate) async fn run_turn(core: Arc<Core>, input: TurnInput, signal: Arc<Turn
             signal.stop(StopCause::TimedOut(ms));
         })
     });
-    let user = user_message(&input);
+    // Read, not taken: a turn that is not committed leaves it for the next one.
+    let note = core.lock().pending_note.clone();
+    let user = user_message(&input, note.as_deref());
     before_turn(&core, &signal, input.joined_text().len()).await;
     let (model, images) = {
         let state = core.lock();
@@ -138,6 +143,42 @@ pub(crate) async fn run_turn(core: Arc<Core>, input: TurnInput, signal: Arc<Turn
     };
     if let Some(timer) = timer {
         timer.abort();
+    }
+    if let (Outcome::Interrupted, Some(StopCause::TimedOut(limit_ms))) = (&outcome, signal.cause())
+    {
+        let elapsed_ms = acc.started.elapsed().as_millis() as u64;
+        let note = time_limit_note(limit_ms, elapsed_ms);
+        core.lock().pending_note = Some(note.clone());
+        core.emit(AgentEvent::ProviderNotice {
+            kind: "turn_time_limit".to_owned(),
+            data: json!({
+                "limit_ms": limit_ms,
+                "elapsed_ms": elapsed_ms,
+                "next_turn_note": note,
+            }),
+        });
+    }
+    // A spent session budget stops every later turn before its first request: the host is
+    // told which budget, how much was counted, and the model is told at the next turn
+    // that runs (once the budget is raised, or in a resumed session, which counts anew).
+    if let Outcome::Stop(StopKind::Budget, _) = &outcome
+        && let Some(mut budget) = spent_budget(&core)
+    {
+        let note = budget_note(&budget, acc.requests);
+        {
+            // A refused turn (no request) keeps the note of the turn the budget cut, if
+            // the model has not read it yet: that one says what happened to its work.
+            let mut state = core.lock();
+            if acc.requests > 0 || state.pending_note.is_none() {
+                state.pending_note = Some(note.clone());
+            }
+        }
+        budget["requests_this_turn"] = json!(acc.requests);
+        budget["next_turn_note"] = json!(note);
+        core.emit(AgentEvent::ProviderNotice {
+            kind: "session_budget_reached".to_owned(),
+            data: budget,
+        });
     }
     let terminal = terminal_event(&core, &signal, &model, outcome, &acc);
     core.emit(terminal);
@@ -267,9 +308,33 @@ fn terminal_event(
     }
 }
 
+/// A duration as a person reads it: `25 min`, `25 min 3 s`, `40 s`, `400 ms`.
+fn human_duration(ms: u64) -> String {
+    let (minutes, seconds) = (ms / 60_000, (ms % 60_000) / 1000);
+    match (minutes, seconds) {
+        (0, 0) => format!("{ms} ms"),
+        (0, s) => format!("{s} s"),
+        (m, 0) => format!("{m} min"),
+        (m, s) => format!("{m} min {s} s"),
+    }
+}
+
+/// The line the model reads at the start of the turn after one its time limit stopped.
+pub(crate) fn time_limit_note(limit_ms: u64, elapsed_ms: u64) -> String {
+    format!(
+        "[system] Your previous turn was stopped after {} by the configured turn time limit \
+         ({}). It was not interrupted by the user. What it did up to that point is above; \
+         a tool that was running was stopped.",
+        human_duration(elapsed_ms),
+        human_duration(limit_ms),
+    )
+}
+
 /// The user message of a turn: the text blocks joined, then the images (sent
-/// as `image_url` parts, kept whole in the transcript).
-fn user_message(input: &TurnInput) -> ChatMessage {
+/// as `image_url` parts, kept whole in the transcript). A pending `note` comes
+/// first, on its own line: it is part of the new message, so the prefix the
+/// endpoint has cached (system prompt, earlier messages) does not change.
+fn user_message(input: &TurnInput, note: Option<&str>) -> ChatMessage {
     let images = input
         .blocks
         .iter()
@@ -284,7 +349,11 @@ fn user_message(input: &TurnInput) -> ChatMessage {
             _ => None,
         })
         .collect();
-    ChatMessage::user_with_images(input.joined_text(), images)
+    let text = match note {
+        Some(note) => format!("{note}\n\n{}", input.joined_text()),
+        None => input.joined_text(),
+    };
+    ChatMessage::user_with_images(text, images)
 }
 
 async fn drive(
@@ -298,12 +367,25 @@ async fn drive(
     messages.push(user);
     let outcome = iterate(core, signal, model, &mut messages, acc).await;
     let commit = match &outcome {
+        // A turn a spent budget refused before its first request did not run: its user
+        // message is not committed (the model would later read questions nobody answered).
+        Outcome::Stop(StopKind::Budget, _) => acc.requests > 0,
         Outcome::Stop(..) => true,
-        Outcome::Interrupted => signal.cause() == Some(StopCause::Interrupted),
+        // A turn its time limit stopped keeps its work, like an interrupted one: the
+        // next turn goes on from it (and is told why it stopped, `pending_note`).
+        Outcome::Interrupted => matches!(
+            signal.cause(),
+            Some(StopCause::Interrupted | StopCause::TimedOut(_))
+        ),
         Outcome::Failed(_) | Outcome::Fatal(_) => false,
     };
     if commit {
-        core.lock().messages = messages.clone();
+        {
+            let mut state = core.lock();
+            state.messages = messages.clone();
+            // The user message just committed carries the note, if there was one.
+            state.pending_note = None;
+        }
         if let Err(error) = core.store.save(&core.transcript_id, &messages) {
             tracing::warn!(
                 kind = error.kind(),
@@ -315,14 +397,54 @@ async fn drive(
 }
 
 fn budget_spent(core: &Core) -> bool {
+    spent_budget(core).is_some()
+}
+
+/// The session budget that is spent, if one is: what it is, its limit and what was counted.
+fn spent_budget(core: &Core) -> Option<Value> {
     let state = core.lock();
-    core.limits
-        .max_tokens
-        .is_some_and(|max| state.tokens_spent >= max)
-        || core
-            .limits
-            .max_cost_usd
-            .is_some_and(|max| state.usd_spent >= max)
+    if let Some(max) = core.limits.max_tokens
+        && state.tokens_spent >= max
+    {
+        return Some(json!({
+            "budget": "tokens",
+            "limit": max,
+            "spent": state.tokens_spent,
+            "counted": "input not served from the cache + cache writes + output; cache reads excluded",
+        }));
+    }
+    if let Some(max) = core.limits.max_cost_usd
+        && state.usd_spent >= max
+    {
+        return Some(json!({ "budget": "usd", "limit": max, "spent": state.usd_spent }));
+    }
+    None
+}
+
+/// The line the model reads at the start of the turn after one a session budget stopped.
+fn budget_note(budget: &Value, requests: u32) -> String {
+    let what = match budget["budget"].as_str() {
+        Some("usd") => format!(
+            "the session cost budget (USD {}) was reached",
+            budget["limit"]
+        ),
+        _ => format!(
+            "the session token budget ({} tokens, cache reads not counted) was reached",
+            budget["limit"]
+        ),
+    };
+    if requests == 0 {
+        format!(
+            "[system] Your previous turn did not run: {what} before it started. It was not \
+             interrupted by the user."
+        )
+    } else {
+        format!(
+            "[system] Your previous turn was stopped because {what}. It was not interrupted by \
+             the user. What it did up to that point is above; tool calls it asked for last did \
+             not run."
+        )
+    }
 }
 
 fn assistant(text: &str, reasoning: &str, tool_calls: Vec<ToolCallChunk>) -> ChatMessage {
@@ -520,8 +642,9 @@ fn spend(
     let mut state = core.lock();
     match reported {
         Some(usage) => {
+            // Cache reads are not counted (`SessionLimits::max_tokens`): billed at a
+            // fraction, they are most of a long conversation's tokens.
             state.tokens_spent += usage.input_tokens.unwrap_or(0)
-                + usage.cache_read_tokens.unwrap_or(0)
                 + usage.cache_creation_tokens.unwrap_or(0)
                 + usage.output_tokens.unwrap_or(0);
             if let Some(usd) = core.settings.prices.cost_usd(model, usage) {

@@ -178,11 +178,11 @@ pub struct NativeConfig {
     pub prices: PriceTable,
     /// `Free` for a local model; anything else lets the price table decide.
     pub cost_basis: CostBasis,
-    /// Limits applied when the session's own are unset. **Not unlimited by
-    /// default**: [`NativeConfig::new`] sets `turn_timeout_ms` to
-    /// [`NativeConfig::DEFAULT_TURN_TIMEOUT_MS`] and `max_tokens` to
-    /// [`NativeConfig::DEFAULT_MAX_TOKENS`]; set a field to `None` to lift it
-    /// (an explicit choice of the operator, not an omission).
+    /// Limits applied when the session's own are unset. **None by default**, as in Claude
+    /// Code: no turn wall-clock limit (`turn_timeout_ms`), no session token or USD budget
+    /// (`max_tokens`, `max_cost_usd`); a turn may run for hours and a conversation for days. What
+    /// bounds a turn is `max_turns`, the user's interrupt and the endpoint's idle deadline (a model stream that goes silent,
+    /// `OpenAiEndpointConfig::idle_timeout`). A `turn_timeout_ms` the operator sets is held.
     pub limits: SessionLimits,
     /// Round trips to the model per turn, when `SessionSpec::max_turns` is unset;
     /// [`NativeConfig::DEFAULT_MAX_TURNS`] by default, `None` lifts it.
@@ -215,14 +215,10 @@ impl NativeConfig {
     pub const DEFAULT_MAX_TURNS: u32 = 50;
     /// A hook that has not answered by then is skipped.
     pub const DEFAULT_HOOK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
-    /// Default longest a turn may run: 30 minutes.
-    pub const DEFAULT_TURN_TIMEOUT_MS: u64 = 30 * 60 * 1000;
-    /// Default token budget of a session (input + output, reported or estimated).
-    pub const DEFAULT_MAX_TOKENS: u64 = 10_000_000;
 
     /// A configuration with the defaults: strict exposure, compaction on, no
-    /// price, no default model, bounded turns and budget (see the `DEFAULT_*`
-    /// constants).
+    /// price, no default model, bounded round trips ([`NativeConfig::DEFAULT_MAX_TURNS`]),
+    /// no turn wall-clock limit and no session budget.
     pub fn new(instance_id: impl Into<String>) -> Self {
         Self {
             instance_id: instance_id.into(),
@@ -230,11 +226,7 @@ impl NativeConfig {
             context_window: None,
             prices: PriceTable::new(),
             cost_basis: CostBasis::Unknown,
-            limits: SessionLimits {
-                turn_timeout_ms: Some(Self::DEFAULT_TURN_TIMEOUT_MS),
-                max_tokens: Some(Self::DEFAULT_MAX_TOKENS),
-                ..SessionLimits::default()
-            },
+            limits: SessionLimits::default(),
             max_turns: Some(Self::DEFAULT_MAX_TURNS),
             max_tokens: None,
             parallel_tool_calls: None,

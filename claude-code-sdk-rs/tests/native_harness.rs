@@ -22,7 +22,13 @@ use nexus_claude::agent::{
     ModelPrice, PermissionDecision, PermissionScope, PolicyMode, ProviderError, ProviderKind,
     ResumeToken, SessionSpec, StopReason, ToolOutput, ToolPattern, ToolPolicy, TurnInput,
 };
-use nexus_claude::model::{EndpointQuirks, PriceTable};
+use nexus_claude::agent::{
+    ModelInfo, ProviderHealth, SessionLimits, SystemPromptMode, SystemPromptSpec,
+};
+use nexus_claude::model::{
+    CompletionChunk, CompletionRequest, CompletionStream, EndpointProbe, EndpointQuirks,
+    FinishReason, ModelEndpoint, PriceTable,
+};
 use nexus_claude::providers::native::{
     FileTranscriptStore, MemoryTranscriptStore, NativeConfig, NativeProvider, TranscriptStore,
 };
@@ -554,10 +560,102 @@ async fn a_token_budget_works_without_any_price_and_stops_before_the_tools_run()
             .any(|e| matches!(e, AgentEvent::ToolCall { .. }))
     );
     assert_eq!(h.chat().len(), 1);
-    // The session budget is spent: the next turn does not even call the model.
+    // Said as such, with the figures and the line the model reads at its next turn.
+    let notice = budget_notice(&events);
+    assert_eq!(notice["budget"], "tokens");
+    assert_eq!(notice["limit"], 150);
+    assert_eq!(notice["spent"], 160);
+    assert_eq!(notice["requests_this_turn"], 1);
+    let note = notice["next_turn_note"].as_str().unwrap();
+    assert!(
+        note.starts_with("[system] Your previous turn was stopped because the session token budget (150 tokens, cache reads not counted) was reached."),
+        "{note}"
+    );
+    assert!(note.contains("not interrupted by the user"), "{note}");
+    // The session budget is spent: the next turn does not even call the model (the
+    // conversation is stopped until the budget is raised or the session resumed, which
+    // counts anew) — and it says so, every time.
     let again = turn(&*session, "again").await;
     assert_eq!(stop_reason(&again), StopReason::BudgetExceeded);
     assert_eq!(h.chat().len(), 1);
+    let refused = budget_notice(&again);
+    assert_eq!(refused["requests_this_turn"], 0);
+    assert!(
+        refused["next_turn_note"]
+            .as_str()
+            .unwrap()
+            .contains("did not run"),
+        "{refused}"
+    );
+}
+
+/// The `session_budget_reached` notice of a turn.
+fn budget_notice(events: &[AgentEvent]) -> &Value {
+    events
+        .iter()
+        .find_map(|event| match event {
+            AgentEvent::ProviderNotice { kind, data } if kind == "session_budget_reached" => {
+                Some(data)
+            },
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("a session_budget_reached notice: {events:?}"))
+}
+
+/// A final answer whose usage says `cached` of the `prompt` tokens came from the cache
+/// (DeepSeek's field).
+fn cached_reply(body_contains: &str, prompt: u64, cached: u64) -> Value {
+    json!({"method": "POST", "path": "/v1/chat/completions", "status": 200,
+        "body_contains": body_contains, "sse": [
+        delta(json!({"content": "ok"})),
+        finish("stop"),
+        json!({"choices": [], "usage": {"prompt_tokens": prompt, "completion_tokens": 50,
+            "total_tokens": prompt + 50, "prompt_cache_hit_tokens": cached}}),
+        json!("[DONE]"),
+    ]})
+}
+
+/// ISO5: on a long DeepSeek conversation, 96 % of the tokens were cache reads; counted at
+/// full weight they spent a 10 M budget and stopped the conversation. They do not count.
+#[tokio::test]
+async fn cache_reads_do_not_spend_the_token_budget() {
+    let h = Harness::with(
+        vec![
+            cached_reply("first", 6_000_000, 5_995_000),
+            cached_reply("second", 6_000_000, 5_995_000),
+            cached_reply("third", 6_000_000, 5_995_000),
+        ],
+        |config| config.limits.max_tokens = Some(1_000_000),
+    )
+    .await;
+    let session = h.open(h.spec()).await;
+    for text in ["first", "second", "third"] {
+        let events = turn(&*session, text).await;
+        assert_eq!(stop_reason(&events), StopReason::Completed, "{events:?}");
+        let AgentEvent::Done { usage, .. } = done(&events) else {
+            unreachable!()
+        };
+        // Reported as they are: the cache reads are in the usage, just not in the budget.
+        assert_eq!(usage.cache_read_tokens, Some(5_995_000));
+    }
+    // 17.985 M tokens read from the cache, 15 150 counted: the budget of 1 M is far.
+    assert_eq!(h.chat().len(), 3);
+}
+
+/// Without a configured budget, nothing stops a conversation however much it reads.
+#[tokio::test]
+async fn without_a_configured_budget_ten_million_cache_reads_stop_nothing() {
+    let h = Harness::new(vec![
+        cached_reply("first", 12_000_000, 11_000_000),
+        cached_reply("second", 12_000_000, 11_000_000),
+    ])
+    .await;
+    let session = h.open(h.spec()).await;
+    for text in ["first", "second"] {
+        let events = turn(&*session, text).await;
+        assert_eq!(stop_reason(&events), StopReason::Completed, "{events:?}");
+    }
+    assert_eq!(h.chat().len(), 2);
 }
 
 #[tokio::test]
@@ -669,21 +767,17 @@ async fn a_report_from_the_endpoint_replaces_the_estimate_and_no_notice_is_made(
 }
 
 #[test]
-fn the_defaults_of_a_native_config_are_bounded_not_unlimited() {
+fn a_native_config_bounds_round_trips_but_sets_no_time_limit_and_no_budget() {
     let config = NativeConfig::new("x");
     assert_eq!(config.max_turns, Some(NativeConfig::DEFAULT_MAX_TURNS));
-    assert_eq!(
-        config.limits.turn_timeout_ms,
-        Some(NativeConfig::DEFAULT_TURN_TIMEOUT_MS)
-    );
-    assert_eq!(
-        config.limits.max_tokens,
-        Some(NativeConfig::DEFAULT_MAX_TOKENS)
-    );
+    // No wall-clock cap on a turn and no session budget (Claude Code has neither, ISO5):
+    // the round trips, the interrupt and the endpoint's idle deadline bound a turn.
+    assert_eq!(config.limits, SessionLimits::default());
+    assert_eq!(config.limits.turn_timeout_ms, None);
+    assert_eq!(config.limits.max_tokens, None);
+    assert_eq!(config.limits.max_cost_usd, None);
     const {
         assert!(NativeConfig::DEFAULT_MAX_TURNS > 0);
-        assert!(NativeConfig::DEFAULT_TURN_TIMEOUT_MS > 0);
-        assert!(NativeConfig::DEFAULT_MAX_TOKENS > 0);
     }
 }
 
@@ -1344,6 +1438,213 @@ async fn a_turn_timeout_is_a_classified_failure_not_a_hang() {
         } => {},
         other => panic!("expected a timeout failure, got {other:?}"),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Turn wall-clock limit (ISO5): none by default; a configured one says why
+// ---------------------------------------------------------------------------
+
+/// An endpoint in the process whose one answer comes after `delay` of tokio time.
+/// Under a paused clock a turn that "lasts" hours runs at once, and only a wall-clock
+/// cap of the harness could cut it.
+struct SlowEndpoint {
+    delay: Duration,
+}
+
+#[async_trait::async_trait]
+impl ModelEndpoint for SlowEndpoint {
+    fn id(&self) -> &str {
+        "slow"
+    }
+
+    async fn health(&self) -> ProviderHealth {
+        ProviderHealth::ok(None)
+    }
+
+    async fn models(&self) -> Result<Vec<ModelInfo>, ProviderError> {
+        Ok(Vec::new())
+    }
+
+    async fn complete(
+        &self,
+        _request: CompletionRequest,
+    ) -> Result<CompletionStream, ProviderError> {
+        let delay = self.delay;
+        Ok(Box::pin(async_stream::stream! {
+            tokio::time::sleep(delay).await;
+            yield Ok(CompletionChunk::Text("done after a long while".to_owned()));
+            yield Ok(CompletionChunk::Finish(FinishReason::Stop));
+        }))
+    }
+
+    async fn probe(&self, _model: &str) -> Result<EndpointProbe, ProviderError> {
+        Ok(EndpointProbe {
+            tools: false,
+            parallel_tools: None,
+            reasoning_field: None,
+            context_window: Some(128_000),
+            images: None,
+            checked_at_ms: 0,
+        })
+    }
+}
+
+/// A session of a default config over [`SlowEndpoint`], with `limit` as the session's cap.
+async fn slow_session(
+    delay: Duration,
+    limit: Option<u64>,
+) -> (Arc<dyn AgentSession>, tempfile::TempDir) {
+    let provider = NativeProvider::new(NativeConfig::new("slow"), Arc::new(SlowEndpoint { delay }));
+    let cwd = tempfile::tempdir().unwrap();
+    let mut spec = SessionSpec::new(cwd.path());
+    spec.model = Some("m".to_owned());
+    spec.limits.turn_timeout_ms = limit;
+    (provider.open(spec).await.expect("open"), cwd)
+}
+
+/// A turn read to its end with no deadline of its own (`collect` has one, which a
+/// paused clock would reach first).
+async fn whole_turn(session: &dyn AgentSession, text: &str) -> Vec<AgentEvent> {
+    session
+        .send_turn(TurnInput::text(text))
+        .await
+        .expect("send_turn")
+        .collect()
+        .await
+}
+
+#[tokio::test(start_paused = true)]
+async fn without_a_configured_cap_a_turn_of_hours_is_not_cut() {
+    let hours = Duration::from_secs(3 * 3600);
+    let (session, _cwd) = slow_session(hours, None).await;
+    let started = tokio::time::Instant::now();
+    let events = whole_turn(&*session, "work for hours").await;
+    match done(&events) {
+        AgentEvent::Done {
+            stop_reason: StopReason::Completed,
+            is_error: false,
+            result_text: Some(text),
+            ..
+        } => assert_eq!(text, "done after a long while"),
+        other => panic!("a long turn must complete, got {other:?}"),
+    }
+    assert!(started.elapsed() >= hours, "the turn did run for hours");
+    assert!(
+        !events.iter().any(|event| matches!(
+            event,
+            AgentEvent::ProviderNotice { kind, .. } if kind == "turn_time_limit"
+        )),
+        "{events:?}"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_explicit_cap_still_stops_a_long_turn_and_says_its_limit() {
+    let limit = 25 * 60 * 1000;
+    let (session, _cwd) = slow_session(Duration::from_secs(3 * 3600), Some(limit)).await;
+    let started = tokio::time::Instant::now();
+    let events = whole_turn(&*session, "work for hours").await;
+    assert!(started.elapsed() < Duration::from_secs(3 * 3600));
+    match done(&events) {
+        AgentEvent::Done {
+            stop_reason: StopReason::Error,
+            subtype: Some(subtype),
+            is_error: true,
+            error: Some(ProviderError::Timeout { after_ms }),
+            ..
+        } => {
+            assert_eq!(subtype, "error_timeout");
+            assert_eq!(*after_ms, limit);
+        },
+        other => panic!("expected the cap to fire, got {other:?}"),
+    }
+    let notice = events
+        .iter()
+        .find_map(|event| match event {
+            AgentEvent::ProviderNotice { kind, data } if kind == "turn_time_limit" => Some(data),
+            _ => None,
+        })
+        .expect("a turn_time_limit notice before the terminal event");
+    assert_eq!(notice["limit_ms"], json!(limit));
+    assert!(notice["elapsed_ms"].is_u64(), "{notice}");
+    assert!(
+        notice["next_turn_note"]
+            .as_str()
+            .unwrap()
+            .contains("(25 min)"),
+        "{notice}"
+    );
+}
+
+/// The text of the last user message of a chat request.
+fn last_user_text(body: &Value) -> String {
+    body["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .rev()
+        .find(|message| message["role"] == "user")
+        .and_then(|message| message["content"].as_str())
+        .unwrap_or_default()
+        .to_owned()
+}
+
+#[tokio::test]
+async fn after_a_capped_turn_the_next_request_tells_the_model_why_it_stopped() {
+    const NOTE: &str = "by the configured turn time limit";
+    let h = Harness::new(vec![
+        busy_reply(Some("busy")),
+        text_reply(Some(NOTE), "understood", None, None),
+        text_reply(Some("third"), "fine", None, None),
+    ])
+    .await;
+    let mut spec = h.spec();
+    spec.system_prompt = Some(SystemPromptSpec {
+        text: "You are a careful agent.".to_owned(),
+        mode: SystemPromptMode::Replace,
+    });
+    spec.limits.turn_timeout_ms = Some(400);
+    let session = h.open(spec).await;
+
+    let first = turn(&*session, "busy").await;
+    assert!(
+        matches!(
+            done(&first),
+            AgentEvent::Done {
+                error: Some(ProviderError::Timeout { after_ms: 400 }),
+                ..
+            }
+        ),
+        "{first:?}"
+    );
+    let second = turn(&*session, "what happened?").await;
+    assert_eq!(stop_reason(&second), StopReason::Completed, "{second:?}");
+    let third = turn(&*session, "third").await;
+    assert_eq!(stop_reason(&third), StopReason::Completed, "{third:?}");
+
+    let chat = h.chat();
+    assert_eq!(chat.len(), 3, "{chat:?}");
+    // The note opens the next user message, then the person's own words.
+    let asked = last_user_text(&chat[1]);
+    assert!(
+        asked.starts_with("[system] Your previous turn was stopped after "),
+        "{asked}"
+    );
+    assert!(asked.contains(&format!("{NOTE} (400 ms)")), "{asked}");
+    assert!(asked.contains("not interrupted by the user"), "{asked}");
+    assert!(asked.ends_with("\n\nwhat happened?"), "{asked}");
+    // The capped turn's work was kept: its user message and the words streamed so far.
+    let history = chat[1]["messages"].to_string();
+    assert!(history.contains("\"busy\""), "{history}");
+    assert!(history.contains("start"), "{history}");
+    // Cache-friendly: the system prompt is the same on every request, never the note's place.
+    for body in &chat {
+        assert_eq!(body["messages"][0]["role"], "system");
+        assert_eq!(body["messages"][0]["content"], "You are a careful agent.");
+    }
+    // Said once: the turn after is not told again (the note stays in the history only).
+    assert_eq!(last_user_text(&chat[2]), "third");
+    assert_eq!(chat[2]["messages"].to_string().matches(NOTE).count(), 1);
 }
 
 // ---------------------------------------------------------------------------
