@@ -21,11 +21,12 @@ if ! command -v cargo &> /dev/null; then
 fi
 
 # 1. cargo fmt check
-echo "📐 Checking formatting (cargo fmt --all --check)..."
-if ! cargo fmt --all --check; then
+# `fmt-nexus` (.cargo/config.toml): the nexus crates only, not the vendored obscura/.
+echo "📐 Checking formatting (cargo fmt-nexus -- --check)..."
+if ! cargo fmt-nexus -- --check; then
     echo ""
     echo "❌ Formatting check failed."
-    echo "   Run 'cargo fmt --all' to fix formatting issues."
+    echo "   Run 'cargo fmt-nexus' to fix formatting issues."
     exit 1
 fi
 echo "   ✅ Formatting OK"

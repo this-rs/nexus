@@ -9,3 +9,7 @@ incompatible-rust-versions = "fallback"
 # drift gate. A workspace crate rather than a script, so the repository needs one toolchain.
 [alias]
 xtask = "run --quiet --package xtask --"
+# Formats the nexus crates only. `cargo fmt --all` (and plain `cargo fmt` at the root) would also
+# reformat the vendored Obscura crates (obscura/), which keep upstream's formatting so that upstream
+# changes still apply to them.
+fmt-nexus = "fmt -p claude-code-api -p nexus-claude -p nexus-tools -p xtask"

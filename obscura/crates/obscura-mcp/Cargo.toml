@@ -1,0 +1,23 @@
+[package]
+name = "obscura-mcp"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/h4ckf0r0day/obscura"
+
+[features]
+default = []
+stealth = ["obscura-browser/stealth", "obscura-net/stealth"]
+render = ["obscura-browser/render", "dep:base64"]
+
+[dependencies]
+obscura-browser = { path = "../obscura-browser" }
+obscura-dom = { path = "../obscura-dom" }
+obscura-net = { path = "../obscura-net" }
+tokio = { version = "1", features = ["full"] }
+url = { version = "2" }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1" }
+anyhow = { version = "1" }
+tracing = { version = "0.1" }
+base64 = { version = "0.22", optional = true }

@@ -1,0 +1,18 @@
+[package]
+name = "obscura-dom"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/h4ckf0r0day/obscura"
+
+[dependencies]
+html5ever = { version = "0.39" }
+markup5ever = { version = "0.39" }
+selectors = { version = "0.26" }
+servo_arc = { version = "0.4" }
+cssparser = { version = "0.34" }
+thiserror = { version = "2" }
+tracing = { version = "0.1" }
+precomputed-hash = "0.1"
+
+[dev-dependencies]

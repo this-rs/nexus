@@ -1,5 +1,27 @@
 [workspace]
-members = ["claude-code-api", "claude-code-sdk-rs", "nexus-tools", "xtask"]
+members = [
+    "claude-code-api",
+    "claude-code-sdk-rs",
+    "nexus-tools",
+    "xtask",
+    # Obscura, the headless browser (Apache-2.0, see obscura/NOTICE). Members, so they share
+    # Cargo.lock and the target directory, but NOT default members: they compile V8 (rusty_v8,
+    # through deno_core), and a plain `cargo build` / `cargo test` / CI must stay V8-free.
+    # Build them by name: `cargo build -p obscura-server`.
+    "obscura/crates/obscura",
+    "obscura/crates/obscura-browser",
+    "obscura/crates/obscura-cdp",
+    "obscura/crates/obscura-cli",
+    "obscura/crates/obscura-dom",
+    "obscura/crates/obscura-js",
+    "obscura/crates/obscura-mcp",
+    "obscura/crates/obscura-net",
+    "obscura/crates/obscura-render",
+    "obscura/crates/obscura-server",
+]
+default-members = ["claude-code-api", "claude-code-sdk-rs", "nexus-tools", "xtask"]
+# Patched copies applied through [patch.crates-io] below, not workspace members.
+exclude = ["obscura/vendor/taffy", "obscura/vendor/cosmic-text"]
 resolver = "2"
 
 [workspace.package]
@@ -24,3 +46,9 @@ futures = "0.3"
 async-trait = "0.1"
 neo4rs = "0.8"
 meilisearch-sdk = { version = "0.33", default-features = false, features = ["reqwest", "tls", "jwt_rust_crypto"] }
+
+# Obscura's local fixes to two layout/text crates, carried until they land upstream. Only the
+# Obscura crates depend on taffy and cosmic-text.
+[patch.crates-io]
+taffy = { path = "obscura/vendor/taffy" }
+cosmic-text = { path = "obscura/vendor/cosmic-text" }

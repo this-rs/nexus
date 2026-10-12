@@ -44,7 +44,7 @@ ET « gated » (hors exclusions de la configuration de couverture). Voir docs/CO
 
 ## Checklist
 
-- [ ] CI verte (`cargo fmt --all --check, cargo clippy --all-targets --all-features -- -D warnings, cargo test --all-features`)
+- [ ] CI verte (`cargo fmt-nexus -- --check, cargo clippy --all-targets --all-features -- -D warnings, cargo test --all-features`)
 - [ ] Test de régression présent et prouvé rouge sans le correctif (section ci-dessus)
 - [ ] Doc à jour (et diagramme, ou `Diagram-Unchanged` / « sans objet » justifié)
 - [ ] Pas de release, de tag ni de bump de version

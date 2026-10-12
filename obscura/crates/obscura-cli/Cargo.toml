@@ -1,0 +1,38 @@
+[package]
+name = "obscura-cli"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/h4ckf0r0day/obscura"
+
+[[bin]]
+name = "obscura"
+path = "src/main.rs"
+
+[[bin]]
+name = "obscura-worker"
+path = "src/worker.rs"
+
+[features]
+default = []
+stealth = ["obscura-browser/stealth", "obscura-net/stealth", "obscura-mcp/stealth"]
+render = ["obscura-browser/render", "obscura-cdp/render", "obscura-mcp/render"]
+
+[dependencies]
+obscura-browser = { path = "../obscura-browser" }
+obscura-mcp = { path = "../obscura-mcp" }
+obscura-cdp = { path = "../obscura-cdp" }
+obscura-dom = { path = "../obscura-dom" }
+obscura-net = { path = "../obscura-net" }
+obscura-js = { path = "../obscura-js" }
+tokio = { version = "1", features = ["full"] }
+clap = { version = "4", features = ["derive"] }
+tracing = { version = "0.1" }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+anyhow = { version = "1" }
+url = { version = "2" }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1" }
+
+[dev-dependencies]
+image = { version = "0.25", default-features = false, features = ["png"] }

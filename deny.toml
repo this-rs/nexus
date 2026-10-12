@@ -5,7 +5,13 @@
 version = 2
 db-path = "~/.cargo/advisory-db"
 db-urls = ["https://github.com/rustsec/advisory-db"]
-ignore = []
+ignore = [
+    # Both reach only the vendored Obscura crates (obscura/), which are not default members and
+    # are compiled only when named. Unmaintained, no known
+    # vulnerability, and no maintained release of their dependents drops them yet.
+    { id = "RUSTSEC-2025-0141", reason = "bincode 1.x, unmaintained: a dependency of deno_core (V8 snapshot data) under obscura-js" },
+    { id = "RUSTSEC-2025-0057", reason = "fxhash, unmaintained: a hashing helper under the html5ever/selectors stack of obscura-dom" },
+]
 
 [licenses]
 version = 2
