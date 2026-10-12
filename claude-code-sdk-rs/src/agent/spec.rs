@@ -240,7 +240,11 @@ impl fmt::Debug for EnvSpec {
 pub struct SessionLimits {
     /// Spending ceiling in USD.
     pub max_cost_usd: Option<f64>,
-    /// Token ceiling (input + output).
+    /// Token ceiling of the session: the tokens billed at full price, that is input not
+    /// served from a prompt cache, cache writes and output. Cache reads (a prefix sent
+    /// again and served from the cache, billed at a fraction) do not count: a long
+    /// conversation re-reads its history on every request, and counting it at full weight
+    /// spends a budget on tokens nobody pays for in full. The USD budget prices them.
     pub max_tokens: Option<u64>,
     /// Longest a turn may run, in milliseconds.
     pub turn_timeout_ms: Option<u64>,
@@ -361,7 +365,8 @@ pub struct TurnContext {
     pub input_chars: usize,
     /// Tokens in context after the previous turn, when the provider reported them.
     pub context_tokens: Option<u64>,
-    /// Tokens spent by the session so far.
+    /// Tokens spent by the session so far, as `SessionLimits::max_tokens` counts them
+    /// (cache reads excluded).
     pub tokens_spent: u64,
     /// USD spent by the session so far, when a price is known.
     pub usd_spent: Option<f64>,

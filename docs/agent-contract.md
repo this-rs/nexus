@@ -310,6 +310,8 @@ sur un provider, aucune forme sérialisée ne bouge : `CONTRACT_VERSION` reste 5
 | background_tasks | oui | oui quand la session a le `Bash` de son serveur `nexus` (`nexus-tools` ; `capabilities(modèle)` : `default_tools` configuré et modèle à outils) | non | non |
 | resume | oui | oui (transcript) | oui | selon `loadSession` |
 | cost | reported (subscription si OAuth) | priced / free / unknown | unknown (tokens seuls, A40) | reported si `Cost` présent, sinon unknown |
+| turn.duration_limit (ISO5) | aucune par défaut (le CLI n'a pas de limite de durée par tour) | aucune par défaut (`NativeConfig::new` : `turn_timeout_ms: None`) ; posée (`limits.turn_timeout_ms`), elle est tenue : notice `turn_time_limit { limit_ms, elapsed_ms }`, `done error_timeout`, travail du tour gardé, ligne `[system]` en tête du message utilisateur suivant ; le délai d'inactivité du flux du modèle (120 s) reste | aucune par défaut ; posée, tenue (`done { error: timeout }`) | aucune par défaut ; posée, tenue (`done { error: timeout }`) |
+| session.token_budget (ISO5) | aucun (le CLI n'a pas de budget de jetons de session) | aucun par défaut (`limits.max_tokens: None`) ; posé, il compte entrée hors cache + écritures de cache + sortie (lectures de cache exclues), notice `session_budget_reached`, ligne `[system]` au tour suivant qui s'exécute, compteur remis à zéro par `resume` | refusé à l'ouverture (`Unsupported { limits }`) | refusé à l'ouverture (`Unsupported { limits }`) |
 
 Écarts constatés à l'implémentation du natif (`claude-code-sdk-rs/src/providers/native/`, feature
 `provider-native`, `NativeProvider` / `NativeConfig`) :
@@ -402,16 +404,23 @@ sur un provider, aucune forme sérialisée ne bouge : `CONTRACT_VERSION` reste 5
   demande en mode `ask`). `auto_edits` se comporte comme `ask` pour MCP. Transports MCP : stdio
   (`isolated_command`, HOME dédié par instance) et HTTP streamable ; le transport HTTP+SSE historique
   (`McpServerSpec::Sse`) est refusé (`Unsupported { mcp_sse }`).
-- **Budgets** : `limits.max_tokens` est un budget de **session**, compté sur l'usage rapporté (estimé à
+- **Budgets** : `limits.max_tokens` est un budget de **session**, compté sur l'usage rapporté **facturé plein
+  tarif** : entrée non servie par le cache + écritures de cache + sortie ; **les lectures de cache ne comptent pas**
+  (facturées une fraction, elles font l'essentiel des jetons d'une longue conversation : 96 % mesurés sur une
+  session DeepSeek, ISO5 ; le budget USD les compte au tarif `cache_read_per_mtok`). Usage (estimé à
   4 caractères par jeton si l'endpoint n'en rapporte pas : texte envoyé et reçu, schémas d'outils non
   comptés, donc le réel est plus haut) ; **le budget USD avance aussi sur cette estimation** quand le modèle a un
   prix, et chaque requête ainsi comptée émet `provider_notice { kind: "usage_estimated", data: { estimated:
   true, chars_per_token: 4, tokens, usd } }` ; `done.usage` et `done.cost` ne portent que ce que l'endpoint a
-  rapporté. **Défauts non nuls** (réglages d'adaptateur dans `NativeConfig`, `SessionSpec` inchangé) : quand le
-  `SessionSpec` ne fixe pas la limite, `NativeConfig::new` applique `max_turns` = 50
-  (`DEFAULT_MAX_TURNS`), délai de tour = 30 min (`DEFAULT_TURN_TIMEOUT_MS`), budget de session = 10 000 000
-  jetons (`DEFAULT_MAX_TOKENS`) ; l'opérateur les lève en mettant le champ à `None`, le `SessionSpec` gagne
-  toujours ; il fonctionne sans fenêtre de contexte
+  rapporté. **Défauts** (réglages d'adaptateur dans `NativeConfig`, `SessionSpec` inchangé) : quand le
+  `SessionSpec` ne fixe pas la limite, `NativeConfig::new` applique `max_turns` = 50 (`DEFAULT_MAX_TURNS`) et
+  **rien d'autre** : ni délai de tour, ni budget de jetons ou USD (parité Claude Code, ISO5 : un tour coupé à
+  30 min et une conversation bloquée à 10 M de jetons, lectures de cache comprises, ont été mesurés) ; l'opérateur
+  les pose dans `NativeConfig::limits`, le `SessionSpec` gagne toujours. Un budget dépensé arrête chaque tour
+  suivant avant sa première requête : la session émet `provider_notice { kind: "session_budget_reached", data:
+  { budget: tokens|usd, limit, spent, counted?, requests_this_turn, next_turn_note } }` avant le `done
+  budget_exceeded`, et le prochain tour qui s'exécute commence par une ligne `[system]` qui le dit au modèle. Les
+  compteurs vivent avec la session : une reprise (`resume`) compte de zéro. Le harnais fonctionne sans fenêtre de contexte
   connue (écart à la ligne `context_window` du tableau). `limits.max_cost_usd` sans prix pour le modèle
   → `Unsupported { cost }` à l'ouverture (A21) ; avec prix, ou endpoint `free`, il est tenu. Dépassement
   → `done { stop_reason: budget_exceeded }`, contrôlé avant chaque requête et avant d'exécuter les
@@ -420,7 +429,13 @@ sur un provider, aucune forme sérialisée ne bouge : `CONTRACT_VERSION` reste 5
 - **Fin de tour** : une erreur d'endpoint classée est un `done { is_error, error }` (usage et coût
   gardés) et le transcript revient à l'état d'avant le tour ; `error { process_exited }` terminal
   seulement quand un serveur MCP stdio meurt (la session est alors morte : `send_turn` rend la même
-  erreur) ; un délai de tour (`turn_timeout_ms`) est un `done { error: timeout }`.
+  erreur) ; un délai de tour (`turn_timeout_ms`, **seulement s'il est posé** : aucun par défaut) émet
+  `provider_notice { kind: "turn_time_limit", data: { limit_ms, elapsed_ms, next_turn_note } }` puis `done {
+  subtype: error_timeout, error: timeout { after_ms } }` ; le travail du tour est **gardé** (comme une
+  interruption) et le message utilisateur du tour suivant commence par la ligne `[system] Your previous turn was
+  stopped after N by the configured turn time limit (L)…` (dans le message, jamais dans le prompt système : le
+  préfixe en cache ne change pas). Le délai d'inactivité du flux du modèle (`OpenAiEndpointConfig::idle_timeout`,
+  120 s) borne toujours un modèle muet.
   `done.provider_session_id` = identifiant du transcript. Les `tool_result` sont émis à leur fin ; le
   modèle les reçoit dans l'ordre des appels.
 - **Transcript** : `ResumeToken { transcript_id }` ; stockage mémoire par défaut, fichiers JSON `0600`
