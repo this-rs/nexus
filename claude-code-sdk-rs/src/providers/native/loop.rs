@@ -567,6 +567,84 @@ fn announce_estimate(core: &Core, estimated: Option<(u64, Option<f64>)>) {
     }
 }
 
+/// What the request log says of a request: its size and a fingerprint of the parts that
+/// a prompt cache needs unchanged from one request to the next.
+struct RequestShape {
+    messages: usize,
+    tools: usize,
+    /// Hash of the system prompt (`0` without one).
+    system_hash: u64,
+    /// Hash of the tool list, in the order sent.
+    tools_hash: u64,
+}
+
+impl RequestShape {
+    fn of(request: &CompletionRequest) -> Self {
+        use std::hash::{Hash, Hasher};
+        let hash = |feed: &dyn Fn(&mut std::collections::hash_map::DefaultHasher)| {
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            feed(&mut hasher);
+            hasher.finish()
+        };
+        let system = request
+            .messages
+            .first()
+            .filter(|message| message.role == Role::System);
+        Self {
+            messages: request.messages.len(),
+            tools: request.tools.len(),
+            system_hash: system.map_or(0, |message| hash(&|h| message.content.hash(h))),
+            tools_hash: hash(&|h| {
+                for tool in &request.tools {
+                    tool.name.hash(h);
+                    tool.description.hash(h);
+                    tool.parameters.to_string().hash(h);
+                }
+            }),
+        }
+    }
+}
+
+/// One INFO line per model request, at its end: what the endpoint reported (prompt,
+/// cached part, completion), how long it took, and the fingerprint of the cacheable
+/// prefix. Read over a conversation, it gives the real cache-hit ratio and shows a
+/// prefix that changed (`system_hash` / `tools_hash` differ between two requests).
+/// No content, no credential: counts, hashes, ids.
+fn log_request(
+    core: &Core,
+    model: &str,
+    // Rank of the request in the turn, from 1.
+    request: u32,
+    shape: &RequestShape,
+    usage: Option<&Usage>,
+    latency: Duration,
+    first_chunk: Option<Duration>,
+) {
+    let cached = usage.and_then(|usage| usage.cache_read_tokens);
+    let prompt = usage
+        .and_then(|usage| usage.input_tokens)
+        .map(|input| input + cached.unwrap_or(0));
+    tracing::info!(
+        target: "nexus_claude::native::request",
+        transcript_id = %core.transcript_id,
+        host_session_id = core.host_session_id.as_deref().unwrap_or("-"),
+        model,
+        request,
+        prompt_tokens = prompt,
+        cached_tokens = cached,
+        completion_tokens = usage.and_then(|usage| usage.output_tokens),
+        reasoning_tokens = usage.and_then(|usage| usage.reasoning_tokens),
+        usage_reported = usage.is_some(),
+        latency_ms = latency.as_millis() as u64,
+        first_chunk_ms = first_chunk.map(|elapsed| elapsed.as_millis() as u64),
+        messages = shape.messages,
+        tools = shape.tools,
+        system_hash = format_args!("{:016x}", shape.system_hash),
+        tools_hash = format_args!("{:016x}", shape.tools_hash),
+        "native model request"
+    );
+}
+
 async fn model_step(
     core: &Core,
     signal: &TurnSignal,
@@ -576,6 +654,8 @@ async fn model_step(
 ) -> Result<Step, ProviderError> {
     let started = Instant::now();
     let prompt_estimate = estimate_tokens(&request.messages);
+    let shape = RequestShape::of(&request);
+    let mut first_chunk: Option<Duration> = None;
     let mut step = Step::default();
     let opened = tokio::select! {
         opened = core.endpoint.complete(request) => opened,
@@ -595,6 +675,7 @@ async fn model_step(
             },
         };
         let Some(chunk) = next else { break };
+        first_chunk.get_or_insert_with(|| started.elapsed());
         match chunk? {
             CompletionChunk::Text(text) => {
                 if core.deltas {
@@ -630,6 +711,15 @@ async fn model_step(
     drop(stream);
     acc.api += started.elapsed();
     acc.requests += 1;
+    log_request(
+        core,
+        model,
+        acc.requests,
+        &shape,
+        usage.as_ref(),
+        started.elapsed(),
+        first_chunk,
+    );
     let completion_estimate = (step.text.len() + step.reasoning.len()) as u64 / CHARS_PER_TOKEN
         + step
             .tool_calls
