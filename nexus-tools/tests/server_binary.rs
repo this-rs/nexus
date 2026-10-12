@@ -377,3 +377,31 @@ fn obscura_alone_without_an_executable_on_the_path_warns_and_websearch_says_why(
     assert_eq!(answers[1]["result"]["isError"], true, "{text}");
     assert!(text.contains("not installed"), "{text}");
 }
+
+#[test]
+fn capabilities_say_what_the_build_carries() {
+    let out = binary().arg("--capabilities").output().unwrap();
+    assert!(out.status.success());
+    let caps: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(caps["version"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(caps["tls"], cfg!(feature = "tls"));
+    assert_eq!(caps["obscura"], cfg!(feature = "obscura"));
+}
+
+// Without the feature, `nexus-tools obscura …` says so instead of running anything
+// (tests/obscura_embedded.rs covers the build that has it).
+#[cfg(not(feature = "obscura"))]
+#[test]
+fn the_obscura_subcommand_says_the_browser_is_not_embedded_in_this_build() {
+    for args in [
+        &["obscura", "mcp"][..],
+        &["obscura", "serp", "q"][..],
+        &["obscura"][..],
+    ] {
+        let out = binary().args(args).output().unwrap();
+        assert_eq!(out.status.code(), Some(2), "{args:?}");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(stderr.contains("without the `obscura` feature"), "{stderr}");
+        assert!(out.stdout.is_empty());
+    }
+}
