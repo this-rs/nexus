@@ -37,7 +37,8 @@ pub use capabilities::{
     SandboxLevel, SubagentSupport,
 };
 pub use credentials::{
-    CredentialRef, CredentialResolver, EnvCredentialResolver, Secret, redact, redact_with,
+    CredentialRef, CredentialResolver, EnvCredentialResolver, KnownSecrets, RecordingResolver,
+    Secret, redact, redact_with,
 };
 pub use error::{ProtocolMismatch, ProviderError};
 pub use event::{
