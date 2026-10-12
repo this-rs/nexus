@@ -8,7 +8,7 @@
 # than implicit; binaries, `mod.rs` and re-exporting `lib.rs`
 # files legitimately live there.
 #
-# 18 diagrams, 344/194 source files claimed, 4 unclaimed.
+# 18 diagrams, 345/194 source files claimed, 4 unclaimed.
 
 diagrams:
   - name: nexus-agent-contract
@@ -41,6 +41,7 @@ diagrams:
       - claude-code-sdk-rs/tests/native_harness.rs
       - claude-code-sdk-rs/tests/native_request_log.rs
       - claude-code-sdk-rs/tests/native_context.rs
+      - claude-code-sdk-rs/tests/native_secret_at_rest.rs
       - claude-code-sdk-rs/tests/support/native.rs
       - claude-code-sdk-rs/src/providers/codex/*.rs
       - claude-code-sdk-rs/src/bin/fake_codex.rs
