@@ -190,6 +190,9 @@ pub(crate) struct Core {
     /// Host callbacks around tools and compaction (`SessionSpec::hooks`).
     pub(crate) hooks: Option<Arc<dyn SessionHooks>>,
     pub(crate) transcript_id: String,
+    /// The host's own id of the session (`extensions.native.host_session_id`), for the
+    /// request log only: it ties a model request to the host's conversation.
+    pub(crate) host_session_id: Option<String>,
     pub(crate) store: Arc<dyn TranscriptStore>,
     pub(crate) state: Mutex<State>,
     pub(crate) wake: Notify,
@@ -211,6 +214,7 @@ pub(crate) struct CoreParts {
     pub(crate) cwd: std::path::PathBuf,
     pub(crate) hooks: Option<Arc<dyn SessionHooks>>,
     pub(crate) transcript_id: String,
+    pub(crate) host_session_id: Option<String>,
     pub(crate) store: Arc<dyn TranscriptStore>,
     pub(crate) policy: ToolPolicy,
     pub(crate) model: String,
@@ -261,6 +265,7 @@ impl Core {
             cwd: parts.cwd,
             hooks: parts.hooks,
             transcript_id: parts.transcript_id,
+            host_session_id: parts.host_session_id,
             store: parts.store,
             state: Mutex::new(state),
             wake: Notify::new(),
