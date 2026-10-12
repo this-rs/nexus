@@ -110,6 +110,11 @@ required-features = ["testkit", "provider-native"]
 name = "native_harness"
 required-features = ["provider-native"]
 
+# Tokens and cache of a native turn, prefix stability, and the reference benchmark (ignored).
+[[test]]
+name = "native_context"
+required-features = ["provider-native"]
+
 [[test]]
 name = "agent_registry"
 required-features = ["provider-native"]
