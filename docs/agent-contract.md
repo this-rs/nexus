@@ -1051,7 +1051,7 @@ La projection `Message → AgentEvent` est la fonction publique
 | `StreamEvent` → `MessageStart`, `MessageDelta`, `ContentBlockStop`, `MessageStop`, `ContentBlockStart` non `tool_use` | (rien) | — | — | — |
 | `System { subtype: "init" }` | `session_started` | `provider_session_id` ← `data.session_id` ; `model` ← `data.model` ; `tools` ← `data.tools[]` (chaînes) ; `mcp_servers` ← `data.mcp_servers[]` (`name`, `status`) ; `native_mode` ← `data.permissionMode` ; `policy_mode` ← table §6 ; `cwd` ← `data.cwd` | `system_init` | `cli_session_id` ← `provider_session_id` (défaut `""`) ; `model` ; `tools` ; `mcp_servers` ← `[{name, status}]` ; `permission_mode` ← `native_mode` ; nouveaux (A42) : `provider`, `capabilities`, `tool_policy` ajoutés par le backend |
 | `System { subtype: "compact_boundary" }` | `compaction { phase: completed }` | `trigger` ← `data.compact_metadata.trigger` (`"manual"`/`"auto"`, absent → `auto`) ; `pre_tokens` ← `data.compact_metadata.pre_tokens` | `compact_boundary` | `trigger` (chaîne) ; `pre_tokens` |
-| hook `PreCompact` (callback en protocole, pas un `Message`) | `compaction { phase: started }` | `trigger` ← `HookInput::PreCompact.trigger` | `compaction_started` | `trigger` |
+| hook `PreCompact` (callback en protocole, pas un `Message`) | `compaction { phase: started }` | `trigger` ← `HookInput::PreCompact.trigger` ; réponse au CLI : `{"systemMessage": <texte de before_compaction>}` si ce texte n'est pas vide, sinon `{}` (le CLI ajoute `systemMessage` aux instructions du résumé, ignore `reason` et rejette `hookSpecificOutput` : mesuré sur Claude Code 2.1.295, M2c) | `compaction_started` | `trigger` |
 | `System { subtype: task_started \| task_progress \| task_updated \| task_notification }` | `task_update` | `phase` ← suffixe du sous-type ; `task_id` ← `data.task_id` ; `tool_call_id` ← `data.tool_use_id` ; `description`, `status`, `summary` ← clés homonymes ; `event_id` ← `data.uuid` ; `data` ← `data` entier | `workflow` | `subtype` ← `"task_" + phase` ; `data` ← `data` (dédoublonnage sur `event_id`) |
 | `System { subtype: "background_tasks_changed" }` | `background_tasks` | `tasks[]` ← `data.tasks[]` (lecture tolérante : `id`\|`task_id`, `type`\|`kind`, `description`\|`command`, `status`) | (compteur `cli_background_tasks` ← `tasks.len()` ; `active_tasks_update` quand B13b remplace le suivi par PID) | — |
 | `System` d'un autre sous-type (`status`, inconnu) | `provider_notice` | `kind` ← `subtype` ; `data` ← `data` | en tour : rien ; hors tour : `background_output { source: "system:" + kind, content: pretty(data) }` | vidage opaque, aucun champ lu (seule exception admise à A5 : c'est déjà un vidage JSON aujourd'hui) |
@@ -1130,7 +1130,7 @@ destination `session` / `localSettings`. Le backend n'envoie que `once` aujourd'
 `permission_prompt_tool_name` ← `"stdio"`, `cli_channel_buffer_size` ← 8192, `mcp_servers`,
 `allowed_tools` / `disallowed_tools` ← `policy.allow` / `policy.deny` (omis si vides), `resume` ←
 jeton, `add_dirs` ← `extra_dirs`, `env` ← `EnvSpec.set`, `cli_path` ← extension, hooks
-`PreToolUse` / `PostToolUse` / `PreCompact` (matcher `None`) ← `SessionHooks` quand présent.
+`PreToolUse` / `PostToolUse` / `PreCompact` (matcher `None`) ← `SessionHooks` quand présent (`before_compaction` → `systemMessage`, cf. §14.1).
 
 ## 16. Versionnement et features cargo (A12, A14)
 
