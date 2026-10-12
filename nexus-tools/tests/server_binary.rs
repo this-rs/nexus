@@ -314,15 +314,20 @@ fn the_html_engine_needs_its_name_and_says_what_it_is() {
 #[cfg(unix)]
 #[test]
 fn the_obscura_engine_is_named_by_path_and_answers_through_websearch() {
-    use std::os::unix::fs::PermissionsExt;
+    // The committed stand-in, linked: a script written then executed races with the forks of
+    // other test threads on Linux (ETXTBSY). Its behaviour is the sourced `body.sh`.
     let dir = tempfile::tempdir().unwrap();
-    let program = dir.path().join("obscura");
     std::fs::write(
-        &program,
-        "#!/bin/sh\necho '[{\"url\":\"https://docs.rs/obscura\",\"title\":\"From Obscura\",\"snippet\":\"s\"}]'\n",
+        dir.path().join("body.sh"),
+        "echo '[{\"url\":\"https://docs.rs/obscura\",\"title\":\"From Obscura\",\"snippet\":\"s\"}]'\n",
     )
     .unwrap();
-    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let program = dir.path().join("obscura");
+    std::os::unix::fs::symlink(
+        concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data/fake_obscura.sh"),
+        &program,
+    )
+    .unwrap();
     let child = binary()
         .args(["--unrestricted", "--search-engine"])
         .arg(format!("obscura:{}", program.display()))

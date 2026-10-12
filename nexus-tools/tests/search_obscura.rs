@@ -17,21 +17,16 @@ use serde_json::json;
 
 const GOLDEN: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data/obscura_serp.json");
 
-/// A fake `obscura` in `dir`: records its argv (one per line) and environment, then runs `body`.
+/// The committed stand-in (`tests/data/fake_obscura.sh`): never written at test time, so no
+/// spawn can fail with ETXTBSY on Linux.
+const FAKE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data/fake_obscura.sh");
+
+/// A fake `obscura` in `dir`: a link to [`FAKE`], which records its argv (one per line, in
+/// `dir/argv`) and environment (`dir/env`), then sources `body` from `dir/body.sh`.
 fn fake(dir: &Path, body: &str) -> PathBuf {
+    std::fs::write(dir.join("body.sh"), format!("{body}\n")).unwrap();
     let path = dir.join("fake-obscura");
-    let log = dir.join("argv");
-    let env = dir.join("env");
-    std::fs::write(
-        &path,
-        format!(
-            "#!/bin/sh\nfor a in \"$@\"; do printf '%s\\n' \"$a\"; done > '{}'\nenv > '{}'\n{body}\n",
-            log.display(),
-            env.display()
-        ),
-    )
-    .unwrap();
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::os::unix::fs::symlink(FAKE, &path).unwrap();
     path
 }
 
@@ -56,8 +51,19 @@ async fn call(tool: &WebSearchTool, args: serde_json::Value) -> ToolResult {
     .await
 }
 
+/// Whether `pid` is still a running process. A zombie (exited, not yet reaped by whoever its
+/// parent is now) is not: on Linux it still answers `kill -0`, so its state is read first.
 fn alive(pid: i32) -> bool {
-    // `kill -0`: is there still such a process (a zombie of ours counts as gone once reaped).
+    if let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+        // `pid (comm) S ...`: the state follows the last `)`.
+        let state = stat
+            .rsplit_once(')')
+            .and_then(|(_, rest)| rest.trim_start().chars().next());
+        return !matches!(state, Some('Z' | 'X') | None);
+    }
+    if std::path::Path::new("/proc/self/stat").exists() {
+        return false; // a /proc without this pid: gone
+    }
     std::process::Command::new("kill")
         .args(["-0", &pid.to_string()])
         .stderr(std::process::Stdio::null())
@@ -66,8 +72,10 @@ fn alive(pid: i32) -> bool {
         .unwrap_or(false)
 }
 
+/// Polls until `path` has content, with a deadline (slow CI, coverage builds).
 async fn wait_for(path: &Path) -> String {
-    for _ in 0..200 {
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    while std::time::Instant::now() < deadline {
         if let Ok(text) = std::fs::read_to_string(path)
             && !text.trim().is_empty()
         {
@@ -251,7 +259,8 @@ fn parse_pids(text: &str) -> Vec<i32> {
 }
 
 async fn all_gone(pids: &[i32]) -> bool {
-    for _ in 0..100 {
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    while std::time::Instant::now() < deadline {
         if pids.iter().all(|&p| !alive(p)) {
             return true;
         }
@@ -265,7 +274,7 @@ async fn a_slow_search_times_out_and_its_whole_group_is_killed() {
     let dir = tempfile::tempdir().unwrap();
     let (program, pids) = hanging(dir.path());
     let error = ObscuraBackend::new(&program)
-        .with_timeout(Duration::from_secs(2))
+        .with_timeout(Duration::from_secs(5))
         .search(&query("slow", 3))
         .await
         .unwrap_err();
@@ -284,7 +293,16 @@ async fn a_cancelled_search_kills_its_whole_group() {
     let (program, pids_file) = hanging(dir.path());
     let backend = ObscuraBackend::new(&program);
     let search = tokio::spawn(async move { backend.search(&query("cancelled", 3)).await });
-    let pids = parse_pids(&wait_for(&pids_file).await);
+    let pids = tokio::select! {
+        text = wait_for(&pids_file) => parse_pids(&text),
+        () = async {
+            while !search.is_finished() {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        } => {
+            panic!("the search ended before it was cancelled: {:?}", search.await)
+        },
+    };
     assert!(pids.iter().all(|&p| alive(p)), "started: {pids:?}");
     search.abort();
     let _ = search.await;
