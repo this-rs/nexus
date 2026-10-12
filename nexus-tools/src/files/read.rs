@@ -107,11 +107,14 @@ impl Tool for ReadTool {
                 "EISDIR: illegal operation on a directory, read '{given}'"
             ));
         }
+        if !meta.is_file() {
+            return ToolResult::error(super::not_regular(given));
+        }
         // A picture comes back as an image block, with a text line that stands in for it where the
         // consumer cannot show images (the native harness has none in v1).
         if let Some(mime) = image_type(&path)
             && meta.len() <= MAX_IMAGE_BYTES
-            && let Ok(bytes) = std::fs::read(&path)
+            && let Ok(bytes) = super::read_regular(&path, MAX_IMAGE_BYTES)
             && sniff(&bytes) == Some(mime)
         {
             file_state(context).record(&path);
@@ -136,8 +139,14 @@ impl Tool for ReadTool {
         if meta.len() > self.config.max_text_bytes {
             return self.config.too_large(given, meta.len(), "Read");
         }
-        let bytes = match std::fs::read(&path) {
+        let bytes = match super::read_regular(&path, self.config.max_text_bytes) {
             Ok(bytes) => bytes,
+            // It grew past the limit since its size was read.
+            Err(error) if error.kind() == std::io::ErrorKind::InvalidData => {
+                let size =
+                    std::fs::metadata(&path).map_or(self.config.max_text_bytes + 1, |m| m.len());
+                return self.config.too_large(given, size, "Read");
+            },
             Err(error) => return ToolResult::error(format!("{error}: read '{given}'")),
         };
         let Ok(text) = String::from_utf8(bytes) else {

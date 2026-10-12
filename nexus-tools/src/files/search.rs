@@ -14,7 +14,7 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::SystemTime;
+use std::time::{Duration, Instant, SystemTime};
 
 use async_trait::async_trait;
 use ignore::WalkBuilder;
@@ -23,7 +23,7 @@ use ignore::types::TypesBuilder;
 use regex::RegexBuilder;
 use serde_json::{Value, json};
 
-use super::FileConfig;
+use super::{FileConfig, Scope};
 use crate::tool::{Annotations, CallContext, Tool, ToolResult};
 
 /// Entries returned when `head_limit` is not given.
@@ -45,16 +45,47 @@ impl Drop for StopOnDrop {
     }
 }
 
-fn walker(root: &Path) -> WalkBuilder {
+/// A walk of `root` that skips version-control directories and never enters a denied place
+/// (`/proc/<pid>/environ`, a `--deny-path`). Symlinks are not followed, so the walked paths are
+/// real paths below the (resolved) root and the deny check applies to them as they are.
+fn walker(root: &Path, scope: Arc<Scope>) -> WalkBuilder {
     let mut builder = WalkBuilder::new(root);
-    builder.hidden(false).filter_entry(|entry| {
-        !(entry.file_type().is_some_and(|t| t.is_dir())
+    builder.hidden(false).filter_entry(move |entry| {
+        let vcs = entry.file_type().is_some_and(|t| t.is_dir())
             && entry
                 .file_name()
                 .to_str()
-                .is_some_and(|name| VCS_DIRS.contains(&name)))
+                .is_some_and(|name| VCS_DIRS.contains(&name));
+        if vcs {
+            return false;
+        }
+        // The identity of each entry, only when some denied place had one at launch (an extra
+        // `lstat` per entry): it catches a second spelling of a denied directory below the root.
+        let metadata = scope
+            .denies_by_identity()
+            .then(|| entry.metadata().ok())
+            .flatten();
+        !scope.is_denied_entry(entry.path(), metadata.as_ref())
     });
     builder
+}
+
+/// When a walk must stop (`FileConfig::search_time_limit`).
+fn deadline(limit: Option<Duration>) -> Option<Instant> {
+    limit.map(|limit| Instant::now() + limit)
+}
+
+/// Whether a walk with this deadline has run out of time.
+fn expired(deadline: Option<Instant>) -> bool {
+    deadline.is_some_and(|at| Instant::now() >= at)
+}
+
+/// Appended to the answer of a walk stopped by its time limit.
+fn stopped_note(limit: Option<Duration>) -> String {
+    format!(
+        "(Search stopped after {} s: the results are partial. Search a narrower `path`.)",
+        limit.unwrap_or_default().as_secs()
+    )
 }
 
 fn shown(path: &Path, cwd: &Path) -> String {
@@ -128,10 +159,18 @@ impl Tool for GlobTool {
         let cwd = self.config.scope.cwd().to_path_buf();
         let stop = Arc::new(AtomicBool::new(false));
         let _guard = StopOnDrop(Arc::clone(&stop));
-        let found = tokio::task::spawn_blocking(move || {
+        let limit = self.config.search_time_limit;
+        let until = deadline(limit);
+        let scope = self.config.scope();
+        let (found, timed_out) = tokio::task::spawn_blocking(move || {
             let mut files: Vec<(SystemTime, PathBuf)> = Vec::new();
-            for entry in walker(&root).build().flatten() {
+            let mut timed_out = false;
+            for entry in walker(&root, scope).build().flatten() {
                 if stop.load(Ordering::Relaxed) {
+                    break;
+                }
+                if expired(until) {
+                    timed_out = true;
                     break;
                 }
                 if !entry.file_type().is_some_and(|t| t.is_file()) {
@@ -143,26 +182,36 @@ impl Tool for GlobTool {
                 }
             }
             files.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
-            files
+            (files, timed_out)
         })
         .await
         .unwrap_or_default();
-        if found.is_empty() {
-            return ToolResult::ok("No files found");
+        let mut result = glob_answer(&found, &cwd);
+        if timed_out {
+            result.text.push_str("\n\n");
+            result.text.push_str(&stopped_note(limit));
         }
-        let truncated = found.len() > GLOB_LIMIT;
-        let mut lines: Vec<String> = found
-            .iter()
-            .take(GLOB_LIMIT)
-            .map(|(_, path)| shown(path, &cwd))
-            .collect();
-        if truncated {
-            lines.push(
-                "(Results are truncated. Consider using a more specific path or pattern.)".into(),
-            );
-        }
-        ToolResult::ok(lines.join("\n"))
+        result
     }
+}
+
+/// The answer of `Glob` for the paths it found, newest first.
+fn glob_answer(found: &[(SystemTime, PathBuf)], cwd: &Path) -> ToolResult {
+    if found.is_empty() {
+        return ToolResult::ok("No files found");
+    }
+    let truncated = found.len() > GLOB_LIMIT;
+    let mut lines: Vec<String> = found
+        .iter()
+        .take(GLOB_LIMIT)
+        .map(|(_, path)| shown(path, cwd))
+        .collect();
+    if truncated {
+        lines.push(
+            "(Results are truncated. Consider using a more specific path or pattern.)".into(),
+        );
+    }
+    ToolResult::ok(lines.join("\n"))
 }
 
 fn search_root(config: &FileConfig, path: Option<&Value>) -> Result<PathBuf, String> {
@@ -299,7 +348,7 @@ impl Tool for GrepTool {
             Ok(root) => root,
             Err(message) => return ToolResult::error(message),
         };
-        let mut builder = walker(&root);
+        let mut builder = walker(&root, self.config.scope());
         if let Some(glob) = arguments.get("glob").and_then(Value::as_str) {
             let mut overrides = OverrideBuilder::new(&root);
             // Several patterns may be given, separated by spaces: `*.ts *.tsx`.
@@ -337,10 +386,17 @@ impl Tool for GrepTool {
 
         let stop = Arc::new(AtomicBool::new(false));
         let _guard = StopOnDrop(Arc::clone(&stop));
+        let limit = self.config.search_time_limit;
+        let until = deadline(limit);
         let hits = tokio::task::spawn_blocking(move || {
             let mut hits: Vec<Hit> = Vec::new();
+            let mut timed_out = false;
             for entry in builder.build().flatten() {
                 if stop.load(Ordering::Relaxed) {
+                    break;
+                }
+                if expired(until) {
+                    timed_out = true;
                     break;
                 }
                 if !entry.file_type().is_some_and(|t| t.is_file()) {
@@ -350,14 +406,19 @@ impl Tool for GrepTool {
                     hits.push(hit);
                 }
             }
-            (hits, query)
+            (hits, query, timed_out)
         })
         .await;
-        let Ok((mut hits, query)) = hits else {
+        let Ok((mut hits, query, timed_out)) = hits else {
             return ToolResult::error("the search failed unexpectedly");
         };
         hits.sort_by(|a, b| a.path.cmp(&b.path));
-        render(hits, &query, &cwd, single_file, Page { head_limit, offset })
+        let mut result = render(hits, &query, &cwd, single_file, Page { head_limit, offset });
+        if timed_out {
+            result.text.push_str("\n\n");
+            result.text.push_str(&stopped_note(limit));
+        }
+        result
     }
 }
 
@@ -375,7 +436,18 @@ fn search_file(path: &Path, query: &Query) -> Option<Hit> {
     if meta.len() > MAX_FILE_BYTES {
         return None;
     }
-    let bytes = std::fs::read(path).ok()?;
+    // Read at most one byte past the ceiling: the size in the metadata is not the size of every
+    // file (`/proc` files say 0, and `/proc/<pid>/pagemap` reads for gigabytes), and an
+    // unscoped search can be pointed at `/`.
+    let mut bytes = Vec::new();
+    std::io::Read::read_to_end(
+        &mut std::io::Read::take(std::fs::File::open(path).ok()?, MAX_FILE_BYTES + 1),
+        &mut bytes,
+    )
+    .ok()?;
+    if bytes.len() as u64 > MAX_FILE_BYTES {
+        return None;
+    }
     // As ripgrep: a NUL byte near the start means "binary", and a binary file is not searched.
     if bytes.iter().take(8192).any(|b| *b == 0) {
         return None;

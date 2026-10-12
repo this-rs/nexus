@@ -501,6 +501,7 @@ fn token(sid: &str, tools: &[&str], ttl: i64) -> String {
             sid: sid.into(),
             tools: tools.iter().map(|t| (*t).to_owned()).collect(),
             exp: (now() as i64 + ttl) as u64,
+            unscoped: false,
         },
     )
 }
@@ -831,6 +832,7 @@ async fn http_refuses_a_well_formed_token_with_a_wrong_or_stolen_signature() {
             sid: "s".into(),
             tools: vec!["echo".into()],
             exp,
+            unscoped: false,
         },
     );
     assert_eq!(

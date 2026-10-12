@@ -552,6 +552,415 @@ async fn an_additional_directory_is_part_of_the_scope() {
     assert_eq!(r.text, "1\textra\n2\t");
 }
 
+/// `--unscoped` (trust mode): the roots are not enforced — a worktree created by
+/// another harness, outside the launch directories, can be read and written.
+#[tokio::test]
+async fn an_unscoped_session_reaches_outside_every_root() {
+    let outside = tempfile::tempdir().unwrap();
+    std::fs::write(outside.path().join("w.txt"), "worktree\n").unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let scope = Scope::new(dir.path(), []).unwrap().without_bounds();
+    let registry = register(ToolRegistry::new(), &FileConfig::new(scope));
+    let profile = nexus_tools::Profile::unrestricted("s");
+    let context = CallContext::new("s", Arc::new(SessionState::default()));
+    let read = registry
+        .resolve(&profile, "Read")
+        .unwrap()
+        .call(
+            &context,
+            json!({"file_path": outside.path().join("w.txt").display().to_string()}),
+        )
+        .await;
+    assert_eq!(read.text, "1\tworktree\n2\t");
+    let write = registry
+        .resolve(&profile, "Write")
+        .unwrap()
+        .call(
+            &context,
+            json!({
+                "file_path": outside.path().join("new.txt").display().to_string(),
+                "content": "created outside\n",
+            }),
+        )
+        .await;
+    assert!(!write.is_error, "{}", write.text);
+    assert_eq!(
+        std::fs::read_to_string(outside.path().join("new.txt")).unwrap(),
+        "created outside\n"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The deny list (`--deny-path`, `/proc/<pid>/environ`): it holds even when unscoped
+// ---------------------------------------------------------------------------
+
+/// A session over `root`, unscoped or not, with `denied` on its deny list.
+struct Denied {
+    registry: ToolRegistry,
+    context: CallContext,
+}
+
+impl Denied {
+    fn new(root: &Path, denied: Vec<std::path::PathBuf>, unscoped: bool) -> Self {
+        Self::with(root, denied, unscoped, |config| config)
+    }
+
+    fn with(
+        root: &Path,
+        denied: Vec<std::path::PathBuf>,
+        unscoped: bool,
+        adjust: impl FnOnce(FileConfig) -> FileConfig,
+    ) -> Self {
+        let mut scope = Scope::new(root, []).unwrap();
+        if unscoped {
+            scope = scope.without_bounds();
+        }
+        let scope = scope.with_denied(denied).unwrap();
+        Self {
+            registry: register(ToolRegistry::new(), &adjust(FileConfig::new(scope))),
+            context: CallContext::new("s", Arc::new(SessionState::default())),
+        }
+    }
+
+    async fn call(&self, tool: &str, arguments: Value) -> ToolResult {
+        self.registry
+            .resolve(&nexus_tools::Profile::unrestricted("s"), tool)
+            .unwrap()
+            .call(&self.context, arguments)
+            .await
+    }
+}
+
+fn is_denied(r: &ToolResult) -> bool {
+    r.is_error && r.text.contains("may never access")
+}
+
+#[tokio::test]
+async fn the_deny_list_holds_even_when_unscoped_for_every_tool() {
+    let root = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let ssh = home.path().join(".ssh");
+    std::fs::create_dir_all(&ssh).unwrap();
+    std::fs::write(ssh.join("id_ed25519"), "PRIVATE KEY\n").unwrap();
+    std::fs::write(home.path().join("notes.txt"), "fine\n").unwrap();
+    for unscoped in [true, false] {
+        // Bounded: the denied directory is inside a root, so only the deny list can refuse it.
+        let session_root = if unscoped { root.path() } else { home.path() };
+        let s = Denied::new(session_root, vec![ssh.clone()], unscoped);
+        let key = ssh.join("id_ed25519").display().to_string();
+        let planted = ssh.join("authorized_keys").display().to_string();
+        assert!(is_denied(&s.call("Read", json!({"file_path": key})).await));
+        let w = s
+            .call(
+                "Write",
+                json!({"file_path": planted, "content": "attacker\n"}),
+            )
+            .await;
+        assert!(is_denied(&w), "{unscoped}: {}", w.text);
+        let e = s
+            .call(
+                "Edit",
+                json!({"file_path": key, "old_string": "PRIVATE", "new_string": "x"}),
+            )
+            .await;
+        assert!(is_denied(&e), "{unscoped}: {}", e.text);
+        // The directory itself, as a search root, and through `..`.
+        let g = s
+            .call(
+                "Grep",
+                json!({"pattern": "KEY", "path": ssh.display().to_string()}),
+            )
+            .await;
+        assert!(
+            g.is_error && g.text.contains("may never access"),
+            "{}",
+            g.text
+        );
+        let dotdot = home
+            .path()
+            .join(".ssh")
+            .join("..")
+            .join(".ssh")
+            .join("id_ed25519");
+        let r = s
+            .call("Read", json!({"file_path": dotdot.display().to_string()}))
+            .await;
+        assert!(is_denied(&r), "{unscoped}: {}", r.text);
+        // What is next to it is not denied.
+        let ok = s
+            .call(
+                "Read",
+                json!({"file_path": home.path().join("notes.txt").display().to_string()}),
+            )
+            .await;
+        assert_eq!(ok.text, "1\tfine\n2\t", "{unscoped}");
+    }
+    assert!(!ssh.join("authorized_keys").exists());
+    assert_eq!(
+        std::fs::read_to_string(ssh.join("id_ed25519")).unwrap(),
+        "PRIVATE KEY\n"
+    );
+}
+
+#[tokio::test]
+async fn a_walk_over_a_parent_never_enters_a_denied_directory() {
+    let home = tempfile::tempdir().unwrap();
+    let ssh = home.path().join(".ssh");
+    std::fs::create_dir_all(&ssh).unwrap();
+    std::fs::write(ssh.join("id_ed25519"), "SECRET-KEY-MATERIAL\n").unwrap();
+    std::fs::write(home.path().join("visible.txt"), "SECRET-KEY-MATERIAL\n").unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let s = Denied::new(root.path(), vec![ssh.clone()], true);
+    let path = home.path().display().to_string();
+    let grep = s
+        .call(
+            "Grep",
+            json!({"pattern": "SECRET", "path": path, "output_mode": "content"}),
+        )
+        .await;
+    assert!(grep.text.contains("visible.txt"), "{}", grep.text);
+    assert!(!grep.text.contains("id_ed25519"), "{}", grep.text);
+    let glob = s
+        .call("Glob", json!({"pattern": "**/*", "path": path}))
+        .await;
+    assert!(glob.text.contains("visible.txt"), "{}", glob.text);
+    assert!(!glob.text.contains("id_ed25519"), "{}", glob.text);
+}
+
+#[tokio::test]
+async fn a_denied_place_created_later_is_still_denied() {
+    let root = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let later = home.path().join("vault");
+    let s = Denied::new(root.path(), vec![later.clone()], true);
+    std::fs::create_dir_all(&later).unwrap();
+    std::fs::write(later.join("store"), "sealed\n").unwrap();
+    let r = s
+        .call(
+            "Read",
+            json!({"file_path": later.join("store").display().to_string()}),
+        )
+        .await;
+    assert!(is_denied(&r), "{}", r.text);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_symlink_into_a_denied_directory_is_denied() {
+    let root = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let claude = home.path().join(".claude");
+    std::fs::create_dir_all(&claude).unwrap();
+    std::fs::write(claude.join("mcp.json"), "{\"secret\":1}\n").unwrap();
+    std::os::unix::fs::symlink(&claude, root.path().join("cfg")).unwrap();
+    std::os::unix::fs::symlink(claude.join("mcp.json"), root.path().join("m.json")).unwrap();
+    // The deny path is given through a link as well: its real place is what counts.
+    std::os::unix::fs::symlink(home.path(), root.path().join("home-link")).unwrap();
+    let through_link = root.path().join("home-link").join(".claude");
+    for (unscoped, denied) in [(true, claude.clone()), (false, through_link)] {
+        let s = Denied::new(root.path(), vec![denied], unscoped);
+        for (tool, args) in [
+            (
+                "Read",
+                json!({"file_path": root.path().join("cfg/mcp.json").display().to_string()}),
+            ),
+            (
+                "Read",
+                json!({"file_path": root.path().join("m.json").display().to_string()}),
+            ),
+            (
+                "Write",
+                json!({"file_path": root.path().join("cfg/settings.json").display().to_string(), "content": "{}"}),
+            ),
+            (
+                "Read",
+                json!({"file_path": root.path().join("cfg/../.claude/mcp.json").display().to_string()}),
+            ),
+        ] {
+            let r = s.call(tool, args.clone()).await;
+            assert!(is_denied(&r), "{unscoped} {tool} {args}: {}", r.text);
+        }
+    }
+    assert!(!claude.join("settings.json").exists());
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn a_process_environment_is_always_denied() {
+    let root = tempfile::tempdir().unwrap();
+    let s = Denied::new(root.path(), vec![], true);
+    let parent = format!("/proc/{}/environ", std::os::unix::process::parent_id());
+    for path in [
+        "/proc/self/environ",
+        parent.as_str(),
+        "/proc/self/task/../environ",
+    ] {
+        let r = s.call("Read", json!({"file_path": path})).await;
+        assert!(is_denied(&r), "{path}: {}", r.text);
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn a_denied_directory_is_denied_whatever_the_case_on_macos() {
+    let root = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let ssh = home.path().join(".ssh");
+    std::fs::create_dir_all(&ssh).unwrap();
+    std::fs::write(ssh.join("id_rsa"), "key\n").unwrap();
+    let s = Denied::new(root.path(), vec![ssh], true);
+    let shouted = home.path().join(".SSH").join("ID_RSA");
+    let r = s
+        .call("Read", json!({"file_path": shouted.display().to_string()}))
+        .await;
+    assert!(is_denied(&r), "{}", r.text);
+}
+
+/// A second spelling the kernel does not fold: on macOS `/System/Volumes/Data/<path>` is
+/// `<path>` (a firmlink), and `realpath` keeps either spelling. The identity of the denied
+/// directory, recorded at launch, refuses it for `Read` and keeps `Grep` out of it.
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn a_firmlink_spelling_of_a_denied_directory_is_denied_on_macos() {
+    let root = tempfile::tempdir().unwrap();
+    let home_temp = tempfile::tempdir().unwrap();
+    let home = std::fs::canonicalize(home_temp.path()).unwrap();
+    let ssh = home.join(".ssh");
+    std::fs::create_dir_all(&ssh).unwrap();
+    std::fs::write(ssh.join("id_ed25519"), "FIRMLINK-SECRET\n").unwrap();
+    let twin = Path::new("/System/Volumes/Data").join(home.strip_prefix("/").unwrap());
+    if !twin.join(".ssh").join("id_ed25519").exists() {
+        eprintln!(
+            "no firmlink twin for {} here: nothing to test",
+            home.display()
+        );
+        return;
+    }
+    let s = Denied::new(root.path(), vec![ssh.clone()], true);
+    let r = s
+        .call(
+            "Read",
+            json!({"file_path": twin.join(".ssh/id_ed25519").display().to_string()}),
+        )
+        .await;
+    assert!(is_denied(&r), "{}", r.text);
+    let grep = s
+        .call(
+            "Grep",
+            json!({"pattern": "FIRMLINK-SECRET", "path": twin.display().to_string(), "output_mode": "content"}),
+        )
+        .await;
+    assert!(!grep.text.contains("FIRMLINK-SECRET"), "{}", grep.text);
+}
+
+/// The identity check on its own, wherever hard links exist: a hard link to a denied file, made
+/// inside the session's root, is the denied file.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_hard_link_to_a_denied_file_is_denied_for_read_and_for_a_walk() {
+    let root = tempfile::tempdir().unwrap();
+    let vault = root.path().join("vault");
+    std::fs::create_dir_all(&vault).unwrap();
+    std::fs::write(vault.join("store"), "HARDLINK-SECRET\n").unwrap();
+    std::fs::hard_link(vault.join("store"), root.path().join("innocent.txt")).unwrap();
+    for unscoped in [true, false] {
+        let s = Denied::new(root.path(), vec![vault.join("store")], unscoped);
+        let r = s
+            .call(
+                "Read",
+                json!({"file_path": root.path().join("innocent.txt").display().to_string()}),
+            )
+            .await;
+        assert!(is_denied(&r), "{unscoped}: {}", r.text);
+        let grep = s
+            .call(
+                "Grep",
+                json!({"pattern": "HARDLINK", "path": root.path().display().to_string(), "output_mode": "content"}),
+            )
+            .await;
+        assert!(
+            !grep.text.contains("HARDLINK-SECRET"),
+            "{unscoped}: {}",
+            grep.text
+        );
+    }
+}
+
+/// `/dev/zero` never ends and a FIFO blocks until someone writes; both say their size is 0.
+/// Read, Edit and NotebookEdit refuse them before opening them.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_device_or_a_pipe_is_refused_and_never_opened() {
+    let root = tempfile::tempdir().unwrap();
+    let fifo = root.path().join("pipe.ipynb");
+    let made = std::process::Command::new("mkfifo")
+        .arg(&fifo)
+        .status()
+        .unwrap();
+    assert!(made.success());
+    let s = Denied::new(root.path(), vec![], true);
+    let fifo = fifo.display().to_string();
+    for (tool, args) in [
+        ("Read", json!({"file_path": "/dev/zero"})),
+        ("Read", json!({"file_path": fifo})),
+        (
+            "Edit",
+            json!({"file_path": "/dev/zero", "old_string": "a", "new_string": "b"}),
+        ),
+        (
+            "Edit",
+            json!({"file_path": fifo, "old_string": "a", "new_string": "b"}),
+        ),
+        (
+            "NotebookEdit",
+            json!({"notebook_path": fifo, "new_source": "x", "cell_id": "c"}),
+        ),
+    ] {
+        let r = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            s.call(tool, args.clone()),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("{tool} {args} blocked"));
+        assert!(
+            r.is_error && r.text.contains("Not a regular file"),
+            "{tool} {args}: {}",
+            r.text
+        );
+    }
+}
+
+#[tokio::test]
+async fn an_unscoped_search_stops_at_its_time_limit_and_says_so() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join("a.txt"), "needle\n").unwrap();
+    let s = Denied::with(root.path(), vec![], true, |config| {
+        config.with_search_time_limit(Some(std::time::Duration::ZERO))
+    });
+    let path = root.path().display().to_string();
+    for (tool, args) in [
+        ("Glob", json!({"pattern": "*.txt", "path": path})),
+        ("Grep", json!({"pattern": "needle", "path": path})),
+    ] {
+        let r = s.call(tool, args).await;
+        assert!(
+            r.text.contains("Search stopped after 0 s"),
+            "{tool}: {}",
+            r.text
+        );
+    }
+    // The default of an unscoped session leaves an ordinary search alone.
+    let s = Denied::new(root.path(), vec![], true);
+    let r = s
+        .call("Glob", json!({"pattern": "*.txt", "path": path}))
+        .await;
+    assert!(
+        r.text.contains("a.txt") && !r.text.contains("Search stopped"),
+        "{}",
+        r.text
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Atomic writes
 // ---------------------------------------------------------------------------

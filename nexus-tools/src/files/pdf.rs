@@ -47,7 +47,7 @@ pub fn read(path: &Path, pages: Option<&str>) -> Result<String, String> {
             MAX_FILE_BYTES / 1024 / 1024
         ));
     }
-    let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
+    let bytes = super::read_regular(path, MAX_FILE_BYTES).map_err(|e| e.to_string())?;
     let document = lopdf::Document::load_mem(&bytes)
         .map_err(|_| "This file is not a PDF that can be read (it may be damaged).".to_owned())?;
     if document.is_encrypted() {

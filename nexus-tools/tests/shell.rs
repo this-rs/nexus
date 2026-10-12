@@ -231,6 +231,46 @@ async fn the_working_directory_persists_and_a_cd_out_of_scope_is_undone() {
     );
 }
 
+/// Unscoped (`--unscoped`, trust mode): a `cd` outside the roots is kept, since the scope accepts
+/// the directory; a `cd` into a denied place is still undone.
+#[tokio::test]
+async fn an_unscoped_session_keeps_a_cd_outside_the_roots_but_not_into_a_denied_place() {
+    let dir = tempfile::tempdir().unwrap();
+    let work = dir.path().join("work");
+    let out = dir.path().join("out");
+    let other = tempfile::tempdir().unwrap();
+    let elsewhere = std::fs::canonicalize(other.path()).unwrap();
+    let denied = elsewhere.join("keys");
+    for d in [&work, &out, &denied] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    let scope = Scope::new(&work, [out.clone()])
+        .unwrap()
+        .without_bounds()
+        .with_denied([denied.clone()])
+        .unwrap();
+    let config = ShellConfig::new(Arc::new(scope), out).unwrap();
+    let registry = register(ToolRegistry::new(), &config);
+    let context = CallContext::new("s", Arc::new(SessionState::default()));
+    let bash = |command: &str| {
+        let tool = registry
+            .resolve(&Profile::unrestricted("s"), "Bash")
+            .unwrap();
+        let arguments = json!({"command": command});
+        let context = &context;
+        async move { tool.call(context, arguments).await }
+    };
+    let cd = |to: &Path| format!("cd \"{}\"", to.display());
+
+    let r = bash(&cd(&elsewhere)).await;
+    assert_eq!(r.text, "(Bash completed with no output)");
+    assert_eq!(bash("pwd").await.text, elsewhere.display().to_string());
+
+    let r = bash(&cd(&denied)).await;
+    assert!(r.text.contains("Shell cwd was reset to"), "{}", r.text);
+    assert_eq!(bash("pwd").await.text, elsewhere.display().to_string());
+}
+
 // ---------------------------------------------------------------------------
 // Process groups
 // ---------------------------------------------------------------------------

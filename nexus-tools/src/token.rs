@@ -58,6 +58,12 @@ pub struct Claims {
     pub tools: Vec<String>,
     /// Expiry, in seconds since the Unix epoch.
     pub exp: u64,
+    /// The session may run with its file scope lifted (`--unscoped`, trust mode). Absent from
+    /// the token when false, so tokens signed before the claim existed still verify (as
+    /// scoped). The server needs BOTH this claim and the `--unscoped` flag: either alone keeps
+    /// the scope.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub unscoped: bool,
 }
 
 /// A token that does not verify. Deliberately one kind: see the module documentation.
@@ -108,7 +114,7 @@ pub fn verify(key: &SigningKey, token: &str, now: u64) -> Result<Profile, Invali
     {
         return Err(InvalidToken);
     }
-    Ok(Profile::only(claims.sid, claims.tools))
+    Ok(Profile::only(claims.sid, claims.tools).with_unscoped(claims.unscoped))
 }
 
 #[cfg(test)]
@@ -124,6 +130,7 @@ mod tests {
             sid: "s1".into(),
             tools: vec!["Read".into(), "Edit".into()],
             exp,
+            unscoped: false,
         }
     }
 
@@ -175,6 +182,40 @@ mod tests {
         ] {
             assert_eq!(verify(key, &token, now), Err(InvalidToken), "{label}");
         }
+    }
+
+    #[test]
+    fn the_unscoped_claim_is_signed_and_absent_means_scoped() {
+        let scoped = issue(&key(), &claims(2_000));
+        assert!(!verify(&key(), &scoped, 1_000).unwrap().unscoped);
+        // A token signed before the claim existed has no such field: it verifies, as scoped.
+        let body = String::from_utf8(
+            URL_SAFE_NO_PAD
+                .decode(scoped.split('.').nth(1).unwrap())
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(!body.contains("unscoped"), "{body}");
+
+        let lifted = issue(
+            &key(),
+            &Claims {
+                unscoped: true,
+                ..claims(2_000)
+            },
+        );
+        assert!(verify(&key(), &lifted, 1_000).unwrap().unscoped);
+        // The claim cannot be added to a scoped token without the key.
+        let mut parts: Vec<&str> = scoped.split('.').collect();
+        let forged = URL_SAFE_NO_PAD.encode(
+            serde_json::to_vec(&Claims {
+                unscoped: true,
+                ..claims(2_000)
+            })
+            .unwrap(),
+        );
+        parts[1] = &forged;
+        assert_eq!(verify(&key(), &parts.join("."), 1_000), Err(InvalidToken));
     }
 
     #[test]

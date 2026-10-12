@@ -76,16 +76,25 @@ impl Tool for EditTool {
         };
         let state = file_state(context);
         let _serialised = state.writing.lock().await;
+        if super::is_special(&path) {
+            return tool_error(super::not_regular(given));
+        }
         if let Ok(meta) = std::fs::metadata(&path)
             && meta.is_file()
             && meta.len() > self.config.max_text_bytes
         {
             return self.config.too_large(given, meta.len(), "Edit");
         }
-        let text = match std::fs::read(&path) {
+        let text = match super::read_regular(&path, self.config.max_text_bytes) {
             Ok(bytes) => match String::from_utf8(bytes) {
                 Ok(text) => text,
                 Err(_) => return tool_error(format!("{given} is not valid UTF-8 text")),
+            },
+            // It grew past the limit since its size was read.
+            Err(error) if error.kind() == std::io::ErrorKind::InvalidData => {
+                let size = std::fs::metadata(&path)
+                    .map_or(self.config.max_text_bytes + 1, |meta| meta.len());
+                return self.config.too_large(given, size, "Edit");
             },
             Err(_) if path.is_dir() => {
                 return tool_error(format!(

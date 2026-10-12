@@ -13,6 +13,21 @@
 //! signed profile: the harness is the only client and enforces the policy) is refused with
 //! `--listen`: a socket is not a private pipe.
 //!
+//! `--unscoped` (a session already in trust mode) keeps the directories as anchors for relative
+//! paths but stops enforcing them: git worktrees made by another harness stay reachable. It is
+//! stdio only, and it takes effect only when the signed `NEXUS_TOOLS_PROFILE` carries the
+//! `unscoped` claim (the flag without the claim refuses to start; the claim without the flag keeps
+//! the scope): an argument slipped into a launch line cannot lift the scope of a session its
+//! backend did not sign for. A
+//! network or device path (`\\host\share`, `\\.\pipe`) is still refused, and so is the deny
+//! list: `/proc/<pid>/environ` always, plus every `--deny-path` (repeatable; the harness names
+//! the home `.ssh`, `.claude`, its own configuration, data and vault). The deny list applies to
+//! the resolved path, so a symlink into a denied directory is refused too, and it holds in a
+//! bounded scope as well. `Glob` and `Grep` stop after 30 s when unscoped (they could be pointed
+//! at `/`). `Bash` keeps a `cd` outside the roots when unscoped (a `cd` into a denied directory
+//! is undone); it is a shell, not a sandbox, and the deny list does not confine what a command
+//! reads.
+//!
 //! Secrets arrive in the **environment**, never on the command line: `NEXUS_TOOLS_KEY` (the
 //! token signing key, at least 32 bytes) and `NEXUS_TOOLS_PROFILE` (the session's token).
 
@@ -30,7 +45,7 @@ use nexus_tools::{Profile, Server, Session, SigningKey, ToolRegistry, serve_line
 use tokio::io::BufReader;
 
 const USAGE: &str = "usage: nexus-tools [--listen ADDR] [--allow-origin ORIGIN]... \
-[--max-output-chars N] [--cwd DIR] [--add-dir DIR]... [--backup-dir DIR] [--search-engine SPEC]... [--search-allow-private] [--brave-endpoint URL] [--tools NAME,...]... [--unrestricted | --trust-harness]\n\
+[--max-output-chars N] [--cwd DIR] [--add-dir DIR]... [--deny-path PATH]... [--unscoped] [--backup-dir DIR] [--search-engine SPEC]... [--search-allow-private] [--brave-endpoint URL] [--tools NAME,...]... [--unrestricted | --trust-harness]\n\
 environment: NEXUS_TOOLS_KEY (signing key, >= 32 bytes), NEXUS_TOOLS_PROFILE (stdio token), \
 NEXUS_TOOLS_LOG";
 
@@ -43,6 +58,11 @@ struct Options {
     trust_harness: bool,
     cwd: Option<std::path::PathBuf>,
     add_dirs: Vec<std::path::PathBuf>,
+    /// The file scope is resolved but not enforced (trust mode): stdio only, and only with a
+    /// signed profile that carries the `unscoped` claim.
+    unscoped: bool,
+    /// Places no file tool may reach, scoped or not (`--deny-path`).
+    deny_paths: Vec<std::path::PathBuf>,
     backup_dir: Option<std::path::PathBuf>,
     /// `brave:ENVVAR`, `searxng:URL` or `html`, in the order they are tried.
     search_engines: Vec<String>,
@@ -56,6 +76,14 @@ struct Options {
 /// The one-line reason `--trust-harness` and `--listen` do not go together.
 const TRUST_HARNESS_IS_STDIO: &str =
     "--trust-harness is for one harness over a private pipe; it cannot be combined with --listen";
+
+/// The one-line reason `--unscoped` and `--listen` do not go together.
+const UNSCOPED_IS_STDIO: &str = "--unscoped is for one trusted session over a private pipe; it \
+cannot be combined with --listen";
+
+/// The one-line reason `--unscoped` was refused on stdio.
+const UNSCOPED_NEEDS_A_SIGNED_CLAIM: &str = "--unscoped needs a signed NEXUS_TOOLS_PROFILE that \
+carries the unscoped claim";
 
 fn fail(message: &str) -> ExitCode {
     eprintln!("nexus-tools: {message}");
@@ -71,6 +99,8 @@ fn parse_args() -> Result<Options, String> {
         trust_harness: false,
         cwd: None,
         add_dirs: Vec::new(),
+        unscoped: false,
+        deny_paths: Vec::new(),
         backup_dir: None,
         search_engines: Vec::new(),
         search_allow_private: false,
@@ -96,6 +126,8 @@ fn parse_args() -> Result<Options, String> {
             },
             "--cwd" => options.cwd = Some(value("--cwd")?.into()),
             "--add-dir" => options.add_dirs.push(value("--add-dir")?.into()),
+            "--unscoped" => options.unscoped = true,
+            "--deny-path" => options.deny_paths.push(value("--deny-path")?.into()),
             "--backup-dir" => options.backup_dir = Some(value("--backup-dir")?.into()),
             "--search-engine" => options.search_engines.push(value("--search-engine")?),
             "--search-allow-private" => options.search_allow_private = true,
@@ -130,6 +162,9 @@ fn parse_args() -> Result<Options, String> {
     if options.trust_harness && options.listen.is_some() {
         return Err(TRUST_HARNESS_IS_STDIO.to_owned());
     }
+    if options.unscoped && options.listen.is_some() {
+        return Err(UNSCOPED_IS_STDIO.to_owned());
+    }
     Ok(options)
 }
 
@@ -145,8 +180,16 @@ fn registry(options: &Options) -> Result<ToolRegistry, String> {
         .map_err(|e| format!("cannot create {}: {e}", output_dir.display()))?;
     let mut extra = options.add_dirs.clone();
     extra.push(output_dir.clone());
-    let scope =
-        Scope::new(&cwd, extra).map_err(|e| format!("cannot use the session directories: {e}"))?;
+    let mut scope = Scope::new(&cwd, extra)
+        .map_err(|e| format!("cannot use the session directories: {e}"))?
+        .with_denied(options.deny_paths.iter().cloned())
+        .map_err(|e| format!("--deny-path: {e}"))?;
+    // Trust mode (`--unscoped`): the directories still anchor relative paths, but the
+    // session may follow paths outside them — e.g. a git worktree created by another
+    // harness of the same conversation.
+    if options.unscoped {
+        scope = scope.without_bounds();
+    }
     let mut files = FileConfig::new(scope);
     if let Some(dir) = &options.backup_dir {
         files = files.with_backup_dir(dir);
@@ -364,6 +407,17 @@ async fn run(options: Options) -> ExitCode {
             );
         },
     };
+    // Defence in depth: the flag lifts the scope only for a session whose backend signed for it.
+    // `--trust-harness` and `--unrestricted` have no signed profile, so they never get it.
+    if options.unscoped {
+        if !profile.unscoped {
+            return fail(UNSCOPED_NEEDS_A_SIGNED_CLAIM);
+        }
+        tracing::info!(
+            session = %profile.session_id,
+            "file scope lifted (--unscoped): roots not enforced, deny list kept"
+        );
+    }
     serve_lines(
         server,
         Session::new(profile),

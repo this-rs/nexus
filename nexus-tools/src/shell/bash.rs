@@ -232,8 +232,12 @@ impl Tool for BashTool {
 }
 
 impl BashTool {
-    /// Adopts the directory the command ended in, if it is inside the scope. A `cd` that
-    /// leaves the scope is undone, and the output says so.
+    /// Adopts the directory the command ended in, if the scope accepts it ([`Scope::resolve`]).
+    /// A `cd` that leaves the scope, or enters a denied place, is undone, and the output says so.
+    /// An unscoped scope accepts any local directory outside the deny list, so there a `cd`
+    /// outside the roots is kept.
+    ///
+    /// [`Scope::resolve`]: crate::files::Scope::resolve
     fn adopt_cwd(&self, state: &Arc<ShellState>, cwd_file: &std::path::Path) -> Option<String> {
         let ended = std::fs::read_to_string(cwd_file).ok()?;
         let ended = ended.trim();
