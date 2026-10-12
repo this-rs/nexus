@@ -115,6 +115,11 @@ required-features = ["provider-native"]
 name = "native_context"
 required-features = ["provider-native"]
 
+# The per-request log line of the native harness (its own binary: a process-wide subscriber).
+[[test]]
+name = "native_request_log"
+required-features = ["provider-native"]
+
 [[test]]
 name = "agent_registry"
 required-features = ["provider-native"]
