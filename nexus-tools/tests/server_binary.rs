@@ -310,3 +310,63 @@ fn the_html_engine_needs_its_name_and_says_what_it_is() {
         "the operator is warned: {stderr}"
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn the_obscura_engine_is_named_by_path_and_answers_through_websearch() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let program = dir.path().join("obscura");
+    std::fs::write(
+        &program,
+        "#!/bin/sh\necho '[{\"url\":\"https://docs.rs/obscura\",\"title\":\"From Obscura\",\"snippet\":\"s\"}]'\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let child = binary()
+        .args(["--unrestricted", "--search-engine"])
+        .arg(format!("obscura:{}", program.display()))
+        .spawn()
+        .unwrap();
+    let (answers, _) = talk(
+        child,
+        &[
+            json!({"jsonrpc":"2.0","id":1,"method":"tools/list"}),
+            json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"WebSearch","arguments":{"query":"keyless search"}}}),
+        ],
+        2,
+    );
+    assert!(names(&answers[0]).contains(&"WebSearch".to_owned()));
+    let text = answers[1]["result"]["content"][0]["text"].as_str().unwrap();
+    assert_eq!(answers[1]["result"]["isError"], false, "{text}");
+    assert!(
+        text.contains("(via obscura)") && text.contains("From Obscura"),
+        "{text}"
+    );
+}
+
+#[test]
+fn obscura_alone_without_an_executable_on_the_path_warns_and_websearch_says_why() {
+    let empty = tempfile::tempdir().unwrap();
+    let child = binary()
+        .env("PATH", empty.path())
+        .args(["--unrestricted", "--search-engine", "obscura"])
+        .spawn()
+        .unwrap();
+    let (answers, stderr) = talk(
+        child,
+        &[
+            json!({"jsonrpc":"2.0","id":1,"method":"tools/list"}),
+            json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"WebSearch","arguments":{"query":"keyless search"}}}),
+        ],
+        2,
+    );
+    assert!(
+        stderr.contains("none of") && stderr.contains("dsh-obscura-nav"),
+        "{stderr}"
+    );
+    assert!(names(&answers[0]).contains(&"WebSearch".to_owned()));
+    let text = answers[1]["result"]["content"][0]["text"].as_str().unwrap();
+    assert_eq!(answers[1]["result"]["isError"], true, "{text}");
+    assert!(text.contains("not installed"), "{text}");
+}

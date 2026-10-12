@@ -25,6 +25,7 @@ use std::sync::Arc;
 
 pub use bash::BashTool;
 pub use process::EnvPolicy;
+pub(crate) use process::kill_group_now;
 pub use tasks::{MonitorTool, TaskStopTool};
 
 use crate::files::Scope;
