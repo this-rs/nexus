@@ -314,3 +314,39 @@ fn the_executable_is_found_on_a_path_under_its_distribution_name_first() {
     let empty = tempfile::tempdir().unwrap();
     assert!(ObscuraBackend::locate_in(&std::env::join_paths([empty.path()]).unwrap()).is_none());
 }
+
+#[tokio::test]
+async fn a_runaway_output_is_a_bad_response_at_once_not_a_timeout() {
+    let dir = tempfile::tempdir().unwrap();
+    // Writes for ever: only the ceiling can end it.
+    let program = fake(dir.path(), "exec yes 0123456789abcdef");
+    let started = std::time::Instant::now();
+    let error = ObscuraBackend::new(&program)
+        .with_timeout(Duration::from_secs(30))
+        .search(&query("runaway", 3))
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind(), "bad_response", "{error}");
+    assert!(error.to_string().contains("more than"), "{error}");
+    assert!(
+        started.elapsed() < Duration::from_secs(15),
+        "ended by the ceiling, not the time limit: {:?}",
+        started.elapsed()
+    );
+}
+
+#[tokio::test]
+async fn a_chatty_stderr_never_blocks_the_answer() {
+    let dir = tempfile::tempdir().unwrap();
+    // 1 MiB on stderr (far past the pipe buffer and the kept 16 KiB), then a valid answer.
+    let program = fake(
+        dir.path(),
+        r#"head -c 1048576 /dev/zero >&2; echo '[{"url":"https://docs.rs/x","title":"X","snippet":"s"}]'"#,
+    );
+    let hits = ObscuraBackend::new(&program)
+        .with_timeout(Duration::from_secs(10))
+        .search(&query("chatty", 3))
+        .await
+        .unwrap();
+    assert_eq!(hits.len(), 1);
+}

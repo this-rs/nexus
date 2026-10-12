@@ -344,7 +344,9 @@ disjoncteur ; mode `standard` = une requête, `extended` = plusieurs variantes (
 est **un seul argument** placé après `--` (une requête qui commence par `-` n'est pas une option ; `;`, `$(...)`, les
 guillemets restent du texte). Le programme tourne dans son propre groupe de processus, tué en entier au délai (30 s) et
 quand l'appel est abandonné (requête annulée, session close). Environnement en liste blanche (`PATH`, locale, `TZ`),
-`OBSCURA_ALLOW_PRIVATE_NETWORK=0` imposé. La réponse (tableau JSON `{url, title, snippet}`) passe par les mêmes filtres de
+`OBSCURA_ALLOW_PRIVATE_NETWORK=0` imposé (vérifié une fois sur le vrai `dsh-obscura-nav serp` : il répond sans `HOME` ni
+`TMPDIR`). Sortie plafonnée à 2 Mio : au-delà, le groupe est tué aussitôt et l'erreur est `bad_response` (pas un délai
+dépassé) ; l'erreur standard est gardée sur 16 Kio et le reste vidé, pour ne jamais bloquer le programme. La réponse (tableau JSON `{url, title, snippet}`) passe par les mêmes filtres de
 domaines, la même fusion et le même étiquetage que les autres moteurs. Exécutable absent : erreur `not_configured` qui le
 nomme (et un avertissement au démarrage pour `obscura` introuvable sur le `PATH`). Le moteur atteint
 `https://html.duckduckgo.com` : c'est l'origine à laquelle un projet consent. Tests : `tests/search_obscura.rs` (script

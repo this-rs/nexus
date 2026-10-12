@@ -159,6 +159,15 @@ impl Drop for Reaper {
     }
 }
 
+/// Kills the group of `pid` at once (Unix). Elsewhere the call's time limit bounds it.
+fn kill_now(_pid: Option<u32>) {
+    #[cfg(unix)]
+    if let Some(pgid) = _pid {
+        crate::shell::kill_group_now(pgid);
+    }
+}
+
+/// At most `cap` bytes of `stream`; it stops reading there (the caller decides what more means).
 async fn read_capped(
     stream: Option<impl tokio::io::AsyncRead + Unpin>,
     cap: u64,
@@ -166,6 +175,22 @@ async fn read_capped(
     let mut out = Vec::new();
     if let Some(stream) = stream {
         stream.take(cap).read_to_end(&mut out).await?;
+    }
+    Ok(out)
+}
+
+/// The first `cap` bytes of `stream`, the rest read and thrown away: a chatty standard error
+/// never fills its pipe and blocks the process.
+async fn drain_capped(
+    stream: Option<impl tokio::io::AsyncRead + Unpin>,
+    cap: u64,
+) -> std::io::Result<Vec<u8>> {
+    let mut out = Vec::new();
+    if let Some(stream) = stream {
+        let mut limited = stream.take(cap);
+        limited.read_to_end(&mut out).await?;
+        let mut rest = limited.into_inner();
+        tokio::io::copy(&mut rest, &mut tokio::io::sink()).await?;
     }
     Ok(out)
 }
@@ -250,13 +275,22 @@ impl SearchBackend for ObscuraBackend {
                 )));
             },
         };
-        let mut reaper = Reaper::new(child.id());
+        let pid = child.id();
+        let mut reaper = Reaper::new(pid);
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();
         let run = async {
             let (out, err, status) = tokio::join!(
-                read_capped(stdout, MAX_STDOUT),
-                read_capped(stderr, MAX_STDERR),
+                async {
+                    // One byte past the ceiling says "too much": the group is ended at once, so
+                    // a runaway output is an unreadable answer now, not a timeout later.
+                    let out = read_capped(stdout, MAX_STDOUT + 1).await;
+                    if matches!(&out, Ok(bytes) if bytes.len() as u64 > MAX_STDOUT) {
+                        kill_now(pid);
+                    }
+                    out
+                },
+                drain_capped(stderr, MAX_STDERR),
                 child.wait()
             );
             (out, err, status)
@@ -269,6 +303,12 @@ impl SearchBackend for ObscuraBackend {
             },
         };
         reaper.disarm();
+        if matches!(&out, Ok(bytes) if bytes.len() as u64 > MAX_STDOUT) {
+            return Err(SearchError::BadResponse(format!(
+                "obscura printed more than {} KiB: not a search answer",
+                MAX_STDOUT / 1024
+            )));
+        }
         let status =
             status.map_err(|e| SearchError::Unavailable(format!("obscura did not finish: {e}")))?;
         let err = err.unwrap_or_default();
