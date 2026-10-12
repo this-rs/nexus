@@ -120,6 +120,11 @@ required-features = ["provider-native"]
 name = "native_request_log"
 required-features = ["provider-native"]
 
+# A real secret never reaches a log nor a file others can read (CTX6; its own binary: a process-wide subscriber).
+[[test]]
+name = "native_secret_at_rest"
+required-features = ["provider-native"]
+
 [[test]]
 name = "agent_registry"
 required-features = ["provider-native"]

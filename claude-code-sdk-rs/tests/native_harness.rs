@@ -1214,9 +1214,13 @@ async fn resume_refuses_an_unknown_id_and_a_foreign_token() {
 }
 
 #[tokio::test]
-async fn a_file_transcript_survives_a_new_provider_and_holds_no_credential() {
+async fn a_file_transcript_survives_a_new_provider_and_holds_no_known_secret() {
     let dir = tempfile::tempdir().unwrap();
-    let store: Arc<dyn TranscriptStore> = Arc::new(FileTranscriptStore::new(dir.path().join("t")));
+    // The host declares the secret VALUES it knows (CTX6): only those are masked.
+    let known = nexus_claude::agent::KnownSecrets::new();
+    known.register(&nexus_claude::agent::Secret::new("tok_SECRETSECRET1234"));
+    let store: Arc<dyn TranscriptStore> =
+        Arc::new(FileTranscriptStore::new(dir.path().join("t")).with_known_secrets(known));
     let routes = || {
         vec![
             probe_route(true),
@@ -1238,7 +1242,7 @@ async fn a_file_transcript_survives_a_new_provider_and_holds_no_credential() {
     let session = first.open(spec.clone()).await.unwrap();
     turn(
         &*session,
-        "use header Authorization: Bearer tok_SECRETSECRET1234 please",
+        "use header Authorization: Bearer tok_SECRETSECRET1234 please, max_tokens=12",
     )
     .await;
     let token = session.resume_token().unwrap();
@@ -1250,6 +1254,14 @@ async fn a_file_transcript_survives_a_new_provider_and_holds_no_credential() {
         "a credential was persisted: {raw}"
     );
     assert!(raw.contains("quiet thought"), "the reasoning is persisted");
+    // What only looks like a credential is the conversation, kept as written.
+    assert!(raw.contains("max_tokens=12"), "{raw}");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&file).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
 
     // A new provider instance (a new process, in effect) resumes from the file.
     let second = NativeProvider::new(
