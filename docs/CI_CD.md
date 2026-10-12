@@ -166,7 +166,7 @@ Reusable action for Rust toolchain setup with caching.
 
 ```bash
 # Format
-cargo fmt --all -- --check
+cargo fmt-nexus -- --check   # the nexus crates; --all would include the vendored obscura/
 
 # Clippy
 cargo clippy --all-targets --all-features -- -D warnings
@@ -190,7 +190,7 @@ Consider adding a pre-commit hook:
 
 ```bash
 #!/bin/sh
-cargo fmt --all -- --check
+cargo fmt-nexus -- --check   # the nexus crates; --all would include the vendored obscura/
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test --all-features
 ```
@@ -201,7 +201,7 @@ cargo test --all-features
 
 | Issue | Solution |
 |-------|----------|
-| Format check fails | Run `cargo fmt --all` locally |
+| Format check fails | Run `cargo fmt-nexus` locally |
 | Clippy warnings | Fix warnings or add `#[allow(...)]` with justification |
 | Test failures | Check test output, run locally with `--nocapture` |
 | MSRV failure | Check for features requiring newer Rust |
