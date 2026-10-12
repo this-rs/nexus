@@ -11,7 +11,7 @@
 //! | `loop.rs` | the tool loop of a turn, budgets, terminal events |
 //! | `mcp.rs` | the MCP client (stdio through `isolated_command`, streamable HTTP) |
 //! | `tools.rs` | `mcp__<server>__<tool>` names and the exposure rule under a policy |
-//! | `transcript.rs` | [`TranscriptStore`] (memory, `0600` files), reasoning kept (A39) |
+//! | `transcript.rs` | [`TranscriptStore`] (memory, `0600` files, byte-faithful resume, value-only masking: CTX6), reasoning kept (A39) |
 //! | `compaction.rs` | summary of the old history by the same endpoint, recent messages intact |
 //! | `cancel.rs` | the cancellation token |
 //! | `tasks.rs` | the background tasks `nexus-tools` runs for a session, read from its structured results and notifications |
@@ -89,7 +89,8 @@ pub use tools::{
     nexus_tools_bound,
 };
 pub use transcript::{
-    FileTranscriptStore, MemoryTranscriptStore, TranscriptStore, new_transcript_id,
+    FileTranscriptStore, MemoryTranscriptStore, TranscriptStore, masked_for_display,
+    new_transcript_id,
 };
 
 /// How the harness attaches `nexus-tools` to a session that names no `nexus` server (N24).

@@ -507,28 +507,39 @@ async fn a_resumed_session_sends_the_same_request_as_the_live_one() {
     );
 }
 
-/// MEASURED, NOT WANTED: the file transcript masks what looks like a credential
-/// (a field NAMED like one — `input_tokens`, `max_tokens`, `api_key` — and any word
-/// over 400 bytes, compact JSON included) in contents AND tool-call arguments. The
-/// live session keeps the clear text in memory, the resumed one replays the masked
-/// text: the prefix breaks there, every request after a reopen pays the history
-/// again, and an argument can come back as invalid JSON. This test pins the
-/// divergence so that its fix shows up (it then fails and is turned around).
+/// The file transcript is the conversation (decision CTX6): what only LOOKS like a
+/// credential — a field NAMED like one (`input_tokens`, `max_tokens`, `api_key`), a
+/// word over 400 bytes, compact JSON included, in a tool-call argument or a tool
+/// result — is replayed byte for byte, so a reopened session is served from the
+/// cache the live one filled and every argument is still the JSON the model wrote.
+/// (Before CTX6 this test pinned the divergence: `<redacted` from message 2 on.)
 #[tokio::test]
-async fn a_resumed_history_departs_from_the_live_one_where_the_file_transcript_masked_it() {
+async fn a_resumed_history_equals_the_live_one_even_where_the_text_looks_like_a_secret() {
+    let long_json = json!({
+        "api_key": "not-a-key",
+        "max_tokens": 4096,
+        "rows": (0..40).map(|i| format!("row-{i:03}")).collect::<Vec<_>>(),
+    })
+    .to_string();
+    assert!(long_json.len() > 400, "{}", long_json.len());
     for text in [
         r#"{"input_tokens":12,"output_tokens":3}"#.to_owned(),
         format!("/{}", "segment/".repeat(60)),
+        long_json,
     ] {
         let live = second_turn_request(false, &text).await;
         let resumed = second_turn_request(true, &text).await;
-        let (index, was, now) = first_difference(&live, &resumed)
-            .unwrap_or_else(|| panic!("expected a masked divergence for {text}"));
-        // Message 0 is the system prompt, 1 the first user message: the masked text
-        // is in the assistant's tool call (2) or the tool result (3).
-        assert!(index >= 2, "{index}: {was} / {now}");
-        assert!(now.contains("<redacted"), "{now}");
-        assert!(!was.contains("<redacted"), "{was}");
+        assert_eq!(first_difference(&live, &resumed), None, "{text}");
+        assert_eq!(canon(&live), canon(&resumed), "{text}");
+        assert!(!canon(&resumed).contains("<redacted"), "{text}");
+        // The replayed argument is still the JSON object the model sent.
+        let arguments = resumed["messages"][2]["tool_calls"][0]["function"]["arguments"]
+            .as_str()
+            .expect("arguments");
+        assert_eq!(
+            serde_json::from_str::<Value>(arguments).expect("valid JSON"),
+            json!({ "text": text })
+        );
     }
 }
 

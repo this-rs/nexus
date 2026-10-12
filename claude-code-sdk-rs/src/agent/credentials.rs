@@ -207,6 +207,103 @@ impl CredentialResolver for EnvCredentialResolver {
     }
 }
 
+/// The secret VALUES a host knows for its sessions (vault keys, tokens it injects),
+/// shared between whoever learns them and whoever must keep them out of what it
+/// writes. Masking by value, never by the shape or the NAME of a field: a text that
+/// merely looks like a credential (`input_tokens`, a long word) is left alone, the
+/// value the host declared is replaced wherever it appears (decision CTX6).
+///
+/// Cloning shares the set. Values shorter than 4 bytes are ignored (they would
+/// mangle ordinary text), as in [`redact_with`].
+#[derive(Clone, Default)]
+pub struct KnownSecrets(std::sync::Arc<std::sync::RwLock<Vec<Secret>>>);
+
+impl fmt::Debug for KnownSecrets {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "KnownSecrets(<{} values>)", self.len())
+    }
+}
+
+impl KnownSecrets {
+    /// An empty set.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Adds `secret` (once: a value already known is not added again).
+    pub fn register(&self, secret: &Secret) {
+        if secret.len() < 4 {
+            return;
+        }
+        let mut values = self.0.write().unwrap_or_else(|e| e.into_inner());
+        if !values.iter().any(|known| known.0 == secret.0) {
+            values.push(secret.clone());
+        }
+    }
+
+    /// How many values are known.
+    pub fn len(&self) -> usize {
+        self.0.read().unwrap_or_else(|e| e.into_inner()).len()
+    }
+
+    /// Whether no value is known.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// `text` with every known value replaced by `<redacted>`; nothing else changes.
+    pub fn mask(&self, text: &str) -> String {
+        let values = self.0.read().unwrap_or_else(|e| e.into_inner());
+        let mut out = text.to_owned();
+        for secret in values.iter() {
+            if out.contains(secret.expose()) {
+                out = out.replace(secret.expose(), "<redacted>");
+            }
+        }
+        out
+    }
+
+    /// Wraps `inner` so that every secret it resolves is registered here: the
+    /// host's resolver feeds the set without the provider knowing about it.
+    pub fn recording(&self, inner: std::sync::Arc<dyn CredentialResolver>) -> RecordingResolver {
+        RecordingResolver {
+            inner,
+            known: self.clone(),
+        }
+    }
+}
+
+/// A [`CredentialResolver`] that registers each secret it resolves in a
+/// [`KnownSecrets`] ([`KnownSecrets::recording`]).
+#[derive(Clone)]
+pub struct RecordingResolver {
+    inner: std::sync::Arc<dyn CredentialResolver>,
+    known: KnownSecrets,
+}
+
+impl fmt::Debug for RecordingResolver {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RecordingResolver")
+            .field("known", &self.known)
+            .finish_non_exhaustive()
+    }
+}
+
+#[async_trait]
+impl CredentialResolver for RecordingResolver {
+    async fn resolve(
+        &self,
+        instance: &str,
+        reference: &CredentialRef,
+    ) -> Result<Option<Secret>, ProviderError> {
+        let secret = self.inner.resolve(instance, reference).await?;
+        if let Some(secret) = &secret {
+            self.known.register(secret);
+        }
+        Ok(secret)
+    }
+}
+
 /// Longest `detail` kept in an error, in bytes.
 pub const MAX_DETAIL_BYTES: usize = 512;
 
@@ -489,6 +586,58 @@ mod tests {
         let secret = Secret::new("plain-looking-value");
         let output = redact_with("upstream said: plain-looking-value is wrong", &[&secret]);
         assert_eq!(output, "upstream said: <redacted> is wrong");
+    }
+
+    #[test]
+    fn known_secrets_mask_by_value_only_and_learn_from_the_resolver() {
+        let known = KnownSecrets::new();
+        let text = r#"{"input_tokens":12,"max_tokens":3,"api_key":"shape-only"} vault-value-7c1e"#;
+        // Nothing known: nothing changes, whatever the field names look like.
+        assert_eq!(known.mask(text), text);
+        known.register(&Secret::new("vault-value-7c1e"));
+        known.register(&Secret::new("vault-value-7c1e"));
+        known.register(&Secret::new("abc"));
+        assert_eq!(known.len(), 1);
+        assert_eq!(
+            known.mask(text),
+            r#"{"input_tokens":12,"max_tokens":3,"api_key":"shape-only"} <redacted>"#
+        );
+        assert!(!format!("{known:?}").contains("vault-value"));
+    }
+
+    #[tokio::test]
+    async fn a_recording_resolver_registers_what_it_resolves() {
+        struct Fixed;
+        #[async_trait]
+        impl CredentialResolver for Fixed {
+            async fn resolve(
+                &self,
+                _instance: &str,
+                reference: &CredentialRef,
+            ) -> Result<Option<Secret>, ProviderError> {
+                Ok(match reference {
+                    CredentialRef::None => None,
+                    _ => Some(Secret::new("resolved-value-91ab")),
+                })
+            }
+        }
+        let known = KnownSecrets::new();
+        let resolver = known.recording(std::sync::Arc::new(Fixed));
+        assert!(
+            resolver
+                .resolve("i", &CredentialRef::None)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(known.is_empty());
+        let secret = resolver
+            .resolve("i", &CredentialRef::Vault("deepseek".into()))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(secret.expose(), "resolved-value-91ab");
+        assert_eq!(known.mask("key resolved-value-91ab"), "key <redacted>");
     }
 
     #[test]
