@@ -56,7 +56,16 @@ fn walker(root: &Path, scope: Arc<Scope>) -> WalkBuilder {
                 .file_name()
                 .to_str()
                 .is_some_and(|name| VCS_DIRS.contains(&name));
-        !vcs && !scope.is_denied(entry.path())
+        if vcs {
+            return false;
+        }
+        // The identity of each entry, only when some denied place had one at launch (an extra
+        // `lstat` per entry): it catches a second spelling of a denied directory below the root.
+        let metadata = scope
+            .denies_by_identity()
+            .then(|| entry.metadata().ok())
+            .flatten();
+        !scope.is_denied_entry(entry.path(), metadata.as_ref())
     });
     builder
 }

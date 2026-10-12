@@ -97,7 +97,13 @@ impl Tool for NotebookEditTool {
         }
         let state = file_state(context);
         let _serialised = state.writing.lock().await;
-        let Ok(text) = std::fs::read_to_string(&path) else {
+        if super::is_special(&path) {
+            return tool_error(super::not_regular(given));
+        }
+        let Ok(text) = super::read_regular(&path, self.config.max_text_bytes)
+            .map_err(|_| ())
+            .and_then(|bytes| String::from_utf8(bytes).map_err(|_| ()))
+        else {
             return tool_error(format!(
                 "File does not exist. Note: your current working directory is {}.",
                 self.config.scope.cwd().display()

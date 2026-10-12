@@ -131,3 +131,40 @@ pub(crate) fn required_str<'a>(
         .and_then(serde_json::Value::as_str)
         .ok_or_else(|| format!("`{name}` is required and must be a string"))
 }
+
+/// The refusal for a path that exists but is not a regular file nor a directory.
+pub(crate) fn not_regular(given: &str) -> String {
+    format!("Not a regular file (a device, a pipe or a socket), it cannot be read: {given}")
+}
+
+/// Whether `path` exists and is neither a regular file nor a directory: `/dev/zero` never ends,
+/// a FIFO blocks the call until someone writes, `/dev/fd/0` is this server's own input. Their
+/// size says 0, so no size check stops them. Checked before the file is opened (opening a FIFO
+/// already blocks).
+pub(crate) fn is_special(path: &std::path::Path) -> bool {
+    std::fs::metadata(path).is_ok_and(|meta| !meta.is_file() && !meta.is_dir())
+}
+
+/// At most `max` bytes of the regular file `path`, read through `take`: a file that grew past
+/// the size checked before is cut rather than read whole. `Err(InvalidData)` when it holds more
+/// than `max` bytes, `Err(InvalidInput)` when it is not a regular file.
+pub(crate) fn read_regular(path: &std::path::Path, max: u64) -> std::io::Result<Vec<u8>> {
+    use std::io::Read;
+    if !std::fs::metadata(path)?.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "not a regular file",
+        ));
+    }
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)?
+        .take(max.saturating_add(1))
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > max {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("over the {max} byte limit"),
+        ));
+    }
+    Ok(bytes)
+}

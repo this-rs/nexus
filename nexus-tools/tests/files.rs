@@ -816,6 +816,120 @@ async fn a_denied_directory_is_denied_whatever_the_case_on_macos() {
     assert!(is_denied(&r), "{}", r.text);
 }
 
+/// A second spelling the kernel does not fold: on macOS `/System/Volumes/Data/<path>` is
+/// `<path>` (a firmlink), and `realpath` keeps either spelling. The identity of the denied
+/// directory, recorded at launch, refuses it for `Read` and keeps `Grep` out of it.
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn a_firmlink_spelling_of_a_denied_directory_is_denied_on_macos() {
+    let root = tempfile::tempdir().unwrap();
+    let home_temp = tempfile::tempdir().unwrap();
+    let home = std::fs::canonicalize(home_temp.path()).unwrap();
+    let ssh = home.join(".ssh");
+    std::fs::create_dir_all(&ssh).unwrap();
+    std::fs::write(ssh.join("id_ed25519"), "FIRMLINK-SECRET\n").unwrap();
+    let twin = Path::new("/System/Volumes/Data").join(home.strip_prefix("/").unwrap());
+    if !twin.join(".ssh").join("id_ed25519").exists() {
+        eprintln!(
+            "no firmlink twin for {} here: nothing to test",
+            home.display()
+        );
+        return;
+    }
+    let s = Denied::new(root.path(), vec![ssh.clone()], true);
+    let r = s
+        .call(
+            "Read",
+            json!({"file_path": twin.join(".ssh/id_ed25519").display().to_string()}),
+        )
+        .await;
+    assert!(is_denied(&r), "{}", r.text);
+    let grep = s
+        .call(
+            "Grep",
+            json!({"pattern": "FIRMLINK-SECRET", "path": twin.display().to_string(), "output_mode": "content"}),
+        )
+        .await;
+    assert!(!grep.text.contains("FIRMLINK-SECRET"), "{}", grep.text);
+}
+
+/// The identity check on its own, wherever hard links exist: a hard link to a denied file, made
+/// inside the session's root, is the denied file.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_hard_link_to_a_denied_file_is_denied_for_read_and_for_a_walk() {
+    let root = tempfile::tempdir().unwrap();
+    let vault = root.path().join("vault");
+    std::fs::create_dir_all(&vault).unwrap();
+    std::fs::write(vault.join("store"), "HARDLINK-SECRET\n").unwrap();
+    std::fs::hard_link(vault.join("store"), root.path().join("innocent.txt")).unwrap();
+    for unscoped in [true, false] {
+        let s = Denied::new(root.path(), vec![vault.join("store")], unscoped);
+        let r = s
+            .call(
+                "Read",
+                json!({"file_path": root.path().join("innocent.txt").display().to_string()}),
+            )
+            .await;
+        assert!(is_denied(&r), "{unscoped}: {}", r.text);
+        let grep = s
+            .call(
+                "Grep",
+                json!({"pattern": "HARDLINK", "path": root.path().display().to_string(), "output_mode": "content"}),
+            )
+            .await;
+        assert!(
+            !grep.text.contains("HARDLINK-SECRET"),
+            "{unscoped}: {}",
+            grep.text
+        );
+    }
+}
+
+/// `/dev/zero` never ends and a FIFO blocks until someone writes; both say their size is 0.
+/// Read, Edit and NotebookEdit refuse them before opening them.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_device_or_a_pipe_is_refused_and_never_opened() {
+    let root = tempfile::tempdir().unwrap();
+    let fifo = root.path().join("pipe.ipynb");
+    let made = std::process::Command::new("mkfifo")
+        .arg(&fifo)
+        .status()
+        .unwrap();
+    assert!(made.success());
+    let s = Denied::new(root.path(), vec![], true);
+    let fifo = fifo.display().to_string();
+    for (tool, args) in [
+        ("Read", json!({"file_path": "/dev/zero"})),
+        ("Read", json!({"file_path": fifo})),
+        (
+            "Edit",
+            json!({"file_path": "/dev/zero", "old_string": "a", "new_string": "b"}),
+        ),
+        (
+            "Edit",
+            json!({"file_path": fifo, "old_string": "a", "new_string": "b"}),
+        ),
+        (
+            "NotebookEdit",
+            json!({"notebook_path": fifo, "new_source": "x", "cell_id": "c"}),
+        ),
+    ] {
+        let r = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            s.call(tool, args.clone()),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("{tool} {args} blocked"));
+        assert!(
+            r.is_error && r.text.contains("Not a regular file"),
+            "{tool} {args}: {}",
+            r.text
+        );
+    }
+}
+
 #[tokio::test]
 async fn an_unscoped_search_stops_at_its_time_limit_and_says_so() {
     let root = tempfile::tempdir().unwrap();

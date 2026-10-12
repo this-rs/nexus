@@ -32,6 +32,12 @@ pub struct Scope {
     unscoped: bool,
     /// Directories no path may enter, whatever the roots (`--deny-path`), resolved.
     denied: Vec<PathBuf>,
+    /// The identity (device, inode) of each denied place that existed at launch. A path
+    /// comparison alone misses a second spelling the kernel does not fold into one: a macOS
+    /// firmlink (`/System/Volumes/Data/Users/me/.ssh` is `/Users/me/.ssh`, and
+    /// `realpath` keeps either spelling), a bind mount, a hard link to a denied file. Unix only:
+    /// Windows has no stable file id in `std`, and its junctions are followed by `canonicalize`.
+    denied_ids: Vec<FileId>,
 }
 
 /// A path that cannot be used.
@@ -84,6 +90,7 @@ impl Scope {
             roots,
             unscoped: false,
             denied: Vec::new(),
+            denied_ids: Vec::new(),
         })
     }
 
@@ -118,6 +125,16 @@ impl Scope {
                 ));
             }
             let real = follow(PathBuf::new(), &path);
+            if let Some(id) = std::fs::metadata(&real).ok().as_ref().and_then(file_id) {
+                self.denied_ids.push(id);
+            }
+            // A place created after launch has no identity yet: on macOS, its firmlink twin is
+            // denied by path as well.
+            if cfg!(target_os = "macos")
+                && let Ok(rest) = real.strip_prefix("/")
+            {
+                self.denied.push(Path::new(MACOS_DATA_VOLUME).join(rest));
+            }
             if real != path {
                 self.denied.push(path);
             }
@@ -139,7 +156,38 @@ impl Scope {
     /// Whether `resolved` (a path already made real) is in a denied place. Used by
     /// [`Scope::resolve`] and by the directory walks of `Glob` and `Grep`.
     pub fn is_denied(&self, resolved: &Path) -> bool {
-        is_process_environment(resolved) || self.denied.iter().any(|dir| under(resolved, dir))
+        self.is_denied_by_path(resolved)
+            || (!self.denied_ids.is_empty()
+                && resolved.ancestors().any(|ancestor| {
+                    std::fs::metadata(ancestor)
+                        .ok()
+                        .as_ref()
+                        .and_then(file_id)
+                        .is_some_and(|id| self.denied_ids.contains(&id))
+                }))
+    }
+
+    /// The deny check of one entry of a directory walk (`Glob`, `Grep`): its path, and its own
+    /// identity when `metadata` is given. Its ancestors need no check: the walk started from a
+    /// resolved, allowed root and never enters a denied directory.
+    pub(crate) fn is_denied_entry(
+        &self,
+        path: &Path,
+        metadata: Option<&std::fs::Metadata>,
+    ) -> bool {
+        self.is_denied_by_path(path)
+            || metadata
+                .and_then(file_id)
+                .is_some_and(|id| self.denied_ids.contains(&id))
+    }
+
+    /// Whether a walk must read each entry's identity (some denied place existed at launch).
+    pub(crate) fn denies_by_identity(&self) -> bool {
+        !self.denied_ids.is_empty()
+    }
+
+    fn is_denied_by_path(&self, path: &Path) -> bool {
+        is_process_environment(path) || self.denied.iter().any(|dir| under(path, dir))
     }
 
     /// The real path `path` designates, if it is inside the scope. The file need not exist.
@@ -182,6 +230,25 @@ impl Scope {
     }
 }
 
+/// Where macOS mounts the data volume: `/System/Volumes/Data/Users` is `/Users` (a firmlink).
+const MACOS_DATA_VOLUME: &str = "/System/Volumes/Data";
+
+/// A file's identity on its device: `(st_dev, st_ino)`.
+type FileId = (u64, u64);
+
+/// The identity of the file `metadata` describes; `None` where `std` gives no stable one.
+#[cfg(unix)]
+fn file_id(metadata: &std::fs::Metadata) -> Option<FileId> {
+    use std::os::unix::fs::MetadataExt;
+    Some((metadata.dev(), metadata.ino()))
+}
+
+/// See the Unix version: Windows has no stable file id in `std`.
+#[cfg(not(unix))]
+fn file_id(_metadata: &std::fs::Metadata) -> Option<FileId> {
+    None
+}
+
 /// `written` resolved against the real filesystem from `base`, component by component.
 fn follow(base: PathBuf, written: &Path) -> PathBuf {
     let mut resolved = base;
@@ -209,8 +276,18 @@ fn follow(base: PathBuf, written: &Path) -> PathBuf {
 /// A path on a local disk: no prefix (Unix, or a rooted Windows path), a drive letter, or the
 /// verbatim form of a drive letter (`\\?\C:\`, what `canonicalize` returns on Windows). A UNC
 /// share (`\\host\share`, `\\?\UNC\host\share`), a device (`\\.\pipe\x`) and any other
-/// verbatim prefix (`\\?\GLOBALROOT`) are not.
+/// verbatim prefix (`\\?\GLOBALROOT`) are not. Neither is the NT object-namespace spelling
+/// `\??\UNC\host\share` on Windows: `std` parses it as a root then a component named `??`,
+/// but the layers below may hand it to the object manager as a share.
 pub(crate) fn is_local(path: &Path) -> bool {
+    if cfg!(windows) {
+        let mut components = path.components();
+        if components.next() == Some(Component::RootDir)
+            && components.next() == Some(Component::Normal("??".as_ref()))
+        {
+            return false;
+        }
+    }
     match path.components().next() {
         Some(Component::Prefix(prefix)) => {
             matches!(prefix.kind(), Prefix::Disk(_) | Prefix::VerbatimDisk(_))
@@ -283,6 +360,8 @@ mod tests {
             r"\\.\pipe\x",
             r"\\.\COM1",
             r"\\?\GLOBALROOT\Device\x",
+            r"\??\UNC\host\share\x",
+            "/??/UNC/host/share/x",
         ] {
             assert!(!is_local(Path::new(remote)), "{remote}");
         }
@@ -299,6 +378,7 @@ mod tests {
             r"\\?\UNC\host.invalid\share\x",
             r"\\.\pipe\x",
             r"\\?\GLOBALROOT\Device\x",
+            r"\??\UNC\host.invalid\share\x",
         ] {
             assert_eq!(
                 scope.resolve(remote),
