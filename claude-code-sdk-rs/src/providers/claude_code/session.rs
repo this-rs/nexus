@@ -891,16 +891,19 @@ impl HookCallback for NeutralHook {
                     trigger: compact.trigger.clone(),
                     custom_instructions: compact.custom_instructions.clone(),
                 };
-                if self.hooks.before_compaction(&info).await.is_some() {
-                    // The CLI's hook protocol has no slot for instructions
-                    // returned by a `PreCompact` callback: say so instead of
-                    // pretending they were applied.
-                    self.core.emit(AgentEvent::ProviderNotice {
-                        kind: "compaction_instructions_unsupported".to_owned(),
-                        data: Value::Null,
-                    });
-                }
-                Ok(sync_output(None))
+                // The CLI appends a `PreCompact` callback's `systemMessage` to
+                // the compaction's custom instructions. It ignores `reason`, and
+                // it rejects `hookSpecificOutput` (no `PreCompact` variant).
+                // Measured on Claude Code 2.1.295 (M2c).
+                Ok(match self.hooks.before_compaction(&info).await {
+                    Some(instructions) if !instructions.trim().is_empty() => {
+                        HookJSONOutput::Sync(SyncHookJSONOutput {
+                            system_message: Some(instructions),
+                            ..SyncHookJSONOutput::default()
+                        })
+                    },
+                    _ => sync_output(None),
+                })
             },
             // Not registered by this adapter.
             _ => Ok(sync_output(None)),

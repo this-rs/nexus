@@ -1397,6 +1397,63 @@ async fn the_neutral_hooks_are_called_and_their_verdicts_written_to_the_cli() {
     session.close().await.unwrap();
 }
 
+/// Hooks whose `before_compaction` answers, in order, the texts given.
+struct CompactionInstructions(Mutex<Vec<Option<String>>>);
+
+#[async_trait]
+impl SessionHooks for CompactionInstructions {
+    async fn before_compaction(&self, _info: &CompactionInfo) -> Option<String> {
+        self.0.lock().unwrap().remove(0)
+    }
+}
+
+/// The CLI appends a `PreCompact` callback's `systemMessage` to the summary's
+/// custom instructions; it ignores `reason` and rejects a `hookSpecificOutput`
+/// (measured on Claude Code 2.1.295, M2c). So the instructions go out as
+/// `systemMessage`, and an empty text answers `{}`.
+#[tokio::test]
+async fn compaction_instructions_reach_the_cli_as_a_system_message() {
+    let compact = |request_id: &str| {
+        (
+            request_id.to_owned(),
+            hook_input("PreCompact", json!({"trigger": "auto"})),
+        )
+    };
+    let mut transcript = Transcript::new()
+        .capture_hooks()
+        .await_stdin_containing("go")
+        .init("fake-session");
+    for (request_id, input) in [compact("hook-text"), compact("hook-blank")] {
+        transcript = transcript.emit_hook("PreCompact", &request_id, input, None);
+    }
+    let (fake, provider, mut spec) = stage(until_closed(transcript.result_ok("done")));
+    spec.hooks = Some(Arc::new(CompactionInstructions(Mutex::new(vec![
+        Some("Keep the word ZEPHYR-42 in the summary".into()),
+        Some("  ".into()),
+    ]))));
+    let session = open(&provider, spec).await;
+    let stream = session.send_turn(TurnInput::text("go")).await.unwrap();
+    let events = read_turn(stream, |_| async {}).await;
+    assert_eq!(stop_reason(&events), Some(StopReason::Completed));
+
+    assert_eq!(
+        stdin_line(&fake, "hook-text").await,
+        r#"{"response":{"request_id":"hook-text","response":{"systemMessage":"Keep the word ZEPHYR-42 in the summary"},"subtype":"success"},"type":"control_response"}"#
+    );
+    assert_eq!(
+        stdin_line(&fake, "hook-blank").await,
+        r#"{"response":{"request_id":"hook-blank","response":{},"subtype":"success"},"type":"control_response"}"#
+    );
+    assert!(
+        !events.iter().any(
+            |event| matches!(event, AgentEvent::ProviderNotice { kind, .. }
+                if kind == "compaction_instructions_unsupported")
+        ),
+        "the instructions are applied, so nothing is reported as unsupported: {events:?}"
+    );
+    session.close().await.unwrap();
+}
+
 // ---------------------------------------------------------------------------
 // Concurrency rules the suite checks from the outside, seen on the wire
 // ---------------------------------------------------------------------------
