@@ -19,6 +19,10 @@ allow = [
     "Zlib",
     "MPL-2.0",
     "Unicode-DFS-2016",
+    # The successor of Unicode-DFS-2016, on the ICU4X crates (idna -> url) and unicode-ident.
+    "Unicode-3.0",
+    # The Mozilla CA list of webpki-roots (via reqwest/hyper-rustls and neo4rs).
+    "CDLA-Permissive-2.0",
     "CC0-1.0",
     "Unlicense",
 ]
