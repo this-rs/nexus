@@ -257,7 +257,7 @@ fn is_variable_name(text: &str) -> bool {
 fn search_engine(options: &Options) -> Result<nexus_tools::search::Engine, String> {
     use nexus_tools::search::{
         BRAVE_ENDPOINT, DDG_HTML_ENDPOINT, Engine, HtmlBackend, KeySource, KeyedApiBackend,
-        Protection, SearxngBackend,
+        OBSCURA_NAMES, ObscuraBackend, Protection, SearxngBackend,
     };
     use nexus_tools::web::{FetchConfig, Fetcher, SystemClock};
     let fetcher = || {
@@ -287,6 +287,19 @@ fn search_engine(options: &Options) -> Result<nexus_tools::search::Engine, Strin
             Some(("searxng", url)) if !url.is_empty() => {
                 engine.with_backend(SearxngBackend::new(url, fetcher()), protection)
             },
+            // Obscura's keyless `serp`, an external executable: by path, or found on the PATH.
+            Some(("obscura", path)) if !path.is_empty() => {
+                engine.with_backend(ObscuraBackend::new(path), protection)
+            },
+            None if spec == "obscura" => {
+                let backend = ObscuraBackend::locate().unwrap_or_else(|| {
+                    eprintln!(
+                        "nexus-tools: WARNING: --search-engine obscura: none of {OBSCURA_NAMES:?} is on the PATH; WebSearch will say so when it is called"
+                    );
+                    ObscuraBackend::new(OBSCURA_NAMES[0])
+                });
+                engine.with_backend(backend, protection)
+            },
             None if spec == "html" => {
                 eprintln!(
                     "nexus-tools: WARNING: the html search engine scrapes a page meant for people; it is fragile and the engine's terms may not allow it"
@@ -299,7 +312,7 @@ fn search_engine(options: &Options) -> Result<nexus_tools::search::Engine, Strin
             _ => {
                 // The spec is NOT echoed: a key pasted by mistake must not reach a log.
                 return Err(
-                    "--search-engine takes brave:ENVVAR, searxng:URL or html (a key is never given here, only the NAME of the environment variable that holds it)"
+                    "--search-engine takes brave:ENVVAR, searxng:URL, obscura[:PATH] or html (a key is never given here, only the NAME of the environment variable that holds it)"
                         .to_owned(),
                 );
             },
