@@ -29,7 +29,7 @@ flowchart TD
 
     subgraph fichiers["Outils fichiers — files/*.rs (N19)"]
         direction TB
-        SCOPE["✅ périmètre : résolution composant par composant,<br/>liens symboliques et .. suivis là où ils mènent<br/><i>vérifié : tests/files.rs, un test par évasion</i>"]
+        SCOPE["✅ périmètre : résolution composant par composant,<br/>liens symboliques et .. suivis là où ils mènent ; --unscoped (stdio, trust) :<br/>dossiers comme ancres pour chemins relatifs mais racines non imposées (worktrees),<br/>SSRF et limites d'URL inchangées<br/><i>vérifié : tests/files.rs (un test par évasion + an_unscoped_session_reaches_outside_every_root)</i>"]
         STATE["✅ état « lu » par session : Edit/Write/NotebookEdit refusent un fichier<br/>non lu ou modifié depuis la lecture<br/><i>vérifié : mutation jouée (garde ignorée → test rouge)</i>"]
         READ["✅ Read : texte numéroté comme cat -n, notebooks en cellules,<br/>plafond en caractères avec coupe annoncée (écart volontaire) ;<br/>Read et Edit refusent un fichier texte de plus de 64 Mio (FileConfig::with_max_text_bytes) en disant la taille, la limite et comment continuer<br/><i>vérifié : longueurs du relevé de Claude Code 2.1.287 ; tests/files.rs, un fichier à la limite exacte se lit encore</i>"]
         WRITE["✅ Write, Edit : messages du relevé, jamais de fichier tronqué<br/>(temporaire voisin, fsync, rename), sauvegarde optionnelle<br/><i>vérifié : lecteur concurrent ne voit jamais un fichier à moitié écrit</i>"]
