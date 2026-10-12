@@ -488,6 +488,16 @@ impl ModelEndpoint for OpenAiEndpoint {
         &self.config.instance_id
     }
 
+    fn wire_messages(&self, request: &CompletionRequest) -> Option<Vec<Value>> {
+        match wire::build_request(request, &self.config.quirks, None) {
+            Value::Object(mut body) => match body.remove("messages") {
+                Some(Value::Array(messages)) => Some(messages),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
     async fn health(&self) -> ProviderHealth {
         match self.models().await {
             Ok(models) => {

@@ -351,6 +351,15 @@ pub trait ModelEndpoint: Send + Sync {
     async fn probe_images(&self, _model: &str) -> Option<bool> {
         None
     }
+
+    /// The messages of `request` exactly as this endpoint puts them on the wire (its
+    /// dialect applied: a reasoning echoed or not, late system messages folded…), one
+    /// JSON value each. What a prompt cache sees; the native harness fingerprints it
+    /// to say whether a request extends the previous one. `None` when the endpoint
+    /// cannot say (the default).
+    fn wire_messages(&self, _request: &CompletionRequest) -> Option<Vec<serde_json::Value>> {
+        None
+    }
 }
 
 #[cfg(test)]

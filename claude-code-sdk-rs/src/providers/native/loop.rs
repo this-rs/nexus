@@ -699,10 +699,53 @@ struct RequestShape {
     system_hash: u64,
     /// Hash of the tool list, in the order sent.
     tools_hash: u64,
+    /// What the history check found (`None` when the endpoint cannot show its wire form).
+    history: Option<HistoryCheck>,
+}
+
+/// The wire messages of a request (the endpoint's dialect applied), against the previous
+/// request of the session: a prompt cache serves the longest common prefix, and an
+/// append-only history keeps it whole.
+struct HistoryCheck {
+    /// Hash of every wire message but the last (the part a cache could already hold).
+    prefix_hash: u64,
+    /// Whether the wire messages of the previous request are, byte for byte, the first
+    /// ones of this request; `None` on the first request of the session.
+    extends_previous: Option<bool>,
+}
+
+impl HistoryCheck {
+    /// Hashes `wire` message by message, compares with `core`'s previous request and
+    /// records this one as the new previous.
+    fn of(core: &Core, wire: &[Value]) -> Self {
+        use std::hash::Hasher;
+        let previous = core.lock().last_wire;
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        let (mut prefix_hash, mut at_previous) = (hasher.finish(), None);
+        for (index, message) in wire.iter().enumerate() {
+            if previous.is_some_and(|(count, _)| count == index) {
+                at_previous = Some(hasher.finish());
+            }
+            if index + 1 == wire.len() {
+                prefix_hash = hasher.finish();
+            }
+            hasher.write(message.to_string().as_bytes());
+            hasher.write_u8(0);
+        }
+        let all = hasher.finish();
+        if previous.is_some_and(|(count, _)| count == wire.len()) {
+            at_previous = Some(all);
+        }
+        core.lock().last_wire = Some((wire.len(), all));
+        Self {
+            prefix_hash,
+            extends_previous: previous.map(|(_, hash)| at_previous == Some(hash)),
+        }
+    }
 }
 
 impl RequestShape {
-    fn of(request: &CompletionRequest) -> Self {
+    fn of(core: &Core, request: &CompletionRequest) -> Self {
         use std::hash::{Hash, Hasher};
         let hash = |feed: &dyn Fn(&mut std::collections::hash_map::DefaultHasher)| {
             let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -724,6 +767,10 @@ impl RequestShape {
                     tool.parameters.to_string().hash(h);
                 }
             }),
+            history: core
+                .endpoint
+                .wire_messages(request)
+                .map(|wire| HistoryCheck::of(core, &wire)),
         }
     }
 }
@@ -732,6 +779,10 @@ impl RequestShape {
 /// cached part, completion), how long it took, and the fingerprint of the cacheable
 /// prefix. Read over a conversation, it gives the real cache-hit ratio and shows a
 /// prefix that changed (`system_hash` / `tools_hash` differ between two requests).
+/// `extends_previous=false` says the HISTORY changed under the cache (a reasoning no
+/// longer echoed, a resumed transcript that differs from the live one…): expected only
+/// after a compaction. The hashes are `DefaultHasher`: stable within one process (one
+/// build), NOT across Rust versions: compare them inside one run of the server only.
 /// No content, no credential: counts, hashes, ids.
 fn log_request(
     core: &Core,
@@ -744,6 +795,10 @@ fn log_request(
     first_chunk: Option<Duration>,
 ) {
     let cached = usage.and_then(|usage| usage.cache_read_tokens);
+    let prefix_hash = shape
+        .history
+        .as_ref()
+        .map(|history| format!("{:016x}", history.prefix_hash));
     let prompt = usage
         .and_then(|usage| usage.input_tokens)
         .map(|input| input + cached.unwrap_or(0));
@@ -764,6 +819,8 @@ fn log_request(
         tools = shape.tools,
         system_hash = format_args!("{:016x}", shape.system_hash),
         tools_hash = format_args!("{:016x}", shape.tools_hash),
+        prefix_hash = prefix_hash.as_deref().map(tracing::field::display),
+        extends_previous = shape.history.as_ref().and_then(|history| history.extends_previous),
         "native model request"
     );
 }
@@ -777,7 +834,7 @@ async fn model_step(
 ) -> Result<Step, ProviderError> {
     let started = Instant::now();
     let prompt_estimate = estimate_tokens(&request.messages);
-    let shape = RequestShape::of(&request);
+    let shape = RequestShape::of(core, &request);
     let mut first_chunk: Option<Duration> = None;
     let mut step = Step::default();
     let opened = tokio::select! {

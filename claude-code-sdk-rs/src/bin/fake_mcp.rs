@@ -17,6 +17,7 @@
 //! | `FAKE_MCP_SSE` | http: answer with an SSE stream |
 //! | `FAKE_MCP_SLOW_MAX_MS` | longest `slow` sleeps (default 30000) |
 //! | `FAKE_MCP_MAX_RUNTIME_MS` | watchdog: hard exit after this long (default 120000) |
+//! | `FAKE_MCP_EXTRA_TOOLS` | JSON file: a list of extra tools `{name, description, inputSchema, annotations?, reply?}`, listed after the built-in ones; a call answers `reply` (default `<name> ok`) |
 //!
 //! # Tools
 //!
@@ -62,11 +63,23 @@ fn log(event: Value) {
 /// A 1x1 transparent PNG (the `picture` tool).
 const PIXEL_PNG_BASE64: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
 
+/// The tools of `FAKE_MCP_EXTRA_TOOLS`, in file order (none when unset).
+fn extra_tools() -> Vec<Value> {
+    let Ok(path) = std::env::var("FAKE_MCP_EXTRA_TOOLS") else {
+        return Vec::new();
+    };
+    let text = std::fs::read_to_string(&path).expect("cannot read FAKE_MCP_EXTRA_TOOLS");
+    match serde_json::from_str(&text).expect("FAKE_MCP_EXTRA_TOOLS is not JSON") {
+        Value::Array(tools) => tools,
+        _ => panic!("FAKE_MCP_EXTRA_TOOLS must be a JSON list"),
+    }
+}
+
 fn tools_list() -> Value {
     let text_schema = json!({"type": "object", "properties": {"text": {"type": "string"}}});
     let none = json!({"type": "object", "properties": {}});
     let read_only = json!({"readOnlyHint": true});
-    json!({"tools": [
+    let mut tools = json!([
         {"name": "echo", "description": "Echoes its text", "inputSchema": text_schema, "annotations": read_only},
         {"name": "readonly", "description": "A read-only tool", "inputSchema": none, "annotations": read_only},
         {"name": "slow", "description": "Sleeps until cancelled", "inputSchema": none, "annotations": read_only},
@@ -77,7 +90,15 @@ fn tools_list() -> Value {
         {"name": "argv", "description": "Arguments of the server", "inputSchema": none, "annotations": read_only},
         {"name": "big", "description": "A long text", "inputSchema": {"type": "object", "properties": {"n": {"type": "integer"}}}, "annotations": read_only},
         {"name": "picture", "description": "A text line and a one-pixel PNG image block", "inputSchema": none, "annotations": read_only},
-    ]})
+    ]);
+    let listed = tools.as_array_mut().expect("a list");
+    for mut extra in extra_tools() {
+        if let Some(fields) = extra.as_object_mut() {
+            fields.remove("reply");
+        }
+        listed.push(extra);
+    }
+    json!({"tools": tools})
 }
 
 fn text_result(text: impl Into<String>) -> Value {
@@ -139,7 +160,17 @@ fn call_tool(id: u64, name: &str, args: &Value, shared: &Shared) -> Result<Value
             }
             Ok(text_result("slow finished"))
         },
-        other => Err(format!("unknown tool: {other}")),
+        other => extra_tools()
+            .into_iter()
+            .find(|tool| tool["name"] == other)
+            .map(|tool| {
+                text_result(
+                    tool["reply"]
+                        .as_str()
+                        .map_or_else(|| format!("{other} ok"), str::to_owned),
+                )
+            })
+            .ok_or_else(|| format!("unknown tool: {other}")),
     }
 }
 
