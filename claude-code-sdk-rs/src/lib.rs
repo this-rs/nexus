@@ -191,3 +191,85 @@ pub mod prelude {
         Result, SdkError, query,
     };
 }
+
+/// Deterministic log capture for unit tests that assert on `tracing` output.
+///
+/// Why not `tracing::subscriber::with_default`: `tracing-core` caches each
+/// callsite's `Interest` process-wide. While at most one dispatcher is
+/// registered, a callsite hit for the first time is registered against the
+/// *registering thread's* default dispatcher. Under the parallel test runner
+/// another test thread (no subscriber of its own) can be first to hit a
+/// callsite while a capturing test's scoped subscriber is live: the callsite is
+/// cached as `Interest::never` and the capturing test silently loses that line.
+///
+/// Here a single global subscriber is installed once per test binary, so every
+/// thread registers callsites against it; it forwards an event only to the
+/// buffer of the thread currently inside [`test_log::capture`].
+#[cfg(test)]
+pub(crate) mod test_log {
+    use std::cell::RefCell;
+    use std::sync::Once;
+    use tracing::Level;
+
+    thread_local! {
+        static CAPTURE: RefCell<Option<(Level, Vec<u8>)>> = const { RefCell::new(None) };
+    }
+
+    struct ThreadWriter(bool);
+
+    impl std::io::Write for ThreadWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            if self.0 {
+                CAPTURE.with(|c| {
+                    if let Some((_, out)) = c.borrow_mut().as_mut() {
+                        out.extend_from_slice(buf);
+                    }
+                });
+            }
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    struct ThreadMakeWriter;
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for ThreadMakeWriter {
+        type Writer = ThreadWriter;
+        fn make_writer(&'a self) -> Self::Writer {
+            ThreadWriter(false)
+        }
+        fn make_writer_for(&'a self, meta: &tracing::Metadata<'_>) -> Self::Writer {
+            // `Level` orders TRACE > DEBUG > ... > ERROR: keep events at least
+            // as severe as the level the capturing thread asked for.
+            let keep = CAPTURE.with(|c| {
+                c.borrow()
+                    .as_ref()
+                    .is_some_and(|(min, _)| *meta.level() <= *min)
+            });
+            ThreadWriter(keep)
+        }
+    }
+
+    /// Run `body` and return what it logged on this thread at `level` or above.
+    pub(crate) fn capture<R>(level: Level, body: impl FnOnce() -> R) -> (R, String) {
+        static INIT: Once = Once::new();
+        INIT.call_once(|| {
+            let subscriber = tracing_subscriber::fmt()
+                .with_max_level(Level::DEBUG)
+                .with_ansi(false)
+                .with_writer(ThreadMakeWriter)
+                .finish();
+            tracing::subscriber::set_global_default(subscriber)
+                .expect("no other global subscriber in the nexus-claude unit tests");
+        });
+        CAPTURE.with(|c| *c.borrow_mut() = Some((level, Vec::new())));
+        let out = body();
+        let bytes = CAPTURE
+            .with(|c| c.borrow_mut().take())
+            .map(|(_, b)| b)
+            .unwrap_or_default();
+        (out, String::from_utf8(bytes).expect("utf-8 log output"))
+    }
+}
