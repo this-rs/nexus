@@ -1616,34 +1616,6 @@ mod tests {
         }
     }
 
-    /// Minimal in-memory `MakeWriter` so a test can read back what `tracing`
-    /// actually emitted.
-    #[derive(Clone, Default)]
-    struct CapturedLog(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
-
-    impl CapturedLog {
-        fn contents(&self) -> String {
-            String::from_utf8(self.0.lock().expect("log mutex").clone()).expect("utf8 log")
-        }
-    }
-
-    impl std::io::Write for CapturedLog {
-        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            self.0.lock().expect("log mutex").extend_from_slice(buf);
-            Ok(buf.len())
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-
-    impl tracing_subscriber::fmt::MakeWriter<'_> for CapturedLog {
-        type Writer = CapturedLog;
-        fn make_writer(&self) -> Self::Writer {
-            self.clone()
-        }
-    }
-
     /// The block count in the DEBUG line is the only trace a dropped block
     /// leaves. This asserts the number is the count of blocks *kept* (2), not
     /// the number of items received (3) — otherwise the log would hide the drop.
@@ -1656,13 +1628,6 @@ mod tests {
     /// The behaviour is verified; the counter cannot be.
     #[test]
     fn test_user_message_debug_log_reports_kept_block_count() {
-        let log = CapturedLog::default();
-        let subscriber = tracing_subscriber::fmt()
-            .with_max_level(tracing::Level::DEBUG)
-            .with_ansi(false)
-            .with_writer(log.clone())
-            .finish();
-
         let json = json!({
             "type": "user",
             "message": {
@@ -1674,8 +1639,9 @@ mod tests {
             }
         });
 
-        let parsed =
-            tracing::subscriber::with_default(subscriber, || parse_message(json).unwrap().unwrap());
+        let (parsed, emitted) = crate::test_log::capture(tracing::Level::DEBUG, || {
+            parse_message(json).unwrap().unwrap()
+        });
 
         match &parsed {
             Message::User { message, .. } => {
@@ -1684,7 +1650,6 @@ mod tests {
             other => panic!("Expected Message::User, got {other:?}"),
         }
 
-        let emitted = log.contents();
         assert!(
             emitted.contains("Parsed user message with 2 content blocks"),
             "DEBUG line must report the count of blocks kept; got: {emitted}"

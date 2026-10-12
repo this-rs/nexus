@@ -574,50 +574,20 @@ mod tests {
     // the emitted text is the only way to prove what they report.
     // ---------------------------------------------------------------------
 
-    #[derive(Clone)]
-    struct VecWriter(Arc<std::sync::Mutex<Vec<u8>>>);
-
-    impl std::io::Write for VecWriter {
-        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            self.0.lock().unwrap().extend_from_slice(buf);
-            Ok(buf.len())
-        }
-
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-
-    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for VecWriter {
-        type Writer = VecWriter;
-
-        fn make_writer(&'a self) -> Self::Writer {
-            self.clone()
-        }
-    }
-
-    /// Run `body` on a current-thread runtime with a thread-local WARN
-    /// subscriber, and return everything it logged.
+    /// Run `body` on a current-thread runtime and return everything it logged
+    /// at WARN or above (see `crate::test_log` for why not `with_default`).
     fn capture_warnings<F>(body: F) -> String
     where
         F: std::future::Future<Output = ()>,
     {
-        let buffer = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let subscriber = tracing_subscriber::fmt()
-            .with_max_level(tracing::Level::WARN)
-            .with_ansi(false)
-            .with_writer(VecWriter(buffer.clone()))
-            .finish();
-
-        tracing::subscriber::with_default(subscriber, || {
+        crate::test_log::capture(tracing::Level::WARN, || {
             tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
                 .expect("current-thread runtime")
                 .block_on(body);
-        });
-
-        String::from_utf8(buffer.lock().unwrap().clone()).expect("utf-8 log output")
+        })
+        .1
     }
 
     #[test]
