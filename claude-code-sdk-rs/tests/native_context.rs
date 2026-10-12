@@ -343,7 +343,7 @@ async fn multi_turn_requests(system_of: impl Fn(usize) -> String) -> Vec<Value> 
     );
     let h = Harness::new(
         vec![
-            chat_route(call_events(&[task.clone()], None)),
+            chat_route(call_events(std::slice::from_ref(&task), None)),
             chat_route(answer_events("t1 is about caching.", None)),
             chat_route(call_events(&[step, note], None)),
             chat_route(answer_events("Step created, two notes found.", None)),
@@ -859,11 +859,13 @@ fn po_tools() -> Value {
 }
 
 /// The ten turns: `(user text, rounds of tool calls, final answer)`.
-fn scenario() -> Vec<(
-    &'static str,
-    Vec<Vec<(String, &'static str, Value)>>,
-    String,
-)> {
+/// One tool call of the scenario: `(id, tool, arguments)`.
+type Call = (String, &'static str, Value);
+
+/// One turn of the scenario: `(user text, rounds of tool calls, final answer)`.
+type Turn = (&'static str, Vec<Vec<Call>>, String);
+
+fn scenario() -> Vec<Turn> {
     let call = |id: &str, tool: &'static str, args: Value| (id.to_owned(), tool, args);
     vec![
         (
