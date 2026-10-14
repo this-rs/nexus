@@ -99,6 +99,31 @@ pub fn tool_reply(
     route(body_contains, events, 0)
 }
 
+/// An answer that reasoned and then stopped without a word of text: the whole output
+/// budget went to the reasoning. What a summarisation call of a reasoning model does
+/// when the budget is too small for both.
+pub fn reasoning_only_reply(body_contains: Option<&str>, reasoning: &str) -> Value {
+    route(
+        body_contains,
+        vec![
+            delta(json!({"reasoning_content": reasoning})),
+            finish("stop"),
+            json!("[DONE]"),
+        ],
+        0,
+    )
+}
+
+/// An error sent **inside** the stream, as an OpenAI-compatible endpoint reports a
+/// failure that happens after the headers (`data: {"error": {…}}`).
+pub fn stream_error_reply(body_contains: Option<&str>, message: &str) -> Value {
+    route(
+        body_contains,
+        vec![json!({"error": {"message": message}})],
+        0,
+    )
+}
+
 /// An answer that starts and then dribbles keep-alive comments for ~30 s: a
 /// turn that stays busy until it is interrupted.
 pub fn busy_reply(body_contains: Option<&str>) -> Value {

@@ -387,6 +387,238 @@ async fn an_unknown_window_never_compacts_by_itself() {
 }
 
 // ---------------------------------------------------------------------------
+// A compaction that fails is not a failed turn
+// ---------------------------------------------------------------------------
+//
+// Compaction is a convenience (compress the old history so the prompt fits). Its
+// failure used to end the whole turn with `error_during_execution` and a generic
+// message, on the measured session whose summary call answered with reasoning only.
+// The turn must go on with its history intact, and say what happened with a typed
+// notice; only the endpoint's own refusal of the prompt it cannot hold ends a turn.
+
+/// The needle that identifies the summarisation request (its fixed system prompt).
+const SUMMARY_NEEDLE: &str = "compacting the history";
+
+/// The summarisation requests the endpoint received, in order.
+fn summary_requests(h: &Harness) -> Vec<Value> {
+    h.chat()
+        .into_iter()
+        .filter(|body| body.to_string().contains(SUMMARY_NEEDLE))
+        .collect()
+}
+
+/// The payload of the first `provider_notice` of that kind.
+fn notice<'a>(events: &'a [AgentEvent], kind: &str) -> Option<&'a Value> {
+    events.iter().find_map(|event| match event {
+        AgentEvent::ProviderNotice { kind: k, data } if k == kind => Some(data),
+        _ => None,
+    })
+}
+
+/// The compaction events of a turn, as `phase` names.
+fn compaction_phases(events: &[AgentEvent]) -> Vec<String> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::Compaction { phase, .. } => Some(format!("{phase:?}")),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Settings that make the second tool round (10 000 reported prompt tokens) cross
+/// the compaction threshold of a 12 000-token window.
+fn compacting(config: &mut NativeConfig) {
+    config.context_window = Some(12_000);
+    config.compaction.keep_recent = 2;
+}
+
+/// A turn whose automatic compaction fires on the third request: two tool round trips
+/// (the second reports a prompt near the window), then `summaries` answer the
+/// summarisation call(s), in order, then the model gives its final answer.
+fn a_turn_where_compaction_fires(summaries: Vec<Value>) -> Vec<Value> {
+    let mut routes = vec![
+        tool_reply(
+            Some("go"),
+            &[echo_call()],
+            Some("old reasoning"),
+            Some((100, 10)),
+        ),
+        tool_reply(
+            Some(TOOL),
+            &[("c2", "mcp__fake__echo", json!({"text": "two"}))],
+            Some("kept reasoning"),
+            Some((10_000, 10)),
+        ),
+    ];
+    routes.extend(summaries);
+    routes.push(text_reply(Some(TOOL), "done", None, Some((300, 10))));
+    routes
+}
+
+#[tokio::test]
+async fn a_compaction_summary_that_comes_back_empty_does_not_end_the_turn() {
+    // The measured failure: the summary call answers with reasoning only, so the text
+    // is empty. Nothing the user asked for is lost — the turn must finish.
+    let h = Harness::with(
+        a_turn_where_compaction_fires(vec![reasoning_only_reply(
+            Some(SUMMARY_NEEDLE),
+            "thinking about the summary",
+        )]),
+        compacting,
+    )
+    .await;
+    let log_dir = tempfile::tempdir().unwrap();
+    let session = h.open(h.spec_with_mcp(&log_path(&log_dir))).await;
+    let events = turn(&*session, "go").await;
+
+    assert_eq!(stop_reason(&events), StopReason::Completed);
+    assert_eq!(result_text(&events), "done");
+    // The failure is said with its cause named, and the compaction never completed.
+    let failed = notice(&events, "compaction_failed").expect("a provider_notice compaction_failed");
+    assert_eq!(failed["trigger"], "auto");
+    assert_eq!(failed["code"], "protocol");
+    assert!(
+        failed["message"]
+            .as_str()
+            .unwrap()
+            .contains("compaction summary came back empty"),
+        "{failed}"
+    );
+    assert_eq!(compaction_phases(&events), ["Started"]);
+    // The history came back intact: the answer was written on the whole conversation,
+    // tool results included.
+    let last = h.chat().last().cloned().unwrap();
+    assert!(last.to_string().contains(TOOL), "{last}");
+    assert!(last.to_string().contains("kept reasoning"), "{last}");
+}
+
+#[tokio::test]
+async fn an_endpoint_error_during_the_compaction_summary_does_not_end_the_turn() {
+    // Second cause: the failure happens inside the summary stream. The endpoint error
+    // is named in the notice, and the turn answers on the history it already had.
+    let h = Harness::with(
+        a_turn_where_compaction_fires(vec![stream_error_reply(
+            Some(SUMMARY_NEEDLE),
+            "the endpoint gave up halfway",
+        )]),
+        compacting,
+    )
+    .await;
+    let log_dir = tempfile::tempdir().unwrap();
+    let session = h.open(h.spec_with_mcp(&log_path(&log_dir))).await;
+    let events = turn(&*session, "go").await;
+
+    assert_eq!(stop_reason(&events), StopReason::Completed);
+    assert_eq!(result_text(&events), "done");
+    let failed = notice(&events, "compaction_failed").expect("a provider_notice compaction_failed");
+    assert_eq!(failed["trigger"], "auto");
+    assert_eq!(failed["code"], "protocol");
+    assert!(
+        failed["message"]
+            .as_str()
+            .unwrap()
+            .contains("the endpoint gave up halfway"),
+        "{failed}"
+    );
+    assert_eq!(compaction_phases(&events), ["Started"]);
+    // An endpoint that just failed is not asked again: one summary request.
+    assert_eq!(summary_requests(&h).len(), 1);
+}
+
+#[tokio::test]
+async fn a_compaction_summary_that_comes_back_empty_is_asked_again_with_twice_the_budget() {
+    // A reasoning model can spend the whole output budget thinking: giving the summary
+    // twice the room is the one retry that answers this cause. When it works, nothing
+    // failed and the compaction completes.
+    let h = Harness::with(
+        a_turn_where_compaction_fires(vec![
+            reasoning_only_reply(Some(SUMMARY_NEEDLE), "the budget went to the reasoning"),
+            text_reply(Some(SUMMARY_NEEDLE), "THE SUMMARY", None, Some((50, 20))),
+        ]),
+        compacting,
+    )
+    .await;
+    let log_dir = tempfile::tempdir().unwrap();
+    let session = h.open(h.spec_with_mcp(&log_path(&log_dir))).await;
+    let events = turn(&*session, "go").await;
+
+    assert_eq!(stop_reason(&events), StopReason::Completed);
+    assert_eq!(result_text(&events), "done");
+    assert!(notice(&events, "compaction_failed").is_none());
+    assert_eq!(compaction_phases(&events), ["Started", "Completed"]);
+    let requests = h.chat();
+    let last = requests.last().cloned().unwrap();
+    assert!(
+        last["messages"][0]["content"]
+            .as_str()
+            .unwrap()
+            .contains("THE SUMMARY"),
+        "{last}"
+    );
+    // The retry doubled the output budget of the summarisation call.
+    let budgets: Vec<u64> = summary_requests(&h)
+        .iter()
+        .map(|body| body["max_tokens"].as_u64().unwrap())
+        .collect();
+    assert_eq!(budgets, [2048, 4096]);
+}
+
+#[tokio::test]
+async fn the_compaction_summary_is_not_asked_forever_when_it_stays_empty() {
+    // One retry with twice the budget, then give up: a summary that keeps coming back
+    // empty must not become a loop (a compaction that failed on every iteration would
+    // otherwise burn the endpoint at every round trip of the turn).
+    let h = Harness::with(
+        a_turn_where_compaction_fires(vec![
+            reasoning_only_reply(Some(SUMMARY_NEEDLE), "thinking"),
+            reasoning_only_reply(Some(SUMMARY_NEEDLE), "still thinking"),
+        ]),
+        compacting,
+    )
+    .await;
+    let log_dir = tempfile::tempdir().unwrap();
+    let session = h.open(h.spec_with_mcp(&log_path(&log_dir))).await;
+    let events = turn(&*session, "go").await;
+
+    assert_eq!(stop_reason(&events), StopReason::Completed);
+    assert_eq!(result_text(&events), "done");
+    assert_eq!(summary_requests(&h).len(), 2);
+    let failed = notice(&events, "compaction_failed").expect("a provider_notice compaction_failed");
+    assert_eq!(failed["code"], "protocol");
+    // The cause is named in the message, not silently swallowed.
+    assert!(
+        failed["message"].as_str().unwrap().contains("reasoning"),
+        "{failed}"
+    );
+}
+
+#[tokio::test]
+async fn the_compaction_failed_notice_carries_no_secret() {
+    // The notice repeats what the endpoint said, and that text goes through `redact`:
+    // a credential-shaped value echoed back by the endpoint is masked, in the notice
+    // and everywhere else the turn is read.
+    let h = Harness::with(
+        a_turn_where_compaction_fires(vec![stream_error_reply(
+            Some(SUMMARY_NEEDLE),
+            "upstream refused the call: api_key=sk-live-0123456789abcdef",
+        )]),
+        compacting,
+    )
+    .await;
+    let log_dir = tempfile::tempdir().unwrap();
+    let session = h.open(h.spec_with_mcp(&log_path(&log_dir))).await;
+    let events = turn(&*session, "go").await;
+
+    assert_eq!(stop_reason(&events), StopReason::Completed);
+    let failed = notice(&events, "compaction_failed").expect("a provider_notice compaction_failed");
+    let message = failed["message"].as_str().unwrap();
+    assert!(message.contains("<redacted>"), "{message}");
+    assert!(!message.contains("sk-live-0123456789abcdef"), "{message}");
+    assert!(!format!("{events:?}").contains("sk-live-0123456789abcdef"));
+}
+
+// ---------------------------------------------------------------------------
 // Capabilities, honestly
 // ---------------------------------------------------------------------------
 
