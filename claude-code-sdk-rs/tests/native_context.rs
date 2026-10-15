@@ -673,6 +673,95 @@ async fn deepseek_serves_every_request_after_the_first_from_its_prefix_cache() {
     assert_eq!(hashes.len(), 1, "the prefix fingerprint moved: {lines:?}");
 }
 
+/// On the real DeepSeek API: a reasoned tool turn, then a PLAN-ONLY turn (no
+/// tools). The earlier assistant message — reasoning included — must be re-sent
+/// verbatim on the tool-less request: `extends_previous=true` proves the history
+/// did not change under the cache. The tool-less request must also be ACCEPTED
+/// (a completed turn, not a 400): DeepSeek takes `reasoning_content` back with or
+/// without tools. Needs `DEEPSEEK_API_KEY`; `DEEPSEEK_MODEL` (default
+/// `deepseek-v4-flash`) and `DEEPSEEK_BASE_URL` (default `https://api.deepseek.com/v1`)
+/// are optional. Costs a few cents.
+#[tokio::test]
+#[ignore = "real DeepSeek API: needs DEEPSEEK_API_KEY, run by hand"]
+async fn deepseek_accepts_reasoning_back_on_a_tool_less_turn_after_a_reasoned_one() {
+    use nexus_claude::agent::{CredentialRef, EnvCredentialResolver};
+    use nexus_claude::model::{OpenAiEndpoint, OpenAiEndpointConfig};
+
+    assert!(
+        std::env::var("DEEPSEEK_API_KEY").is_ok_and(|key| !key.is_empty()),
+        "DEEPSEEK_API_KEY is not set"
+    );
+    let model = std::env::var("DEEPSEEK_MODEL").unwrap_or_else(|_| "deepseek-v4-flash".into());
+    let base =
+        std::env::var("DEEPSEEK_BASE_URL").unwrap_or_else(|_| "https://api.deepseek.com/v1".into());
+    let mut config = OpenAiEndpointConfig::new("deepseek-real", base);
+    config.credential = CredentialRef::Env("DEEPSEEK_API_KEY".into());
+    config.quirks = EndpointQuirks::deepseek();
+    config.response_timeout = std::time::Duration::from_secs(180);
+    config.idle_timeout = std::time::Duration::from_secs(180);
+    let endpoint = Arc::new(OpenAiEndpoint::new(config, Arc::new(EnvCredentialResolver)));
+    let mut native = NativeConfig::new("deepseek-real");
+    native.default_model = Some(model.clone());
+    native.max_tokens = Some(2048);
+    let provider = NativeProvider::new(native, endpoint);
+
+    // A harness only for its PO-like tools file and its spec; nothing is sent to its fake.
+    let h = Harness::new(vec![], |_| {}).await;
+    let mut spec = h.spec(SYSTEM);
+    spec.model = Some(model.clone());
+
+    let logs = CapturedLog::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(logs.clone())
+        .with_max_level(tracing::Level::INFO)
+        .with_ansi(false)
+        .without_time()
+        .finish();
+    let _guard = tracing::subscriber::set_default(subscriber);
+    let session = provider.open(spec).await.expect("open on DeepSeek");
+
+    // A reasoned tool turn: the model thinks, calls the task tool, then answers.
+    let first = turn(
+        &*session,
+        "Call the task tool once with action get and task_id t1, then answer in one short sentence.",
+    )
+    .await;
+    assert!(
+        first
+            .iter()
+            .any(|event| matches!(event, AgentEvent::ToolCall { .. })),
+        "the model did not call the tool: {first:?}"
+    );
+    let (usage, _, _) = done_usage(&first);
+    assert!(
+        usage.reasoning_tokens.is_some_and(|tokens| tokens > 0),
+        "the tool turn did not reason: {usage:?}"
+    );
+
+    // A plan-only turn: the policy leaves no tool. DeepSeek accepts reasoning back
+    // with or without tools, so the earlier assistant message must be re-sent
+    // verbatim and the history still extends the previous request.
+    session
+        .set_policy_mode(PolicyMode::PlanOnly, None)
+        .await
+        .expect("plan only");
+    let second = turn(&*session, "Thanks. Now answer with the single word: done.").await;
+    let (_, _, stop) = done_usage(&second);
+    assert_eq!(stop, StopReason::Completed, "{second:?}");
+
+    let lines = logs.lines("native model request");
+    for line in &lines {
+        println!("{line}");
+    }
+    assert!(
+        lines.len() >= 3,
+        "a tool turn and a plan-only follow-up: {lines:?}"
+    );
+    let plan_only = lines.last().expect("the plan-only request");
+    assert!(plan_only.contains("tools=0"), "{plan_only}");
+    assert!(plan_only.contains("extends_previous=true"), "{plan_only}");
+}
+
 // ---------------------------------------------------------------------------
 // 3. Reference benchmark
 // ---------------------------------------------------------------------------

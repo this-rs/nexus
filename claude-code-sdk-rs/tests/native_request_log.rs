@@ -213,10 +213,9 @@ async fn every_model_request_is_logged_with_its_usage_cache_latency_and_prefix_f
     assert!(lines[0].contains("usage_reported=true"), "{}", lines[0]);
     assert!(logs.lines("forged").is_empty());
 
-    // MEASURED HAZARD (DeepSeek): the reasoning is echoed only when the request offers
-    // tools. A policy that leaves no tool (here plan_only over an allow list of one
-    // writing tool) re-serialises the EARLIER assistant messages without it: the history
-    // no longer extends the previous request, the cache breaks there.
+    // A policy that leaves no tool (here plan_only over an allow list of one writing
+    // tool) still re-sends the earlier assistant messages WITH their reasoning: the
+    // history still extends the previous request, the cache does not break there.
     logs.clear();
     let write = ("w1", "mcp__fake__write", json!({"text": "x"}));
     let server = FakeOpenAi::start(json!([
@@ -242,5 +241,5 @@ async fn every_model_request_is_logged_with_its_usage_cache_latency_and_prefix_f
     assert_eq!(lines.len(), 3, "{lines:?}");
     assert!(lines[1].contains("extends_previous=true"), "{}", lines[1]);
     assert!(lines[2].contains("tools=0"), "{}", lines[2]);
-    assert!(lines[2].contains("extends_previous=false"), "{}", lines[2]);
+    assert!(lines[2].contains("extends_previous=true"), "{}", lines[2]);
 }
