@@ -496,6 +496,7 @@ async fn a_real_obscura_renders_a_local_page_as_markdown() {
             cwd: std::env::temp_dir(),
             env: Default::default(),
             home: None,
+            output_dir: None,
         },
         &McpConfig::default(),
     )

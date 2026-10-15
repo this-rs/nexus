@@ -587,6 +587,7 @@ async fn the_native_harness_client_drives_the_http_server() {
             cwd: std::env::temp_dir(),
             env: EnvSpec::default(),
             home: None,
+            output_dir: None,
         },
         &McpConfig {
             allow_private_network: true,
