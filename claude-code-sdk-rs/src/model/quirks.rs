@@ -41,9 +41,11 @@ impl ReasoningField {
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct EndpointQuirks {
-    /// Send back the `reasoning` of assistant messages (under [`Self::reasoning_field`])
-    /// when the request offers tools, and only then. DeepSeek rejects a
-    /// tool-calling transcript that dropped it.
+    /// Send back the `reasoning` of every assistant message that reasoned (under
+    /// [`Self::reasoning_field`]), whether the request offers tools or not.
+    /// DeepSeek rejects a tool-calling transcript that dropped it, and its prefix
+    /// cache breaks when a later tool-less turn re-serialises the history without
+    /// the reasoning of an earlier reasoned turn.
     pub echo_reasoning_with_tools: bool,
     /// Never send `tool_choice` (Ollama's compatibility layer rejects or ignores it).
     pub omit_tool_choice: bool,

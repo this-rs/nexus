@@ -480,9 +480,9 @@ async fn iterate(
         if budget_spent(core) {
             return Outcome::Stop(StopKind::Budget, None);
         }
-        if let Err(error) = maybe_compact(core, signal, model, messages, acc).await {
-            return Outcome::Failed(error);
-        }
+        // Compaction is a convenience: a summary that cannot be written leaves the
+        // history as it was and the turn goes on (it says so itself).
+        maybe_compact(core, signal, model, messages, acc).await;
         if signal.token.is_cancelled() {
             return Outcome::Interrupted;
         }
@@ -939,13 +939,26 @@ async fn model_step(
     Ok(step)
 }
 
+/// Compacts the prompt when it nears the context window (see [`super::compaction`]).
+///
+/// Compaction is a **convenience**, never a condition of the turn: its summary is
+/// written by the same endpoint, and when that call fails — an endpoint error, a
+/// summary that comes back empty — the turn goes on with the history **intact**, and
+/// the failure is said with `provider_notice { compaction_failed }` (the trigger, the
+/// typed `code`, the redacted message). A turn ends on the endpoint's own refusal of a
+/// prompt it cannot hold, with that refusal's typed error (`context_too_small` and the
+/// like) — never on this step.
+///
+/// Nothing is retried here: the summary is asked once per round trip of the tool loop
+/// (whose own bound is what stops a runaway turn), and a retry inside this function
+/// would ask a failing endpoint again and again for a summary the turn can do without.
 async fn maybe_compact(
     core: &Core,
     signal: &TurnSignal,
     model: &str,
     messages: &mut Vec<ChatMessage>,
     acc: &mut Acc,
-) -> Result<(), ProviderError> {
+) {
     let config = core.settings.compaction;
     // The window of the model now active, not the snapshot's: a smaller model
     // chosen for this turn compacts where the opening one would not.
@@ -958,10 +971,10 @@ async fn maybe_compact(
     let reported = core.lock().last_prompt_tokens.unwrap_or(0);
     let size = estimate.max(reported);
     if !should_compact(&config, window, size) {
-        return Ok(());
+        return;
     }
     let Some(split) = split_point(messages, config.keep_recent) else {
-        return Ok(());
+        return;
     };
     core.emit(AgentEvent::Compaction {
         phase: CompactionPhase::Started,
@@ -989,11 +1002,29 @@ async fn maybe_compact(
     let summary_prompt_estimate = estimate_tokens(&request.messages);
     let started = Instant::now();
     let summary = tokio::select! {
-        summary = summarise(core.endpoint.as_ref(), request) => summary?,
-        () = signal.token.cancelled() => return Ok(()),
+        summary = summarise(core.endpoint.as_ref(), request) => summary,
+        () = signal.token.cancelled() => return,
     };
-    acc.api += started.elapsed();
-    let (text, usage) = summary;
+    let (text, usage) = match summary {
+        Ok(summary) => {
+            acc.api += started.elapsed();
+            summary
+        },
+        Err(error) => {
+            // Fail open: the history stays exactly as it was and the host is told what
+            // went wrong, with the typed code and a message that already went through
+            // `redact` (a credential the endpoint echoed never reaches an event).
+            core.emit(AgentEvent::ProviderNotice {
+                kind: "compaction_failed".to_owned(),
+                data: json!({
+                    "trigger": "auto",
+                    "code": error.kind(),
+                    "message": error.to_string(),
+                }),
+            });
+            return;
+        },
+    };
     let estimated = spend(
         core,
         model,
@@ -1025,7 +1056,6 @@ async fn maybe_compact(
         trigger: Some(CompactionTrigger::Auto),
         pre_tokens: Some(size),
     });
-    Ok(())
 }
 
 // ---------------------------------------------------------------------------

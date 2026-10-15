@@ -465,7 +465,7 @@ fn tool_transcript() -> CompletionRequest {
 }
 
 #[tokio::test]
-async fn deepseek_reasoning_is_sent_back_only_with_tools() {
+async fn deepseek_reasoning_is_sent_back_with_or_without_tools() {
     let server = FakeOpenAi::start(json!([route_sse(&[finish("stop"), json!("[DONE]")])]));
     let endpoint = endpoint(&server, EndpointQuirks::deepseek());
     run(&endpoint, tool_transcript()).await.unwrap();
@@ -477,10 +477,12 @@ async fn deepseek_reasoning_is_sent_back_only_with_tools() {
         sent[0]["body"]["messages"][1]["reasoning_content"],
         "need the file"
     );
-    assert!(
-        sent[1]["body"]["messages"][1]
-            .get("reasoning_content")
-            .is_none()
+    // The reasoning comes back on a request without tools too: dropping it would
+    // re-serialise the earlier assistant messages differently and break the
+    // prefix cache on the first tool-less turn after a reasoned one.
+    assert_eq!(
+        sent[1]["body"]["messages"][1]["reasoning_content"],
+        "need the file"
     );
     assert!(sent[1]["body"].get("tools").is_none());
 }

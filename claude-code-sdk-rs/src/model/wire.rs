@@ -48,7 +48,7 @@ pub(crate) fn fold_late_system(messages: &[ChatMessage]) -> Vec<ChatMessage> {
     out
 }
 
-fn message_json(message: &ChatMessage, with_tools: bool, quirks: &EndpointQuirks) -> Value {
+fn message_json(message: &ChatMessage, quirks: &EndpointQuirks) -> Value {
     let mut object = Map::new();
     object.insert("role".into(), json!(message.role.as_str()));
     let content = if message.images.is_empty() {
@@ -96,10 +96,11 @@ fn message_json(message: &ChatMessage, with_tools: bool, quirks: &EndpointQuirks
                 .collect();
             object.insert("tool_calls".into(), Value::Array(calls));
         }
-        // DeepSeek: the reasoning must come back when tools are offered, and
-        // is left out otherwise.
+        // DeepSeek: the reasoning of any assistant turn that reasoned must come
+        // back, tools or not. Dropping it when a later request offers no tools
+        // re-serialises the earlier assistant messages differently and breaks
+        // the prefix cache on the first tool-less turn after a reasoned one.
         if quirks.echo_reasoning_with_tools
-            && with_tools
             && let Some(reasoning) = &message.reasoning
         {
             object.insert(
@@ -136,7 +137,7 @@ pub(crate) fn build_request(
         Value::Array(
             messages
                 .iter()
-                .map(|message| message_json(message, with_tools, quirks))
+                .map(|message| message_json(message, quirks))
                 .collect(),
         ),
     );
@@ -562,9 +563,12 @@ mod tests {
     }
 
     #[test]
-    fn deepseek_omits_reasoning_without_tools() {
+    fn deepseek_echoes_reasoning_without_tools() {
         let body = build_request(&request(vec![]), &EndpointQuirks::deepseek(), None);
-        assert!(body["messages"][2].get("reasoning_content").is_none());
+        assert_eq!(
+            body["messages"][2]["reasoning_content"],
+            "I should read the file"
+        );
         assert!(body.get("tools").is_none());
         assert!(body.get("tool_choice").is_none());
     }
