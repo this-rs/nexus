@@ -2,9 +2,10 @@
 //! keeps the doc and the registry identical.
 //!
 //! `docs/acp-conformance.md` is generated from `support::acp_matrix::ACP_AGENTS`.
-//! `the_conformance_matrix_matches_the_doc` is the doc↔code contract: the table
-//! between the sentinels must equal `matrix_markdown()` byte-for-byte, so a
-//! registry edit without a doc regeneration fails the gate (and vice-versa).
+//! `the_conformance_matrix_matches_the_doc` is the doc↔code contract: the whole
+//! `docs/acp-conformance.md` body (preamble prose plus the sentinel-wrapped
+//! table) must equal [`doc_body`] byte-for-byte, so a registry edit or a prose
+//! drift without a doc regeneration fails the gate (and vice-versa).
 //!
 //! Regenerate the doc with
 //! `UPDATE_ACP_MATRIX=1 cargo test -p nexus-claude --features provider-acp --test acp_conformance_matrix`.
@@ -54,7 +55,18 @@ The items the gate does **not** prove stay in
 `usage` shape of a `session/prompt` result, `usage_update` fields, `messageId`,
 `rawOutput`, `availableCommands`, `session/load` result modes, the `-32000`
 auth-refusal answer, the agent-published mode ids, opencode's `<server>_<tool>`
-spelling, and the launch arguments of real agents."#;
+spelling, and the launch arguments of real agents.
+
+## What this gate does not prove
+
+A green gate is **not** a full conformance proof. The `Verified` claim is
+derived from the contract's own constants — `wire::MESSAGE_KINDS` and
+`Capabilities::FIELDS` — plus hand-written lists (`ACP_BEHAVIOURS`,
+`FAKE_ACP_BARE`, `FAKE_ACP_FALLBACK`, `FAKE_ACP_EXTRA`). The gate catches drift
+and classification errors between those lists and the suite, but it does **not**
+prove that every `MESSAGE_KINDS` name has an actual assertion behind it in
+`acp_conformance.rs`; a name wired into the claim without a real runtime
+assertion still passes."#;
 
 /// The whole `docs/acp-conformance.md` body: preamble, start sentinel, the
 /// generated table, end sentinel.
@@ -63,21 +75,6 @@ fn doc_body() -> String {
         "{PREAMBLE}\n<!-- ACP-MATRIX:START -->\n{}<!-- ACP-MATRIX:END -->\n",
         matrix_markdown()
     )
-}
-
-/// The slice strictly between the two sentinels — exactly what [`matrix_markdown`]
-/// must reproduce.
-fn matrix_slice(doc: &str) -> String {
-    const START: &str = "<!-- ACP-MATRIX:START -->\n";
-    const END: &str = "<!-- ACP-MATRIX:END -->";
-    let start = doc
-        .find(START)
-        .expect("docs/acp-conformance.md has the ACP-MATRIX:START sentinel")
-        + START.len();
-    let end = doc
-        .find(END)
-        .expect("docs/acp-conformance.md has the ACP-MATRIX:END sentinel");
-    doc[start..end].to_owned()
 }
 
 #[test]
@@ -95,10 +92,11 @@ fn the_conformance_matrix_matches_the_doc() {
         )
     });
     assert_eq!(
-        matrix_slice(&committed),
-        matrix_markdown(),
-        "the matrix in docs/acp-conformance.md diverged from ACP_AGENTS in \
-         tests/support/acp_matrix.rs; regenerate with UPDATE_ACP_MATRIX=1"
+        committed,
+        doc_body(),
+        "docs/acp-conformance.md diverged from ACP_AGENTS in \
+         tests/support/acp_matrix.rs (or its prose diverged from PREAMBLE); \
+         regenerate with UPDATE_ACP_MATRIX=1"
     );
 }
 

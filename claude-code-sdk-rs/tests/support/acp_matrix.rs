@@ -112,6 +112,14 @@ pub const ACP_AGENTS: &[AcpAgentEntry] = &[
     },
 ];
 
+/// Escape a table cell so markdown-special characters (at minimum `|` and
+/// newlines) cannot silently break the table or smuggle a second column.
+fn escape_cell(text: &str) -> String {
+    text.replace('|', "\\|")
+        .replace('\n', "<br>")
+        .replace('\r', "")
+}
+
 /// The markdown table (no sentinels) that `docs/acp-conformance.md` embeds
 /// verbatim between `<!-- ACP-MATRIX:START -->` and `<!-- ACP-MATRIX:END -->`.
 pub fn matrix_markdown() -> String {
@@ -129,7 +137,11 @@ pub fn matrix_markdown() -> String {
         };
         out.push_str(&format!(
             "| `{}` {} | {} | {} | {} |\n",
-            entry.id, entry.product, status, entry.evidence, behaviours
+            entry.id,
+            entry.product,
+            status,
+            escape_cell(entry.evidence),
+            behaviours
         ));
     }
     out

@@ -32,6 +32,17 @@ The items the gate does **not** prove stay in
 `rawOutput`, `availableCommands`, `session/load` result modes, the `-32000`
 auth-refusal answer, the agent-published mode ids, opencode's `<server>_<tool>`
 spelling, and the launch arguments of real agents.
+
+## What this gate does not prove
+
+A green gate is **not** a full conformance proof. The `Verified` claim is
+derived from the contract's own constants — `wire::MESSAGE_KINDS` and
+`Capabilities::FIELDS` — plus hand-written lists (`ACP_BEHAVIOURS`,
+`FAKE_ACP_BARE`, `FAKE_ACP_FALLBACK`, `FAKE_ACP_EXTRA`). The gate catches drift
+and classification errors between those lists and the suite, but it does **not**
+prove that every `MESSAGE_KINDS` name has an actual assertion behind it in
+`acp_conformance.rs`; a name wired into the claim without a real runtime
+assertion still passes.
 <!-- ACP-MATRIX:START -->
 | agent | status | evidence | verified behaviours |
 | --- | --- | --- | --- |

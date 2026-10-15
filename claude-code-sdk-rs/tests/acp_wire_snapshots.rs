@@ -2,8 +2,10 @@
 //!
 //! `tests/snapshots/acp_wire_v<N>.json` holds, for every message the adapter
 //! *writes*, the exact `wire::canonical_line` bytes `transport::Process::write`
-//! puts on the agent's stdio, plus the pure inbound→event projection of
-//! `providers::acp::map`. The file name carries `SUPPORTED_PROTOCOL_VERSION`
+//! puts on the agent's stdio — with one exception: `initialize.clientInfo.version`
+//! is normalised to [`NORMALISED_CLIENT_VERSION`] (`0.0.0`), not the live crate
+//! version — plus the pure inbound→event projection of `providers::acp::map`.
+//! The file name carries `SUPPORTED_PROTOCOL_VERSION`
 //! (which is `wire::PROTOCOL_VERSION`): changing a wire shape without bumping
 //! the version fails the compare, and bumping the version requires a new file,
 //! so a wire change can never slip through as an incidental diff.
