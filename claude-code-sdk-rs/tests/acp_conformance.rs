@@ -8,7 +8,9 @@
 //! implements the protocol *as the specification describes it*, and the contract on top
 //! of it.
 
-use std::collections::BTreeMap;
+mod support;
+
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
@@ -16,10 +18,10 @@ use std::time::Duration;
 use async_trait::async_trait;
 use futures::StreamExt;
 use nexus_claude::agent::{
-    AgentEvent, AgentProvider, AgentSession, CancelScope, CostBasis, EventStream, HealthStatus,
-    HookSupport, InterruptScope, McpServerSpec, ModelPrice, PermissionDecision, PermissionScope,
-    PolicyMode, ProviderError, ProviderKind, ResumeToken, SandboxLevel, SessionSpec, StopReason,
-    SubagentSupport, ToolCategory, ToolPolicy, TurnInput,
+    AgentEvent, AgentProvider, AgentSession, CancelScope, Capabilities, CostBasis, EventStream,
+    HealthStatus, HookSupport, InterruptScope, McpServerSpec, ModelPrice, PermissionDecision,
+    PermissionScope, PolicyMode, ProviderError, ProviderKind, ResumeToken, SandboxLevel,
+    SessionSpec, StopReason, SubagentSupport, ToolCategory, ToolPolicy, TurnInput,
 };
 use nexus_claude::providers::acp::wire;
 use nexus_claude::providers::acp::{AcpConfig, AcpProvider, SUPPORTED_PROTOCOL_VERSION};
@@ -27,6 +29,7 @@ use nexus_claude::testkit::conformance::{
     ConformanceTarget, Prepared, Scenario, ScenarioOutcome, run_all,
 };
 use serde_json::{Value, json};
+use support::acp_matrix::*;
 use tempfile::TempDir;
 
 const FAKE: &str = env!("CARGO_BIN_EXE_fake_acp");
@@ -1683,4 +1686,104 @@ async fn an_agent_that_exits_during_its_handshake_fails_the_opening() {
     .await
     .expect("no hang");
     assert!(opened.is_err(), "the agent exited at once");
+}
+
+// ---------------------------------------------------------------------------
+// Matrix cross-link: the suite proves exactly what the registry claims
+// ---------------------------------------------------------------------------
+
+/// The [`Capabilities`] fields the suite proves for `fake_acp` and claims *bare*
+/// (under the field's own name): either the capability is present, or — for
+/// `context_window` — the field is directly asserted as an honest `None` (never
+/// an invented default). These are the fields pinned by `caps.*`,
+/// `caps.permission_scopes`, `caps.cost` and `caps.context_window` in
+/// `the_acp_adapter_passes_the_conformance_suite`, plus the dedicated
+/// secret-isolation tests.
+const FAKE_ACP_BARE: &[&str] = &[
+    "interactive_permissions",
+    "permission_scopes",
+    "secret_isolation",
+    "per_session_mcp",
+    "thinking",
+    "tools",
+    "resume",
+    "cost",
+    "context_window",
+];
+
+/// The [`Capabilities`] fields the suite proves *through their written §5
+/// fallback* (the capability is absent and its fallback is verified): claimed as
+/// `<field>_fallback`.
+const FAKE_ACP_FALLBACK: &[&str] = &[
+    "sandbox",
+    "hooks",
+    "subagents",
+    "compaction_signal",
+    "images",
+    "set_model_live",
+    "native_question",
+    "tool_cancel",
+    "background_tasks",
+];
+
+/// The one behaviour the suite proves that is not a [`Capabilities`] field:
+/// `openclaw acp` refusing `mcpServers` and the retry without them.
+const FAKE_ACP_EXTRA: &[&str] = &["mcp_servers_refused_retry"];
+
+/// The capability names the suite proves for `fake_acp`, derived from
+/// [`Capabilities::FIELDS`]: every field is classified exactly once, bare or
+/// fallback, and [`FAKE_ACP_EXTRA`] is added. A field added to `Capabilities`
+/// without a matrix claim, or a matrix name with no field behind it, breaks the
+/// cross-link comparison below.
+fn proven_capabilities() -> BTreeSet<String> {
+    let fields: BTreeSet<&str> = Capabilities::FIELDS.iter().copied().collect();
+    let bare: BTreeSet<&str> = FAKE_ACP_BARE.iter().copied().collect();
+    let fallback: BTreeSet<&str> = FAKE_ACP_FALLBACK.iter().copied().collect();
+    assert!(
+        bare.is_disjoint(&fallback),
+        "a capability is classified both bare and fallback"
+    );
+    assert_eq!(
+        bare.union(&fallback).copied().collect::<BTreeSet<&str>>(),
+        fields,
+        "every Capabilities field must be classified bare or fallback for fake_acp"
+    );
+
+    let mut proven: BTreeSet<String> = bare.iter().map(|field| (*field).to_owned()).collect();
+    for &field in &fallback {
+        proven.insert(format!("{field}_fallback"));
+    }
+    proven.extend(FAKE_ACP_EXTRA.iter().map(|name| (*name).to_owned()));
+    proven
+}
+
+/// The conformance matrix must claim `fake_acp` verified for exactly what this
+/// suite proves — and for nothing the gate does not prove. The proven set is
+/// derived here from the contract itself (`wire::MESSAGE_KINDS` and
+/// [`Capabilities::FIELDS`]), never copied from the claim, so a behaviour name
+/// added to `ACP_BEHAVIOURS` (or a `wire::MESSAGE_KINDS` entry) without a real
+/// assertion fails the gate instead of silently marking it verified.
+#[test]
+fn the_matrix_says_fake_acp_is_verified_for_exactly_what_the_suite_proves() {
+    let fake = ACP_AGENTS
+        .iter()
+        .find(|entry| entry.id == "fake_acp")
+        .expect("fake_acp is in the matrix");
+
+    let mut proven: BTreeSet<String> = wire::MESSAGE_KINDS
+        .iter()
+        .map(|kind| (*kind).to_owned())
+        .collect();
+    proven.extend(proven_capabilities());
+
+    let claimed: BTreeSet<String> = fake
+        .verified_behaviours
+        .iter()
+        .map(|name| (*name).to_owned())
+        .collect();
+    assert_eq!(
+        claimed, proven,
+        "fake_acp.verified_behaviours must be exactly what the suite proves: a \
+         name claimed without a proof, or a proof without a claim, fails the gate"
+    );
 }
