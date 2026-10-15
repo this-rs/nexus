@@ -1,0 +1,235 @@
+{
+  "outbound": {
+    "error_response.invalid_params": "{\"error\":{\"code\":-32602,\"message\":\"invalid params\"},\"id\":\"s1\",\"jsonrpc\":\"2.0\"}",
+    "error_response.method_not_found": "{\"error\":{\"code\":-32601,\"message\":\"method not found: this client serves no fs or terminal\"},\"id\":\"s1\",\"jsonrpc\":\"2.0\"}",
+    "initialize.params": "{\"id\":1,\"jsonrpc\":\"2.0\",\"method\":\"initialize\",\"params\":{\"clientCapabilities\":{\"fs\":{\"readTextFile\":false,\"writeTextFile\":false},\"terminal\":false},\"clientInfo\":{\"name\":\"nexus_po\",\"title\":\"Project Orchestrator\",\"version\":\"0.0.0\"},\"protocolVersion\":1}}",
+    "session/cancel.params": "{\"jsonrpc\":\"2.0\",\"method\":\"session/cancel\",\"params\":{\"sessionId\":\"sess_fake1\"}}",
+    "session/load.params": "{\"id\":3,\"jsonrpc\":\"2.0\",\"method\":\"session/load\",\"params\":{\"cwd\":\"/work\",\"mcpServers\":[],\"sessionId\":\"sess_prev\"}}",
+    "session/new.params": "{\"id\":2,\"jsonrpc\":\"2.0\",\"method\":\"session/new\",\"params\":{\"cwd\":\"/work\",\"mcpServers\":[{\"args\":[\"--stdio\"],\"command\":\"/bin/po-mcp\",\"env\":[{\"name\":\"LEVEL\",\"value\":\"1\"}],\"name\":\"po\"},{\"headers\":[{\"name\":\"X-Tenant\",\"value\":\"acme\"}],\"name\":\"remote\",\"type\":\"http\",\"url\":\"https://mcp.example/api\"}]}}",
+    "session/prompt.params": "{\"id\":4,\"jsonrpc\":\"2.0\",\"method\":\"session/prompt\",\"params\":{\"prompt\":[{\"text\":\"go\",\"type\":\"text\"}],\"sessionId\":\"sess_fake1\"}}",
+    "session/request_permission.response.cancelled": "{\"id\":\"perm_1\",\"jsonrpc\":\"2.0\",\"result\":{\"outcome\":{\"outcome\":\"cancelled\"}}}",
+    "session/request_permission.response.selected": "{\"id\":\"perm_1\",\"jsonrpc\":\"2.0\",\"result\":{\"outcome\":{\"optionId\":\"allow-once\",\"outcome\":\"selected\"}}}",
+    "session/set_mode.params": "{\"id\":5,\"jsonrpc\":\"2.0\",\"method\":\"session/set_mode\",\"params\":{\"modeId\":\"acceptEdits\",\"sessionId\":\"sess_fake1\"}}"
+  },
+  "protocol_version": 1,
+  "response_mapping": {
+    "permission": {
+      "allow_once": {
+        "outcome": {
+          "optionId": "allow-once",
+          "outcome": "selected"
+        }
+      },
+      "cancelled": {
+        "outcome": {
+          "outcome": "cancelled"
+        }
+      },
+      "deny": {
+        "outcome": {
+          "optionId": "reject-once",
+          "outcome": "selected"
+        }
+      }
+    },
+    "rpc_error": {
+      "auth_required": {
+        "kind": "auth_required"
+      },
+      "context_too_small": {
+        "kind": "context_too_small"
+      },
+      "endpoint_unreachable": {
+        "detail": "network",
+        "kind": "endpoint_unreachable"
+      },
+      "invalid_request": {
+        "detail": "bad params",
+        "kind": "invalid_request"
+      },
+      "overloaded": {
+        "kind": "overloaded"
+      },
+      "protocol": {
+        "detail": "the agent refused (-32603): whatever",
+        "kind": "protocol"
+      },
+      "rate_limited": {
+        "kind": "rate_limited"
+      },
+      "unauthorized": {
+        "kind": "unauthorized"
+      }
+    },
+    "stop_reason": {
+      "cancelled": {
+        "error": null,
+        "is_error": false,
+        "stop_reason": "interrupted"
+      },
+      "end_turn": {
+        "error": null,
+        "is_error": false,
+        "stop_reason": "completed"
+      },
+      "max_tokens": {
+        "error": null,
+        "is_error": false,
+        "stop_reason": "max_tokens"
+      },
+      "max_turn_requests": {
+        "error": null,
+        "is_error": false,
+        "stop_reason": "max_turns"
+      },
+      "refusal": {
+        "error": null,
+        "is_error": false,
+        "stop_reason": "refusal"
+      },
+      "unknown": {
+        "error": {
+          "detail": "unknown stopReason `unknown`",
+          "kind": "protocol"
+        },
+        "is_error": true,
+        "stop_reason": "error"
+      }
+    },
+    "tool_description": {
+      "delete": [
+        "edit",
+        "Edit"
+      ],
+      "edit": [
+        "edit",
+        "Edit"
+      ],
+      "execute": [
+        "command",
+        "Bash"
+      ],
+      "fetch": [
+        "web",
+        "WebFetch"
+      ],
+      "move": [
+        "edit",
+        "Edit"
+      ],
+      "opencode": [
+        "mcp",
+        "mcp__po__write"
+      ],
+      "other": [
+        "other",
+        null
+      ],
+      "read": [
+        "read",
+        "Read"
+      ],
+      "search": [
+        "search",
+        "Grep"
+      ]
+    },
+    "update": {
+      "agent_message_chunk": [
+        {
+          "text": "Hello",
+          "type": "text"
+        }
+      ],
+      "agent_thought_chunk": [
+        {
+          "text": "hmm",
+          "type": "thinking"
+        }
+      ],
+      "agent_thought_chunk_not_declared": [
+        {
+          "data": {
+            "detail": "the agent sent reasoning the capabilities do not declare; dropped"
+          },
+          "kind": "thinking_not_declared",
+          "type": "provider_notice"
+        }
+      ],
+      "available_commands_update": [
+        {
+          "data": {
+            "commands": [
+              {
+                "description": "build it",
+                "name": "build"
+              }
+            ]
+          },
+          "kind": "available_commands",
+          "type": "provider_notice"
+        }
+      ],
+      "current_mode_update": [
+        {
+          "mode": "plan_only",
+          "native_mode": "plan",
+          "type": "policy_mode_changed"
+        }
+      ],
+      "plan": [
+        {
+          "data": {
+            "entries": [
+              {
+                "content": "do it",
+                "priority": 1,
+                "status": "pending"
+              }
+            ]
+          },
+          "kind": "plan",
+          "type": "provider_notice"
+        }
+      ],
+      "tool_call": [
+        {
+          "canonical": "Bash",
+          "category": "command",
+          "id": "c1",
+          "input": {
+            "command": "ls"
+          },
+          "input_complete": true,
+          "name": "ls",
+          "type": "tool_call"
+        },
+        {
+          "id": "c1",
+          "is_error": false,
+          "output": "a.txt",
+          "type": "tool_result"
+        }
+      ],
+      "tool_call_update": [
+        {
+          "canonical": "mcp__po__write",
+          "category": "mcp",
+          "id": "c2",
+          "input": {},
+          "input_complete": true,
+          "name": "po_write",
+          "type": "tool_call"
+        },
+        {
+          "id": "c2",
+          "is_error": true,
+          "output": "boom",
+          "type": "tool_result"
+        }
+      ],
+      "usage_update": [],
+      "user_message_chunk": []
+    }
+  }
+}

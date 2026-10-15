@@ -162,3 +162,15 @@ required-features = ["provider-acp"]
 [[test]]
 name = "acp_registry"
 required-features = ["provider-acp"]
+
+[[test]]
+name = "acp_wire_snapshots"
+required-features = ["provider-acp"]
+
+[[test]]
+name = "acp_conformance_matrix"
+required-features = ["provider-acp"]
+
+[[test]]
+name = "acp_routing"
+required-features = ["provider-acp"]
