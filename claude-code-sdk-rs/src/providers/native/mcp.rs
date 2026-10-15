@@ -55,6 +55,14 @@ const BODY_LIMIT: usize = 16 * 1024 * 1024;
 /// Pages of `tools/list` followed at most.
 const MAX_LIST_PAGES: usize = 50;
 
+/// The ONE output threshold every tool result follows, in bytes — the one Bash already
+/// uses (`nexus-tools`'s `INLINE_OUTPUT_LIMIT`). At or above it the whole text is written to a
+/// file and only a preview is returned. There is no second, MCP-specific threshold.
+pub const INLINE_OUTPUT_LIMIT: usize = 30_000;
+
+/// Bytes of the preview returned in place of a persisted output (Bash's `PREVIEW_BYTES`).
+pub const PREVIEW_BYTES: usize = 2_000;
+
 /// Limits and policy of the MCP clients of a provider.
 #[derive(Clone)]
 pub struct McpConfig {
@@ -64,8 +72,6 @@ pub struct McpConfig {
     pub call_timeout: Duration,
     /// Accept private ranges (RFC 1918) for HTTP servers; off by default.
     pub allow_private_network: bool,
-    /// Longest tool output kept, in bytes; the rest is cut and said so.
-    pub max_output_bytes: usize,
     /// Give stdio servers a dedicated `HOME` (contract §11) instead of the host's.
     pub isolated_home: bool,
     /// Another DNS resolver for the HTTP servers' guard (tests, hosts with their
@@ -79,7 +85,6 @@ impl std::fmt::Debug for McpConfig {
             .field("connect_timeout", &self.connect_timeout)
             .field("call_timeout", &self.call_timeout)
             .field("allow_private_network", &self.allow_private_network)
-            .field("max_output_bytes", &self.max_output_bytes)
             .field("isolated_home", &self.isolated_home)
             .field("dns_resolver", &self.dns_resolver.is_some())
             .finish()
@@ -92,7 +97,6 @@ impl Default for McpConfig {
             connect_timeout: Duration::from_secs(30),
             call_timeout: Duration::from_secs(300),
             allow_private_network: false,
-            max_output_bytes: 100_000,
             isolated_home: true,
             dns_resolver: None,
         }
@@ -108,6 +112,10 @@ pub struct McpLaunch {
     pub env: EnvSpec,
     /// Dedicated `HOME`, when the provider isolates it.
     pub home: Option<PathBuf>,
+    /// Where a tool result too big to send to the model is kept ([`bound_output`]). `Some` in a
+    /// session opened by the harness, which also adds this directory to the scope of its own
+    /// `Read`, so the model can open the file the preview names. `None`: nothing is kept.
+    pub output_dir: Option<PathBuf>,
 }
 
 /// A tool as the server lists it.
@@ -200,6 +208,8 @@ pub struct McpClient {
     name: String,
     transport: Transport,
     config: McpConfig,
+    /// Where a result too big to send to the model is written ([`bound_output`]).
+    output_dir: Option<PathBuf>,
 }
 
 enum Transport {
@@ -238,6 +248,7 @@ impl McpClient {
             name: name.to_owned(),
             transport,
             config: config.clone(),
+            output_dir: launch.output_dir.clone(),
         };
         let handshake = async {
             client
@@ -331,7 +342,7 @@ impl McpClient {
             )
             .await;
         match outcome {
-            Ok(result) => Ok(parse_call_result(&result, self.config.max_output_bytes)),
+            Ok(result) => Ok(parse_call_result(&result, self.output_dir.as_deref())),
             Err(McpError::Rpc { message }) => Ok(McpCallResult {
                 text: message,
                 is_error: true,
@@ -413,7 +424,76 @@ fn parse_tool(entry: &Value) -> Option<McpTool> {
     })
 }
 
-fn truncate_output(mut text: String, limit: usize) -> String {
+/// The ONE policy for a tool result too big to send to the model, the one Bash already follows:
+/// at or above [`INLINE_OUTPUT_LIMIT`] the whole text is written under `output_dir` and only the
+/// first [`PREVIEW_BYTES`] come back, in Bash's `<persisted-output>` shape. The preview names the
+/// file, and the model reads it back with `Read`. Below the limit the text goes as it is.
+///
+/// Without a directory (a client opened outside a session, a unit test) there is nowhere to keep
+/// the whole of it: the text is cut at the SAME limit and the cut is said. The threshold never
+/// depends on the tool that produced the result.
+pub fn bound_output(text: String, output_dir: Option<&Path>) -> String {
+    if text.len() <= INLINE_OUTPUT_LIMIT {
+        return text;
+    }
+    let Some(dir) = output_dir else {
+        return cut_output(text, INLINE_OUTPUT_LIMIT);
+    };
+    match persist_output(dir, &text) {
+        Some(path) => persisted_text(&text, path),
+        // Nowhere writable: nothing is lost in silence, the cut is said.
+        None => cut_output(text, INLINE_OUTPUT_LIMIT),
+    }
+}
+
+/// Counter of the files written by [`persist_output`] in this process.
+static OUTPUT_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// Writes the whole of `text` to a private file (`0600`) of `dir`, named for the process and a
+/// counter. `None` when the file cannot be written.
+fn persist_output(dir: &Path, text: &str) -> Option<PathBuf> {
+    if create_private(dir).is_err() {
+        return None;
+    }
+    let counter = OUTPUT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let path = dir.join(format!("mcp-{}-{counter}.txt", std::process::id()));
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&path)
+        .ok()?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = file.set_permissions(std::fs::Permissions::from_mode(0o600));
+    }
+    std::io::Write::write_all(&mut file, text.as_bytes()).ok()?;
+    Some(path)
+}
+
+/// Bash's shape for an output too big to return (`nexus-tools`'s `persisted_text`): the size,
+/// where the whole of it is, and the first [`PREVIEW_BYTES`] cut at a line.
+fn persisted_text(text: &str, path: PathBuf) -> String {
+    let mut end = PREVIEW_BYTES.min(text.len());
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    let mut preview = &text[..end];
+    if end < text.len()
+        && let Some(newline) = preview.rfind('\n')
+    {
+        preview = &preview[..newline];
+    }
+    format!(
+        "<persisted-output>\nOutput too large ({:.1}KB). Full output saved to: {}\n\nPreview (first 2KB):\n{preview}\n...\n</persisted-output>",
+        text.len() as f64 / 1024.0,
+        path.display()
+    )
+}
+
+/// Keeps the first `limit` bytes of `text`, on a character boundary, and says the cut.
+fn cut_output(mut text: String, limit: usize) -> String {
     if text.len() <= limit {
         return text;
     }
@@ -426,8 +506,9 @@ fn truncate_output(mut text: String, limit: usize) -> String {
     text
 }
 
-/// Turns a `tools/call` result into text for the model.
-pub fn parse_call_result(result: &Value, limit: usize) -> McpCallResult {
+/// Turns a `tools/call` result into text for the model, under the one output policy
+/// ([`bound_output`]).
+pub fn parse_call_result(result: &Value, output_dir: Option<&Path>) -> McpCallResult {
     let mut parts: Vec<String> = Vec::new();
     let mut images = Vec::new();
     if let Some(blocks) = result.get("content").and_then(Value::as_array) {
@@ -468,7 +549,7 @@ pub fn parse_call_result(result: &Value, limit: usize) -> McpCallResult {
         parts.push(structured.to_string());
     }
     McpCallResult {
-        text: truncate_output(parts.join("\n"), limit),
+        text: bound_output(parts.join("\n"), output_dir),
         is_error: result
             .get("isError")
             .and_then(Value::as_bool)
@@ -1026,6 +1107,26 @@ async fn read_sse_answer(
     }
 }
 
+/// Where a session keeps a tool result too big to send to the model: a private directory of the
+/// system temporary directory, named after the instance. The harness adds it to the scope of its
+/// own `nexus` server, so `Read` opens the files [`bound_output`] names. `None` when it cannot
+/// be made: the result is then cut, and the cut is said.
+pub fn session_output_dir(instance: &str) -> Option<PathBuf> {
+    let safe: String = instance
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let dir = std::env::temp_dir().join(format!("nexus-native-output-{safe}"));
+    create_private(&dir).ok()?;
+    Some(dir)
+}
+
 /// Directory used as the `HOME` of the stdio servers of an instance: created
 /// `0700` under the system temp directory, named after the instance.
 pub fn isolated_home(instance: &str) -> Option<PathBuf> {
@@ -1100,6 +1201,7 @@ mod tests {
             cwd: std::env::temp_dir(),
             env: EnvSpec::default(),
             home: None,
+            output_dir: None,
         }
     }
 
@@ -1221,7 +1323,7 @@ mod tests {
                 {"type": "image", "data": "xx", "mimeType": "image/png"},
                 {"type": "text", "text": "b"},
             ]}),
-            1000,
+            None,
         );
         assert_eq!(result.text, "a\n[image content not shown]\nb");
         assert!(!result.is_error);
@@ -1240,7 +1342,7 @@ mod tests {
                 {"type": "image", "data": "xx", "mimeType": "application/pdf"},
                 {"type": "audio", "data": "xx", "mimeType": "audio/wav"},
             ]}),
-            1000,
+            None,
         );
         assert!(odd.images.is_empty());
         assert_eq!(
@@ -1249,21 +1351,75 @@ mod tests {
         );
         let error = parse_call_result(
             &json!({"content": [{"type": "text", "text": "boom"}], "isError": true}),
-            1000,
+            None,
         );
         assert!(error.is_error);
-        let structured = parse_call_result(&json!({"structuredContent": {"n": 1}}), 1000);
+        let structured = parse_call_result(&json!({"structuredContent": {"n": 1}}), None);
         assert_eq!(structured.text, r#"{"n":1}"#);
     }
 
     #[test]
-    fn a_long_output_is_cut_on_a_character_boundary_and_says_so() {
+    fn an_output_over_the_limit_is_persisted_in_bash_shape_and_read_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let long = "x".repeat(INLINE_OUTPUT_LIMIT + 1);
         let result = parse_call_result(
-            &json!({"content": [{"type": "text", "text": "é".repeat(100)}]}),
-            11,
+            &json!({"content": [{"type": "text", "text": long}]}),
+            Some(dir.path()),
+        );
+        // Bash's shape, byte for byte (nexus-tools' `persisted_text`).
+        assert!(
+            result
+                .text
+                .starts_with("<persisted-output>\nOutput too large (29.3KB)."),
+            "{}",
+            &result.text[..80]
+        );
+        assert!(result.text.contains("Preview (first 2KB):"));
+        assert!(result.text.ends_with("\n...\n</persisted-output>"));
+        // The WHOLE of it is on disk: nothing was lost, only bounded on the wire.
+        let path = result
+            .text
+            .split("Full output saved to: ")
+            .nth(1)
+            .unwrap()
+            .lines()
+            .next()
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(path).unwrap().len(),
+            INLINE_OUTPUT_LIMIT + 1,
+            "the whole output is on disk"
+        );
+        let preview = result
+            .text
+            .split("Preview (first 2KB):\n")
+            .nth(1)
+            .unwrap()
+            .strip_suffix("\n...\n</persisted-output>")
+            .unwrap();
+        assert!(preview.len() <= PREVIEW_BYTES);
+    }
+
+    #[test]
+    fn an_output_at_the_limit_goes_inline() {
+        let result = parse_call_result(
+            &json!({"content": [{"type": "text", "text": "y".repeat(INLINE_OUTPUT_LIMIT)}]}),
+            None,
+        );
+        assert_eq!(result.text.len(), INLINE_OUTPUT_LIMIT);
+        assert!(!result.text.contains("persisted-output"));
+    }
+
+    #[test]
+    fn without_a_directory_the_cut_is_at_the_same_limit_and_is_said() {
+        // Never over the limit, even with no place to keep the whole of it.
+        let result = parse_call_result(
+            &json!({"content": [{"type": "text", "text": "é".repeat(INLINE_OUTPUT_LIMIT + 10)}]}),
+            None,
         );
         assert!(result.text.ends_with("[output truncated]"));
-        assert!(result.text.starts_with("ééééé"));
+        assert!(result.text.len() <= INLINE_OUTPUT_LIMIT + "\n[output truncated]".len());
+        assert!(result.text.starts_with('é'));
     }
 
     #[tokio::test]
@@ -1272,6 +1428,7 @@ mod tests {
             cwd: std::env::temp_dir(),
             env: EnvSpec::default(),
             home: None,
+            output_dir: None,
         };
         let error = McpClient::connect(
             "x",
@@ -1290,6 +1447,7 @@ mod tests {
             cwd: std::env::temp_dir(),
             env: EnvSpec::default(),
             home: None,
+            output_dir: None,
         };
         let error = McpClient::connect(
             "x",
@@ -1311,6 +1469,7 @@ mod tests {
             cwd: std::env::temp_dir(),
             env: EnvSpec::default(),
             home: None,
+            output_dir: None,
         };
         let config = McpConfig {
             connect_timeout: Duration::from_secs(3),
@@ -1363,6 +1522,7 @@ mod tests {
             cwd: std::env::temp_dir(),
             env: EnvSpec::default(),
             home: None,
+            output_dir: None,
         };
         let error = McpClient::connect(
             "x",
@@ -1391,6 +1551,7 @@ mod tests {
             cwd: std::env::temp_dir(),
             env: EnvSpec::default(),
             home: None,
+            output_dir: None,
         };
         let error = McpClient::connect(
             "x",

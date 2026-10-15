@@ -549,10 +549,26 @@ impl NativeProvider {
                 .any(|server| matches!(server, McpServerSpec::Stdio { .. })))
         .then(|| mcp::isolated_home(&self.config.instance_id))
         .flatten();
+        // Where a tool result too big to send to the model is kept (GROS-1): the ONE policy Bash
+        // already follows. It is created for any session that has an MCP server; when the harness
+        // attached its own `nexus` server, the directory joins its scope, so `Read` opens the
+        // files the preview names.
+        let output_dir = (!servers.is_empty())
+            .then(|| mcp::session_output_dir(&self.config.instance_id))
+            .flatten();
+        if let Some(dir) = &output_dir
+            && self.config.default_tools.is_some()
+            && !spec.mcp_servers.contains_key(NEXUS_TOOLS_SERVER)
+            && let Some(McpServerSpec::Stdio { args, .. }) = servers.get_mut(NEXUS_TOOLS_SERVER)
+        {
+            args.push("--add-dir".to_owned());
+            args.push(dir.display().to_string());
+        }
         let launch = McpLaunch {
             cwd: spec.cwd.clone(),
             env: spec.env.clone(),
             home,
+            output_dir,
         };
         let mut clients: HashMap<String, McpClient> = HashMap::new();
         let mut registry = ToolRegistry::new();

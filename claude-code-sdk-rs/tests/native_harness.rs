@@ -30,7 +30,8 @@ use nexus_claude::model::{
     FinishReason, ModelEndpoint, PriceTable,
 };
 use nexus_claude::providers::native::{
-    FileTranscriptStore, MemoryTranscriptStore, NativeConfig, NativeProvider, TranscriptStore,
+    DefaultTools, FileTranscriptStore, MemoryTranscriptStore, NativeConfig, NativeProvider,
+    TranscriptStore,
 };
 use serde_json::{Value, json};
 
@@ -3686,4 +3687,127 @@ async fn a_before_tool_deny_means_no_question_and_no_subagent() {
     );
     // No question was asked, so the turn did not end on it.
     assert_eq!(h.chat().len(), 2);
+}
+
+// ---------------------------------------------------------------------------
+// A tool result too big to send to the model (GROS-1)
+// ---------------------------------------------------------------------------
+
+/// The `big` call of `fake_mcp`: `n` characters of `x`.
+fn big_call(n: usize) -> (&'static str, &'static str, Value) {
+    ("c1", "mcp__fake__big", json!({ "n": n }))
+}
+
+/// A one-megabyte MCP result must not reach the model: it is written to a file, the model gets a
+/// bounded preview (Bash's shape), the whole of it stays readable, and the turn after it runs.
+#[tokio::test]
+async fn a_megabyte_tool_result_is_persisted_and_only_a_bounded_preview_reaches_the_model() {
+    const MEGABYTE: usize = 1_000_000;
+    let h = Harness::new(vec![
+        tool_reply(
+            Some("call big"),
+            &[big_call(MEGABYTE)],
+            None,
+            Some((100, 10)),
+        ),
+        text_reply(Some(TOOL), "read it back", None, Some((120, 10))),
+        text_reply(Some("second"), "ok", None, Some((150, 5))),
+    ])
+    .await;
+    let log_dir = tempfile::tempdir().unwrap();
+    let log = log_path(&log_dir);
+    let session = h.open(h.spec_with_mcp(&log)).await;
+
+    let events = turn(&*session, "call big").await;
+    assert_eq!(stop_reason(&events), StopReason::Completed);
+    assert_eq!(mcp_calls(&log, "big"), 1);
+
+    // What the model was given: Bash's shape, bounded.
+    let results = tool_results(&events);
+    assert_eq!(results.len(), 1);
+    let (_, is_error, text) = &results[0];
+    assert!(!is_error, "the call failed: {}", &text[..120]);
+    // Measured first: a megabyte must never come back whole.
+    assert!(
+        text.len() < 4_000,
+        "the result the model got is {} bytes, not a bounded preview",
+        text.len()
+    );
+    assert!(
+        text.starts_with("<persisted-output>\nOutput too large ("),
+        "{}",
+        &text[..80]
+    );
+    assert!(text.ends_with("\n...\n</persisted-output>"), "{text}");
+
+    // The whole of it is on disk: nothing was lost.
+    let path = text
+        .split("Full output saved to: ")
+        .nth(1)
+        .unwrap()
+        .lines()
+        .next()
+        .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(path).unwrap().len(),
+        MEGABYTE,
+        "the whole output is on disk, readable"
+    );
+    // ...in the very directory the harness gives its own `Read` (see the argv test below).
+    let scope = nexus_claude::providers::native::mcp::session_output_dir("native-test").unwrap();
+    assert!(
+        std::path::Path::new(path).starts_with(&scope),
+        "{path} is outside the scope the session's Read can open"
+    );
+
+    // The bound holds in the request itself: the megabyte never reaches the endpoint.
+    let requests = h.chat();
+    let tool_message = requests[1]["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["role"] == "tool")
+        .cloned()
+        .expect("the tool result of the round reached the endpoint");
+    let content = tool_message["content"].as_str().unwrap();
+    assert!(
+        content.contains("persisted-output") && content.len() < 4_000,
+        "the whole result never reaches the endpoint: {} bytes",
+        content.len()
+    );
+
+    // The turn after a huge result starts and ends: the session did not die with it.
+    let events = turn(&*session, "second").await;
+    assert_eq!(stop_reason(&events), StopReason::Completed);
+}
+
+/// A persisted result is readable by the model's own `Read`: the harness adds its output
+/// directory to the scope of the `nexus` server it launched. `fake_mcp` stands in for it and
+/// reports the arguments it was given (`argv`).
+#[tokio::test]
+async fn the_harness_gives_its_own_read_the_directory_where_a_result_is_persisted() {
+    let h = Harness::with(
+        vec![
+            tool_reply(
+                Some("argv"),
+                &[("c1", "mcp__nexus__argv", json!({}))],
+                None,
+                None,
+            ),
+            text_reply(Some(TOOL), "seen", None, None),
+        ],
+        |config| config.default_tools = Some(DefaultTools::new(FAKE_MCP)),
+    )
+    .await;
+    let session = h.open(h.spec()).await;
+    let events = turn(&*session, "argv").await;
+    assert_eq!(stop_reason(&events), StopReason::Completed);
+    let results = tool_results(&events);
+    assert_eq!(results.len(), 1, "{results:?}");
+    let argv = &results[0].2;
+    let dir = nexus_claude::providers::native::mcp::session_output_dir("native-test").unwrap();
+    assert!(
+        argv.contains("--add-dir") && argv.contains(&dir.display().to_string()),
+        "the output directory is not in the scope of the session's Read: {argv}"
+    );
 }

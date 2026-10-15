@@ -450,6 +450,13 @@ sur un provider, aucune forme sérialisée ne bouge : `CONTRACT_VERSION` reste 5
 - **Serveurs MCP stdio** : une ligne de plus de 8 Mio (`MAX_LINE_BYTES`) n'est jamais accumulée au-delà de la
   borne : la lecture s'arrête au dépassement, jette le reste de la ligne et répond aux requêtes en attente par une
   erreur `protocol` (même lecteur borné pour Codex et ACP, où la ligne est signalée `malformed`).
+- **Un résultat d'outil MCP trop gros est persisté, jamais tronqué en silence** (GROS-1) : au-delà de
+  `INLINE_OUTPUT_LIMIT` (30 000 octets, **le seuil de `Bash`**, la même constante que `nexus-tools`), le texte
+  entier est écrit `0600` dans le répertoire de sortie de la session (`mcp::session_output_dir`, ajouté au
+  périmètre du serveur `nexus` lancé par le harnais, donc relisible par `Read`) et le modèle ne reçoit que les
+  2 000 premiers octets, dans la forme `<persisted-output>` de `Bash` ; il relit le fichier par `Read`. Sans
+  répertoire (un client monté hors session), la coupe reste au même seuil et se dit. Il n'y a donc qu'UN seuil :
+  `nexus-tools/tests/mcp_output_policy.rs` échoue si les deux divergent.
 - **Serveurs MCP HTTP** : connexion épinglée sur les adresses validées (`resolve_to_addrs`, résolveur
   injectable `McpConfig::dns_resolver`), nom re-vérifié à chaque requête (`an_http_server_connection_is_pinned_…`,
   `an_http_server_name_that_rebinds_…`, rouges sans épinglage).
