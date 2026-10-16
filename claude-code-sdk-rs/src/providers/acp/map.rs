@@ -632,22 +632,32 @@ pub fn stop_of(reason: &str) -> (StopReason, bool, Option<ProviderError>) {
 }
 
 /// A JSON-RPC error → [`ProviderError`] (contract §7). ACP defines `-32000` as
-/// `auth_required`; the rest is read from the message, which never carries more than
-/// what [`redact`] lets through.
+/// `auth_required`; the rest is read from the **message and the `data` detail**, both
+/// searched as [`redact`] leaves them. The TypeScript ACP SDK answers an exception
+/// with `-32603 Internal error` and puts the real text in `data.details` (OpenClaw's
+/// session-creation limiter arrives so, #84): reading only the message would call a
+/// rate limit a `protocol` error and lose the delay it asks for.
 ///
 /// | error | `ProviderError` |
 /// |---|---|
 /// | `-32000` | `auth_required` |
 /// | `-32602` | `invalid_request` |
-/// | message with `rate limit`, `429`, `too many requests` | `rate_limited` |
+/// | message **or** detail with `rate limit`, `429`, `too many requests` | `rate_limited`, `retry_after_ms` read from `retry after <N>s` |
 /// | `overloaded`, `503`, `529` | `overloaded` |
 /// | `context` + `length` / `window` / `too long` | `context_too_small` |
 /// | `unauthorized`, `401`, `invalid api key` | `unauthorized` |
 /// | `unreachable`, `connection refused`, `network`, `econn` | `endpoint_unreachable` |
 /// | anything else | `protocol` |
 pub fn classify_rpc_error(error: &RpcError) -> ProviderError {
-    let lower = error.message.to_ascii_lowercase();
-    let has = |needles: &[&str]| needles.iter().any(|needle| lower.contains(needle));
+    // The detail is free text from the agent: redact it once, before it steers a
+    // classification and before it is shown (a credential must not slip into the text).
+    let detail = error.detail.as_deref().map(redact);
+    let mut text = error.message.to_ascii_lowercase();
+    if let Some(detail) = &detail {
+        text.push(' ');
+        text.push_str(&detail.to_ascii_lowercase());
+    }
+    let has = |needles: &[&str]| needles.iter().any(|needle| text.contains(needle));
     if error.code == -32000 {
         return ProviderError::AuthRequired { login_hint: None };
     }
@@ -656,13 +666,13 @@ pub fn classify_rpc_error(error: &RpcError) -> ProviderError {
     }
     if has(&["rate limit", "rate_limit", "429", "too many requests"]) {
         return ProviderError::RateLimited {
-            retry_after_ms: None,
+            retry_after_ms: retry_after_ms(&text),
         };
     }
     if has(&["overloaded", "503", "529"]) {
         return ProviderError::Overloaded;
     }
-    if lower.contains("context") && has(&["length", "window", "too long"]) {
+    if text.contains("context") && has(&["length", "window", "too long"]) {
         return ProviderError::ContextTooSmall {
             needed: None,
             available: None,
@@ -674,18 +684,41 @@ pub fn classify_rpc_error(error: &RpcError) -> ProviderError {
     if has(&["unreachable", "connection refused", "network", "econn"]) {
         return ProviderError::unreachable(&error.message);
     }
-    match &error.detail {
+    match &detail {
         Some(detail) => ProviderError::protocol(format!(
             "the agent refused ({}): {}: {}",
-            error.code,
-            error.message,
-            redact(detail)
+            error.code, error.message, detail
         )),
         None => ProviderError::protocol(format!(
             "the agent refused ({}): {}",
             error.code, error.message
         )),
     }
+}
+
+/// The delay an error text asks for, in milliseconds. Reads the first `retry after` of
+/// the text (case-insensitive), the number that follows it and, when it is named, its
+/// unit: `ms` (also `msec`, `millisecond(s)`) is milliseconds, `s` (also `sec`, `secs`,
+/// `second(s)`) is seconds. A bare number is seconds, as a `Retry-After` header. Any
+/// other text — a missing or non-numeric number, an unknown unit — gives `None`: no
+/// delay is invented. OpenClaw's limiter writes it as `retry after 3s.` in
+/// `data.details`, which is the shape this reads.
+fn retry_after_ms(text: &str) -> Option<u64> {
+    let lower = text.to_ascii_lowercase();
+    let rest = lower.split_once("retry after")?.1.trim_start();
+    let number: String = rest
+        .chars()
+        .take_while(|c| c.is_ascii_digit() || *c == '.')
+        .collect();
+    let seconds: f64 = number.parse().ok()?;
+    let unit = rest[number.len()..].trim_start();
+    let millis =
+        if unit.starts_with("ms") || unit.starts_with("msec") || unit.starts_with("millisecond") {
+            seconds
+        } else {
+            seconds * 1000.0
+        };
+    (millis.is_finite() && millis >= 0.0).then_some(millis as u64)
 }
 
 /// The agent refuses the `mcpServers` of `session/new` / `session/load`: its message or
@@ -1004,5 +1037,64 @@ mod tests {
         )));
         assert!(!refuses_mcp_servers(&other("the MCP server crashed", None)));
         assert!(!refuses_mcp_servers(&other("Internal error", None)));
+    }
+
+    /// OpenClaw's session-creation limiter answers `-32603 Internal error` with its
+    /// real text in `data.details` (#84): the classification reads it there, calls the
+    /// error `rate_limited` and keeps the delay it asks for. Reading only `message`
+    /// would have made it a `protocol` error, with no retry and no `retry_after`.
+    #[test]
+    fn a_rate_limit_in_the_data_of_the_error_is_classified_and_keeps_its_delay() {
+        let line = r#"{"jsonrpc":"2.0","id":2,"error":{"code":-32603,"message":"Internal error","data":{"details":"ACP session creation rate limit exceeded for newSession; retry after 3s."}}}"#;
+        let Ok(super::super::wire::Frame::Response {
+            outcome: Err(error),
+            ..
+        }) = super::super::wire::Frame::parse(line)
+        else {
+            panic!("an error response");
+        };
+        assert_eq!(
+            classify_rpc_error(&error),
+            ProviderError::RateLimited {
+                retry_after_ms: Some(3_000)
+            }
+        );
+    }
+
+    /// The `retry after` reader: seconds by default, milliseconds when named, and
+    /// `None` — no invented delay — when the text says nothing usable.
+    #[test]
+    fn retry_after_is_read_from_the_text_and_nothing_is_invented() {
+        // The parser, unit by unit.
+        assert_eq!(retry_after_ms("retry after 3s."), Some(3_000));
+        assert_eq!(retry_after_ms("retry after 3"), Some(3_000));
+        assert_eq!(retry_after_ms("retry after 1.5 seconds"), Some(1_500));
+        assert_eq!(
+            retry_after_ms("rate limit reached; retry after 500ms"),
+            Some(500)
+        );
+        assert_eq!(retry_after_ms("Retry-After: 500ms"), None); // no such wording
+        assert_eq!(retry_after_ms("retry after soon"), None);
+        assert_eq!(retry_after_ms("no delay here"), None);
+
+        // And through the classification: the delay travels with the error, and a rate
+        // limit that names no delay keeps `None`.
+        let rpc = |message: &str, detail: Option<&str>| RpcError {
+            code: -32603,
+            message: message.to_owned(),
+            detail: detail.map(str::to_owned),
+        };
+        let delay = |error: &RpcError| match classify_rpc_error(error) {
+            ProviderError::RateLimited { retry_after_ms } => retry_after_ms,
+            other => panic!("not a rate limit: {other}"),
+        };
+        assert_eq!(
+            delay(&rpc(
+                "Internal error",
+                Some("rate limit reached; retry after 500ms")
+            )),
+            Some(500)
+        );
+        assert_eq!(delay(&rpc("Rate limit exceeded", None)), None);
     }
 }
