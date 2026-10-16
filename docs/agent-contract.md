@@ -560,7 +560,10 @@ transcriptions écrites depuis les pages publiques d'`agentclientprotocol.com`
   d'`AcpProvider` (partagé par ses processus d'agent, perdu au redémarrage de l'hôte ou à la reconstruction de
   l'instance) ; un hôte qui doit s'en souvenir le garde lui-même (les capacités de la session le disent). Un autre
   refus n'est pas redemandé.
-  `RpcError::detail` garde le texte de `data` (`details`, `message` ou chaîne), affiché dans l'erreur `protocol`.
+  `RpcError::detail` garde le texte de `data` (`details`, `message` ou chaîne) ; il est **lu par la classification au même
+  titre que `message`** (rouge au préalable), puis affiché dans l'erreur `protocol`. Le limiteur de création de session
+  d'OpenClaw (`-32603 Internal error`, `retry after 3s.` dans `data.details`) donne ainsi `rate_limited { retry_after_ms:
+  Some(3000) }` — et non `protocol` —, avec un nouvel essai possible côté appelant.
 - **`context_window`** : celle de la configuration (`configured`), sinon `None`. **`set_model_live` = non** :
   `session/set_model` est instable, `set_model` → `Unsupported { set_model_live }` ; `SessionSpec::model` n'est
   qu'une étiquette de `done.model` et du prix (`provider_notice { model_not_applied }`).
@@ -576,7 +579,8 @@ transcriptions écrites depuis les pages publiques d'`agentclientprotocol.com`
   `provider_notice { plan }` (aucun événement neutre de plan) ; `stopReason` : `end_turn` → `completed`, `max_tokens`,
   `max_turn_requests` → `max_turns`, `refusal` → `done { refusal }` sans `is_error` (comme le natif), `cancelled` →
   `interrupted` ; une erreur JSON-RPC de `session/prompt` → `done { is_error, error }` classé (`-32000` → `auth_required`,
-  message `rate limit` → `rate_limited`, `overloaded` → `overloaded`…) ; `error { process_exited }` terminal seulement
+  message **ou détail `data`** `rate limit` → `rate_limited` (`retry_after_ms` lu de `retry after <N>s`, sinon `None`),
+  `overloaded` → `overloaded`…) ; `error { process_exited }` terminal seulement
   quand le processus meurt.
 - **Annulation** : `interrupt` répond `cancelled` à chaque permission en attente puis envoie la notification
   `session/cancel` ; le tour finit quand l'agent répond `cancelled`. Le client n'annonce ni `fs` ni `terminal` : toute
