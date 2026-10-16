@@ -33,8 +33,13 @@ if [ "$pinned" != "$V8_VERSION" ]; then
 fi
 
 sha256_of() {
+  # The digest is the first field, but do not trust it verbatim: GNU coreutils prefixes the line
+  # with a `\` when the path contains a backslash and it escapes the name (a Windows path does:
+  # `sha256sum` then prints `\<hash>  D:\...`), so `cut -d' ' -f1` alone yields `\<hash>` and the
+  # comparison below fails on a digest that is in fact identical (measured on the release Windows
+  # runner: "expected 15ada191…, got \15ada191…"). Strip the leading `\` and any stray CR.
   if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | cut -d' ' -f1
-  else shasum -a 256 "$1" | cut -d' ' -f1; fi
+  else shasum -a 256 "$1" | cut -d' ' -f1; fi | tr -d '\\\r'
 }
 
 cache="${CARGO_HOME:-$HOME/.cargo}/.rusty_v8"
