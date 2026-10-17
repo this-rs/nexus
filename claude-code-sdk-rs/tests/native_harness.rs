@@ -1215,6 +1215,199 @@ async fn a_session_scoped_approval_is_not_asked_again() {
     }
 }
 
+// ---------------------------------------------------------------------------
+// In-band consent to a subject (N23b): a hook names what a call is about, a human
+// answers, and the answer is scoped to that subject.
+// ---------------------------------------------------------------------------
+
+/// A hook that judges a call's destination: the `origin` the call would reach is the
+/// **subject**, and the human decides. The harness asserts that subject from the call (here the
+/// fake server's `origin` argument, as the backend reads a browser destination), never from the
+/// model's prose.
+#[derive(Default)]
+struct DestinationHooks {
+    /// Every subject the hook named, in order.
+    subjects: Mutex<Vec<String>>,
+}
+
+#[async_trait::async_trait]
+impl SessionHooks for DestinationHooks {
+    async fn before_tool(&self, call: &ToolCallInfo) -> HookVerdict {
+        let Some(origin) = call.input.get("origin").and_then(Value::as_str) else {
+            return HookVerdict::Continue;
+        };
+        self.subjects.lock().unwrap().push(origin.to_owned());
+        HookVerdict::RequireConsent {
+            subject: origin.to_owned(),
+            reason: format!("origin not allowed: {origin}"),
+        }
+    }
+}
+
+/// One turn of `mcp__fake__echo` on each origin given, then a final answer. `turn-<n>` marks the
+/// turns, so the fake endpoint answers them in order whatever the conversation holds.
+fn origin_routes(origins: &[&str]) -> Vec<Value> {
+    let mut routes = Vec::new();
+    for (index, origin) in origins.iter().enumerate() {
+        let marker = format!("turn-{}", index + 1);
+        let id = format!("c{}", index + 1);
+        routes.push(tool_reply(
+            Some(&marker),
+            &[(
+                &id,
+                "mcp__fake__echo",
+                json!({"text": "hi", "origin": origin}),
+            )],
+            None,
+            None,
+        ));
+        routes.push(text_reply(Some(TOOL), "done", None, None));
+    }
+    routes
+}
+
+fn asks(events: &[AgentEvent]) -> Vec<&AgentEvent> {
+    events
+        .iter()
+        .filter(|event| matches!(event, AgentEvent::PermissionAsk { .. }))
+        .collect()
+}
+
+/// The input of the first permission ask of `events`, as the human saw it.
+fn asked_input(events: &[AgentEvent]) -> &Value {
+    match asks(events).first().expect("a permission ask") {
+        AgentEvent::PermissionAsk { input, .. } => input,
+        _ => unreachable!(),
+    }
+}
+
+async fn hooked_with(
+    h: &Harness,
+    hooks: Arc<DestinationHooks>,
+    log: &std::path::Path,
+) -> Arc<dyn AgentSession> {
+    let mut spec = h.spec_with_mcp(log);
+    spec.hooks = Some(hooks);
+    h.open(spec).await
+}
+
+/// (a) A hook that requires consent makes the harness ASK, and the call runs only once the human
+/// allows it.
+#[tokio::test]
+async fn a_hook_that_requires_consent_asks_the_human_and_the_call_runs_only_after_the_allow() {
+    let h = Harness::new(origin_routes(&["https://example.com"])).await;
+    let log_dir = tempfile::tempdir().unwrap();
+    let log = log_path(&log_dir);
+    let hooks = Arc::new(DestinationHooks::default());
+    let session = hooked_with(&h, hooks.clone(), &log).await;
+
+    let mut stream = session.send_turn(TurnInput::text("turn-1")).await.unwrap();
+    let mut events = Vec::new();
+    while let Some(event) = stream.next().await {
+        if let AgentEvent::PermissionAsk {
+            request_id, input, ..
+        } = &event
+        {
+            // The question is about the call that is about to run, and NOTHING has run yet.
+            assert_eq!(input["origin"], "https://example.com");
+            assert_eq!(
+                mcp_calls(&log, "echo"),
+                0,
+                "the call waits for the human's answer"
+            );
+            session
+                .answer_permission(request_id, PermissionDecision::allow_once())
+                .await
+                .expect("answer");
+        }
+        events.push(event);
+    }
+    assert_eq!(stop_reason(&events), StopReason::Completed);
+    assert_eq!(asks(&events).len(), 1, "one question, one answer");
+    assert_eq!(*hooks.subjects.lock().unwrap(), vec!["https://example.com"]);
+    assert_eq!(mcp_calls(&log, "echo"), 1, "allowed, so it ran");
+}
+
+/// (c) The security regression: a `session` answer about ONE origin is not consent for another.
+/// Before N23b the approval was keyed by the tool name alone, so one answer opened every
+/// destination of the session — the model granted itself the rest of the network.
+#[tokio::test]
+async fn a_session_approval_for_one_origin_does_not_authorise_another_origin() {
+    let h = Harness::new(origin_routes(&[
+        "https://example.com",
+        "https://evil.example",
+    ]))
+    .await;
+    let log_dir = tempfile::tempdir().unwrap();
+    let log = log_path(&log_dir);
+    let session = hooked_with(&h, Arc::new(DestinationHooks::default()), &log).await;
+    let on_session = |_: &str| PermissionDecision::Allow {
+        scope: PermissionScope::Session,
+        updated_input: None,
+    };
+
+    let first = turn_deciding(&*session, "turn-1", on_session).await;
+    assert_eq!(asks(&first).len(), 1);
+    assert_eq!(asked_input(&first)["origin"], "https://example.com");
+    assert_eq!(mcp_calls(&log, "echo"), 1);
+
+    let second = turn_deciding(&*session, "turn-2", on_session).await;
+    assert_eq!(
+        asks(&second).len(),
+        1,
+        "another origin is another question: a session approval never covers it"
+    );
+    assert_eq!(asked_input(&second)["origin"], "https://evil.example");
+    assert_eq!(mcp_calls(&log, "echo"), 2);
+}
+
+/// (d) A `session` answer about an origin does hold for that origin: no second question.
+#[tokio::test]
+async fn a_session_approval_for_an_origin_is_not_asked_again_for_that_origin() {
+    let h = Harness::new(origin_routes(&[
+        "https://example.com",
+        "https://example.com",
+    ]))
+    .await;
+    let log_dir = tempfile::tempdir().unwrap();
+    let log = log_path(&log_dir);
+    let session = hooked_with(&h, Arc::new(DestinationHooks::default()), &log).await;
+    let on_session = |_: &str| PermissionDecision::Allow {
+        scope: PermissionScope::Session,
+        updated_input: None,
+    };
+
+    let first = turn_deciding(&*session, "turn-1", on_session).await;
+    assert_eq!(asks(&first).len(), 1);
+    let second = turn_deciding(&*session, "turn-2", on_session).await;
+    assert_eq!(
+        asks(&second).len(),
+        0,
+        "the same origin, already approved for the session: no question"
+    );
+    assert_eq!(mcp_calls(&log, "echo"), 2, "both calls ran");
+}
+
+/// A `Deny` to a consent question does not run the call, and the model reads the reason.
+#[tokio::test]
+async fn a_refused_consent_does_not_run_the_call_and_the_model_reads_why() {
+    let h = Harness::new(origin_routes(&["https://example.com"])).await;
+    let log_dir = tempfile::tempdir().unwrap();
+    let log = log_path(&log_dir);
+    let session = hooked_with(&h, Arc::new(DestinationHooks::default()), &log).await;
+    let events = turn_deciding(&*session, "turn-1", |_| PermissionDecision::Deny {
+        message: Some("not that origin".into()),
+        interrupt: false,
+    })
+    .await;
+    assert_eq!(asks(&events).len(), 1);
+    assert_eq!(mcp_calls(&log, "echo"), 0, "refused, so it never ran");
+    assert_eq!(
+        tool_results(&events),
+        vec![("c1".into(), true, "not that origin".into())]
+    );
+}
+
 #[tokio::test]
 async fn deny_patterns_and_allow_lists_decide_what_the_model_is_offered() {
     let h = Harness::new(vec![text_reply(None, "ok", None, None)]).await;

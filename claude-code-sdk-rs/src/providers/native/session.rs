@@ -98,7 +98,46 @@ impl TurnSignal {
 /// A permission request waiting for its answer.
 pub(crate) struct PendingAsk {
     pub(crate) tool: String,
+    /// What the ask is about, when the harness asks about a **subject** rather than about the
+    /// tool as a whole (a `HookVerdict::RequireConsent`, N23b): the origin, the host. A
+    /// `session` answer is then remembered for that subject alone.
+    pub(crate) subject: Option<String>,
     pub(crate) answer: oneshot::Sender<PermissionDecision>,
+}
+
+/// Separator of a consent key. It cannot appear in a tool name (`mcp__server__tool`) nor in a
+/// subject (an origin, a host), so a key never collides with a bare tool name.
+const CONSENT_SUBJECT_SEPARATOR: char = '\u{0}';
+
+/// What a `session` answer is remembered under: the tool alone for an ordinary tool approval,
+/// the tool **and** the subject when a hook asked about one (N23b). Answering "session" for
+/// `browser_navigate` on one origin must not open every other origin.
+fn consent_key(tool: &str, subject: &str) -> String {
+    format!("{tool}{CONSENT_SUBJECT_SEPARATOR}{subject}")
+}
+
+/// Where a `RequireConsent` verdict sends the call (N23b).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ConsentRoute {
+    /// This tool+subject was approved for the session: the call runs.
+    Approved,
+    /// A human must answer: the harness asks (`permission_ask`).
+    Ask,
+    /// Nobody can be asked (no `interactive_permissions`: an agent session, a delegation, a
+    /// runner): the call is refused. Fail closed, never open.
+    Refused,
+}
+
+/// The rule of `RequireConsent`, in one place: an approval already given wins, then a session
+/// that can ask asks, and anything else is refused.
+pub(crate) fn consent_route(approved: bool, interactive: bool) -> ConsentRoute {
+    if approved {
+        ConsentRoute::Approved
+    } else if interactive {
+        ConsentRoute::Ask
+    } else {
+        ConsentRoute::Refused
+    }
 }
 
 pub(crate) struct State {
@@ -113,7 +152,8 @@ pub(crate) struct State {
     pub(crate) pending: HashMap<String, PendingAsk>,
     /// Running tool calls, by tool call id.
     pub(crate) inflight: HashMap<String, CancelToken>,
-    /// Tools approved for the rest of the session (scope `session`).
+    /// What a `session` answer covers, for the rest of the session: a tool name (`Write`), or
+    /// `tool\u{0}subject` when the ask was about a subject (see [`consent_key`]).
     pub(crate) approved: HashSet<String>,
     pub(crate) policy: ToolPolicy,
     pub(crate) model: String,
@@ -325,6 +365,13 @@ impl Core {
 
     pub(crate) fn is_closed(&self) -> bool {
         self.lock().closed
+    }
+
+    /// Whether a human already allowed **this** tool on **this** subject for the session
+    /// (N23b). Tool and subject together: a `session` answer for one origin never covers the
+    /// next one.
+    pub(crate) fn consented(&self, tool: &str, subject: &str) -> bool {
+        self.lock().approved.contains(&consent_key(tool, subject))
     }
 
     /// The local policy decision for a call (contract §6). A read-only tool
@@ -584,8 +631,13 @@ impl AgentSession for NativeSession {
             if *scope == PermissionScope::Session
                 && let Some(pending) = state.pending.get(request_id)
             {
-                let tool = pending.tool.clone();
-                state.approved.insert(tool);
+                // An ask about a subject is remembered for that subject only (N23b): "session"
+                // for one origin is not consent for every origin.
+                let key = match &pending.subject {
+                    Some(subject) => consent_key(&pending.tool, subject),
+                    None => pending.tool.clone(),
+                };
+                state.approved.insert(key);
             }
         }
         if let Some(pending) = state.pending.remove(request_id) {
@@ -745,5 +797,47 @@ impl AgentSession for NativeSession {
             client.close().await;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod consent_tests {
+    use super::{ConsentRoute, consent_key, consent_route};
+
+    /// A tool approval and a subject approval never share a key: the separator of a consent key
+    /// is a character no tool name and no origin can hold (N23b).
+    #[test]
+    fn a_consent_key_is_the_tool_and_its_subject_and_never_a_bare_tool_name() {
+        let key = consent_key("browser_navigate", "https://example.com");
+        assert_eq!(key, "browser_navigate\u{0}https://example.com");
+        assert_ne!(key, "browser_navigate");
+        assert_ne!(
+            key,
+            consent_key("browser_navigate", "https://evil.example"),
+            "two origins are two consents"
+        );
+        assert_ne!(
+            consent_key("write", "https://example.com"),
+            consent_key("read", "https://example.com"),
+            "two tools are two consents"
+        );
+    }
+
+    /// The rule of `RequireConsent`, before any I/O: an approval wins, then a session that can
+    /// ask asks, and a session where nobody can be asked is REFUSED (fail closed).
+    #[test]
+    fn a_consent_is_approved_asked_or_refused_and_the_last_case_never_opens() {
+        assert_eq!(consent_route(true, true), ConsentRoute::Approved);
+        assert_eq!(
+            consent_route(true, false),
+            ConsentRoute::Approved,
+            "an approval a human already gave still holds where nobody answers"
+        );
+        assert_eq!(consent_route(false, true), ConsentRoute::Ask);
+        assert_eq!(
+            consent_route(false, false),
+            ConsentRoute::Refused,
+            "nobody can be asked: the call does not run"
+        );
     }
 }

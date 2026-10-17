@@ -145,11 +145,25 @@ pub struct SessionSpec {
       async fn before_compaction(&self, info: &CompactionInfo) -> Option<String> { None } // instructions
       async fn before_turn(&self, ctx: &TurnContext) -> TurnDirective { TurnDirective::default() } // v4
   }
-  pub enum HookVerdict { Continue, Deny { reason: String }, ReplaceInput(Value), AddContext(String) }
+  pub enum HookVerdict { Continue, Deny { reason: String }, ReplaceInput(Value), AddContext(String),
+                         RequireConsent { subject: String, reason: String } }
   pub struct TurnContext { turn_index: u32, current_model: String, input_chars: usize,
                            context_tokens: Option<u64>, tokens_spent: u64, usd_spent: Option<f64> }
   pub struct TurnDirective { model: Option<String> }   // TurnDirective::model(m) / ::none()
   ```
+  **`RequireConsent` (N23b)** : le hook ne décide pas à la place d'un humain : il nomme le **sujet** de
+  l'appel (`subject`, p. ex. l'origine qu'un appel de navigateur atteindrait — assertée par le harnais,
+  jamais lue dans le texte du modèle) et un motif. Le harnais pose la question par le canal de permission
+  qu'il a déjà (`permission_ask` / `answer_permission`, périmètres `once` / `session`) ; une réponse
+  `session` est mémorisée pour **ce sujet-là** (clé `outil\u{0}sujet`), jamais pour le nom d'outil seul :
+  un « session » pour une origine n'ouvre aucune autre origine. Trois issues, aucune autre :
+  - le couple outil+sujet est déjà approuvé pour la session → l'appel suit son cours, sans question ;
+  - `interactive_permissions` vrai → question. `Allow` (l'`updated_input` est honoré comme partout),
+    `Deny` (le motif est ce que le modèle lit), interruption → le tour s'arrête ;
+  - sinon (session d'agent, délégation, runner : **personne** ne peut répondre) → l'appel est REFUSÉ et
+    le modèle lit `reason`. Échec fermé, jamais ouvert.
+  Un harnais sans canal de réponse sur son chemin de hook refuse (`deny`) plutôt que de laisser passer :
+  c'est ce que fait la façade Claude Code, dont la parité « question dans le chat » reste une tâche à part.
   **`before_turn` (contrat v4, décision R3 du 2026-10-07)** : appelé AVANT que le harnais lise le modèle du
   tour. Une directive nommant un autre modèle du **même** provider rend ce modèle actif pour ce tour et les
   suivants, et le tour s'ouvre par `model_changed { model }` avant tout autre événement. La directive est
@@ -244,7 +258,7 @@ puis affectation des champs.
 
 | Champ | Type | Repli quand absent (obligatoire, un scénario de conformité par ligne) |
 |---|---|---|
-| `interactive_permissions` | `bool` | Pas de `permission_ask` : la politique seule décide ; ce qui demanderait est REFUSÉ (`tool_result` en erreur « permission denied by policy ») ; `answer_permission` → `Unsupported` |
+| `interactive_permissions` | `bool` | Pas de `permission_ask` : la politique seule décide ; ce qui demanderait est REFUSÉ (`tool_result` en erreur « permission denied by policy ») ; `answer_permission` → `Unsupported` ; un `HookVerdict::RequireConsent` est REFUSÉ aussi (le motif du hook) — personne à qui demander |
 | `permission_scopes` | `Vec<PermissionScope>` | Une portée non listée dans une réponse → `Unsupported { capability: "permission_scope" }` ; le frontend ne propose que les portées listées |
 | `sandbox` | `none \| workspace \| full` | `none` : information pour l'utilisateur (ce qui isole les outils), **pas une barrière** : `trust` s'ouvre sur tout provider (décision du 2026-10-07, remplace A35) |
 | `secret_isolation` | `bool` | `false` : le registre refuse l'instance pour un projet soumis au consentement (porte A32) ; jamais ouvert « quand même » |
@@ -322,7 +336,10 @@ sur un provider, aucune forme sérialisée ne bouge : `CONTRACT_VERSION` reste 5
   texte suit le résultat dans le message d'outil lu par le modèle (pas dans l'événement `tool_result`),
   `before_compaction` joint son texte aux instructions du résumé. Un hook qui ne répond pas dans
   `NativeConfig::hook_timeout` (30 s) est ignoré avec `provider_notice { kind: "hook_timeout" }` ; l'arrêt
-  du tour l'abandonne aussi. Plus de `hooks_not_supported` pour le natif. `before_turn` est appelé par
+  du tour l'abandonne aussi. Plus de `hooks_not_supported` pour le natif. Un `RequireConsent` y devient une
+  question posée par `ask()` (`loop::execute`), donc une `permission_ask` ordinaire : rien de plus n'est
+  offert au modèle, et un harnais qui ne peut pas demander (agent, délégation, runner) refuse l'appel avec
+  le motif du hook. `before_turn` est appelé par
   `run_turn` avant la lecture du modèle ; sa directive passe par `Core::apply_model`, comme `set_model` :
   le modèle devient actif et `State.active_window` / `State.active_cost` / `State.active_images` sont recalculés
   depuis la sonde ou le catalogue du provider (`ModelFacts::active` ; un modèle jamais vu est sondé une fois, au

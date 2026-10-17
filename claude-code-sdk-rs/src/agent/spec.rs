@@ -458,6 +458,27 @@ pub enum HookVerdict {
     ReplaceInput(Value),
     /// Let the call go and add text to the model's context.
     AddContext(String),
+    /// The hook does not decide: a human must consent to `subject` before the call runs (N23b).
+    ///
+    /// A hook that judges *what* a call is about — an origin a browser would reach, a host a
+    /// command would contact — cannot decide in the model's place, and `Deny` would be a final
+    /// refusal the human never sees. This verdict names the **subject** and the harness asks the
+    /// user in band, through the permission channel it already has (`permission_ask` /
+    /// `answer_permission`), so the answer is remembered against that subject and never against
+    /// the tool as a whole.
+    ///
+    /// `subject` is asserted by the **harness** (the origin a tool call really targets), never
+    /// read from the model's text: it is what the user's answer is scoped to.
+    ///
+    /// A provider that cannot ask (no `interactive_permissions`, nobody to answer) fails closed:
+    /// the call does not run and the model reads `reason`.
+    RequireConsent {
+        /// What the consent is about, e.g. `https://example.com` — asserted by the harness.
+        subject: String,
+        /// Why the subject is not allowed yet: shown to the human, and to the model when
+        /// nobody can be asked.
+        reason: String,
+    },
 }
 
 /// What the user sends to start a turn.
