@@ -1,6 +1,6 @@
 %% name: nexus-ci-pipeline
 %% covers: .github/workflows/ci.yml, .github/workflows/release.yml
-%% verified: 2026-10-12
+%% verified: 2026-10-17
 flowchart TD
     subgraph PR["Pull Request"]
         direction TB
@@ -33,9 +33,10 @@ flowchart TD
         changelog --> ghrel[Create GitHub Release]
         ghrel --> build[Build artifacts]
 
-        build --> linux["Linux\nx64 / ARM64\ntar.gz"]
-        build --> macos["macOS\nx64 / ARM64\ntar.gz"]
-        build --> win["Windows\nx64\nzip"]
+        build --> lic["Third-party licences\ncargo about --fail (pinned 0.9.2) + our LICENSE\ngenerated next to the binary before packaging"]
+        lic --> linux["Linux\nx64 / ARM64\ntar.gz\n+ LICENSE, THIRD-PARTY-LICENSES.txt"]
+        lic --> macos["macOS\nx64 / ARM64\ntar.gz\n+ LICENSE, THIRD-PARTY-LICENSES.txt"]
+        lic --> win["Windows\nx64\nzip\n+ LICENSE, THIRD-PARTY-LICENSES.txt"]
 
         linux & macos & win --> upload[Upload to Release]
 
