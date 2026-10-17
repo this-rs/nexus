@@ -94,6 +94,7 @@ fn stop_spinner(running: Arc<AtomicBool>) {
 /// Chat configuration
 struct ChatConfig {
     verbose: bool,
+    #[allow(dead_code)]
     meilisearch_url: String,
     #[allow(dead_code)]
     meilisearch_key: Option<String>,

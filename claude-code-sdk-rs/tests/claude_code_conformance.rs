@@ -570,11 +570,9 @@ async fn a_granted_permission_replays_the_original_input_byte_for_byte() {
             category: ToolCategory::Command,
             canonical: Some("Bash".into()),
             tool_call_id: Some("toolu_1".into()),
-            scopes: vec![
-                PermissionScope::Once,
-                PermissionScope::Session,
-                PermissionScope::Always
-            ],
+            // No `permission_suggestions` in the transcript → only `once`
+            // is advertised (non-rétrogradation rule, §15.1).
+            scopes: vec![PermissionScope::Once],
             parent: None,
         }]
     );
@@ -624,6 +622,127 @@ async fn a_replaced_input_and_a_lasting_scope_are_written_as_documented() {
         stdin_line(&fake, "req-scope").await,
         r#"{"response":{"request_id":"req-scope","response":{"behavior":"allow","updatedInput":{"command":"ls -1"},"updatedPermissions":[{"behavior":"allow","destination":"session","rules":[{"ruleContent":"ls","toolName":"Bash"}],"type":"addRules"}]},"subtype":"success"},"type":"control_response"}"#
     );
+    session.close().await.unwrap();
+}
+
+/// §15.1 non-rétrogradation : `can_use_tool` sans `permission_suggestions` +
+/// `scope: session` → `Unsupported { permission_scope }`, la demande reste en
+/// attente et peut être répondue avec `once`.
+#[tokio::test]
+async fn a_session_scope_without_cli_suggestions_returns_unsupported_and_keeps_request_pending() {
+    // No `permission_suggestions` key at all.
+    let ask = can_use_tool("req-no-sug", "Bash", json!({"command": "ls"}), None);
+    let (_fake, provider, spec) = stage(until_closed(
+        Transcript::new()
+            .json(ask)
+            .await_stdin_containing("req-no-sug"),
+    ));
+    let session = open(&provider, spec).await;
+    let mut out_of_band = session.out_of_band().unwrap();
+    // The PermissionAsk must arrive and announce only `once` (no suggestions).
+    let event = next(&mut out_of_band).await;
+    match event {
+        Some(AgentEvent::PermissionAsk {
+            request_id, scopes, ..
+        }) => {
+            assert_eq!(request_id, "req-no-sug");
+            assert_eq!(
+                scopes,
+                vec![PermissionScope::Once],
+                "without suggestions the facade must not advertise session/always"
+            );
+        },
+        other => panic!("expected PermissionAsk, got {other:?}"),
+    }
+    // Attempting session scope → typed error; the request is NOT consumed.
+    assert_eq!(
+        session
+            .answer_permission(
+                "req-no-sug",
+                PermissionDecision::Allow {
+                    scope: PermissionScope::Session,
+                    updated_input: None,
+                },
+            )
+            .await,
+        Err(ProviderError::unsupported("permission_scope")),
+        "session scope without suggestions must return Unsupported, not silently allow"
+    );
+    // Same for `always`.
+    assert_eq!(
+        session
+            .answer_permission(
+                "req-no-sug",
+                PermissionDecision::Allow {
+                    scope: PermissionScope::Always,
+                    updated_input: None,
+                },
+            )
+            .await,
+        Err(ProviderError::unsupported("permission_scope")),
+        "always scope without suggestions must return Unsupported"
+    );
+    // The request is still in pending: answering with `once` succeeds.
+    session
+        .answer_permission("req-no-sug", PermissionDecision::allow_once())
+        .await
+        .expect("once is always answerable and the request was not consumed");
+    session.close().await.unwrap();
+}
+
+/// `PermissionAsk.scopes` advertises `session` and `always` when and only
+/// when the CLI attached non-empty `permission_suggestions`.
+#[tokio::test]
+async fn permission_ask_scopes_reflect_whether_cli_has_suggestions() {
+    let ask_with = {
+        let mut ask = can_use_tool("req-with-sug", "Bash", json!({"command": "ls"}), None);
+        ask["request"]["permission_suggestions"] = json!([
+            {"type": "addRules", "rules": [{"toolName": "Bash"}],
+             "behavior": "allow", "destination": "localSettings"}
+        ]);
+        ask
+    };
+    let ask_without = can_use_tool("req-without-sug", "Bash", json!({"command": "ls"}), None);
+    let (_fake, provider, spec) = stage(until_closed(
+        Transcript::new()
+            .json(ask_with)
+            .json(ask_without)
+            .await_stdin_containing("req-without-sug"),
+    ));
+    let session = open(&provider, spec).await;
+    let mut oob = session.out_of_band().unwrap();
+    let event_with = next(&mut oob).await;
+    match event_with {
+        Some(AgentEvent::PermissionAsk {
+            request_id, scopes, ..
+        }) => {
+            assert_eq!(request_id, "req-with-sug");
+            assert_eq!(
+                scopes,
+                vec![
+                    PermissionScope::Once,
+                    PermissionScope::Session,
+                    PermissionScope::Always
+                ],
+                "with suggestions all three scopes must be advertised"
+            );
+        },
+        other => panic!("expected PermissionAsk for req-with-sug, got {other:?}"),
+    }
+    let event_without = next(&mut oob).await;
+    match event_without {
+        Some(AgentEvent::PermissionAsk {
+            request_id, scopes, ..
+        }) => {
+            assert_eq!(request_id, "req-without-sug");
+            assert_eq!(
+                scopes,
+                vec![PermissionScope::Once],
+                "without suggestions only once must be advertised"
+            );
+        },
+        other => panic!("expected PermissionAsk for req-without-sug, got {other:?}"),
+    }
     session.close().await.unwrap();
 }
 
