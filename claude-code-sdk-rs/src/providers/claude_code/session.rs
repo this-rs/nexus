@@ -858,6 +858,15 @@ impl HookCallback for NeutralHook {
                     HookVerdict::Deny { reason } => decided(Some("deny"), Some(reason), None, None),
                     HookVerdict::ReplaceInput(input) => decided(None, None, Some(input), None),
                     HookVerdict::AddContext(context) => decided(None, None, None, Some(context)),
+                    // A hook asks a human to consent to a subject (N23b). This façade has no
+                    // in-band answer of its own on the hook path — the CLI's own permission flow
+                    // is the only asking channel — so it refuses rather than let the call run:
+                    // a `Continue` here would be a silent allow. The in-band question exists on
+                    // the native harness (`providers::native::r#loop`); parity for this façade is
+                    // a separate task.
+                    HookVerdict::RequireConsent { reason, .. } => {
+                        decided(Some("deny"), Some(reason), None, None)
+                    },
                     // `Continue`, and any verdict a later contract adds.
                     _ => sync_output(None),
                 })

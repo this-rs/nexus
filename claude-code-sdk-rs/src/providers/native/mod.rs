@@ -261,7 +261,7 @@ pub(crate) struct ModelFacts {
 }
 
 impl ModelFacts {
-    fn new(config: Arc<NativeConfig>) -> Self {
+    pub(crate) fn new(config: Arc<NativeConfig>) -> Self {
         Self {
             config,
             probes: Arc::new(Mutex::new(HashMap::new())),

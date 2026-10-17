@@ -40,7 +40,7 @@ use super::compaction::{
     apply, count_images, estimate_tokens, should_compact, split_point, summarise, summary_request,
 };
 use super::mcp::{IMAGE_NOT_SHOWN, McpError};
-use super::session::{Core, PendingAsk, StopCause, TurnSignal};
+use super::session::{ConsentRoute, Core, PendingAsk, StopCause, TurnSignal};
 use super::tools::{ToolEntry, ToolRegistry};
 use crate::agent::{
     AgentEvent, CompactionInfo, CompactionPhase, CompactionTrigger, Cost, CostBasis, DeltaKind,
@@ -1173,6 +1173,9 @@ enum Asked {
     Stopped,
 }
 
+/// Asks the human about a call. `subject` names what the answer is scoped to when the ask comes
+/// from a hook (`HookVerdict::RequireConsent`, N23b): a `session` answer is then remembered for
+/// that subject alone; `None` is an ordinary tool approval.
 async fn ask(
     core: &Core,
     signal: &TurnSignal,
@@ -1180,6 +1183,7 @@ async fn ask(
     call: &ToolCallChunk,
     input: &Value,
     token: &CancelToken,
+    subject: Option<&str>,
 ) -> Asked {
     let request_id = format!("perm_{}", uuid::Uuid::new_v4().simple());
     let (answer, answered) = oneshot::channel();
@@ -1187,6 +1191,7 @@ async fn ask(
         request_id.clone(),
         PendingAsk {
             tool: entry.name.clone(),
+            subject: subject.map(str::to_owned),
             answer,
         },
     );
@@ -1296,6 +1301,30 @@ async fn execute(
                 input = replaced;
             },
             Some(HookVerdict::AddContext(text)) => context.push(text),
+            // A hook does not decide for a human (N23b): it names the subject, and the answer goes
+            // through the permission channel the session already has. An approval already given
+            // for this very subject lets the call through; a session where nobody can be asked —
+            // an agent session, a delegation, a runner — refuses, and there is no path around it.
+            Some(HookVerdict::RequireConsent { subject, reason }) => {
+                match super::session::consent_route(
+                    core.consented(&entry.name, &subject),
+                    core.capabilities.interactive_permissions,
+                ) {
+                    ConsentRoute::Approved => {},
+                    ConsentRoute::Ask => {
+                        match ask(core, signal, entry, call, &input, token, Some(&subject)).await {
+                            Asked::Allow(updated) => {
+                                if let Some(updated) = updated {
+                                    input = updated;
+                                }
+                            },
+                            Asked::Deny(message) => return (message, true, None),
+                            Asked::Stopped => return (stopped_message(signal, token), true, None),
+                        }
+                    },
+                    ConsentRoute::Refused => return (reason, true, None),
+                }
+            },
             _ => {},
         }
         if signal.token.is_cancelled() || token.is_cancelled() {
@@ -1325,7 +1354,7 @@ async fn execute(
     match core.decide(entry, &input) {
         PolicyDecision::Allow => {},
         PolicyDecision::Ask if core.capabilities.interactive_permissions => {
-            match ask(core, signal, entry, call, &input, token).await {
+            match ask(core, signal, entry, call, &input, token, None).await {
                 Asked::Allow(updated) => {
                     if let Some(updated) = updated {
                         input = updated;
@@ -1488,5 +1517,192 @@ async fn hook_call<T>(
             },
         },
         () = signal.token.cancelled() => None,
+    }
+}
+
+#[cfg(test)]
+mod consent_tests {
+    //! The fail-closed half of `HookVerdict::RequireConsent` (N23b), at the level of the one
+    //! function that decides it: a session where nobody can be asked never emits a
+    //! `PermissionAsk` and never runs the call. A native session always *can* ask, so this state
+    //! is reached here with a `Core` whose capabilities say so — the same shape a runner, a
+    //! delegation or an agent session has on the host side.
+
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    use serde_json::json;
+
+    use super::{Outputs, execute};
+    use crate::agent::{
+        Capabilities, HookVerdict, ModelInfo, ProviderError, ProviderHealth, SessionHooks,
+        ToolCallInfo, ToolPolicy,
+    };
+    use crate::model::{
+        CompletionRequest, CompletionStream, EndpointProbe, ModelEndpoint, ToolCallChunk,
+    };
+    use crate::providers::native::ModelFacts;
+    use crate::providers::native::cancel::CancelToken;
+    use crate::providers::native::session::{Core, CoreParts, TurnSignal};
+    use crate::providers::native::tools::{ToolEntry, ToolRegistry};
+    use crate::providers::native::transcript::MemoryTranscriptStore;
+    use crate::providers::native::{NativeConfig, tools};
+
+    /// An endpoint nothing ever asks anything of: this test never reaches the model.
+    struct UnusedEndpoint;
+
+    #[async_trait::async_trait]
+    impl ModelEndpoint for UnusedEndpoint {
+        fn id(&self) -> &str {
+            "unused"
+        }
+
+        async fn health(&self) -> ProviderHealth {
+            ProviderHealth::ok(None)
+        }
+
+        async fn models(&self) -> Result<Vec<ModelInfo>, ProviderError> {
+            Ok(Vec::new())
+        }
+
+        async fn complete(
+            &self,
+            _request: CompletionRequest,
+        ) -> Result<CompletionStream, ProviderError> {
+            panic!("the consent path never reaches the model")
+        }
+
+        async fn probe(&self, _model: &str) -> Result<EndpointProbe, ProviderError> {
+            panic!("the consent path never probes the model")
+        }
+    }
+
+    /// A hook that judges the destination of a browser call, as the graph does.
+    struct OriginHook {
+        verdict: HookVerdict,
+        calls: std::sync::Mutex<usize>,
+    }
+
+    #[async_trait::async_trait]
+    impl SessionHooks for OriginHook {
+        async fn before_tool(&self, _call: &ToolCallInfo) -> HookVerdict {
+            *self.calls.lock().unwrap() += 1;
+            self.verdict.clone()
+        }
+    }
+
+    /// A session whose capabilities say whether a human can be asked, with one browser tool.
+    fn core(interactive: bool, verdict: HookVerdict) -> (Arc<Core>, Arc<OriginHook>) {
+        let mut capabilities = Capabilities::none();
+        capabilities.interactive_permissions = interactive;
+        let settings = Arc::new(NativeConfig::new("consent-test"));
+        let mut registry = ToolRegistry::new();
+        registry
+            .insert(ToolEntry {
+                name: tools::exposed_name("browser", "navigate"),
+                server: "browser".to_owned(),
+                tool: "navigate".to_owned(),
+                description: "go to a URL".to_owned(),
+                schema: json!({"type": "object"}),
+                read_only: false,
+                canonical: None,
+                category: crate::agent::ToolCategory::Web,
+                builtin: None,
+            })
+            .expect("one tool");
+        let hooks = Arc::new(OriginHook {
+            verdict,
+            calls: std::sync::Mutex::new(0),
+        });
+        let core = Core::new(CoreParts {
+            capabilities,
+            facts: ModelFacts::new(Arc::clone(&settings)),
+            endpoint: Arc::new(UnusedEndpoint),
+            settings,
+            registry,
+            mcp: HashMap::new(),
+            system_prompt: None,
+            deltas: false,
+            max_turns: None,
+            limits: Default::default(),
+            ceiling: None,
+            cwd: std::env::temp_dir(),
+            hooks: Some(hooks.clone()),
+            transcript_id: "consent-test".to_owned(),
+            host_session_id: None,
+            store: Arc::new(MemoryTranscriptStore::new()),
+            policy: ToolPolicy::default(),
+            model: "m".to_owned(),
+            messages: Vec::new(),
+            initial_events: Vec::new(),
+        });
+        (core, hooks)
+    }
+
+    /// The verdict of the graph: the origin is not allowed yet, and a human must say so.
+    fn consent() -> HookVerdict {
+        HookVerdict::RequireConsent {
+            subject: "https://example.com".to_owned(),
+            reason: "origin not allowed: https://example.com".to_owned(),
+        }
+    }
+
+    fn navigate() -> ToolCallChunk {
+        ToolCallChunk {
+            id: "c1".to_owned(),
+            name: tools::exposed_name("browser", "navigate"),
+            arguments: json!({"url": "https://example.com"}).to_string(),
+        }
+    }
+
+    async fn run(core: &Core) -> (String, bool) {
+        let signal = TurnSignal::new();
+        let token = CancelToken::new();
+        let mut context = Vec::new();
+        let mut images = Vec::new();
+        let mut task = None;
+        let mut ends_turn = false;
+        let (content, is_error, fatal) = execute(
+            core,
+            &signal,
+            &navigate(),
+            &token,
+            Outputs {
+                context: &mut context,
+                images: &mut images,
+                task: &mut task,
+                ends_turn: &mut ends_turn,
+            },
+        )
+        .await;
+        assert!(fatal.is_none());
+        (content, is_error)
+    }
+
+    /// (b) Nobody can be asked: the call is REFUSED with the hook's reason, and no
+    /// `PermissionAsk` is emitted — nothing waits for an answer that would never come.
+    #[tokio::test]
+    async fn a_consent_nobody_can_be_asked_about_refuses_the_call_without_asking_anyone() {
+        let (core, hooks) = core(false, consent());
+        let (content, is_error) = run(&core).await;
+        assert_eq!(
+            (content.as_str(), is_error),
+            ("origin not allowed: https://example.com", true),
+            "the hook's reason is what the model reads"
+        );
+        assert_eq!(*hooks.calls.lock().unwrap(), 1, "the hook did speak");
+        let state = core.lock();
+        assert!(
+            state.pending.is_empty(),
+            "no permission request was left waiting for an answer"
+        );
+        assert!(
+            !state
+                .out_of_band
+                .iter()
+                .any(|event| matches!(event, crate::agent::AgentEvent::PermissionAsk { .. })),
+            "{:?}",
+            state.out_of_band
+        );
     }
 }
