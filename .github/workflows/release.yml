@@ -102,17 +102,31 @@ jobs:
           fi
         shell: bash
 
+      # The license texts the binary owes its dependencies (MIT/BSD/Apache-2.0 require them in a
+      # binary distribution), next to our LICENSE in every archive. cargo-about is pinned.
+      - name: Install cargo-about
+        uses: taiki-e/install-action@ab6895351a88b908e96a4697860d4ffea5e57dbe # v2.87.27
+        with:
+          tool: cargo-about@0.9.2
+
+      - name: Generate third-party licenses
+        shell: bash
+        run: |
+          cargo about generate --fail -m claude-code-api/Cargo.toml about.hbs \
+            -o target/${{ matrix.target }}/release/THIRD-PARTY-LICENSES.txt
+          cp LICENSE target/${{ matrix.target }}/release/LICENSE
+
       - name: Package artifact (Unix)
         if: runner.os != 'Windows'
         run: |
           cd target/${{ matrix.target }}/release
-          tar -czvf ../../../${{ matrix.asset_name }}.tar.gz ${{ matrix.artifact_name }}
+          tar -czvf ../../../${{ matrix.asset_name }}.tar.gz ${{ matrix.artifact_name }} LICENSE THIRD-PARTY-LICENSES.txt
 
       - name: Package artifact (Windows)
         if: runner.os == 'Windows'
         run: |
           cd target/${{ matrix.target }}/release
-          7z a ../../../${{ matrix.asset_name }}.zip ${{ matrix.artifact_name }}
+          7z a ../../../${{ matrix.asset_name }}.zip ${{ matrix.artifact_name }} LICENSE THIRD-PARTY-LICENSES.txt
         shell: bash
 
       - name: Upload artifact to release
