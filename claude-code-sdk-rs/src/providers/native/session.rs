@@ -184,6 +184,10 @@ pub(crate) struct State {
     /// that commits it, in its user message (never the system prompt: the cached prefix
     /// stays as it is).
     pub(crate) pending_note: Option<String>,
+    /// The deferred tools a `ToolSearch` call loaded (CTX2), in load order: sent with every
+    /// later request, appended after the tools already sent. The list never shrinks during
+    /// the session (CTX0: the cached prefix only grows at its tail).
+    pub(crate) loaded_tools: Vec<String>,
 }
 
 impl State {
@@ -296,6 +300,7 @@ impl Core {
             last_wire: None,
             tasks: TaskTable::default(),
             pending_note: None,
+            loaded_tools: Vec::new(),
         };
         for event in parts.initial_events {
             state.push_out_of_band(event);

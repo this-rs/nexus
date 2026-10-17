@@ -1,17 +1,19 @@
-//! The two tools the harness itself offers (P18): `AskUserQuestion` and `Agent`, under the
-//! names and input shapes Claude Code gives them. Neither touches the machine: one puts a
-//! question to the user, the other hands a task to the host.
+//! The tools the harness itself offers (P18, CTX2): `AskUserQuestion`, `Agent` and
+//! `ToolSearch`, under the names and input shapes Claude Code gives them. None touches the
+//! machine: one puts a question to the user, one hands a task to the host, one loads the
+//! definitions of deferred tools.
 //!
 //! | Tool | Offered when | A call |
 //! |---|---|---|
 //! | `AskUserQuestion` | `NativeConfig::ask_user_question` and a model with tools (`native_question`) | emits `question { reply: turn }`, answers the model that the reply comes as the next user message, and **ends the turn** once the step's calls are done (decision A45: the answer is a user turn) |
 //! | `Agent` | the session's hooks say `runs_subagents()`, a model with tools, and the session is not a child (`lineage.depth == 0` or no lineage) | awaits `SessionHooks::run_subagent` (decision A18: the host's child session), whose answer is the `tool_result` |
+//! | `ToolSearch` | `NativeConfig::deferred_tools` defers at least one tool the session has (see [`super::tools::is_deferred`]) | answers with the full definitions of the deferred tools the query names (`select:A,B`) or matches (keywords), which become **loaded** for the rest of the session: sent with every later request, appended after the tools already sent, callable in the same turn |
 //!
 //! Policy, as on Claude Code:
-//! - a `deny` refuses them: a bare `Agent` (or `Task`, its other name) / `AskUserQuestion`
-//!   hides the tool; a pattern with an argument is judged at the call on Claude Code's argument,
-//!   the `subagent_type` (`Agent(Explore)`), and fails closed when the call names none
-//!   ([`denied`]); the input judged is the one `before_tool` left;
+//! - a `deny` refuses them: a bare `Agent` (or `Task`, its other name) / `AskUserQuestion` /
+//!   `ToolSearch` hides the tool; a pattern with an argument is judged at the call on Claude
+//!   Code's argument, the `subagent_type` (`Agent(Explore)`), and fails closed when the call
+//!   names none ([`denied`]); the input judged is the one `before_tool` left;
 //! - an allow-list does not hide them (on Claude Code it only approves, and these tools ask
 //!   nothing), and `plan_only` keeps them (neither changes anything by itself);
 //! - `before_tool` / `after_tool` apply; a `before_tool` deny means no question and no sub-agent.
@@ -32,6 +34,8 @@ pub const ASK_USER_QUESTION_TOOL: &str = "AskUserQuestion";
 pub const AGENT_TOOL: &str = "Agent";
 /// The other name Claude Code gives the sub-agent tool: a policy pattern may use it.
 pub const AGENT_ALIAS: &str = "Task";
+/// Name of the tool that loads deferred tools, as Claude Code names it (CTX2).
+pub const TOOL_SEARCH_TOOL: &str = "ToolSearch";
 
 /// What the model reads back from a question it asked.
 pub const QUESTION_ASKED: &str = "The question was shown to the user. Their answer will \
@@ -44,6 +48,8 @@ pub enum BuiltinTool {
     AskUserQuestion,
     /// `Agent`.
     Agent,
+    /// `ToolSearch`.
+    ToolSearch,
 }
 
 /// The entry of `AskUserQuestion`.
@@ -119,8 +125,42 @@ pub fn agent_entry() -> ToolEntry {
     )
 }
 
+/// The entry of `ToolSearch` (CTX2), the same name and shape as Claude Code's.
+pub fn tool_search_entry() -> ToolEntry {
+    ToolEntry::builtin(
+        BuiltinTool::ToolSearch,
+        TOOL_SEARCH_TOOL,
+        "Fetches full schema definitions for deferred tools so they can be called.\n\n\
+         Deferred tools exist but their definitions are not loaded — they cannot be \
+         called until this tool returns them. Once a tool's definition appears in a \
+         result, it is loaded for the rest of the session and callable exactly like \
+         any other tool.\n\n\
+         Query forms:\n\
+         - \"select:ToolA,ToolB\" — fetch these exact tools by name\n\
+         - anything else — keyword search over tool names and descriptions, \
+         up to max_results best matches"
+            .to_owned(),
+        json!({
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Query to find deferred tools. Use \"select:<tool_name>\" for direct selection, or keywords to search."
+                },
+                "max_results": {
+                    "type": "number",
+                    "description": "Maximum number of results to return (default: 5)"
+                }
+            },
+            "required": ["query"]
+        }),
+        ToolCategory::Other,
+    )
+}
+
 /// The argument a policy pattern is matched against, in Claude Code's form: the
-/// `subagent_type` of an `Agent` call (`Agent(Explore)`), nothing for a question.
+/// `subagent_type` of an `Agent` call (`Agent(Explore)`), nothing for a question
+/// or a tool search.
 pub fn primary_argument(kind: BuiltinTool, input: &Value) -> Option<String> {
     match kind {
         BuiltinTool::Agent => input
@@ -129,7 +169,7 @@ pub fn primary_argument(kind: BuiltinTool, input: &Value) -> Option<String> {
             .map(str::trim)
             .filter(|kind| !kind.is_empty())
             .map(str::to_owned),
-        BuiltinTool::AskUserQuestion => None,
+        BuiltinTool::AskUserQuestion | BuiltinTool::ToolSearch => None,
     }
 }
 
@@ -219,12 +259,19 @@ mod tests {
     fn the_builtin_tools_keep_claude_codes_names_and_are_read_only() {
         let ask = ask_user_question_entry();
         let agent = agent_entry();
+        let search = tool_search_entry();
         assert_eq!(ask.name, "AskUserQuestion");
         assert_eq!(agent.name, "Agent");
+        assert_eq!(search.name, "ToolSearch");
         assert_eq!(agent.category, ToolCategory::Agent);
-        assert!(ask.read_only && agent.read_only);
+        assert!(ask.read_only && agent.read_only && search.read_only);
         assert_eq!(ask.builtin, Some(BuiltinTool::AskUserQuestion));
         assert_eq!(agent.builtin, Some(BuiltinTool::Agent));
+        assert_eq!(search.builtin, Some(BuiltinTool::ToolSearch));
         assert_eq!(agent.canonical.as_deref(), Some("Agent"));
+        // The same shape as Claude Code: `query` required, `max_results` a number.
+        assert_eq!(search.schema["required"], json!(["query"]));
+        assert_eq!(search.schema["properties"]["query"]["type"], "string");
+        assert_eq!(search.schema["properties"]["max_results"]["type"], "number");
     }
 }

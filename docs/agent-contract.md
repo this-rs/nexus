@@ -363,9 +363,10 @@ sur un provider, aucune forme sérialisée ne bouge : `CONTRACT_VERSION` reste 5
   `answer_question` → `Unsupported { native_question }` (`Unsupported { answer_question }` quand le harnais a
   sa question : elle se répond par un tour), mode `trust` accepté à
   l'ouverture et à chaud (la politique locale autorise tout appel que ne refuse pas un `deny`).
-- **Outils du harnais (P18, `providers/native/builtin.rs`)** : deux outils sans serveur, sous les noms et formes
+- **Outils du harnais (P18/CTX2, `providers/native/builtin.rs`)** : trois outils sans serveur (`AskUserQuestion`,
+  `Agent`, `ToolSearch`), sous les noms et formes
   d'entrée de Claude Code, jamais soumis à une demande de permission. Politique comme sur Claude Code : un `deny` nu
-  (`Agent`, ou `Task` son autre nom, `AskUserQuestion`) retire l'outil ; un `deny` à argument est jugé à l'appel sur
+  (`Agent`, ou `Task` son autre nom, `AskUserQuestion`, `ToolSearch`) retire l'outil ; un `deny` à argument est jugé à l'appel sur
   l'argument de Claude Code, le `subagent_type` (`Agent(Explore)`), en échec fermé quand l'appel n'en nomme pas
   (`builtin::denied`, sur l'entrée laissée par `before_tool`) ; une liste `allow` ne les masque pas (sur Claude Code elle
   ne fait qu'approuver) et `plan_only` les garde ; `before_tool` / `after_tool` s'appliquent (un refus de `before_tool` :
@@ -384,6 +385,20 @@ sur un provider, aucune forme sérialisée ne bouge : `CONTRACT_VERSION` reste 5
   résultat en erreur, le tour continue) ; l'arrêt du tour ou l'annulation de l'appel abandonne le futur, ce qui
   dit à l'hôte d'arrêter le sous-agent. `subagents` reste `none` : aucun événement ne porte `parent`, le
   sous-agent est la session enfant de l'hôte (A18).
+- **Outils différés et `ToolSearch` (CTX2, `NativeConfig::deferred_tools`)** : une liste de noms exacts ou de
+  préfixes finissant par `*` (`mcp__po__*`), vide par défaut — **vide, rien ne change** (liste d'outils identique
+  octet pour octet à celle d'avant). Quand elle diffère au moins un outil que la session possède, les définitions
+  des outils différés sont **retenues** (elles ne partent pas sur le fil, `SessionStarted.tools` ne les liste pas)
+  et le modèle reçoit à la place `ToolSearch`, troisième outil du harnais, du même nom et de la même forme que
+  celui de Claude Code : entrée `{ query: string (requis), max_results: number (défaut 5) }`, `query` =
+  `select:A,B` (noms exacts) ou des mots-clés (recherche sur nom + description, `max_results` meilleurs). Le
+  résultat porte les définitions complètes (nom, description, schéma JSON) dans un bloc `<functions>` lisible par
+  le modèle ; un outil trouvé devient **chargé** pour le reste de la session : envoyé dans chaque requête
+  suivante, **ajouté en fin de liste** (le préfixe déjà envoyé ne bouge pas : le cache tient, CTX0 — la liste
+  chargée ne rétrécit jamais), et appelable dans le même tour. Seuls les outils que la politique expose sont
+  trouvables ; une recherche sans résultat est un `tool_result` d'erreur qui ne charge rien ; l'appel d'un outil
+  différé **non chargé** est un `tool_result` d'erreur explicite qui dit d'appeler `ToolSearch` d'abord — jamais
+  une exécution silencieuse (`tools::is_deferred`, `ToolRegistry::specs_deferred`, `loop::tool_search`).
 - **Tâches de fond** : `background_tasks` est vrai pour une session dont le serveur `nexus` (`nexus-tools`)
   sert `Bash` (le cas par défaut : `capabilities(modèle)` le dit quand `default_tools` est configuré et que le
   modèle appelle des outils ; une politique qui retire `Bash` le rend faux pour la session, sinon

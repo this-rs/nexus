@@ -37,6 +37,16 @@
 //! by call, between running it, asking, and refusing (`ToolPolicy::decide`). A
 //! call to a tool that was not offered is answered by an error `tool_result`
 //! (`unknown tool`), without any permission request.
+//!
+//! # Deferred tools (CTX2)
+//!
+//! `NativeConfig::deferred_tools` (empty by default: nothing changes) names tools — exactly or
+//! by prefix (`mcp__po__*`) — whose definitions are **withheld** from the model: they do not
+//! count against the context until a `ToolSearch` call loads them ([`is_deferred`],
+//! [`ToolRegistry::specs_deferred`], `builtin::tool_search_entry`). A loaded tool is sent with
+//! every later request, appended after the tools already sent (the cached prefix does not
+//! move), and stays loaded for the rest of the session. A call to a deferred tool that is not
+//! loaded is answered by an error `tool_result` that says to call `ToolSearch` first.
 
 use std::collections::BTreeMap;
 
@@ -317,6 +327,11 @@ impl ToolRegistry {
         self.entries.get(name)
     }
 
+    /// Every tool of the registry, offered or not, in name order.
+    pub fn entries(&self) -> impl Iterator<Item = &ToolEntry> {
+        self.entries.values()
+    }
+
     /// Number of tools, offered or not.
     pub fn len(&self) -> usize {
         self.entries.len()
@@ -364,13 +379,67 @@ impl ToolRegistry {
     pub fn specs(&self, policy: &ToolPolicy, strict: bool) -> Vec<ToolSpec> {
         self.exposed(policy, strict)
             .into_iter()
-            .map(|entry| ToolSpec {
-                name: entry.name.clone(),
-                description: entry.description.clone(),
-                parameters: entry.schema.clone(),
-            })
+            .map(spec_of)
             .collect()
     }
+
+    /// The offered tools when some are deferred (CTX2): every exposed tool the configuration
+    /// does not defer, in name order — the same bytes from one request to the next — then the
+    /// `loaded` tools in the order they were loaded, **appended at the end** so the prefix a
+    /// cache already holds does not move. `loaded` never shrinks during a session (CTX0), so
+    /// the whole list only ever grows at its tail. A loaded name the registry does not hold,
+    /// does not defer (it is already in the first part) or the policy hides is skipped.
+    pub fn specs_deferred(
+        &self,
+        policy: &ToolPolicy,
+        strict: bool,
+        deferred: &[String],
+        loaded: &[String],
+    ) -> Vec<ToolSpec> {
+        let mut specs: Vec<ToolSpec> = self
+            .exposed(policy, strict)
+            .into_iter()
+            .filter(|entry| !is_deferred(entry, deferred))
+            .map(spec_of)
+            .collect();
+        for name in loaded {
+            if let Some(entry) = self.get(name)
+                && is_deferred(entry, deferred)
+                && Self::is_exposed(entry, policy, strict)
+            {
+                specs.push(spec_of(entry));
+            }
+        }
+        specs
+    }
+}
+
+/// The definition of one tool, as the endpoint wants it.
+fn spec_of(entry: &ToolEntry) -> ToolSpec {
+    ToolSpec {
+        name: entry.name.clone(),
+        description: entry.description.clone(),
+        parameters: entry.schema.clone(),
+    }
+}
+
+/// Whether the configuration defers this tool (CTX2, `NativeConfig::deferred_tools`): its
+/// definition is withheld from the model until a `ToolSearch` call loads it. A pattern is an
+/// exact name or a prefix ending in `*` (`mcp__po__*`), matched against every name of the tool
+/// (the offered name and the canonical one). `ToolSearch` itself is never deferred: it is what
+/// loads the others.
+pub fn is_deferred(entry: &ToolEntry, patterns: &[String]) -> bool {
+    if entry.builtin == Some(BuiltinTool::ToolSearch) {
+        return false;
+    }
+    entry.names().any(|name| {
+        patterns
+            .iter()
+            .any(|pattern| match pattern.strip_suffix('*') {
+                Some(prefix) => name.starts_with(prefix),
+                None => name == pattern,
+            })
+    })
 }
 
 #[cfg(test)]
@@ -590,6 +659,68 @@ mod tests {
         // A plan-only ceiling: never anything but reads.
         let ceiling = ToolPolicy::new(PolicyMode::PlanOnly);
         assert_eq!(nexus_tools_bound(&plan, Some(&ceiling), true), read_only);
+    }
+
+    #[test]
+    fn a_deferred_pattern_matches_exact_names_and_prefixes_but_never_tool_search() {
+        let patterns = vec!["mcp__po__*".to_owned(), "mcp__fake__echo".to_owned()];
+        assert!(is_deferred(&entry("po", "task", false), &patterns));
+        assert!(is_deferred(&entry("fake", "echo", true), &patterns));
+        assert!(!is_deferred(&entry("fake", "write", false), &patterns));
+        // The canonical name matches too: deferring `Bash` defers `mcp__nexus__Bash`.
+        assert!(is_deferred(
+            &entry("nexus", "Bash", false),
+            &["Bash".to_owned()]
+        ));
+        // `ToolSearch` is what loads the others: no pattern ever defers it.
+        assert!(!is_deferred(
+            &crate::providers::native::builtin::tool_search_entry(),
+            &["*".to_owned()]
+        ));
+        // An empty configuration defers nothing.
+        assert!(!is_deferred(&entry("po", "task", false), &[]));
+    }
+
+    #[test]
+    fn deferred_specs_keep_the_base_in_name_order_and_append_the_loaded_at_the_end() {
+        let mut registry = ToolRegistry::new();
+        for tool in ["alpha", "beta", "gamma"] {
+            registry.insert(entry("po", tool, false)).unwrap();
+        }
+        registry.insert(entry("fake", "echo", true)).unwrap();
+        let ask = policy(PolicyMode::Ask, &[], &[]);
+        let deferred = vec!["mcp__po__*".to_owned()];
+        let names = |specs: Vec<crate::model::ToolSpec>| {
+            specs.into_iter().map(|s| s.name).collect::<Vec<_>>()
+        };
+        // Nothing loaded: only the non-deferred tool.
+        assert_eq!(
+            names(registry.specs_deferred(&ask, true, &deferred, &[])),
+            ["mcp__fake__echo"]
+        );
+        // Loaded tools come after the base, in LOAD order, not name order.
+        let loaded = vec!["mcp__po__gamma".to_owned(), "mcp__po__alpha".to_owned()];
+        assert_eq!(
+            names(registry.specs_deferred(&ask, true, &deferred, &loaded)),
+            ["mcp__fake__echo", "mcp__po__gamma", "mcp__po__alpha"]
+        );
+        // A loaded name that is unknown or not deferred adds nothing (no duplicate).
+        let noise = vec!["mcp__fake__echo".to_owned(), "mcp__po__missing".to_owned()];
+        assert_eq!(
+            names(registry.specs_deferred(&ask, true, &deferred, &noise)),
+            ["mcp__fake__echo"]
+        );
+        // A loaded tool the policy hides is not sent.
+        let denied = policy(PolicyMode::Ask, &[], &["mcp__po__gamma"]);
+        assert_eq!(
+            names(registry.specs_deferred(&denied, true, &deferred, &loaded)),
+            ["mcp__fake__echo", "mcp__po__alpha"]
+        );
+        // With no deferred configuration the list is exactly `specs` (unchanged behaviour).
+        assert_eq!(
+            names(registry.specs_deferred(&ask, true, &[], &[])),
+            names(registry.specs(&ask, true))
+        );
     }
 
     #[test]
