@@ -1116,6 +1116,15 @@ impl AgentSession for ClaudeCodeSession {
                 let updates = destination.and_then(|destination| {
                     control::scoped_permission_updates(pending.suggestions.as_ref(), destination)
                 });
+                // Session/Always without CLI suggestions: the scope cannot be
+                // honoured — the CLI gave no `permission_suggestions` to promote.
+                // Re-insert the request (it was already removed) so the caller
+                // can retry with `Once`, then return a typed error instead of
+                // silently downgrading to a plain §15.1 allow.
+                if destination.is_some() && updates.is_none() {
+                    core.lock().pending.insert(request_id.to_owned(), pending);
+                    return Err(ProviderError::unsupported("permission_scope"));
+                }
                 let line = match updates {
                     Some(updates) => {
                         control::permission_allow_with_updates(request_id, input, &updates)

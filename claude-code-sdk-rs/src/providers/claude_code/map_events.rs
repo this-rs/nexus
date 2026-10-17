@@ -500,11 +500,23 @@ pub fn permission_event(request: &PermissionRequest, state: &MapState) -> AgentE
         category: tool_category(&request.tool_name),
         canonical: canonical_name(&request.tool_name),
         tool_call_id: request.tool_use_id.clone(),
-        scopes: vec![
-            PermissionScope::Once,
-            PermissionScope::Session,
-            PermissionScope::Always,
-        ],
+        scopes: {
+            // Only advertise Session/Always when the CLI sent permission
+            // suggestions: without them the facade cannot honour a lasting
+            // approval (§15.1 requires `updatedPermissions`). Advertising
+            // scopes we cannot fulfil would produce a silent downgrade.
+            let has_suggestions = request
+                .permission_suggestions
+                .as_ref()
+                .and_then(Value::as_array)
+                .is_some_and(|a| !a.is_empty());
+            let mut scopes = vec![PermissionScope::Once];
+            if has_suggestions {
+                scopes.push(PermissionScope::Session);
+                scopes.push(PermissionScope::Always);
+            }
+            scopes
+        },
         parent,
     }
 }
@@ -1305,11 +1317,8 @@ mod tests {
                 category: ToolCategory::Command,
                 canonical: Some("Bash".into()),
                 tool_call_id: Some("toolu_1".into()),
-                scopes: vec![
-                    PermissionScope::Once,
-                    PermissionScope::Session,
-                    PermissionScope::Always
-                ],
+                // permission_suggestions: None → only once is advertised.
+                scopes: vec![PermissionScope::Once],
                 parent: Some("toolu_task".into()),
             }
         );

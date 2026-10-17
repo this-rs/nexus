@@ -1099,7 +1099,7 @@ La projection `Message → AgentEvent` est la fonction publique
 | `System { subtype: "background_tasks_changed" }` | `background_tasks` | `tasks[]` ← `data.tasks[]` (lecture tolérante : `id`\|`task_id`, `type`\|`kind`, `description`\|`command`, `status`) | (compteur `cli_background_tasks` ← `tasks.len()` ; `active_tasks_update` quand B13b remplace le suivi par PID) | — |
 | `System` d'un autre sous-type (`status`, inconnu) | `provider_notice` | `kind` ← `subtype` ; `data` ← `data` | en tour : rien ; hors tour : `background_output { source: "system:" + kind, content: pretty(data) }` | vidage opaque, aucun champ lu (seule exception admise à A5 : c'est déjà un vidage JSON aujourd'hui) |
 | `Result` | `done` | `subtype` ← `subtype` ; `stop_reason` ← table ci-dessous ; `is_error` ; `result_text` ← `result` ; `duration_ms` ; `duration_api_ms` ; `num_turns` ; `provider_session_id` ← `session_id` ; `cost` ← `{ usd: total_cost_usd, basis: reported }` (ou `subscription`/`unknown` selon l'instance) ; `usage` ← `usage` (`input_tokens`, `output_tokens`, `cache_read_input_tokens`, `cache_creation_input_tokens`) et `by_model` ← `modelUsage` ; `structured_output` | `result` | `session_id` ← `provider_session_id` ; `duration_ms` ; `cost_usd` ← `cost.usd` ; `subtype` ← `subtype` (défaut d'après `stop_reason`) ; `is_error` ; `num_turns` ; `result_text` ; nouveau : `cost_basis` (A21) |
-| contrôle `can_use_tool` (canal de contrôle, pas un `Message`), outil ≠ `AskUserQuestion` | `permission_ask` | `request_id` ← `request_id`\|`requestId` (racine) ; `tool_name` ← `request.tool_name`\|`toolName` (défaut `"unknown"`) ; `input` ← `request.input` (défaut `{}`) ; `tool_call_id` ← `request.tool_use_id`\|`toolUseId` ; `parent` ← dernier `parent_tool_use_id` vu sur le flux ; `scopes` ← `[once, session, always]` | `permission_request` | `id` ← `request_id` ; `tool` ← `tool_name` ; `input` ; `parent_tool_use_id` ← `parent` |
+| contrôle `can_use_tool` (canal de contrôle, pas un `Message`), outil ≠ `AskUserQuestion` | `permission_ask` | `request_id` ← `request_id`\|`requestId` (racine) ; `tool_name` ← `request.tool_name`\|`toolName` (défaut `"unknown"`) ; `input` ← `request.input` (défaut `{}`) ; `tool_call_id` ← `request.tool_use_id`\|`toolUseId` ; `parent` ← dernier `parent_tool_use_id` vu sur le flux ; `scopes` ← `[once]` si `permission_suggestions` absent ou vide, sinon `[once, session, always]` | `permission_request` | `id` ← `request_id` ; `tool` ← `tool_name` ; `input` ; `parent_tool_use_id` ← `parent` |
 | contrôle `can_use_tool` avec `tool_name == "AskUserQuestion"` | `question { reply: turn }` — l'adaptateur répond lui-même `allow` + `updatedInput: input` (comme le backend aujourd'hui, §15.6) | `question_id` ← `request_id` ; `tool_call_id` ← `tool_use_id` ; `questions` ← `input.questions` (lecture tolérante) ; `input` ← `input` | `ask_user_question` | `id` ← `question_id` ; `tool_call_id` (défaut `""`) ; `questions` ← `input.questions` (brut, défaut `[]`) ; `input` ; `parent_tool_use_id` |
 | contrôle `hook_callback` | (aucun événement : traité par l'adaptateur, appelle `SessionHooks`) | — | — | — |
 | fin du flux SDK sans `Result` (processus mort) | `error { process_exited }` | `code` si connu | `session_error` | `reason: "subprocess_exited"`, message fixe |
@@ -1166,6 +1166,15 @@ l'instance propriétaire, donc la forme 15.1/15.2 (tâche backend B12b).
 Portée d'une autorisation : `scope: once` → 15.1 seul ; `session` / `always` → 15.1 avec
 `"updatedPermissions"` reprenant les suggestions du CLI (`request.permission_suggestions`) pour la
 destination `session` / `localSettings`. Le backend n'envoie que `once` aujourd'hui.
+
+**Règle de non-rétrogradation** : si `scope` vaut `session` ou `always` mais que le CLI n'a fourni
+aucune suggestion utilisable (`permission_suggestions` absent, null ou tableau vide), la façade
+**ne répond pas** `behavior: allow` sans `updatedPermissions` — ce serait une rétrogradation
+silencieuse de portée. Elle réinsère la demande en attente et renvoie
+`ProviderError::Unsupported { capability: "permission_scope" }`. L'appelant peut alors
+réessayer avec `scope: once`. La façade n'annonce `session`/`always` dans `PermissionAsk.scopes`
+que lorsque la demande dispose de suggestions, de façon à ce que l'hôte ne propose jamais des
+portées qu'elle sait ne pas pouvoir honorer.
 
 `SessionSpec` → `ClaudeCodeOptions` (identique à `ChatManager::build_options`) : `model`, `cwd`,
 `system_prompt` (`replace` → `--system-prompt`, `append` → `--append-system-prompt`),
