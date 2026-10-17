@@ -37,7 +37,8 @@ use tokio::sync::oneshot;
 use super::builtin::{self, BuiltinTool};
 use super::cancel::CancelToken;
 use super::compaction::{
-    apply, count_images, estimate_tokens, should_compact, split_point, summarise, summary_request,
+    STUB_MARKER, apply, apply_stub, count_images, estimate_tokens, plan_stub, should_compact,
+    should_stub, split_point, summarise, summary_request,
 };
 use super::mcp::{IMAGE_NOT_SHOWN, McpError};
 use super::session::{ConsentRoute, Core, PendingAsk, StopCause, TurnSignal};
@@ -480,8 +481,11 @@ async fn iterate(
         if budget_spent(core) {
             return Outcome::Stop(StopKind::Budget, None);
         }
-        // Compaction is a convenience: a summary that cannot be written leaves the
-        // history as it was and the turn goes on (it says so itself).
+        // The cheap tier first: stubbing tool results the model no longer reads is a
+        // free win over a summary, so it takes every chance it gets. Then compaction,
+        // which is a convenience: a summary that cannot be written leaves the history
+        // as it was and the turn goes on (it says so itself).
+        maybe_stub(core, messages);
         maybe_compact(core, signal, model, messages, acc).await;
         if signal.token.is_cancelled() {
             return Outcome::Interrupted;
@@ -780,10 +784,12 @@ impl RequestShape {
 /// prefix. Read over a conversation, it gives the real cache-hit ratio and shows a
 /// prefix that changed (`system_hash` / `tools_hash` differ between two requests).
 /// `extends_previous=false` says the HISTORY changed under the cache (a reasoning no
-/// longer echoed, a resumed transcript that differs from the live one…): expected only
-/// after a compaction. The hashes are `DefaultHasher`: stable within one process (one
-/// build), NOT across Rust versions: compare them inside one run of the server only.
-/// No content, no credential: counts, hashes, ids.
+/// longer echoed, a resumed transcript that differs from the live one, an old tool
+/// result stubbed, a compaction…): expected only at a declared rewrite of the history —
+/// a stub pass or a summary — never between two ordinary round trips. The hashes are
+/// `DefaultHasher`: stable within one process (one build), NOT across Rust versions:
+/// compare them inside one run of the server only. No content, no credential: counts,
+/// hashes, ids.
 fn log_request(
     core: &Core,
     model: &str,
@@ -939,6 +945,59 @@ async fn model_step(
     Ok(step)
 }
 
+/// What the prompt costs now, and the window of the model now active: the larger of
+/// the estimate and the last size the endpoint reported (its report is the truth when
+/// it has one).
+fn prompt_pressure(core: &Core, messages: &[ChatMessage]) -> (u64, Option<u64>) {
+    // The window of the model now active, not the snapshot's: a smaller model chosen
+    // for this turn compacts where the opening one would not.
+    let window = core.lock().active_window;
+    let system = core
+        .system_prompt
+        .as_deref()
+        .map_or(0, |text| text.len() as u64 / 4);
+    let estimate = estimate_tokens(messages) + system;
+    let reported = core.lock().last_prompt_tokens.unwrap_or(0);
+    (estimate.max(reported), window)
+}
+
+/// Stubs the tool results older than the last rounds: the cheap tier of the context
+/// economy, taken before the summary (see [`super::compaction`]).
+///
+/// It costs nothing at the endpoint — no call, no summary, and nothing the model still
+/// reads is touched. What it does cost is **one cache break** (the history changes
+/// under the prompt cache, so the suffix is written again), which is why it happens
+/// only under real pressure ([`should_stub`]) and one block at a time
+/// (`CompactionConfig::stub_block`). The host is told: nothing goes in silence.
+fn maybe_stub(core: &Core, messages: &mut [ChatMessage]) {
+    let config = core.settings.compaction;
+    let (size, window) = prompt_pressure(core, messages);
+    if !should_stub(&config, window, size) {
+        return;
+    }
+    let Some(plan) = plan_stub(messages, &config) else {
+        return;
+    };
+    let elided = apply_stub(messages, &plan);
+    if elided == 0 {
+        return;
+    }
+    // The size the endpoint last reported describes a history that has just shrunk: kept
+    // as is, it would make the compaction below fire on a prompt that no longer exists
+    // (the tier would relieve the window and be summarised anyway). Dropped, the next
+    // round trip measures the real one — estimate first, then the endpoint's report.
+    core.lock().last_prompt_tokens = None;
+    core.emit(AgentEvent::ProviderNotice {
+        kind: "tool_results_stubbed".to_owned(),
+        data: json!({
+            "count": elided,
+            "kept_rounds": config.keep_tool_rounds,
+            "chars_freed": plan.chars_freed,
+            "stub": STUB_MARKER,
+        }),
+    });
+}
+
 /// Compacts the prompt when it nears the context window (see [`super::compaction`]).
 ///
 /// Compaction is a **convenience**, never a condition of the turn: its summary is
@@ -960,16 +1019,7 @@ async fn maybe_compact(
     acc: &mut Acc,
 ) {
     let config = core.settings.compaction;
-    // The window of the model now active, not the snapshot's: a smaller model
-    // chosen for this turn compacts where the opening one would not.
-    let window = core.lock().active_window;
-    let system = core
-        .system_prompt
-        .as_deref()
-        .map_or(0, |text| text.len() as u64 / 4);
-    let estimate = estimate_tokens(messages) + system;
-    let reported = core.lock().last_prompt_tokens.unwrap_or(0);
-    let size = estimate.max(reported);
+    let (size, window) = prompt_pressure(core, messages);
     if !should_compact(&config, window, size) {
         return;
     }

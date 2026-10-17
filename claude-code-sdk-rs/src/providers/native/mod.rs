@@ -12,7 +12,7 @@
 //! | `mcp.rs` | the MCP client (stdio through `isolated_command`, streamable HTTP) |
 //! | `tools.rs` | `mcp__<server>__<tool>` names and the exposure rule under a policy |
 //! | `transcript.rs` | [`TranscriptStore`] (memory, `0600` files, byte-faithful resume, value-only masking: CTX6), reasoning kept (A39) |
-//! | `compaction.rs` | summary of the old history by the same endpoint, recent messages intact |
+//! | `compaction.rs` | summary of the old history by the same endpoint, recent messages intact; the cheap tier before it: tool results older than the kept rounds become a stub (CTX3) |
 //! | `cancel.rs` | the cancellation token |
 //! | `tasks.rs` | the background tasks `nexus-tools` runs for a session, read from its structured results and notifications |
 //!

@@ -4,15 +4,19 @@
 //! servers (OpenAI, DeepSeek, vLLM prefix caching), which needs no `cache_control`
 //! marker but breaks at the first byte that differs.
 //!
-//! Three things, all offline (scripted `fake_openai`, real `fake_mcp`):
+//! Four things, all offline (scripted `fake_openai`, real `fake_mcp`):
 //!
 //! 1. the cache reads an endpoint reports reach the `done` usage and its cost;
 //! 2. over a multi-turn session with tool calls and a resume, every request
 //!    starts with the previous one: same tool list in the same order, same
-//!    system prompt, the history append-only. Compaction is the one declared
-//!    exception. The check itself is proven to catch a timestamp in the system
-//!    prompt;
-//! 3. a reference benchmark (`#[ignore]`), ten turns on PO-like tools, that
+//!    system prompt, the history append-only. Two rewrites are declared: a
+//!    compaction and a stub pass of old tool results (CTX3). The check itself is
+//!    proven to catch a timestamp in the system prompt;
+//! 3. the cheap tier measured where it matters: 40 tool rounds in ONE turn, under
+//!    a window they would blow through without it, with no summary and a bounded
+//!    number of cache breaks — and the control that says the measure is not empty
+//!    (the same session, tier off, does reach the summary);
+//! 4. a reference benchmark (`#[ignore]`), ten turns on PO-like tools, that
 //!    prints per turn what is sent and how much of it a prefix cache could serve:
 //!
 //! ```text
@@ -39,6 +43,7 @@ use nexus_claude::agent::{
     StopReason, SystemPromptMode, SystemPromptSpec, ToolPolicy, TurnInput,
 };
 use nexus_claude::model::{EndpointQuirks, PriceTable};
+use nexus_claude::providers::native::compaction::STUB_MARKER;
 use nexus_claude::providers::native::{
     FileTranscriptStore, MemoryTranscriptStore, NativeConfig, NativeProvider, TranscriptStore,
 };
@@ -298,12 +303,53 @@ fn is_summary_request(body: &Value) -> bool {
     body.get("tools").is_none() && body.to_string().contains("compacting the history")
 }
 
-/// Asserts that every request starts with the one before it, a compaction aside:
-/// the summary request is not part of the conversation, and the request that
-/// follows a compaction starts a new prefix (the declared exception).
-fn assert_prefix_stable(requests: &[Value]) {
+/// How many messages a break of the prefix is allowed to touch **as a stub pass**
+/// (CTX3), or `None` when this break is not one.
+///
+/// The stub tier rewrites the text of old tool results, on purpose and under
+/// pressure: the message list keeps its length, its roles and its `tool_call_id`s,
+/// and the ONLY difference a break may carry is a `tool` message whose content became
+/// [`STUB_MARKER`]. Anything else is a real prefix break.
+fn stub_break(prev: &Value, next: &Value) -> Option<usize> {
+    if canon(&prev["tools"]) != canon(&next["tools"]) {
+        return None;
+    }
+    let before = prev["messages"].as_array()?;
+    let after = next["messages"].as_array()?;
+    // A stub pass never removes nor reorders a message: it only shortens one.
+    if after.len() < before.len() {
+        return None;
+    }
+    let mut stubbed = 0;
+    for (index, message) in before.iter().enumerate() {
+        let other = after.get(index)?;
+        if canon(other) == canon(message) {
+            continue;
+        }
+        let is_tool = message["role"] == "tool" && other["role"] == "tool";
+        let became_stub = other["content"].as_str() == Some(STUB_MARKER);
+        let was_whole = message["content"].as_str() != Some(STUB_MARKER);
+        // Everything but the content must be identical, ids included.
+        let mut rest_before = message.clone();
+        let mut rest_after = other.clone();
+        rest_before["content"] = Value::Null;
+        rest_after["content"] = Value::Null;
+        if !is_tool || !became_stub || !was_whole || canon(&rest_before) != canon(&rest_after) {
+            return None;
+        }
+        stubbed += 1;
+    }
+    (stubbed > 0).then_some(stubbed)
+}
+
+/// Asserts that every request starts with the one before it, a declared rewrite of the
+/// history aside: a compaction (the summary request is not part of the conversation, and
+/// the request that follows it starts a new prefix) or a stub pass (old tool results
+/// only). A stub pass is counted and returned, so a test can say how many it cost.
+fn assert_prefix_stable(requests: &[Value]) -> usize {
     let mut previous: Option<&Value> = None;
     let mut compacted = false;
+    let mut passes = 0;
     for (index, request) in requests.iter().enumerate() {
         if is_summary_request(request) {
             compacted = true;
@@ -313,13 +359,18 @@ fn assert_prefix_stable(requests: &[Value]) {
             && !std::mem::take(&mut compacted)
             && let Some(why) = prefix_break(prev, request)
         {
-            panic!(
-                "prefix broken between request {} and {index}: {why}",
-                index - 1
-            );
+            if stub_break(prev, request).is_some() {
+                passes += 1;
+            } else {
+                panic!(
+                    "prefix broken between request {} and {index}: {why}",
+                    index - 1
+                );
+            }
         }
         previous = Some(request);
     }
+    passes
 }
 
 /// A session of four turns with tool calls, a resume between turns two and
@@ -445,6 +496,138 @@ async fn compaction_is_the_declared_exception_and_the_prefix_holds_again_after_i
     // … and the check, which allows it, holds everywhere else.
     assert_prefix_stable(&requests);
     assert!(prefix_break(&requests[3], &requests[4]).is_none());
+}
+
+// ---------------------------------------------------------------------------
+// 2b. The cheap tier: old tool results become a stub (CTX3)
+// ---------------------------------------------------------------------------
+
+/// Rough size of a request's prompt in tokens, the way the harness estimates it: four
+/// characters per token over what the model reads (system prompt, text, reasoning).
+fn prompt_tokens(body: &Value) -> u64 {
+    let mut chars = 0;
+    for message in body["messages"].as_array().expect("messages") {
+        for key in ["content", "reasoning_content"] {
+            chars += message[key].as_str().map_or(0, str::len);
+        }
+    }
+    (chars as u64).div_ceil(BYTES_PER_TOKEN as u64)
+}
+
+/// One turn of `rounds` sequential tool rounds, each result `result_chars` long (the
+/// `big` tool: short arguments, big result — what a `Read` of a file looks like), then
+/// the final answer.
+///
+/// The summary route comes last and matches nothing but a summary request: a request
+/// count of `rounds + 1` therefore says that no summary was asked for.
+async fn long_session(
+    rounds: usize,
+    result_chars: usize,
+    tweak: impl FnOnce(&mut NativeConfig),
+) -> (Vec<Value>, Vec<AgentEvent>) {
+    let mut routes = Vec::new();
+    for round in 0..rounds {
+        let id = format!("c{round}");
+        let calls: Vec<(&str, &str, Value)> =
+            vec![(id.as_str(), "mcp__po__big", json!({ "n": result_chars }))];
+        routes.push(chat_route(call_events(&calls, None)));
+    }
+    routes.push(chat_route(answer_events("done", None)));
+    routes.push(
+        json!({"method": "POST", "path": "/v1/chat/completions", "status": 200,
+        "body_contains": "compacting the history",
+        "sse": answer_events("THE SUMMARY", None)}),
+    );
+    let h = Harness::new(routes, tweak).await;
+    let session = h
+        .provider
+        .open(h.spec_with(SYSTEM, &["big"]))
+        .await
+        .expect("open");
+    let events = turn(&*session, "read the file in pieces").await;
+    (h.chat(), events)
+}
+
+/// The measured session: 40 rounds of tool results in ONE turn, a window it would blow
+/// through without the cheap tier (`0.8 × 8000` tokens).
+const LONG_ROUNDS: usize = 40;
+const LONG_WINDOW: u64 = 8_000;
+
+#[tokio::test]
+async fn forty_tool_rounds_stay_under_the_threshold_without_a_full_compaction() {
+    let (requests, events) = long_session(LONG_ROUNDS, 800, |config| {
+        config.context_window = Some(LONG_WINDOW);
+    })
+    .await;
+    assert_eq!(done_usage(&events).2, StopReason::Completed, "{events:?}");
+    // One request per round, then the answer: no summary was ever asked for.
+    assert_eq!(requests.len(), LONG_ROUNDS + 1);
+    assert!(
+        requests.iter().all(|request| !is_summary_request(request)),
+        "a full compaction ran although the cheap tier was enough"
+    );
+
+    // The prompt never comes near the threshold, round trip after round trip.
+    let threshold = (LONG_WINDOW as f64 * 0.8) as u64;
+    let sizes: Vec<u64> = requests.iter().map(prompt_tokens).collect();
+    assert!(
+        sizes.iter().all(|size| *size < threshold),
+        "the prompt reached the threshold: {sizes:?}"
+    );
+
+    // What it DOES pay: a bounded number of cache breaks, each one a declared stub pass
+    // — the CTX0 measure, over the same canonical bytes the prefix check uses.
+    let passes = assert_prefix_stable(&requests);
+    assert!(passes >= 1, "the cheap tier never ran: nothing to measure");
+    // Never more than one pass per block of aged-out results (the default block).
+    let block = nexus_claude::providers::native::compaction::CompactionConfig::default().stub_block;
+    assert!(
+        passes <= LONG_ROUNDS / block,
+        "{passes} cache breaks for {LONG_ROUNDS} rounds, a block of {block}"
+    );
+
+    // The stubs really reach the model, and the old results really left the prompt.
+    let last = canon(requests.last().expect("a last request"));
+    assert!(last.contains(STUB_MARKER), "no stub in the last request");
+    let elided = last.matches(STUB_MARKER).count();
+    assert!(elided >= 4, "{elided} stubs, expected a whole block");
+}
+
+/// The control the test above is worth nothing without: the SAME session, with the
+/// cheap tier off, reaches the summary — so the figures above really do measure the
+/// tier and not a window nobody would have hit.
+#[tokio::test]
+async fn without_the_cheap_tier_the_same_session_reaches_the_full_compaction() {
+    let (requests, events) = long_session(LONG_ROUNDS, 800, |config| {
+        config.context_window = Some(LONG_WINDOW);
+        config.compaction.keep_tool_rounds = 0;
+    })
+    .await;
+    assert_eq!(done_usage(&events).2, StopReason::Completed, "{events:?}");
+    assert!(
+        requests.iter().any(is_summary_request),
+        "the session never compacted: the 40-round window is not the one measured above"
+    );
+    assert!(!canon(&requests[requests.len() - 1]).contains(STUB_MARKER));
+}
+
+/// The cheap tier is a step, never a substitute: 120 rounds, and a window the tier can
+/// no longer relieve — the kept rounds plus the stubs themselves fill it — still ends
+/// in a summary. A pass never silences the tier below it.
+#[tokio::test]
+async fn a_window_the_cheap_tier_cannot_relieve_still_compacts() {
+    let (requests, events) = long_session(120, 1_000, |config| {
+        config.context_window = Some(5_000);
+        // A turn of 120 round trips: the default bound of 50 would stop it first.
+        config.max_turns = Some(200);
+    })
+    .await;
+    assert_eq!(done_usage(&events).2, StopReason::Completed, "{events:?}");
+    assert!(
+        requests.iter().any(is_summary_request),
+        "the prompt was never summarised although the tier cannot relieve it"
+    );
+    assert!(assert_prefix_stable(&requests) >= 1, "the tier never ran");
 }
 
 /// The request of the second turn of a session whose first turn called `echo`
@@ -763,7 +946,7 @@ async fn deepseek_accepts_reasoning_back_on_a_tool_less_turn_after_a_reasoned_on
 }
 
 // ---------------------------------------------------------------------------
-// 3. Reference benchmark
+// 4. Reference benchmark
 // ---------------------------------------------------------------------------
 
 fn tokens(bytes: usize) -> usize {

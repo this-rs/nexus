@@ -46,7 +46,10 @@
 //!
 //! `allow_private_network` (bool, native: accept RFC 1918 / CGNAT endpoints),
 //! `cli_path` (string, claude_code: path of the CLI), `compaction_keep_recent`
-//! (unsigned integer, native), `codex_home` (string, codex: the instance's persistent
+//! (unsigned integer, native), `compaction_keep_tool_rounds`, `compaction_stub_ratio`
+//! and `compaction_stub_block` (unsigned integer / number / unsigned integer, native:
+//! the cheap tier that stubs old tool results before a summary), `codex_home` (string,
+//! codex: the instance's persistent
 //! `CODEX_HOME`), `env` (object of strings, acp), `thinking` (bool, acp), `login_hint`
 //! (string, acp), `acp_home` (string, acp: the instance's dedicated `HOME`, created `0700`). Their types are checked by
 //! [`ProviderInstanceConfig::validate`]; other keys are kept untouched for the
@@ -446,6 +449,11 @@ impl ProviderInstanceConfig {
                 "allow_private_network" => value.is_boolean(),
                 "cli_path" => value.as_str().is_some_and(|path| !path.is_empty()),
                 "compaction_keep_recent" => value.is_u64(),
+                "compaction_keep_tool_rounds" => value.is_u64(),
+                "compaction_stub_block" => value.is_u64(),
+                "compaction_stub_ratio" => value
+                    .as_f64()
+                    .is_some_and(|ratio| (0.0..=1.0).contains(&ratio)),
                 "codex_home" => value.as_str().is_some_and(|path| !path.is_empty()),
                 "acp_home" => value.as_str().is_some_and(|path| !path.is_empty()),
                 "env" => value
@@ -1127,13 +1135,7 @@ impl ProviderRegistry {
         native.context_window = config.context_window;
         native.prices = price_table_of(config);
         native.cost_basis = config.cost_source;
-        if let Some(keep) = config
-            .extensions
-            .get("compaction_keep_recent")
-            .and_then(Value::as_u64)
-        {
-            native.compaction.keep_recent = usize::try_from(keep).unwrap_or(usize::MAX);
-        }
+        apply_compaction_extensions(&mut native, config);
         native.default_tools = default_tools_of(config)?;
         native.browser = browser_of(config)?;
         let mut provider = NativeProvider::new(native, endpoint);
@@ -1156,6 +1158,41 @@ impl ProviderRegistry {
         _credential_owner: &str,
     ) -> Result<BuiltProvider, ProviderError> {
         Err(ProviderError::unsupported("provider_native"))
+    }
+}
+
+/// The context-economy knobs a native instance sets through its `extensions`:
+/// `compaction_keep_recent`, and the cheap tier that stubs old tool results before a
+/// summary (CTX3) — `compaction_keep_tool_rounds` (0 turns the tier off),
+/// `compaction_stub_ratio` and `compaction_stub_block`. Absent keys keep the defaults;
+/// [`ProviderInstanceConfig::validate`] refused a value of the wrong type already.
+#[cfg(feature = "provider-native")]
+fn apply_compaction_extensions(
+    native: &mut crate::providers::native::NativeConfig,
+    config: &ProviderInstanceConfig,
+) {
+    let count = |key: &str| {
+        config
+            .extensions
+            .get(key)
+            .and_then(Value::as_u64)
+            .map(|value| usize::try_from(value).unwrap_or(usize::MAX))
+    };
+    if let Some(keep) = count("compaction_keep_recent") {
+        native.compaction.keep_recent = keep;
+    }
+    if let Some(rounds) = count("compaction_keep_tool_rounds") {
+        native.compaction.keep_tool_rounds = rounds;
+    }
+    if let Some(ratio) = config
+        .extensions
+        .get("compaction_stub_ratio")
+        .and_then(Value::as_f64)
+    {
+        native.compaction.stub_ratio = ratio;
+    }
+    if let Some(block) = count("compaction_stub_block") {
+        native.compaction.stub_block = block;
     }
 }
 
@@ -2235,5 +2272,53 @@ mod tests {
         assert_eq!(catalog.len(), 1);
         assert!(catalog[0].is_default);
         assert_eq!(catalog[0].pricing, Some(price(3.0, 15.0)));
+    }
+
+    /// The cheap tier of the context economy is configured by `extensions` only, one
+    /// key per knob: what an instance says is what the harness gets, and a key nobody
+    /// set leaves the default in place.
+    #[cfg(feature = "provider-native")]
+    #[test]
+    fn the_native_instance_reads_its_compaction_extensions() {
+        let config = ProviderInstanceConfig::native("native-test", "http://127.0.0.1:1/v1")
+            .with_extension("compaction_keep_recent", json!(2))
+            .with_extension("compaction_keep_tool_rounds", json!(9))
+            .with_extension("compaction_stub_ratio", json!(0.25))
+            .with_extension("compaction_stub_block", json!(3));
+        config.validate().unwrap();
+        let mut native = crate::providers::native::NativeConfig::new("native-test");
+        apply_compaction_extensions(&mut native, &config);
+        assert_eq!(native.compaction.keep_recent, 2);
+        assert_eq!(native.compaction.keep_tool_rounds, 9);
+        assert_eq!(native.compaction.stub_ratio, 0.25);
+        assert_eq!(native.compaction.stub_block, 3);
+
+        // Nothing set: the defaults, untouched (a harness upgrade must not silently
+        // change the context economy of an instance that said nothing).
+        let silent = ProviderInstanceConfig::native("native-test", "http://127.0.0.1:1/v1");
+        let mut native = crate::providers::native::NativeConfig::new("native-test");
+        let defaults = native.compaction;
+        apply_compaction_extensions(&mut native, &silent);
+        assert_eq!(native.compaction, defaults);
+
+        // A stub ratio is a fraction: 0 to 1, never a percentage nor a token count.
+        for bad in [json!(1.5), json!(-0.1), json!("0.5"), json!(50)] {
+            let config = ProviderInstanceConfig::native("native-test", "http://127.0.0.1:1/v1")
+                .with_extension("compaction_stub_ratio", bad.clone());
+            let error = config.validate().expect_err("refused");
+            assert!(
+                format!("{error}").contains("extension"),
+                "compaction_stub_ratio accepted {bad}: {error}"
+            );
+        }
+        for key in ["compaction_keep_tool_rounds", "compaction_stub_block"] {
+            let config = ProviderInstanceConfig::native("native-test", "http://127.0.0.1:1/v1")
+                .with_extension(key, json!("4"));
+            let error = config.validate().expect_err("refused");
+            assert!(
+                format!("{error}").contains("extension"),
+                "{key} accepted a string: {error}"
+            );
+        }
     }
 }

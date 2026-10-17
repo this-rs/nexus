@@ -460,6 +460,24 @@ sur un provider, aucune forme sérialisée ne bouge : `CONTRACT_VERSION` reste 5
   collé dans un message n'est pas persisté, donc le texte rechargé peut différer du texte envoyé. Le
   raisonnement est conservé (A39), y compris par la compaction (les derniers messages gardés sont
   intacts). Pas de compaction manuelle (le contrat n'en prévoit pas pour le natif).
+- **Palier bon marché avant le résumé (CTX3)** : dès que le prompt atteint `stub_ratio` de la fenêtre
+  (défaut 0,5), les résultats d'outils **plus vieux que les `keep_tool_rounds` derniers tours** (défaut 6 ;
+  un tour = un message assistant porteur d'appels et les résultats qui y répondent) sont remplacés par
+  `compaction::STUB_MARKER` (« tool result stubbed to save context — call the tool again if you still need
+  it »). Le message reste (même rôle, même `tool_call_id`, même raisonnement) : **seul son texte part**.
+  Le passage est **par blocs** (`stub_block`, défaut 4) — un résultat isolé n'achète pas une rupture de
+  cache — et **une seule fois par résultat** (un stub est reconnu et jamais retouché). Il est dit au
+  conducteur : `provider_notice { kind: "tool_results_stubbed", data: { count, kept_rounds, chars_freed,
+  stub } }` ; rien n'est effacé en silence. Ce palier **ne remplace pas** la compaction : sous pression
+  réelle, le résumé reste la réponse (une fenêtre que les stubs ne peuvent pas soulager compacte quand
+  même), et `before_compaction` reste appelé pour elle. Effet sur le cache : un passage réécrit l'historique
+  sous le préfixe, donc `extends_previous=false` **une fois par bloc** — c'est la rupture déclarée, mesurée
+  par `tests/native_context.rs` (40 tours d'outils, aucun résumé, ruptures bornées à une par bloc). Les
+  images rendues par un outil ne sont pas stubbées ici (elles vivent dans le message utilisateur qui suit les
+  résultats) : une session qui en porte beaucoup atteint le résumé, qui les résume en `[image <type>]`.
+  Réglage : `compaction_keep_tool_rounds` (0 éteint le palier), `compaction_stub_ratio`,
+  `compaction_stub_block` dans les `extensions` de l'instance ; `CompactionConfig.enabled = false` éteint
+  les deux paliers.
 - **Hors tour** : le natif émet `session_started` sur `out_of_band()`
   dès l'ouverture ; un flux de tour lâché envoie le reste du tour (permissions comprises) hors tour.
   La conformité de `permission_hors_tour` est montée ainsi (`DetachedTurn` dans
@@ -912,7 +930,8 @@ instance intégrée, toujours présente.
 - `quirks` = préréglage ∪ surcharge : booléens en OU, `explicit_parallel_tool_calls` et `reasoning_field` pris
   de la surcharge quand elle les fixe. Une surcharge ne retire pas un drapeau du préréglage.
 - Clés d'`extensions` lues : `allow_private_network` (bool), `cli_path` (chaîne), `compaction_keep_recent`
-  (entier), `codex_home` (chaîne), `env` (objet de chaînes, acp), `thinking` (bool, acp), `login_hint` (chaîne, acp) ; une clé dont le nom évoque un identifiant est refusée.
+  (entier), `compaction_keep_tool_rounds` (entier), `compaction_stub_ratio` (nombre, 0 à 1),
+  `compaction_stub_block` (entier), `codex_home` (chaîne), `env` (objet de chaînes, acp), `thinking` (bool, acp), `login_hint` (chaîne, acp) ; une clé dont le nom évoque un identifiant est refusée.
 - Kinds : `claude_code`, `native`, `codex` et `acp` construits ; `scripted` sans constructeur répond
   `Unsupported { provider_scripted }` ; sans la feature `provider-native`, `native` répond
   `Unsupported { provider_native }`, sans `provider-codex`, `codex` répond `Unsupported { provider_codex }`, sans `provider-acp`, `acp` répond `Unsupported { provider_acp }`.
