@@ -499,7 +499,209 @@ async fn compaction_is_the_declared_exception_and_the_prefix_holds_again_after_i
 }
 
 // ---------------------------------------------------------------------------
-// 2b. The cheap tier: old tool results become a stub (CTX3)
+// 2b. Deferred tools and ToolSearch (CTX2)
+// ---------------------------------------------------------------------------
+
+/// The names of the tools a request offers, in wire order.
+fn tool_names(body: &Value) -> Vec<String> {
+    body["tools"]
+        .as_array()
+        .map(|tools| {
+            tools
+                .iter()
+                .map(|tool| tool["function"]["name"].as_str().unwrap().to_owned())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The content of the tool result for `call_id`, as a later request replays it.
+fn result_of(body: &Value, call_id: &str) -> String {
+    body["messages"]
+        .as_array()
+        .expect("messages")
+        .iter()
+        .find(|message| message["role"] == "tool" && message["tool_call_id"] == call_id)
+        .unwrap_or_else(|| panic!("no tool result for {call_id}"))["content"]
+        .as_str()
+        .expect("text content")
+        .to_owned()
+}
+
+/// Asserts that `next`'s messages start with `prev`'s, byte for byte (the tool
+/// list is judged separately: loading a deferred tool grows it at the tail).
+fn assert_messages_prefix(prev: &Value, next: &Value) {
+    let before = prev["messages"].as_array().expect("messages");
+    let after = next["messages"].as_array().expect("messages");
+    for (index, message) in before.iter().enumerate() {
+        assert_eq!(
+            after.get(index).map(canon),
+            Some(canon(message)),
+            "message {index} moved"
+        );
+    }
+}
+
+/// The whole CTX2 contract on one turn: (a) the first request offers `ToolSearch` and no
+/// deferred definition; (e) a call to a deferred tool that is not loaded is an explicit
+/// error, and (c) moves the tool list by no byte; (b) after `ToolSearch select:X` the next
+/// request carries X at the END of the list, the old list its untouched prefix, and X runs
+/// in the same turn.
+#[tokio::test]
+async fn a_deferred_tool_is_withheld_loaded_by_tool_search_and_callable_in_the_same_turn() {
+    let get_t1 = json!({"action": "get", "task_id": "t1"});
+    let h = Harness::new(
+        vec![
+            chat_route(call_events(
+                &[("c1", "mcp__po__task", get_t1.clone())],
+                None,
+            )),
+            chat_route(call_events(
+                &[("c2", "ToolSearch", json!({"query": "select:mcp__po__task"}))],
+                None,
+            )),
+            chat_route(call_events(&[("c3", "mcp__po__task", get_t1)], None)),
+            chat_route(answer_events("done", None)),
+        ],
+        |config| config.deferred_tools = vec!["mcp__po__*".to_owned()],
+    )
+    .await;
+    let session = h.provider.open(h.spec(SYSTEM)).await.expect("open");
+    let events = turn(&*session, "look at t1").await;
+    assert_eq!(done_usage(&events).2, StopReason::Completed, "{events:?}");
+    let requests = h.chat();
+    assert_eq!(requests.len(), 4);
+    // (a) Every `mcp__po__*` definition is withheld; `ToolSearch` stands in for them.
+    assert_eq!(tool_names(&requests[0]), ["ToolSearch"]);
+    // (e) The unloaded call is answered by an error that says how to load the tool…
+    let refused = result_of(&requests[1], "c1");
+    assert!(
+        refused.contains("deferred") && refused.contains("select:mcp__po__task"),
+        "{refused}"
+    );
+    // (c) …and loads nothing: the tool list has not moved by a byte.
+    assert_eq!(canon(&requests[0]["tools"]), canon(&requests[1]["tools"]));
+    // The ToolSearch result is the full definition, in a block the model can read.
+    let loaded = result_of(&requests[2], "c2");
+    assert!(
+        loaded.contains("<function>")
+            && loaded.contains("mcp__po__task")
+            && loaded.contains("\"parameters\""),
+        "{loaded}"
+    );
+    // (b) The loaded tool is appended at the END; what was sent before does not move.
+    assert_eq!(tool_names(&requests[2]), ["ToolSearch", "mcp__po__task"]);
+    assert_eq!(
+        canon(&json!(requests[2]["tools"].as_array().unwrap()[..1])),
+        canon(&requests[0]["tools"])
+    );
+    // …and the call in the SAME turn ran: the server answered (its scripted reply, no error).
+    let ran = result_of(&requests[3], "c3");
+    assert!(ran.starts_with("task:"), "{ran}");
+    // Once loaded, the list is byte-stable again, and the history stayed append-only.
+    assert_eq!(canon(&requests[2]["tools"]), canon(&requests[3]["tools"]));
+    for pair in requests.windows(2) {
+        assert_messages_prefix(&pair[0], &pair[1]);
+    }
+}
+
+/// (d) The option's default is empty and changes NOTHING: the tool list is the one of
+/// before — every definition sent, no `ToolSearch` — and a configuration that defers
+/// only tools the session does not have is the same no-op.
+#[tokio::test]
+async fn with_no_deferred_tool_the_list_is_what_it_always_was_and_tool_search_is_absent() {
+    let all_po: Vec<String> = po_tools()
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|tool| format!("mcp__po__{}", tool["name"].as_str().unwrap()))
+        .collect();
+    let mut sorted = all_po.clone();
+    sorted.sort();
+    let mut baseline = None;
+    for deferred in [Vec::new(), vec!["mcp__other__*".to_owned()]] {
+        let h = Harness::new(vec![chat_route(answer_events("hi", None))], |config| {
+            config.deferred_tools = deferred;
+        })
+        .await;
+        let session = h.provider.open(h.spec(SYSTEM)).await.expect("open");
+        turn(&*session, "hello").await;
+        let requests = h.chat();
+        assert_eq!(tool_names(&requests[0]), sorted);
+        // Byte for byte the same wire, whichever of the two no-op configurations.
+        let tools = canon(&requests[0]["tools"]);
+        assert!(!tools.contains("ToolSearch"));
+        if let Some(baseline) = &baseline {
+            assert_eq!(baseline, &tools);
+        }
+        baseline = Some(tools);
+    }
+}
+
+/// `ToolSearch` by keywords: a miss is an explicit error that loads nothing (the list does
+/// not move), a hit loads the `max_results` best matches, and the non-deferred tools were
+/// offered all along.
+#[tokio::test]
+async fn tool_search_finds_by_keyword_and_a_miss_loads_nothing() {
+    let h = Harness::new(
+        vec![
+            chat_route(call_events(
+                &[(
+                    "c1",
+                    "ToolSearch",
+                    json!({"query": "zzz nothing matches this"}),
+                )],
+                None,
+            )),
+            chat_route(call_events(
+                &[(
+                    "c2",
+                    "ToolSearch",
+                    json!({"query": "milestone", "max_results": 1}),
+                )],
+                None,
+            )),
+            chat_route(call_events(
+                &[(
+                    "c3",
+                    "mcp__po__milestone",
+                    json!({"action": "get_progress"}),
+                )],
+                None,
+            )),
+            chat_route(answer_events("done", None)),
+        ],
+        |config| {
+            config.deferred_tools =
+                vec!["mcp__po__milestone".to_owned(), "mcp__po__note".to_owned()];
+        },
+    )
+    .await;
+    let session = h.provider.open(h.spec(SYSTEM)).await.expect("open");
+    let events = turn(&*session, "where is the milestone?").await;
+    assert_eq!(done_usage(&events).2, StopReason::Completed, "{events:?}");
+    let requests = h.chat();
+    assert_eq!(requests.len(), 4);
+    // Only the two deferred definitions are withheld; `ToolSearch` joins the rest.
+    let names = tool_names(&requests[0]);
+    assert_eq!(names.len(), 11);
+    assert_eq!(names[0], "ToolSearch");
+    assert!(!names.contains(&"mcp__po__milestone".to_owned()));
+    assert!(!names.contains(&"mcp__po__note".to_owned()));
+    // A miss is an error the model can read, and the list does not move.
+    let miss = result_of(&requests[1], "c1");
+    assert!(miss.contains("no deferred tool matches"), "{miss}");
+    assert_eq!(canon(&requests[0]["tools"]), canon(&requests[1]["tools"]));
+    // The hit loads the one best match, appended at the end, and it runs.
+    let names = tool_names(&requests[2]);
+    assert_eq!(names.last().map(String::as_str), Some("mcp__po__milestone"));
+    assert_eq!(names.len(), 12);
+    let ran = result_of(&requests[3], "c3");
+    assert!(ran.starts_with("milestone:"), "{ran}");
+}
+
+// ---------------------------------------------------------------------------
+// 2c. The cheap tier: old tool results become a stub (CTX3)
 // ---------------------------------------------------------------------------
 
 /// Rough size of a request's prompt in tokens, the way the harness estimates it: four

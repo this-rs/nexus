@@ -583,9 +583,13 @@ fn normalise_ids(mut calls: Vec<ToolCallChunk>) -> Vec<ToolCallChunk> {
 }
 
 fn build_request(core: &Core, model: &str, messages: &[ChatMessage]) -> CompletionRequest {
-    let (policy, vision) = {
+    let (policy, vision, loaded) = {
         let state = core.lock();
-        (state.policy.clone(), state.active_images)
+        (
+            state.policy.clone(),
+            state.active_images,
+            state.loaded_tools.clone(),
+        )
     };
     let mut wire = Vec::with_capacity(messages.len() + 1);
     if let Some(system) = &core.system_prompt {
@@ -601,9 +605,15 @@ fn build_request(core: &Core, model: &str, messages: &[ChatMessage]) -> Completi
         }
     }));
     let mut request = CompletionRequest::new(model, wire);
-    request.tools = core
-        .registry
-        .specs(&policy, core.settings.strict_tool_exposure);
+    let strict = core.settings.strict_tool_exposure;
+    // With no deferred configuration the list is exactly what it always was; with one, the
+    // deferred definitions are withheld and the loaded ones follow the base, at the end (CTX2).
+    request.tools = if core.settings.deferred_tools.is_empty() {
+        core.registry.specs(&policy, strict)
+    } else {
+        core.registry
+            .specs_deferred(&policy, strict, &core.settings.deferred_tools, &loaded)
+    };
     request.max_tokens = core.settings.max_tokens;
     if !request.tools.is_empty() {
         request.parallel_tool_calls = core.settings.parallel_tool_calls;
@@ -1322,6 +1332,21 @@ async fn execute(
     if !ToolRegistry::is_exposed(entry, &policy, core.settings.strict_tool_exposure) {
         return fail("tool not available under the current policy");
     }
+    // A deferred tool is never run silently (CTX2): until a `ToolSearch` call loads it, a
+    // call to it is answered by an error that says how to load it.
+    if super::tools::is_deferred(entry, &core.settings.deferred_tools)
+        && !core
+            .lock()
+            .loaded_tools
+            .iter()
+            .any(|name| name == &entry.name)
+    {
+        return fail(&format!(
+            "`{name}` is deferred and not loaded yet: call ToolSearch with query \
+             \"select:{name}\" (or keywords) to load its definition, then call it again",
+            name = entry.name
+        ));
+    }
     let Ok(mut input) = parse_arguments(&call.arguments) else {
         return fail("the tool arguments are not a JSON object");
     };
@@ -1394,6 +1419,7 @@ async fn execute(
                 Some(outcome) => outcome,
                 None => return (stopped_message(signal, token), true, None),
             },
+            BuiltinTool::ToolSearch => tool_search(core, &input),
         };
         after_tool(
             core, signal, call, entry, ran_input, &content, is_error, context,
@@ -1508,6 +1534,108 @@ fn ask_user(
             (builtin::QUESTION_ASKED.to_owned(), false)
         },
     }
+}
+
+/// `ToolSearch` (CTX2): finds deferred tools — `select:A,B` names them exactly, anything else
+/// is a keyword search over names and descriptions (`max_results` best matches, 5 by default) —
+/// loads what it found for the rest of the session, and answers with their full definitions.
+/// Only tools the current policy exposes can be found; nothing found is an error result, so the
+/// model sees it and rephrases.
+fn tool_search(core: &Core, input: &Value) -> (String, bool) {
+    let Some(query) = input
+        .get("query")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|query| !query.is_empty())
+    else {
+        return (
+            "ToolSearch needs `query`: \"select:<name>,<name>\" for exact tools, or keywords \
+             to search"
+                .to_owned(),
+            true,
+        );
+    };
+    let policy = core.lock().policy.clone();
+    let deferred = &core.settings.deferred_tools;
+    let candidates: Vec<&ToolEntry> = core
+        .registry
+        .exposed(&policy, core.settings.strict_tool_exposure)
+        .into_iter()
+        .filter(|entry| super::tools::is_deferred(entry, deferred))
+        .collect();
+    let mut found: Vec<&ToolEntry> = Vec::new();
+    let mut missing: Vec<&str> = Vec::new();
+    if let Some(names) = query.strip_prefix("select:") {
+        for name in names
+            .split(',')
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+        {
+            match candidates.iter().find(|entry| entry.name == name) {
+                Some(entry) => found.push(entry),
+                None => missing.push(name),
+            }
+        }
+    } else {
+        let terms: Vec<String> = query.split_whitespace().map(str::to_lowercase).collect();
+        let mut scored: Vec<(usize, &ToolEntry)> = candidates
+            .iter()
+            .filter_map(|entry| {
+                let haystack = format!("{} {}", entry.name, entry.description).to_lowercase();
+                let score = terms.iter().filter(|term| haystack.contains(*term)).count();
+                (score > 0).then_some((score, *entry))
+            })
+            .collect();
+        scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.name.cmp(&b.1.name)));
+        let max = input
+            .get("max_results")
+            .and_then(Value::as_f64)
+            .map_or(5, |n| (n.max(1.0)) as usize);
+        found = scored
+            .into_iter()
+            .take(max)
+            .map(|(_, entry)| entry)
+            .collect();
+    }
+    if found.is_empty() {
+        return (
+            format!(
+                "no deferred tool matches `{query}`: nothing was loaded. Use \
+                 \"select:<exact name>\" or other keywords"
+            ),
+            true,
+        );
+    }
+    {
+        // Loaded for the rest of the session, in load order; the list never shrinks (CTX0).
+        let mut state = core.lock();
+        for entry in &found {
+            if !state.loaded_tools.iter().any(|name| name == &entry.name) {
+                state.loaded_tools.push(entry.name.clone());
+            }
+        }
+    }
+    let mut out = String::from("<functions>\n");
+    for entry in &found {
+        let definition = json!({
+            "description": entry.description,
+            "name": entry.name,
+            "parameters": entry.schema,
+        });
+        out.push_str(&format!("<function>{definition}</function>\n"));
+    }
+    out.push_str("</functions>\n");
+    out.push_str(&format!(
+        "{} tool(s) loaded: callable from now on, for the rest of the session.",
+        found.len()
+    ));
+    if !missing.is_empty() {
+        out.push_str(&format!(
+            "\nNot found (no deferred tool of that name): {}.",
+            missing.join(", ")
+        ));
+    }
+    (out, false)
 }
 
 /// `Agent`: the host runs the sub-agent (A18). `None` when the turn was interrupted or the call

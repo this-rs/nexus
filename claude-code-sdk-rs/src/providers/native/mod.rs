@@ -194,6 +194,12 @@ pub struct NativeConfig {
     pub parallel_tool_calls: Option<bool>,
     /// An `allow` list is an exposure list (see [`tools`]). On by default.
     pub strict_tool_exposure: bool,
+    /// The tools whose definitions are **deferred** (CTX2): exact names or prefixes ending in
+    /// `*` (`mcp__po__*`). Empty by default — nothing changes. When it defers at least one tool
+    /// of the session, the model is offered `ToolSearch` instead of their definitions, and a
+    /// tool it loads is sent with every later request, appended after the tools already sent
+    /// (see [`tools`], "Deferred tools").
+    pub deferred_tools: Vec<String>,
     /// Automatic compaction.
     pub compaction: CompactionConfig,
     /// MCP clients.
@@ -232,6 +238,7 @@ impl NativeConfig {
             max_tokens: None,
             parallel_tool_calls: None,
             strict_tool_exposure: true,
+            deferred_tools: Vec::new(),
             compaction: CompactionConfig::default(),
             mcp: McpConfig::default(),
             default_tools: None,
@@ -610,6 +617,17 @@ impl NativeProvider {
             {
                 registry.insert(builtin::agent_entry())?;
             }
+            // Deferred tools (CTX2): when the configuration defers at least one tool the
+            // session has, the model gets `ToolSearch` instead of their definitions. With
+            // nothing to defer the tool is not offered and nothing changes.
+            if capabilities.tools
+                && !self.config.deferred_tools.is_empty()
+                && registry
+                    .entries()
+                    .any(|entry| tools::is_deferred(entry, &self.config.deferred_tools))
+            {
+                registry.insert(builtin::tool_search_entry())?;
+            }
             Ok::<(), ProviderError>(())
         }
         .await;
@@ -640,6 +658,8 @@ impl NativeProvider {
             tools: registry
                 .exposed(&spec.policy, self.config.strict_tool_exposure)
                 .into_iter()
+                // A deferred tool is not offered until a `ToolSearch` call loads it (CTX2).
+                .filter(|entry| !tools::is_deferred(entry, &self.config.deferred_tools))
                 .map(|entry| entry.name.clone())
                 .collect(),
             mcp_servers: statuses,
