@@ -53,6 +53,7 @@ use crate::agent::{
 };
 use crate::model::{
     ChatMessage, CompletionChunk, CompletionRequest, FinishReason, ImagePart, Role, ToolCallChunk,
+    WireEcho, forget_echoed_reasoning,
 };
 
 /// How the body of a turn ended, before it becomes a terminal event.
@@ -610,7 +611,19 @@ fn assistant(text: &str, reasoning: &str, tool_calls: Vec<ToolCallChunk>) -> Cha
         reasoning: (!reasoning.is_empty()).then(|| reasoning.to_owned()),
         tool_calls,
         tool_call_id: None,
+        wire_echo: None,
     }
+}
+
+/// The whole answer of a step, with the echo the endpoint asked to get back verbatim.
+/// Only for a step kept whole: a step whose calls were dropped or renamed is not what
+/// the echo says, and goes without it.
+fn answered(step: &mut Step, tool_calls: Vec<ToolCallChunk>) -> ChatMessage {
+    let mut message = assistant(&step.text, &step.reasoning, tool_calls);
+    if message.tool_calls == step.tool_calls {
+        message.wire_echo = step.echo.take();
+    }
+    message
 }
 
 async fn iterate(
@@ -647,7 +660,7 @@ async fn iterate(
             return Outcome::Interrupted;
         }
         let request = build_request(core, model, messages);
-        let step = match model_step(core, signal, model, request, acc).await {
+        let mut step = match model_step(core, signal, model, request, acc).await {
             Ok(step) => step,
             Err(error) => return Outcome::Failed(error),
         };
@@ -659,7 +672,7 @@ async fn iterate(
             return Outcome::Interrupted;
         }
         if step.tool_calls.is_empty() {
-            messages.push(assistant(&step.text, &step.reasoning, Vec::new()));
+            messages.push(answered(&mut step, Vec::new()));
             let kind = match step.finish {
                 Some(FinishReason::Length) => StopKind::MaxTokens,
                 Some(FinishReason::ContentFilter) => StopKind::Refusal,
@@ -682,8 +695,8 @@ async fn iterate(
             }
             return Outcome::Stop(StopKind::Budget, Some(step.text));
         }
-        let calls = normalise_ids(step.tool_calls);
-        messages.push(assistant(&step.text, &step.reasoning, calls.clone()));
+        let calls = normalise_ids(step.tool_calls.clone());
+        messages.push(answered(&mut step, calls.clone()));
         let ran = run_tools(core, signal, &calls).await;
         push_results(core, messages, &calls, &ran);
         let asked = ran.iter().any(|run| run.ends_turn);
@@ -792,6 +805,8 @@ struct Step {
     tool_calls: Vec<ToolCallChunk>,
     finish: Option<FinishReason>,
     interrupted: bool,
+    /// The answer in the endpoint's own wire form, to send back verbatim.
+    echo: Option<WireEcho>,
 }
 
 /// Characters per token of the estimate made when an endpoint reports no usage.
@@ -829,8 +844,13 @@ fn spend(
                 state.usd_spent += usd;
             }
             if usage.input_tokens.is_some() {
-                state.last_prompt_tokens =
-                    Some(usage.input_tokens.unwrap_or(0) + usage.cache_read_tokens.unwrap_or(0));
+                // The whole prompt: what was read from the cache and what was written
+                // to it count as much as the rest (Anthropic reports the three apart).
+                state.last_prompt_tokens = Some(
+                    usage.input_tokens.unwrap_or(0)
+                        + usage.cache_read_tokens.unwrap_or(0)
+                        + usage.cache_creation_tokens.unwrap_or(0),
+                );
             }
             None
         },
@@ -1063,6 +1083,7 @@ async fn model_step(
             },
             CompletionChunk::ToolCall(call) => step.tool_calls.push(call),
             CompletionChunk::Usage(reported) => usage = Some(reported),
+            CompletionChunk::Echo(echo) => step.echo = Some(echo),
             CompletionChunk::Finish(reason) => step.finish = Some(reason),
             #[allow(unreachable_patterns)]
             _ => {},
@@ -1159,6 +1180,9 @@ fn maybe_stub(core: &Core, messages: &mut [ChatMessage]) {
     if elided == 0 {
         return;
     }
+    // The history changed under the messages that echo reasoning: a thinking block
+    // replayed after an edit before it is refused, so none is replayed any more.
+    forget_echoed_reasoning(messages);
     // The size the endpoint last reported describes a history that has just shrunk: kept
     // as is, it would make the compaction below fire on a prompt that no longer exists
     // (the tier would relieve the window and be summarised anyway). Dropped, the next
@@ -1349,6 +1373,8 @@ async fn compact_history(
         });
     }
     *messages = apply(std::mem::take(messages), split, &text);
+    // The kept messages follow a summary now: their echoed reasoning is not valid any more.
+    forget_echoed_reasoning(messages);
     core.lock().last_prompt_tokens = None;
     core.emit(AgentEvent::Compaction {
         phase: CompactionPhase::Completed,

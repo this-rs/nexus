@@ -33,11 +33,12 @@ use crate::model::EndpointQuirks;
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum ModelProtocol {
-    /// The Anthropic Messages API, and gateways that speak it. What Claude Code consumes.
+    /// The Anthropic Messages API, and gateways that speak it. What Claude Code consumes,
+    /// and the native harness too (CTX5, `model::AnthropicEndpoint`).
     #[serde(rename = "anthropic_messages")]
     AnthropicMessages,
     /// OpenAI-compatible `chat/completions` with SSE: OpenAI, DeepSeek, vLLM, Ollama,
-    /// llama.cpp, NVIDIA NIM. What the native harness consumes.
+    /// llama.cpp, NVIDIA NIM. What the native harness consumes by default.
     #[serde(rename = "openai_chat")]
     OpenAiChat,
     /// The OpenAI Responses API. What Codex consumes for a custom provider.
@@ -95,7 +96,11 @@ impl ProviderKind {
     pub fn model_protocols(self) -> ProtocolSupport {
         match self {
             Self::ClaudeCode => ProtocolSupport::Fixed(&[ModelProtocol::AnthropicMessages]),
-            Self::Native => ProtocolSupport::Fixed(&[ModelProtocol::OpenAiChat]),
+            // OpenAI-compatible first: what an instance written before CTX5 is read as.
+            Self::Native => ProtocolSupport::Fixed(&[
+                ModelProtocol::OpenAiChat,
+                ModelProtocol::AnthropicMessages,
+            ]),
             Self::Codex => ProtocolSupport::Fixed(&[ModelProtocol::OpenAiResponses]),
             Self::Acp | Self::Scripted => ProtocolSupport::AgentChosen,
         }
@@ -347,28 +352,29 @@ mod tests {
     /// harness or protocol must change this test on purpose.
     #[test]
     fn each_harness_declares_the_protocols_it_consumes() {
-        let table = [
+        // (harness, every protocol it consumes, its default first).
+        let table: [(ProviderKind, &[ModelProtocol]); 5] = [
             (
                 ProviderKind::ClaudeCode,
-                Some(ModelProtocol::AnthropicMessages),
+                &[ModelProtocol::AnthropicMessages],
             ),
-            (ProviderKind::Native, Some(ModelProtocol::OpenAiChat)),
-            (ProviderKind::Codex, Some(ModelProtocol::OpenAiResponses)),
-            (ProviderKind::Acp, None),
-            (ProviderKind::Scripted, None),
+            (
+                ProviderKind::Native,
+                &[ModelProtocol::OpenAiChat, ModelProtocol::AnthropicMessages],
+            ),
+            (ProviderKind::Codex, &[ModelProtocol::OpenAiResponses]),
+            (ProviderKind::Acp, &[]),
+            (ProviderKind::Scripted, &[]),
         ];
         for (kind, expected) in table {
-            assert_eq!(kind.default_model_protocol(), expected, "{kind:?}");
-            match (kind.model_protocols(), expected) {
-                (ProtocolSupport::Fixed(protocols), Some(protocol)) => {
-                    assert_eq!(
-                        protocols,
-                        [protocol],
-                        "{kind:?} consumes exactly one protocol"
-                    )
-                },
-                (ProtocolSupport::AgentChosen, None) => {},
-                other => panic!("{kind:?}: {other:?}"),
+            assert_eq!(
+                kind.default_model_protocol(),
+                expected.first().copied(),
+                "{kind:?}"
+            );
+            match kind.model_protocols() {
+                ProtocolSupport::Fixed(protocols) => assert_eq!(protocols, expected, "{kind:?}"),
+                ProtocolSupport::AgentChosen => assert!(expected.is_empty(), "{kind:?}"),
             }
         }
     }

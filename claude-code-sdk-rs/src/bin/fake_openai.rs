@@ -15,7 +15,7 @@
 //! # Route
 //!
 //! `{method, path, body_contains?, status, headers?, body? | sse?, delay_ms?,
-//! event_delay_ms?, close_after?, chunked?}`
+//! event_delay_ms?, close_after?, chunked?, sse_event_names?}`
 //!
 //! - A request matches a route when method and path (query ignored) are equal and the
 //!   request body contains `body_contains` (if given).
@@ -28,10 +28,14 @@
 //!   line. The response is chunked, one chunk per event. `close_after: n` closes the
 //!   connection abruptly after n events (no final chunk). `event_delay_ms` sleeps
 //!   before each event.
+//! - `sse_event_names: true` puts an `event: <type>` line before the `data:` line of an
+//!   item that is a JSON object with a string `type` (the Anthropic Messages framing).
 //! - No route matches: `404` with a JSON error body.
 //!
 //! The request log records the method, the path, the header **names** and whether an
-//! `Authorization` header was present, never its value, and the body.
+//! `Authorization` (or `x-api-key`) header was present, never its value, the values of
+//! the headers that carry no secret (`anthropic-version`, `anthropic-beta`, `content-type`,
+//! `accept`), and the body.
 
 use std::fs::OpenOptions;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -55,6 +59,7 @@ struct Route {
     event_delay_ms: u64,
     close_after: Option<usize>,
     chunked: bool,
+    sse_event_names: bool,
 }
 
 fn text_of(value: &Value) -> String {
@@ -91,6 +96,7 @@ fn load_routes() -> Vec<Route> {
             event_delay_ms: route["event_delay_ms"].as_u64().unwrap_or(0),
             close_after: route["close_after"].as_u64().map(|n| n as usize),
             chunked: route["chunked"].as_bool().unwrap_or(false),
+            sse_event_names: route["sse_event_names"].as_bool().unwrap_or(false),
         })
         .collect()
 }
@@ -214,8 +220,20 @@ fn respond(stream: &mut TcpStream, route: &Route) -> std::io::Result<()> {
             if route.event_delay_ms > 0 {
                 thread::sleep(Duration::from_millis(route.event_delay_ms));
             }
+            let named = route
+                .sse_event_names
+                .then(|| serde_json::from_str::<Value>(event).ok())
+                .flatten()
+                .and_then(|value| {
+                    value
+                        .get("type")
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                });
             let frame = if event.starts_with(':') {
                 format!("{event}\n\n")
+            } else if let Some(name) = named {
+                format!("event: {name}\ndata: {event}\n\n")
             } else {
                 format!("data: {event}\n\n")
             };
@@ -251,6 +269,14 @@ fn respond(stream: &mut TcpStream, route: &Route) -> std::io::Result<()> {
     stream.flush()
 }
 
+/// Headers whose VALUE the log keeps: none of them carries a secret.
+const PLAIN_HEADERS: [&str; 4] = [
+    "anthropic-version",
+    "anthropic-beta",
+    "content-type",
+    "accept",
+];
+
 /// One lock for the request log: each entry is written whole, by one `write_all`, so two
 /// requests logged at the same time never interleave inside a line.
 static LOG: Mutex<()> = Mutex::new(());
@@ -266,6 +292,13 @@ fn log_request(request: &Request) {
         "path": request.path,
         "headers": request.headers.iter().map(|(n, _)| n.clone()).collect::<Vec<_>>(),
         "authorization_present": request.headers.iter().any(|(n, _)| n == "authorization"),
+        "x_api_key_present": request.headers.iter().any(|(n, _)| n == "x-api-key"),
+        "header_values": request
+            .headers
+            .iter()
+            .filter(|(n, _)| PLAIN_HEADERS.contains(&n.as_str()))
+            .map(|(n, v)| (n.clone(), Value::String(v.clone())))
+            .collect::<serde_json::Map<_, _>>(),
         "body": body,
     });
     // `writeln!` on a `File` issues one write per formatted piece: concurrent requests
@@ -325,6 +358,7 @@ fn handle(mut stream: TcpStream, routes: Arc<Vec<Route>>, used: Arc<Mutex<Vec<us
                 event_delay_ms: 0,
                 close_after: None,
                 chunked: false,
+                sse_event_names: false,
             };
             respond(&mut stream, &miss)
         },

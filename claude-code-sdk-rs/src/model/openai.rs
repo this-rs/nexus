@@ -120,7 +120,7 @@ struct ProbeAttempt {
 /// Locks, taking the data over when a panicking holder poisoned the mutex: these
 /// caches hold plain values, a half-finished update is at worst a stale entry,
 /// and a panic elsewhere must not take every later request down with it.
-fn locked<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+pub(crate) fn locked<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
@@ -177,18 +177,7 @@ impl OpenAiEndpoint {
         {
             return Ok((checked, client.clone()));
         }
-        let mut builder = Client::builder()
-            .redirect(Policy::none())
-            .no_proxy()
-            .connect_timeout(self.config.connect_timeout)
-            .user_agent(concat!("nexus-claude/", env!("CARGO_PKG_VERSION")));
-        if !checked.ip_literal {
-            // Close the DNS-rebinding window: connect to what was validated.
-            builder = builder.resolve_to_addrs(&checked.host, &checked.addrs);
-        }
-        let client = builder
-            .build()
-            .map_err(|_| ProviderError::unreachable("HTTP client could not be built"))?;
+        let client = pinned_client(&checked, self.config.connect_timeout)?;
         *locked(&self.client) = Some((checked.host.clone(), checked.addrs.clone(), client.clone()));
         Ok((checked, client))
     }
@@ -227,30 +216,7 @@ impl OpenAiEndpoint {
         builder: RequestBuilder,
         secret: Option<&Secret>,
     ) -> Result<Response, ProviderError> {
-        let limit = self.config.response_timeout;
-        let response = match tokio::time::timeout(limit, builder.send()).await {
-            Err(_) => return Err(timeout_error(limit)),
-            Ok(Err(error)) => return Err(map_reqwest(error, secret, limit)),
-            Ok(Ok(response)) => response,
-        };
-        let status = response.status();
-        if status.is_success() {
-            return Ok(response);
-        }
-        let retry_after = response
-            .headers()
-            .get(RETRY_AFTER)
-            .and_then(|v| v.to_str().ok())
-            .map(str::to_string);
-        let body = read_body(response, ERROR_BODY_READ_LIMIT, limit)
-            .await
-            .unwrap_or_default();
-        Err(classify_http(
-            status.as_u16(),
-            retry_after.as_deref(),
-            &String::from_utf8_lossy(&body),
-            secret,
-        ))
+        send_request(builder, secret, self.config.response_timeout).await
     }
 
     async fn start(
@@ -634,13 +600,69 @@ fn tools_refusal(error: ProviderError, no_tools: &dyn Fn() -> ProviderError) -> 
     error
 }
 
-fn timeout_error(after: Duration) -> ProviderError {
+/// The HTTP client of one validated address set (A36): no redirect, no proxy, and —
+/// unless the URL is an IP literal — connected to the addresses the guard validated,
+/// which closes the DNS-rebinding window.
+pub(crate) fn pinned_client(
+    checked: &CheckedEndpoint,
+    connect_timeout: Duration,
+) -> Result<Client, ProviderError> {
+    let mut builder = Client::builder()
+        .redirect(Policy::none())
+        .no_proxy()
+        .connect_timeout(connect_timeout)
+        .user_agent(concat!("nexus-claude/", env!("CARGO_PKG_VERSION")));
+    if !checked.ip_literal {
+        builder = builder.resolve_to_addrs(&checked.host, &checked.addrs);
+    }
+    builder
+        .build()
+        .map_err(|_| ProviderError::unreachable("HTTP client could not be built"))
+}
+
+/// Sends a request and waits for its headers within `limit`. A failed status becomes
+/// a [`ProviderError`] ([`classify_http`]), its body masked with `secret`.
+pub(crate) async fn send_request(
+    builder: RequestBuilder,
+    secret: Option<&Secret>,
+    limit: Duration,
+) -> Result<Response, ProviderError> {
+    let response = match tokio::time::timeout(limit, builder.send()).await {
+        Err(_) => return Err(timeout_error(limit)),
+        Ok(Err(error)) => return Err(map_reqwest(error, secret, limit)),
+        Ok(Ok(response)) => response,
+    };
+    let status = response.status();
+    if status.is_success() {
+        return Ok(response);
+    }
+    let retry_after = response
+        .headers()
+        .get(RETRY_AFTER)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
+    let body = read_body(response, ERROR_BODY_READ_LIMIT, limit)
+        .await
+        .unwrap_or_default();
+    Err(classify_http(
+        status.as_u16(),
+        retry_after.as_deref(),
+        &String::from_utf8_lossy(&body),
+        secret,
+    ))
+}
+
+pub(crate) fn timeout_error(after: Duration) -> ProviderError {
     ProviderError::Timeout {
         after_ms: after.as_millis() as u64,
     }
 }
 
-fn map_reqwest(error: reqwest::Error, secret: Option<&Secret>, limit: Duration) -> ProviderError {
+pub(crate) fn map_reqwest(
+    error: reqwest::Error,
+    secret: Option<&Secret>,
+    limit: Duration,
+) -> ProviderError {
     if error.is_timeout() {
         return timeout_error(limit);
     }
@@ -659,7 +681,7 @@ fn map_reqwest(error: reqwest::Error, secret: Option<&Secret>, limit: Duration) 
 }
 
 /// Re-masks the free-text part of an error with the request's secret.
-fn scrub(error: ProviderError, secret: Option<&Secret>) -> ProviderError {
+pub(crate) fn scrub(error: ProviderError, secret: Option<&Secret>) -> ProviderError {
     let secrets: Vec<&Secret> = secret.into_iter().collect();
     let mask = |detail: String| redact_with(&detail, &secrets);
     match error {
@@ -676,7 +698,7 @@ fn scrub(error: ProviderError, secret: Option<&Secret>) -> ProviderError {
     }
 }
 
-async fn read_body(
+pub(crate) async fn read_body(
     mut response: Response,
     limit: usize,
     per_chunk: Duration,

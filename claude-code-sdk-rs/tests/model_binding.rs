@@ -15,6 +15,8 @@
 //! gateway. The effect of the `ANTHROPIC_*` variables on the real CLI was measured
 //! separately (see the contract §13.2).
 
+#[path = "support/fake_anthropic.rs"]
+mod fake_anthropic;
 #[path = "support/fake_openai.rs"]
 mod fake_openai;
 #[path = "support/native.rs"]
@@ -152,15 +154,9 @@ async fn every_pair_is_checked_before_anything_starts() {
         ),
         (
             "native-h",
-            "anthropic",
-            "anthropic_messages",
-            &["openai_chat"],
-        ),
-        (
-            "native-h",
             "responses",
             "openai_responses",
-            &["openai_chat"],
+            &["openai_chat", "anthropic_messages"],
         ),
         ("codex-h", "deepseek", "openai_chat", &["openai_responses"]),
         (
@@ -582,5 +578,88 @@ async fn a_locked_credential_store_stops_the_session_instead_of_falling_back() {
     assert_eq!(
         session.err().expect("refused"),
         ProviderError::CredentialsLocked
+    );
+}
+
+// ---------------------------------------------------------------------------
+// One Anthropic model provider, two harnesses (CTX5)
+// ---------------------------------------------------------------------------
+
+/// The same Anthropic gateway serves Claude Code and the native harness, in turn: the
+/// native loop speaks the Messages API to it itself, Claude Code is pointed at it, and
+/// the key is resolved for the gateway each time. Switching harness changes nothing on
+/// the model side.
+#[tokio::test]
+async fn one_anthropic_gateway_serves_claude_code_then_the_native_harness() {
+    let server = FakeOpenAi::start(json!([
+        fake_anthropic::models_route(200_000, true),
+        fake_anthropic::text_reply(None, "native over the gateway", None, None),
+    ]));
+    let resolver = RecordingResolver::new();
+    let registry = registry(resolver.clone());
+    registry
+        .upsert(ProviderInstanceConfig::native(
+            "native-h",
+            "http://127.0.0.1:9",
+        ))
+        .unwrap();
+    registry
+        .upsert_model_provider(
+            ModelProviderConfig::new("gw", ModelProtocol::AnthropicMessages)
+                .with_endpoint(server.base_url())
+                .with_credential(CredentialRef::Env("GW_KEY".into()))
+                .with_default_model("m")
+                .with_extension("allow_private_network", json!(true)),
+        )
+        .unwrap();
+
+    // Claude Code first: the child is pointed at the gateway, with its key.
+    let (fake, session) = claude_bound_to(&registry, "gw").await;
+    session.expect("claude code over the gateway");
+    let invocation = fake
+        .wait_for_invocation(std::time::Duration::from_secs(5))
+        .await;
+    assert_eq!(
+        invocation.env("ANTHROPIC_BASE_URL").as_deref(),
+        Some(server.base_url().as_str())
+    );
+    assert_eq!(
+        invocation.env("ANTHROPIC_AUTH_TOKEN"),
+        redacted(GATEWAY_SECRET.len())
+    );
+
+    // Then the native harness, over the same model provider: the Messages API itself.
+    let session = registry
+        .open_session("native-h", binding_spec("gw"))
+        .await
+        .expect("native over the gateway");
+    let events = collect_turn(&*session).await;
+    let Some(AgentEvent::Done { stop_reason, .. }) = events.last() else {
+        panic!("no terminal event: {events:?}");
+    };
+    assert_eq!(*stop_reason, StopReason::Completed);
+    let posts = server.requests_to("POST", "/v1/messages");
+    assert_eq!(
+        posts.len(),
+        1,
+        "the turn reached the gateway's Messages API"
+    );
+    assert_eq!(posts[0]["header_values"]["anthropic-version"], "2023-06-01");
+    assert_eq!(
+        posts[0]["authorization_present"], true,
+        "a gateway gets the key as a Bearer token, as Claude Code sends it"
+    );
+    assert_eq!(posts[0]["x_api_key_present"], false);
+    assert_eq!(posts[0]["body"]["model"], "m");
+    assert!(
+        server
+            .requests_to("POST", "/v1/chat/completions")
+            .is_empty()
+    );
+
+    assert!(
+        resolver.asked_by().iter().all(|who| who == "gw"),
+        "every resolution named the model provider: {:?}",
+        resolver.asked_by()
     );
 }

@@ -237,7 +237,37 @@ fn mask_known_values(message: &ChatMessage, known: &KnownSecrets) -> ChatMessage
     }
     message.content = message.content.as_deref().map(|text| known.mask(text));
     message.reasoning = message.reasoning.as_deref().map(|text| known.mask(text));
+    if let Some(echo) = &mut message.wire_echo {
+        // The echo holds the same texts: masked the same way. A reasoning block whose
+        // text was masked no longer matches its signature and would be refused when
+        // replayed: the echo goes on without its reasoning.
+        let mut masked = echo.content.clone();
+        mask_strings(&mut masked, known);
+        if masked != echo.content {
+            echo.content = masked;
+            *echo = echo.without_reasoning();
+        }
+    }
     message
+}
+
+/// Masks every string of an echo but the opaque ones (`signature`, `data`, which carry
+/// no text of the conversation) and the tool-call `input`, kept byte for byte like the
+/// arguments it repeats.
+fn mask_strings(value: &mut serde_json::Value, known: &KnownSecrets) {
+    use serde_json::Value;
+    match value {
+        Value::String(text) => *text = known.mask(text),
+        Value::Array(items) => items.iter_mut().for_each(|item| mask_strings(item, known)),
+        Value::Object(map) => {
+            for (key, item) in map.iter_mut() {
+                if !matches!(key.as_str(), "signature" | "data" | "input") {
+                    mask_strings(item, known);
+                }
+            }
+        },
+        _ => {},
+    }
 }
 
 /// Longest run of text handed to `redact` at once (it truncates at 512 bytes).
@@ -298,6 +328,8 @@ fn scrub_message(message: &ChatMessage) -> ChatMessage {
     for call in &mut message.tool_calls {
         call.arguments = scrub_text(&call.arguments);
     }
+    // The wire echo repeats the fields above for the endpoint alone: not shown.
+    message.wire_echo = None;
     message
 }
 

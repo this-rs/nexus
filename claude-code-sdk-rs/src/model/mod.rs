@@ -5,7 +5,7 @@
 //!
 //! The wire-neutral types, [`quirks`] and [`pricing`] are always compiled (the
 //! provider registry holds them in its instance configuration); the HTTP client
-//! side (`guard`, `sse`, `wire`, `openai`) needs the `provider-native` cargo
+//! side (`guard`, `sse`, `wire`, `openai`, `anthropic_wire`, `anthropic`) needs the `provider-native` cargo
 //! feature (it pulls `reqwest`).
 //!
 //! | File | Role |
@@ -17,6 +17,8 @@
 //! | `guard.rs` | endpoint guard: https, internal ranges, DNS pinning (A36) |
 //! | `wire.rs` | request JSON and stream-to-chunks assembly (pure) |
 //! | `openai.rs` | [`OpenAiEndpoint`]: chat/completions over HTTP + SSE, probe (A30) |
+//! | `anthropic_wire.rs` | Anthropic Messages request JSON (the three cache points) and stream assembly (pure) |
+//! | `anthropic.rs` | [`AnthropicEndpoint`]: the Messages API over HTTP + SSE (CTX5) |
 
 use std::pin::Pin;
 
@@ -26,6 +28,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::agent::{ModelInfo, ProviderError, ProviderHealth, Usage};
 
+#[cfg(feature = "provider-native")]
+pub mod anthropic;
+#[cfg(feature = "provider-native")]
+pub(crate) mod anthropic_wire;
 #[cfg(feature = "provider-native")]
 pub mod guard;
 #[cfg(feature = "provider-native")]
@@ -37,6 +43,8 @@ pub mod sse;
 #[cfg(feature = "provider-native")]
 pub(crate) mod wire;
 
+#[cfg(feature = "provider-native")]
+pub use anthropic::{AnthropicAuth, AnthropicEndpoint, AnthropicEndpointConfig};
 #[cfg(feature = "provider-native")]
 pub use guard::{
     CheckedEndpoint, DnsResolver, EndpointGuard, IpClass, SystemResolver, classify_ip,
@@ -132,6 +140,71 @@ pub struct ChatMessage {
     /// For a `tool` message: the call it answers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
+    /// An assistant message as the endpoint's own wire returned it, for an endpoint
+    /// that must be sent it back verbatim (Anthropic: the thinking blocks with their
+    /// signature, in their order). Read only by the endpoint of that protocol; the
+    /// other fields stay the message for everything else.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wire_echo: Option<WireEcho>,
+}
+
+/// The content of an assistant message in an endpoint's own wire form (see
+/// [`ChatMessage::wire_echo`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WireEcho {
+    /// The protocol it is written in (`anthropic_messages`).
+    pub protocol: String,
+    /// The content blocks, as the endpoint returned them.
+    pub content: serde_json::Value,
+}
+
+/// Block types of an Anthropic echo that carry the model's reasoning.
+const ECHOED_REASONING: [&str; 2] = ["thinking", "redacted_thinking"];
+
+impl WireEcho {
+    /// Whether the echo holds a reasoning block (`thinking`, `redacted_thinking`).
+    pub fn has_reasoning(&self) -> bool {
+        self.content.as_array().is_some_and(|blocks| {
+            blocks.iter().any(|block| {
+                block
+                    .get("type")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|kind| ECHOED_REASONING.contains(&kind))
+            })
+        })
+    }
+
+    /// The echo without its reasoning blocks.
+    pub fn without_reasoning(&self) -> Self {
+        let mut echo = self.clone();
+        if let Some(blocks) = echo.content.as_array_mut() {
+            blocks.retain(|block| {
+                !block
+                    .get("type")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|kind| ECHOED_REASONING.contains(&kind))
+            });
+        }
+        echo
+    }
+}
+
+/// Drops the echoed reasoning blocks of every message (their text and the rest of
+/// the echo stay). For a history that was just rewritten — a tool result stubbed, a
+/// summary — under messages that echo reasoning: an Anthropic thinking block is valid
+/// only while everything before it is unchanged, and replaying one after such an edit
+/// is refused. Returns how many messages lost a block.
+pub fn forget_echoed_reasoning(messages: &mut [ChatMessage]) -> usize {
+    let mut changed = 0;
+    for message in messages {
+        if let Some(echo) = &message.wire_echo
+            && echo.has_reasoning()
+        {
+            message.wire_echo = Some(echo.without_reasoning());
+            changed += 1;
+        }
+    }
+    changed
 }
 
 impl ChatMessage {
@@ -143,6 +216,7 @@ impl ChatMessage {
             reasoning: None,
             tool_calls: Vec::new(),
             tool_call_id: None,
+            wire_echo: None,
         }
     }
 
@@ -298,6 +372,9 @@ pub enum CompletionChunk {
     ToolCall(ToolCallChunk),
     /// Token usage of the whole completion.
     Usage(Usage),
+    /// The whole assistant message in the endpoint's wire form, to be kept in the
+    /// transcript and sent back verbatim ([`ChatMessage::wire_echo`]). Before `Usage`.
+    Echo(WireEcho),
     /// End of the completion.
     Finish(FinishReason),
 }
