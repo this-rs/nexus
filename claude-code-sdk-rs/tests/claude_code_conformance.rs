@@ -1739,7 +1739,6 @@ async fn the_children_of_the_cli_are_killed_at_close() {
     session.close().await.unwrap();
     eventually("the CLI's child is gone after close", || !alive()).await;
 }
-<<<<<<< HEAD
 
 // ---------------------------------------------------------------------------
 // 2f. The Claude Code hook events of contract v7: SessionStart, UserPromptSubmit,
@@ -2017,8 +2016,6 @@ async fn a_permission_prompt_is_notified_to_the_host_as_claude_code_does() {
     );
     session.close().await.unwrap();
 }
-||||||| parent of b0f501a (fix(claude-code): un processus d'arrière-plan forké avant la première lecture est réclamé, et un Stop arrivé pendant la réclamation est rejoué)
-=======
 
 /// The CLI forks a background tool right after it prints the call, often before
 /// the adapter's first reading of the process table: the process is then no
@@ -2085,4 +2082,3 @@ async fn a_background_process_forked_before_the_first_reading_is_claimed_and_sto
     eventually("the background process is gone after the stop", || !alive()).await;
     session.close().await.unwrap();
 }
->>>>>>> b0f501a (fix(claude-code): un processus d'arrière-plan forké avant la première lecture est réclamé, et un Stop arrivé pendant la réclamation est rejoué)
