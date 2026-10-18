@@ -348,6 +348,7 @@ mod tests {
                 "hooks": "in_protocol",
                 "subagents": "nested",
                 "compaction_signal": true,
+                "compaction_manual": false,
                 "thinking": true,
                 "images": true,
                 "tools": true,

@@ -664,6 +664,24 @@ pub struct CancelOutcome {
     pub diagnostic: Option<ProcessDiagnostic>,
 }
 
+/// Result of `AgentSession::compact`.
+///
+/// `compacted: false` is a successful no-op (the history is too short to be worth a
+/// summary): nothing was sent to the model and the history is as it was.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct CompactOutcome {
+    /// A summary replaced the older part of the history.
+    pub compacted: bool,
+    /// Estimated size of the history before, in tokens (system prompt included).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tokens_before: Option<u64>,
+    /// Estimated size of the history after, in tokens. `None` when nothing was done.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tokens_after: Option<u64>,
+    /// Messages the summary stands for (`0` when nothing was done).
+    pub messages_summarised: u32,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

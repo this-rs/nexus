@@ -1511,6 +1511,19 @@ impl AgentSession for ScriptedSession {
         }))
     }
 
+    async fn compact(
+        &self,
+        _instructions: Option<String>,
+    ) -> Result<crate::agent::CompactOutcome, ProviderError> {
+        if self.shared.lock().closed {
+            return Err(ProviderError::Closed);
+        }
+        if !self.shared.capabilities.compaction_manual {
+            return Err(ProviderError::unsupported("compaction_manual"));
+        }
+        Ok(crate::agent::CompactOutcome::default())
+    }
+
     async fn close(&self) -> Result<(), ProviderError> {
         self.shared.record(RecordedCall::Close);
         self.shared.close();

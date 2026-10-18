@@ -44,10 +44,10 @@ use super::mcp::{IMAGE_NOT_SHOWN, McpError};
 use super::session::{ConsentRoute, Core, PendingAsk, StopCause, TurnSignal};
 use super::tools::{ToolEntry, ToolRegistry};
 use crate::agent::{
-    AgentEvent, CompactionInfo, CompactionPhase, CompactionTrigger, Cost, CostBasis, DeltaKind,
-    HookVerdict, InputBlock, ModelUsage, PermissionDecision, PolicyDecision, ProviderError,
-    QuestionReply, StopReason, ToolCallInfo, ToolCategory, ToolOutput, ToolResultInfo, TurnContext,
-    TurnInput, Usage,
+    AgentEvent, CompactOutcome, CompactionInfo, CompactionPhase, CompactionTrigger, Cost,
+    CostBasis, DeltaKind, HookVerdict, InputBlock, ModelUsage, PermissionDecision, PolicyDecision,
+    ProviderError, QuestionReply, StopReason, ToolCallInfo, ToolCategory, ToolOutput,
+    ToolResultInfo, TurnContext, TurnInput, Usage,
 };
 use crate::model::{
     ChatMessage, CompletionChunk, CompletionRequest, FinishReason, ImagePart, Role, ToolCallChunk,
@@ -955,6 +955,13 @@ async fn model_step(
     Ok(step)
 }
 
+/// Estimated tokens of the system prompt (four characters per token).
+fn system_tokens(core: &Core) -> u64 {
+    core.system_prompt
+        .as_deref()
+        .map_or(0, |text| text.len() as u64 / 4)
+}
+
 /// What the prompt costs now, and the window of the model now active: the larger of
 /// the estimate and the last size the endpoint reported (its report is the truth when
 /// it has one).
@@ -962,11 +969,7 @@ fn prompt_pressure(core: &Core, messages: &[ChatMessage]) -> (u64, Option<u64>) 
     // The window of the model now active, not the snapshot's: a smaller model chosen
     // for this turn compacts where the opening one would not.
     let window = core.lock().active_window;
-    let system = core
-        .system_prompt
-        .as_deref()
-        .map_or(0, |text| text.len() as u64 / 4);
-    let estimate = estimate_tokens(messages) + system;
+    let estimate = estimate_tokens(messages) + system_tokens(core);
     let reported = core.lock().last_prompt_tokens.unwrap_or(0);
     (estimate.max(reported), window)
 }
@@ -1036,16 +1039,78 @@ async fn maybe_compact(
     let Some(split) = split_point(messages, config.keep_recent) else {
         return;
     };
+    // Failure is already said (`compaction_failed`) and leaves the history intact; a
+    // cancelled summary has nothing to say.
+    let _ = compact_history(
+        core,
+        signal,
+        model,
+        messages,
+        Some(acc),
+        Compaction {
+            trigger: CompactionTrigger::Auto,
+            size,
+            system: system_tokens(core),
+            split,
+            instructions: None,
+        },
+    )
+    .await;
+}
+
+/// What one compaction is asked to do.
+struct Compaction<'a> {
+    trigger: CompactionTrigger,
+    /// Estimated size of the prompt now, in tokens (the system prompt included).
+    size: u64,
+    /// Estimated tokens of the system prompt (kept out of the history).
+    system: u64,
+    /// Index where the kept tail starts.
+    split: usize,
+    /// What the user asked the summary to keep in mind (manual compaction).
+    instructions: Option<&'a str>,
+}
+
+/// How a compaction ended.
+enum Compacted {
+    /// The history was replaced: messages summarised, estimated size after.
+    Done { summarised: usize, after: u64 },
+    /// The summary could not be written; the history is intact.
+    Failed(ProviderError),
+    /// The turn (or the session) was stopped while the summary was written.
+    Cancelled,
+}
+
+/// The one compaction, automatic or manual: same events, same summary, same hook.
+///
+/// `before_compaction` is asked with the trigger and the user's instructions, and its
+/// `systemMessage` is **added** to them. `acc` is the turn's accounting when there is a
+/// turn; a manual compaction has none and spends through the session counters only.
+async fn compact_history(
+    core: &Core,
+    signal: &TurnSignal,
+    model: &str,
+    messages: &mut Vec<ChatMessage>,
+    mut acc: Option<&mut Acc>,
+    job: Compaction<'_>,
+) -> Compacted {
+    let Compaction {
+        trigger,
+        size,
+        system,
+        split,
+        instructions: asked,
+    } = job;
     core.emit(AgentEvent::Compaction {
         phase: CompactionPhase::Started,
-        trigger: Some(CompactionTrigger::Auto),
+        trigger: Some(trigger),
         pre_tokens: Some(size),
     });
-    let instructions = match &core.hooks {
+    let from_hook = match &core.hooks {
         Some(hooks) => {
             let info = CompactionInfo {
-                trigger: "auto".to_owned(),
-                custom_instructions: None,
+                trigger: trigger.as_str().to_owned(),
+                custom_instructions: asked.map(str::to_owned),
             };
             hook_call(
                 core,
@@ -1058,16 +1123,24 @@ async fn maybe_compact(
         },
         None => None,
     };
+    let instructions = match (asked, from_hook) {
+        (Some(asked), Some(hook)) => Some(format!("{asked}\n\n{hook}")),
+        (Some(text), None) => Some(text.to_owned()),
+        (None, hook) => hook,
+    };
+    let config = core.settings.compaction;
     let request = summary_request(model, &messages[..split], instructions.as_deref(), &config);
     let summary_prompt_estimate = estimate_tokens(&request.messages);
     let started = Instant::now();
     let summary = tokio::select! {
         summary = summarise(core.endpoint.as_ref(), request) => summary,
-        () = signal.token.cancelled() => return,
+        () = signal.token.cancelled() => return Compacted::Cancelled,
     };
     let (text, usage) = match summary {
         Ok(summary) => {
-            acc.api += started.elapsed();
+            if let Some(acc) = acc.as_deref_mut() {
+                acc.api += started.elapsed();
+            }
             summary
         },
         Err(error) => {
@@ -1077,12 +1150,12 @@ async fn maybe_compact(
             core.emit(AgentEvent::ProviderNotice {
                 kind: "compaction_failed".to_owned(),
                 data: json!({
-                    "trigger": "auto",
+                    "trigger": trigger.as_str(),
                     "code": error.kind(),
                     "message": error.to_string(),
                 }),
             });
-            return;
+            return Compacted::Failed(error);
         },
     };
     let estimated = spend(
@@ -1095,11 +1168,13 @@ async fn maybe_compact(
         },
     );
     announce_estimate(core, estimated);
-    if let Some(usage) = &usage {
-        acc.add_usage(usage);
+    if let Some(acc) = &mut acc {
+        if let Some(usage) = &usage {
+            acc.add_usage(usage);
+        }
+        // Neither the summary's prompt nor the old reports say how big the new history is.
+        acc.prompt_tokens = None;
     }
-    // Neither the summary's prompt nor the old reports say how big the new history is.
-    acc.prompt_tokens = None;
     // Images of the summarised history reached the summary as "[image]": the
     // model keeps what it said of them, not the pixels. Said, never silent.
     let images = count_images(&messages[..split]);
@@ -1113,9 +1188,93 @@ async fn maybe_compact(
     core.lock().last_prompt_tokens = None;
     core.emit(AgentEvent::Compaction {
         phase: CompactionPhase::Completed,
-        trigger: Some(CompactionTrigger::Auto),
+        trigger: Some(trigger),
         pre_tokens: Some(size),
     });
+    Compacted::Done {
+        summarised: split,
+        after: estimate_tokens(messages) + system,
+    }
+}
+
+/// Manual compaction (`AgentSession::compact`): the same summary as the automatic one,
+/// outside any threshold, on the committed history. The session is marked busy for its
+/// whole length (a turn is refused), and the new history is committed and saved only
+/// when the summary was written.
+pub(crate) async fn compact_now(
+    core: &Core,
+    instructions: Option<String>,
+) -> Result<CompactOutcome, ProviderError> {
+    let signal = TurnSignal::new();
+    {
+        let mut state = core.lock();
+        if state.closed {
+            return Err(ProviderError::Closed);
+        }
+        if state.turn.is_some() || state.compacting {
+            return Err(ProviderError::TurnInProgress);
+        }
+        state.compacting = true;
+        // `interrupt` stops the summary like it stops a turn.
+        state.signal = Some(Arc::clone(&signal));
+    }
+    let result = compact_now_inner(core, &signal, instructions).await;
+    {
+        let mut state = core.lock();
+        state.compacting = false;
+        state.signal = None;
+    }
+    result
+}
+
+async fn compact_now_inner(
+    core: &Core,
+    signal: &Arc<TurnSignal>,
+    instructions: Option<String>,
+) -> Result<CompactOutcome, ProviderError> {
+    let (mut messages, model) = {
+        let state = core.lock();
+        (state.messages.clone(), state.model.clone())
+    };
+    let system = system_tokens(core);
+    let (size, _) = prompt_pressure(core, &messages);
+    let Some(split) = split_point(&messages, core.settings.compaction.keep_recent) else {
+        return Ok(CompactOutcome {
+            compacted: false,
+            tokens_before: Some(size),
+            tokens_after: None,
+            messages_summarised: 0,
+        });
+    };
+    let instructions = instructions.filter(|text| !text.trim().is_empty());
+    let job = Compaction {
+        trigger: CompactionTrigger::Manual,
+        size,
+        system,
+        split,
+        instructions: instructions.as_deref(),
+    };
+    match compact_history(core, signal, &model, &mut messages, None, job).await {
+        Compacted::Done { summarised, after } => {
+            core.lock().messages = messages.clone();
+            if let Err(error) = core.store.save(&core.transcript_id, &messages) {
+                tracing::warn!(
+                    kind = error.kind(),
+                    "the native transcript could not be saved"
+                );
+            }
+            Ok(CompactOutcome {
+                compacted: true,
+                tokens_before: Some(size),
+                tokens_after: Some(after),
+                messages_summarised: summarised as u32,
+            })
+        },
+        Compacted::Failed(error) => Err(error),
+        Compacted::Cancelled => Err(ProviderError::invalid(
+            "the compaction was interrupted: the history is as it was",
+        )),
+    }
 }
 
 // ---------------------------------------------------------------------------

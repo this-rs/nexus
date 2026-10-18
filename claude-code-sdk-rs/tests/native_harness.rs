@@ -2663,6 +2663,208 @@ async fn before_compaction_text_joins_the_summary_instructions() {
 }
 
 // ---------------------------------------------------------------------------
+// Manual compaction: `AgentSession::compact` (ISO3-a)
+// ---------------------------------------------------------------------------
+
+/// Two plain turns whose first question is long, so a one-line summary is smaller.
+fn manual_compaction_routes(summary: Value) -> Vec<Value> {
+    vec![
+        text_reply(Some("FIRST-Q"), "first answer", None, Some((100, 10))),
+        text_reply(Some("SECOND-Q"), "second answer", None, Some((120, 10))),
+        summary,
+        text_reply(Some("THIRD-Q"), "third answer", None, Some((60, 10))),
+    ]
+}
+
+fn summary_ok() -> Value {
+    text_reply(
+        Some("compacting the history"),
+        "THE SUMMARY",
+        None,
+        Some((50, 20)),
+    )
+}
+
+async fn two_turns(h: &Harness, hooks: Option<Arc<TestHooks>>) -> Arc<dyn AgentSession> {
+    let mut spec = h.spec();
+    if let Some(hooks) = hooks {
+        spec.hooks = Some(hooks);
+    }
+    let session = h.open(spec).await;
+    turn(&*session, &format!("FIRST-Q {}", "padding ".repeat(400))).await;
+    turn(&*session, "SECOND-Q").await;
+    session
+}
+
+fn is_summary(body: &Value) -> bool {
+    body.to_string().contains("compacting the history")
+}
+
+/// Drains the out-of-band stream until `compaction completed` (or a second of silence).
+async fn compaction_events(session: &dyn AgentSession) -> Vec<AgentEvent> {
+    use futures::StreamExt;
+    let mut stream = session.out_of_band().expect("out_of_band");
+    let mut seen = Vec::new();
+    while let Ok(Some(event)) =
+        tokio::time::timeout(std::time::Duration::from_secs(1), stream.next()).await
+    {
+        let done = matches!(
+            event,
+            AgentEvent::Compaction {
+                phase: nexus_claude::agent::CompactionPhase::Completed,
+                ..
+            }
+        );
+        seen.push(event);
+        if done {
+            break;
+        }
+    }
+    seen
+}
+
+#[tokio::test]
+async fn compact_summarises_the_older_history_below_any_threshold_and_keeps_the_tail() {
+    let h = Harness::with(manual_compaction_routes(summary_ok()), |config| {
+        config.compaction.keep_recent = 2;
+    })
+    .await;
+    assert!(h.open(h.spec()).await.capabilities().compaction_manual);
+    let session = two_turns(&h, None).await;
+    let outcome = session.compact(None).await.expect("compact");
+    assert!(outcome.compacted);
+    assert_eq!(outcome.messages_summarised, 2);
+    let (before, after) = (
+        outcome.tokens_before.unwrap(),
+        outcome.tokens_after.unwrap(),
+    );
+    assert!(after < before, "{after} should be below {before}");
+    // The same events as the automatic one, with the manual trigger.
+    let events = compaction_events(&*session).await;
+    let triggers: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::Compaction { trigger, .. } => *trigger,
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        triggers,
+        vec![
+            nexus_claude::agent::CompactionTrigger::Manual,
+            nexus_claude::agent::CompactionTrigger::Manual
+        ]
+    );
+    // The next request: the summary, then the two kept messages untouched, then the turn.
+    turn(&*session, "THIRD-Q").await;
+    let requests = h.chat();
+    assert!(is_summary(&requests[2]));
+    let messages = requests[3]["messages"].as_array().unwrap();
+    let texts: Vec<String> = messages
+        .iter()
+        .filter_map(|m| m["content"].as_str().map(str::to_owned))
+        .collect();
+    assert!(texts[0].starts_with("[Summary of the earlier conversation]"));
+    assert!(texts[0].contains("THE SUMMARY"));
+    assert_eq!(texts[1], "SECOND-Q");
+    assert_eq!(texts[2], "second answer");
+    assert_eq!(texts[3], "THIRD-Q");
+    assert!(!texts.iter().any(|t| t.contains("FIRST-Q")));
+}
+
+#[tokio::test]
+async fn compact_sends_the_instructions_and_the_before_compaction_message_to_the_summary() {
+    let h = Harness::with(manual_compaction_routes(summary_ok()), |config| {
+        config.compaction.keep_recent = 2;
+    })
+    .await;
+    let hooks = Arc::new(TestHooks {
+        compaction: Some("Keep the decision about the hot bridge.".into()),
+        ..TestHooks::default()
+    });
+    let session = two_turns(&h, Some(hooks.clone())).await;
+    session
+        .compact(Some("Focus on the API.".to_owned()))
+        .await
+        .expect("compact");
+    let requests = h.chat();
+    let summary = requests
+        .iter()
+        .find(|b| is_summary(b))
+        .expect("a summary request");
+    let body = summary["messages"][1]["content"].as_str().unwrap();
+    assert!(body.contains("Focus on the API."), "{body}");
+    assert!(
+        body.contains("Keep the decision about the hot bridge."),
+        "{body}"
+    );
+    let seen = hooks.compactions.lock().unwrap();
+    assert_eq!(seen.len(), 1);
+    assert_eq!(seen[0].trigger, "manual");
+    assert_eq!(
+        seen[0].custom_instructions.as_deref(),
+        Some("Focus on the API.")
+    );
+}
+
+#[tokio::test]
+async fn compact_is_refused_while_a_turn_runs_and_a_turn_while_it_compacts() {
+    let h = Harness::new(vec![text_reply(Some("ONLY-Q"), "answer", None, None)]).await;
+    let session = h.open(h.spec()).await;
+    let stream = session
+        .send_turn(TurnInput::text("ONLY-Q"))
+        .await
+        .expect("send_turn");
+    let refused = session.compact(None).await.unwrap_err();
+    assert!(
+        matches!(refused, ProviderError::TurnInProgress),
+        "{refused:?}"
+    );
+    collect(stream).await;
+    // Once the turn is over the session can compact again (nothing to do here).
+    assert!(session.compact(None).await.is_ok());
+}
+
+#[tokio::test]
+async fn compact_on_a_history_too_short_does_nothing_and_asks_no_one() {
+    let h = Harness::new(vec![text_reply(Some("ONLY-Q"), "answer", None, None)]).await;
+    let session = h.open(h.spec()).await;
+    let empty = session.compact(None).await.expect("compact");
+    assert!(!empty.compacted);
+    assert_eq!(empty.messages_summarised, 0);
+    assert_eq!(empty.tokens_after, None);
+    turn(&*session, "ONLY-Q").await;
+    let short = session.compact(None).await.expect("compact");
+    assert!(!short.compacted);
+    // Only the turn reached the endpoint.
+    assert_eq!(h.chat().len(), 1);
+}
+
+#[tokio::test]
+async fn a_summary_that_fails_is_an_error_and_leaves_the_history_intact() {
+    let failing = status_reply(
+        Some("compacting the history"),
+        500,
+        json!({"error": {"message": "boom"}}),
+    );
+    let h = Harness::with(manual_compaction_routes(failing), |config| {
+        config.compaction.keep_recent = 2;
+    })
+    .await;
+    let session = two_turns(&h, None).await;
+    assert!(session.compact(None).await.is_err());
+    // Not wedged, and the history is whole: the next turn still carries the first question.
+    turn(&*session, "THIRD-Q").await;
+    let last = h.chat().pop().unwrap();
+    assert!(last.to_string().contains("FIRST-Q"));
+    assert!(
+        !last
+            .to_string()
+            .contains("[Summary of the earlier conversation]")
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Active model: `set_model` and a `before_turn` directive make a model active;
 // its window and its price govern the turn, not the opening snapshot's (R3)
 // ---------------------------------------------------------------------------

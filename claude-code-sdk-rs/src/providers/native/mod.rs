@@ -25,7 +25,7 @@
 //! | `context_window` | configured, else the probe's (`probed`), else the catalogue's (`catalog`, once `catalog()` was read); `None` if unknown: no automatic compaction |
 //! | `cost` | `free` if configured so, `priced` when the model has a price, else `unknown` |
 //! | `interactive_permissions` | yes; scopes `once` and `session` (`always` has nowhere to be kept) |
-//! | `resume`, `set_model_live`, `per_session_mcp`, `compaction_signal`, `tool_cancel` | yes |
+//! | `resume`, `set_model_live`, `per_session_mcp`, `compaction_signal`, `compaction_manual`, `tool_cancel` | yes |
 //! | `secret_isolation` | yes: stdio servers get an allowlisted environment, credentials are resolved per request and never stored |
 //! | `sandbox` | none: information for the user, not a gate: `trust` opens like on every provider |
 //! | `hooks` | `in_protocol`: `before_tool` (after the exposure check, before the policy, so a replaced input is judged too), `after_tool` (only for a call that ran; its text reaches the model, not the `tool_result` event) and `before_compaction` (its text joins the summary instructions). A hook that does not answer within `NativeConfig::hook_timeout` is skipped with `provider_notice { hook_timeout }` |
@@ -746,6 +746,7 @@ impl AgentProvider for NativeProvider {
         capabilities.secret_isolation = true;
         capabilities.per_session_mcp = true;
         capabilities.compaction_signal = true;
+        capabilities.compaction_manual = true;
         capabilities.set_model_live = true;
         capabilities.tool_cancel = true;
         capabilities.resume = true;

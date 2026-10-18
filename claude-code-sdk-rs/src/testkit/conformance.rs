@@ -418,7 +418,7 @@ impl Scenario {
             Self::Reprise => &["resume"],
             Self::MessageImages => &["images"],
             Self::SousAgent => &["subagents"],
-            Self::Compaction => &["compaction_signal"],
+            Self::Compaction => &["compaction_signal", "compaction_manual"],
             Self::HorsTour => &["hooks"],
             Self::FinUsageCout => &["cost", "context_window"],
             Self::FluxDeltas
@@ -455,6 +455,7 @@ pub fn capability_present(capabilities: &Capabilities, field: &str) -> bool {
         "hooks" => capabilities.hooks == HookSupport::InProtocol,
         "subagents" => capabilities.subagents != SubagentSupport::None,
         "compaction_signal" => capabilities.compaction_signal,
+        "compaction_manual" => capabilities.compaction_manual,
         "thinking" => capabilities.thinking,
         "images" => capabilities.images,
         "tools" => capabilities.tools,
@@ -2288,6 +2289,23 @@ async fn compaction(ctx: &mut Ctx, prepared: &Prepared) {
     } else {
         // Leave a late signal the time to show up before judging its absence.
         tokio::time::sleep(QUIET_WINDOW).await;
+    }
+    // `compaction_manual`: present, `compact` is not refused as unsupported; absent,
+    // its fallback is the typed refusal naming the capability.
+    match session.compact(None).await {
+        Err(ProviderError::Unsupported { capability })
+            if !ctx.caps.compaction_manual && capability == "compaction_manual" => {},
+        Err(ProviderError::Unsupported { .. }) if ctx.caps.compaction_manual => {
+            ctx.fail("`compaction_manual` is declared but `compact` answers unsupported");
+        },
+        Err(other) if !ctx.caps.compaction_manual => ctx.fail(format!(
+            "`compaction_manual` is absent: `compact` must answer unsupported(compaction_manual), got {other:?}"
+        )),
+        Ok(_) if !ctx.caps.compaction_manual => {
+            ctx.fail("`compaction_manual` is absent but `compact` succeeded");
+        },
+        // Present: any other outcome (done, nothing to do, a typed failure) is the provider's own.
+        _ => {},
     }
     out_of_band.check(ctx);
     finish(ctx, &*session).await;

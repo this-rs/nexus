@@ -629,6 +629,20 @@ async fn a_replaced_input_and_a_lasting_scope_are_written_as_documented() {
 /// `scope: session` → `Unsupported { permission_scope }`, la demande reste en
 /// attente et peut être répondue avec `once`.
 #[tokio::test]
+async fn manual_compaction_is_unsupported_on_the_facade_and_not_declared() {
+    // The CLI compacts on its own (`/compact` goes to it as a prompt): the facade does
+    // not touch the history, says so, and does not claim the capability.
+    let (_fake, provider, spec) = stage(until_closed(Transcript::new()));
+    let session = open(&provider, spec).await;
+    assert!(!session.capabilities().compaction_manual);
+    assert_eq!(
+        session.compact(Some("keep the plan".to_owned())).await,
+        Err(ProviderError::unsupported("compaction_manual"))
+    );
+    session.close().await.unwrap();
+}
+
+#[tokio::test]
 async fn a_session_scope_without_cli_suggestions_returns_unsupported_and_keeps_request_pending() {
     // No `permission_suggestions` key at all.
     let ask = can_use_tool("req-no-sug", "Bash", json!({"command": "ls"}), None);
