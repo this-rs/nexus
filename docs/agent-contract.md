@@ -146,6 +146,7 @@ pub struct SessionSpec {
       async fn before_tool(&self, call: &ToolCallInfo) -> HookVerdict { HookVerdict::Continue }
       async fn after_tool(&self, result: &ToolResultInfo) -> Option<String> { None }      // contexte ajouté
       async fn before_compaction(&self, info: &CompactionInfo) -> Option<String> { None } // instructions
+      async fn compaction_directive(&self, info: &CompactionInfo) -> CompactionDirective { CompactionDirective::default() } // v8
       async fn before_turn(&self, ctx: &TurnContext) -> TurnDirective { TurnDirective::default() } // v4
       // v7 : les événements de Claude Code (ISO1), mêmes champs de sortie que son CLI
       async fn session_start(&self, info: &SessionStartInfo) -> HookReply { HookReply::none() }
@@ -168,6 +169,7 @@ pub struct SessionSpec {
   pub struct TurnContext { turn_index: u32, current_model: String, input_chars: usize,
                            context_tokens: Option<u64>, tokens_spent: u64, usd_spent: Option<f64> }
   pub struct TurnDirective { model: Option<String> }   // TurnDirective::model(m) / ::none()
+  pub struct CompactionDirective { model: Option<String> }   // v8 : CompactionDirective::model(m) / ::none()
   ```
   **`RequireConsent` (N23b)** : le hook ne décide pas à la place d'un humain : il nomme le **sujet** de
   l'appel (`subject`, p. ex. l'origine qu'un appel de navigateur atteindrait — assertée par le harnais,
@@ -192,6 +194,24 @@ pub struct SessionSpec {
   modèle courant, ou un nom vide, ne fait rien. C'est le point d'entrée du routage cognitif du backend
   (`GraphSessionHooks::before_turn`) : le harnais ne sait pas pourquoi, il obéit. Le changement d'ENDPOINT en
   cours de session n'existe pas (une session = un provider).
+  **`compaction_directive` (contrat v8, N-C1)** : un hook VOISIN de `before_compaction`, appelé juste
+  après lui, avec le même `CompactionInfo` (automatique ou manuelle). Sa directive peut nommer le modèle
+  qui ÉCRIT LE RÉSUMÉ — un modèle du **même** provider, pour ce résumé seulement : le modèle de la session
+  ne change pas (aucun `model_changed`). Elle est honorée seulement si `Capabilities::compaction_model` :
+  le résumé est demandé sur ce modèle (même endpoint) et c'est dit AVANT la requête, par
+  `provider_notice { kind: "compaction_model", data: { provider, trigger, model, session_model } }` ; le
+  coût du résumé est tarifé au prix de ce modèle. Sinon elle est dite par `provider_notice { kind:
+  "compaction_model_ignored", data: { provider, trigger, model, capability: "compaction_model" } }` et le
+  résumé est écrit par le modèle de la session — **jamais une erreur**. Nommer le modèle de la session, ou
+  un nom vide, ne fait rien. Un hook sans réponse dans le délai est ignoré (`hook_timeout`, `hook:
+  "compaction_directive"`). Un résumé qui échoue sur ce modèle (modèle inconnu de l'endpoint…) suit la
+  règle de toute compaction : `compaction_failed`, historique intact, le tour continue. C'est le point
+  d'entrée de la décision cognitive `utility.compaction` du backend (`GraphSessionHooks`) : le harnais ne
+  sait pas pourquoi, il obéit.
+  Pourquoi un hook voisin plutôt qu'un `before_compaction` qui rendrait aussi un modèle : la réponse de
+  `before_compaction` est, pour la façade Claude Code, le `systemMessage` du `PreCompact` du CLI
+  (§14.1) — un texte d'instructions, rien d'autre ; et un hook à défaut ne change rien pour un hôte v7
+  (même forme que `before_turn` → `TurnDirective`).
   **Événements de Claude Code (contrat v7, ISO1)** : la sémantique est celle RELEVÉE sur le vrai CLI
   2.1.296 le 18/10/2026 (`claude-code-sdk-rs/tests/parity/claude-code-2.1.296/hooks-2026-10-18/`), pas
   celle de sa documentation. Chaque événement lit les champs de `HookReply` qui ont un sens pour lui :
@@ -298,6 +318,7 @@ puis affectation des champs.
 | `subagents` | `nested \| separate_thread \| none` | `none` : repli par session enfant PO (A18) ; `separate_thread` : les événements de l'enfant portent `parent` = identifiant du fil enfant |
 | `compaction_signal` | `bool` | Aucun `compaction` émis ; le backend ne promet pas de bandeau ; `before_compaction` jamais appelé |
 | `compaction_manual` | `bool` | `compact` → `Unsupported { capability: "compaction_manual" }` (le CLI compacte seul : Claude Code reçoit `/compact` comme un prompt) ; le backend n'offre pas de compaction manuelle. Présent : `compact(instructions)` résume l'historique hors seuil (voir ci-dessous) |
+| `compaction_model` | `bool` | v8 : une directive `compaction_directive` est dite par `provider_notice { compaction_model_ignored }` et le résumé est écrit par le modèle de la session, sans erreur (Claude Code : le CLI ne permet pas de nommer un autre modèle de résumé, MESURÉ sur 2.1.296 — `claude-code-sdk-rs/tests/parity/claude-code-2.1.296/compaction-model-2026-10-18/`). Présent : le résumé est écrit par le modèle nommé, annoncé par `provider_notice { compaction_model }` |
 | `thinking` | `bool` | Aucun `thinking` ; pas d'erreur |
 | `images` | `bool` | `send_turn` avec un bloc image → `Unsupported { capability: "images" }` |
 | `tools` | `bool` | `open()` avec `mcp_servers` non vide ou préflight d'outil → `ModelNoTools` |
@@ -322,6 +343,7 @@ Valeurs de référence (v1, à confirmer par la conformité de chaque adaptateur
 | subagents | nested | none (outil `Agent` du harnais quand l'hôte le sert : `SessionHooks::run_subagent`, repli A18) | separate_thread | none |
 | compaction_signal | oui | oui | oui | non |
 | compaction_manual | non (le CLI compacte seul) | oui | non | non |
+| compaction_model | non (le CLI résume avec le modèle de la session : directive → `compaction_model_ignored`) | oui (même endpoint, ce résumé seulement) | non (hook jamais appelé : hooks `command`) | non (hooks `none`) |
 | thinking | oui | selon modèle | oui | oui |
 | images | oui (A12 révisée : blocs de contenu dans l'ordre de l'utilisateur, local et SSH) | selon modèle (v5 : catalogue, sonde d'un pixel en option, déclaration d'instance) | non | non |
 
@@ -401,6 +423,11 @@ sur un provider, aucune forme sérialisée ne bouge : `CONTRACT_VERSION` reste 5
   ⇒ `compacted: false`, aucun appel à l'endpoint. Un résumé qui échoue rend l'erreur typée (et
   `provider_notice { compaction_failed, trigger: "manual" }`), l'historique reste intact et rien n'est
   réécrit dans le transcript. `compaction.enabled = false` ne l'empêche pas : il règle l'automatique.
+- **Modèle de résumé (v8, `compaction_model` = oui)** : `loop::compact_history` (automatique et manuelle)
+  demande `compaction_directive` après `before_compaction` ; un modèle nommé autre que l'actif écrit le
+  résumé (`summary_request` sur ce modèle, même endpoint, second essai à budget doublé compris), annoncé par
+  `provider_notice { compaction_model }` avant la requête, et le coût du résumé est tarifé à son prix. Le
+  modèle actif de la session ne bouge pas : la requête suivante repart sur lui.
 - **`capabilities(model)` est synchrone** : il lit ce qui a été sondé. Tant qu'un modèle n'est pas sondé
   (`refresh_capabilities(model)`, ou `open`, qui sonde), `tools` est `false`, `thinking` `false`,
   `context_window` `None` ; rien n'est affirmé sans preuve. `thinking` = la sonde a vu un champ de
@@ -1229,7 +1256,7 @@ La projection `Message → AgentEvent` est la fonction publique
 | `StreamEvent` → `MessageStart`, `MessageDelta`, `ContentBlockStop`, `MessageStop`, `ContentBlockStart` non `tool_use` | (rien) | — | — | — |
 | `System { subtype: "init" }` | `session_started` | `provider_session_id` ← `data.session_id` ; `model` ← `data.model` ; `tools` ← `data.tools[]` (chaînes) ; `mcp_servers` ← `data.mcp_servers[]` (`name`, `status`) ; `native_mode` ← `data.permissionMode` ; `policy_mode` ← table §6 ; `cwd` ← `data.cwd` | `system_init` | `cli_session_id` ← `provider_session_id` (défaut `""`) ; `model` ; `tools` ; `mcp_servers` ← `[{name, status}]` ; `permission_mode` ← `native_mode` ; nouveaux (A42) : `provider`, `capabilities`, `tool_policy` ajoutés par le backend |
 | `System { subtype: "compact_boundary" }` | `compaction { phase: completed }` | `trigger` ← `data.compact_metadata.trigger` (`"manual"`/`"auto"`, absent → `auto`) ; `pre_tokens` ← `data.compact_metadata.pre_tokens` | `compact_boundary` | `trigger` (chaîne) ; `pre_tokens` |
-| hook `PreCompact` (callback en protocole, pas un `Message`) | `compaction { phase: started }` | `trigger` ← `HookInput::PreCompact.trigger` ; réponse au CLI : `{"systemMessage": <texte de before_compaction>}` si ce texte n'est pas vide, sinon `{}` (le CLI ajoute `systemMessage` aux instructions du résumé, ignore `reason` et rejette `hookSpecificOutput` : mesuré sur Claude Code 2.1.295, M2c) | `compaction_started` | `trigger` |
+| hook `PreCompact` (callback en protocole, pas un `Message`) | `compaction { phase: started }` | `trigger` ← `HookInput::PreCompact.trigger` ; réponse au CLI : `{"systemMessage": <texte de before_compaction>}` si ce texte n'est pas vide, sinon `{}` (le CLI ajoute `systemMessage` aux instructions du résumé, ignore `reason` et rejette `hookSpecificOutput` : mesuré sur Claude Code 2.1.295, M2c) ; v8 : `compaction_directive` est demandé aussi, et un modèle nommé donne `provider_notice { compaction_model_ignored }` (le CLI n'a aucun moyen de choisir le modèle du résumé, mesuré sur 2.1.296), la réponse au CLI ne change pas | `compaction_started` | `trigger` |
 | `System { subtype: task_started \| task_progress \| task_updated \| task_notification }` | `task_update` | `phase` ← suffixe du sous-type ; `task_id` ← `data.task_id` ; `tool_call_id` ← `data.tool_use_id` ; `description`, `status`, `summary` ← clés homonymes ; `event_id` ← `data.uuid` ; `data` ← `data` entier | `workflow` | `subtype` ← `"task_" + phase` ; `data` ← `data` (dédoublonnage sur `event_id`) |
 | `System { subtype: "background_tasks_changed" }` | `background_tasks` | `tasks[]` ← `data.tasks[]` (lecture tolérante : `id`\|`task_id`, `type`\|`kind`, `description`\|`command`, `status`) | (compteur `cli_background_tasks` ← `tasks.len()` ; `active_tasks_update` quand B13b remplace le suivi par PID) | — |
 | `System { subtype: "notification", key: "stop-hook-block-cap" }` | `provider_notice { kind: "stop_hook_block_cap" }` | `data` ← `{ provider: "claude_code", cap: 9, text }` (le CLI a passé outre le 9ᵉ blocage d'affilée d'un hook `Stop` / `SubagentStop`, mesuré 2.1.296) | comme ci-dessous | — |
@@ -1341,7 +1368,11 @@ jeton, `add_dirs` ← `extra_dirs`, `env` ← `EnvSpec.set`, `cli_path` ← exte
   (ajout compatible : un hôte v6 n'implémente rien et rien ne change pour lui ; aucune forme sérialisée ne
   bouge : `tests/snapshots/agent_contract_v7.json` ne diffère de v6 que par la version) ; côté SDK,
   variantes `HookInput::SessionStart` / `HookInput::Notification` et champs optionnels
-  `last_assistant_message` (`Stop`, `SubagentStop`), `agent_id` / `agent_type` (`SubagentStop`). Le fichier
+  `last_assistant_message` (`Stop`, `SubagentStop`), `agent_id` / `agent_type` (`SubagentStop`) ; **v8** = v7 +
+  méthode à défaut `SessionHooks::compaction_directive(&CompactionInfo) -> CompactionDirective`, le type
+  `CompactionDirective { model }` et le champ `Capabilities::compaction_model` (`#[serde(default)]`, `false` :
+  un pair v7 qui l'ignore reste correct ; natif oui, Claude Code / Codex / ACP non), scénario `compaction`
+  étendu à ce champ (20 champs), notices `compaction_model` / `compaction_model_ignored` (N-C1). Le fichier
   `tests/snapshots/agent_contract_v2.json` est conservé : le backend et le frontend, tant qu'ils sont en
   v2, le copient comme fixture.
   L'instantané v2 porte aussi `provider_instance_config` (natif avec préréglage, prix et extension ; ACP ; Claude Code) : une entrée d'instantané ajoutée pour une

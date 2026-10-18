@@ -285,6 +285,20 @@ pub trait SessionHooks: Send + Sync {
         None
     }
 
+    /// Called before a compaction, right after [`Self::before_compaction`] (contract v8). The
+    /// returned directive may name the model that writes the summary — a model of the
+    /// **same** provider, for this summary only: the session's model does not change. A
+    /// provider with [`Capabilities::compaction_model`] summarises with it and says so with
+    /// `provider_notice { kind: "compaction_model" }`; one without ignores it and says so
+    /// with `provider_notice { kind: "compaction_model_ignored" }`, the compaction going on
+    /// with the session's model. Never an error. Naming the session's model, or a blank
+    /// name, changes nothing.
+    ///
+    /// [`Capabilities::compaction_model`]: crate::agent::Capabilities::compaction_model
+    async fn compaction_directive(&self, _info: &CompactionInfo) -> CompactionDirective {
+        CompactionDirective::default()
+    }
+
     /// Called before a turn starts, before the harness reads which model to send
     /// it to. The returned directive may name another model of the **same**
     /// provider: the turn then runs on that model and a [`AgentEvent::ModelChanged`]
@@ -665,6 +679,34 @@ pub struct ToolResultInfo {
     pub output: Value,
     /// Whether the tool failed.
     pub is_error: bool,
+}
+
+/// What a `compaction_directive` hook asks of the compaction about to start (contract v8).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct CompactionDirective {
+    /// Model that writes the summary (same provider), when the hook wants another one than
+    /// the session's.
+    pub model: Option<String>,
+}
+
+impl CompactionDirective {
+    /// A directive that changes nothing.
+    pub fn none() -> Self {
+        Self::default()
+    }
+
+    /// A directive that writes the summary with `model`.
+    pub fn model(model: impl Into<String>) -> Self {
+        Self {
+            model: Some(model.into()),
+        }
+    }
+
+    /// The model named, when it says something and differs from `current`.
+    pub fn model_other_than(&self, current: &str) -> Option<&str> {
+        non_blank(self.model.as_deref()).filter(|model| *model != current)
+    }
 }
 
 /// A compaction about to start, as seen by a hook.

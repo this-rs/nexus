@@ -2381,7 +2381,8 @@ async fn with_strict_exposure_off_an_allow_list_only_pre_approves() {
 // ---------------------------------------------------------------------------
 
 use nexus_claude::agent::{
-    CompactionInfo, HookSupport, HookVerdict, SessionHooks, ToolCallInfo, ToolResultInfo,
+    CompactionDirective, CompactionInfo, HookSupport, HookVerdict, SessionHooks, ToolCallInfo,
+    ToolResultInfo,
 };
 use std::sync::Mutex;
 
@@ -2390,6 +2391,8 @@ struct TestHooks {
     verdict: Mutex<Option<HookVerdict>>,
     after: Option<String>,
     compaction: Option<String>,
+    /// What `compaction_directive` names (contract v8).
+    summary_model: Option<String>,
     /// `before_tool` never answers.
     stall: bool,
     calls: Mutex<Vec<ToolCallInfo>>,
@@ -2419,6 +2422,13 @@ impl SessionHooks for TestHooks {
     async fn before_compaction(&self, info: &CompactionInfo) -> Option<String> {
         self.compactions.lock().unwrap().push(info.clone());
         self.compaction.clone()
+    }
+
+    async fn compaction_directive(&self, _info: &CompactionInfo) -> CompactionDirective {
+        match &self.summary_model {
+            Some(model) => CompactionDirective::model(model.clone()),
+            None => CompactionDirective::none(),
+        }
     }
 }
 
@@ -2660,6 +2670,142 @@ async fn before_compaction_text_joins_the_summary_instructions() {
     let seen = hooks.compactions.lock().unwrap();
     assert_eq!(seen.len(), 1);
     assert_eq!(seen[0].trigger, "auto");
+}
+
+/// The routes of one turn whose second round crosses the 12 000-token window.
+fn auto_compaction_routes() -> Vec<Value> {
+    vec![
+        tool_reply(Some("go"), &[echo_call()], Some("old"), Some((100, 10))),
+        tool_reply(
+            Some(TOOL),
+            &[("c2", "mcp__fake__echo", json!({"text": "two"}))],
+            Some("kept"),
+            Some((10_000, 10)),
+        ),
+        text_reply(
+            Some("compacting the history"),
+            "THE SUMMARY",
+            None,
+            Some((50, 20)),
+        ),
+        text_reply(Some(TOOL), "done", None, Some((300, 10))),
+    ]
+}
+
+async fn auto_compaction_with(summary_model: Option<&str>) -> (Harness, Vec<AgentEvent>) {
+    let h = Harness::with(auto_compaction_routes(), |config| {
+        config.context_window = Some(12_000);
+        config.compaction.keep_recent = 2;
+    })
+    .await;
+    let log_dir = tempfile::tempdir().unwrap();
+    let hooks = Arc::new(TestHooks {
+        summary_model: summary_model.map(str::to_owned),
+        ..TestHooks::default()
+    });
+    let session = hooked(&h, hooks, &log_path(&log_dir)).await;
+    let events = turn(&*session, "go").await;
+    assert_eq!(stop_reason(&events), StopReason::Completed);
+    session.close().await.unwrap();
+    (h, events)
+}
+
+fn compaction_model_notices(events: &[AgentEvent]) -> Vec<Value> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::ProviderNotice { kind, data } if kind.starts_with("compaction_model") => {
+                Some(json!({ "kind": kind, "data": data }))
+            },
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn a_compaction_directive_writes_the_summary_with_its_model_and_the_session_keeps_its_own() {
+    // Contract v8 (N-C1): the host names the summary model; the endpoint receives the summary
+    // request on that model, and the turn goes on with the session's.
+    let (h, events) = auto_compaction_with(Some("summary-model")).await;
+    let chat = h.chat();
+    assert_eq!(chat.len(), 4, "{chat:#?}");
+    assert!(is_summary(&chat[2]), "{:#}", chat[2]);
+    assert_eq!(chat[2]["model"], "summary-model");
+    assert_eq!(chat[0]["model"], "m");
+    assert_eq!(chat[1]["model"], "m");
+    assert_eq!(chat[3]["model"], "m", "the session's model does not change");
+    assert_eq!(
+        compaction_model_notices(&events),
+        [json!({
+            "kind": "compaction_model",
+            "data": {
+                "provider": "native",
+                "trigger": "auto",
+                "model": "summary-model",
+                "session_model": "m",
+            },
+        })]
+    );
+    // Announced before the summary is asked, inside the compaction.
+    let notice = events
+        .iter()
+        .position(
+            |e| matches!(e, AgentEvent::ProviderNotice { kind, .. } if kind == "compaction_model"),
+        )
+        .unwrap();
+    let completed = events
+        .iter()
+        .position(|e| {
+            matches!(
+                e,
+                AgentEvent::Compaction {
+                    phase: nexus_claude::agent::CompactionPhase::Completed,
+                    ..
+                }
+            )
+        })
+        .unwrap();
+    assert!(notice < completed);
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::ModelChanged { .. }))
+    );
+}
+
+#[tokio::test]
+async fn a_compaction_directive_naming_the_session_model_or_nothing_changes_nothing() {
+    for named in [None, Some("m"), Some("  ")] {
+        let (h, events) = auto_compaction_with(named).await;
+        let chat = h.chat();
+        assert!(is_summary(&chat[2]), "{named:?}");
+        assert_eq!(chat[2]["model"], "m", "{named:?}");
+        assert!(compaction_model_notices(&events).is_empty(), "{named:?}");
+    }
+}
+
+#[tokio::test]
+async fn a_manual_compaction_follows_the_directive_too() {
+    let h = Harness::with(manual_compaction_routes(summary_ok()), |config| {
+        config.compaction.keep_recent = 2;
+    })
+    .await;
+    let hooks = Arc::new(TestHooks {
+        summary_model: Some("summary-model".into()),
+        ..TestHooks::default()
+    });
+    let session = two_turns(&h, Some(hooks)).await;
+    let outcome = session.compact(None).await.unwrap();
+    assert!(outcome.compacted);
+    let summary = h
+        .chat()
+        .into_iter()
+        .find(is_summary)
+        .expect("a summary was asked");
+    assert_eq!(summary["model"], "summary-model");
+    turn(&*session, "THIRD-Q").await;
+    assert_eq!(h.chat().last().unwrap()["model"], "m");
+    session.close().await.unwrap();
 }
 
 // ---------------------------------------------------------------------------

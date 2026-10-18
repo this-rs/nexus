@@ -68,6 +68,7 @@ pub fn full_capabilities() -> Capabilities {
     capabilities.subagents = SubagentSupport::Nested;
     capabilities.compaction_signal = true;
     capabilities.compaction_manual = true;
+    capabilities.compaction_model = true;
     capabilities.thinking = true;
     capabilities.images = true;
     capabilities.tools = true;

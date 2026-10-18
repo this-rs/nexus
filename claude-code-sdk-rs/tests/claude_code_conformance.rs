@@ -22,11 +22,11 @@ use std::time::Duration;
 use async_trait::async_trait;
 use futures::StreamExt;
 use nexus_claude::agent::{
-    AgentEvent, AgentProvider, AgentSession, CancelScope, CompactionInfo, CompactionPhase,
-    CompactionTrigger, EventStream, HookVerdict, InputBlock, InterruptScope, McpServerSpec,
-    ModelInfo, PermissionDecision, PermissionScope, PolicyMode, ProviderError, ProviderKind,
-    QuestionAnswer, QuestionReply, ResumeToken, SessionHooks, SessionSpec, StopReason,
-    ToolCallInfo, ToolCategory, ToolResultInfo, TurnInput,
+    AgentEvent, AgentProvider, AgentSession, CancelScope, CompactionDirective, CompactionInfo,
+    CompactionPhase, CompactionTrigger, EventStream, HookVerdict, InputBlock, InterruptScope,
+    McpServerSpec, ModelInfo, PermissionDecision, PermissionScope, PolicyMode, ProviderError,
+    ProviderKind, QuestionAnswer, QuestionReply, ResumeToken, SessionHooks, SessionSpec,
+    StopReason, ToolCallInfo, ToolCategory, ToolResultInfo, TurnInput,
 };
 use nexus_claude::providers::claude_code::{ClaudeCodeConfig, ClaudeCodeProvider};
 use nexus_claude::testkit::{ConformanceTarget, Prepared, Scenario, ScenarioOutcome, run_all};
@@ -1584,6 +1584,76 @@ async fn compaction_instructions_reach_the_cli_as_a_system_message() {
         ),
         "the instructions are applied, so nothing is reported as unsupported: {events:?}"
     );
+    session.close().await.unwrap();
+}
+
+/// Hooks whose `compaction_directive` names a summary model, with instructions too.
+struct SummaryModelHooks;
+
+#[async_trait]
+impl SessionHooks for SummaryModelHooks {
+    async fn before_compaction(&self, _info: &CompactionInfo) -> Option<String> {
+        Some("Keep the word ZEPHYR-42".into())
+    }
+
+    async fn compaction_directive(&self, _info: &CompactionInfo) -> CompactionDirective {
+        CompactionDirective::model("claude-sonnet-4-5")
+    }
+}
+
+/// Contract v8 (N-C1): the CLI summarises with the session's model and has no way to name
+/// another (measured on 2.1.296, `tests/parity/claude-code-2.1.296/compaction-model-2026-10-18/`).
+/// The facade does not declare `compaction_model`; a directive is said ignored with a
+/// `provider_notice`, the CLI is answered as before (the instructions still go), no error.
+#[tokio::test]
+async fn a_compaction_model_directive_is_said_ignored_and_the_compaction_goes_on() {
+    let transcript = Transcript::new()
+        .capture_hooks()
+        .await_stdin_containing("go")
+        .init("fake-session")
+        .emit_hook(
+            "PreCompact",
+            "hook-model",
+            hook_input("PreCompact", json!({"trigger": "auto"})),
+            None,
+        )
+        .system(
+            "compact_boundary",
+            json!({"compact_metadata": {"trigger": "auto", "pre_tokens": 9}}),
+        );
+    let (fake, provider, mut spec) = stage(until_closed(transcript.result_ok("done")));
+    spec.hooks = Some(Arc::new(SummaryModelHooks));
+    let session = open(&provider, spec).await;
+    assert!(!session.capabilities().compaction_model);
+    let stream = session.send_turn(TurnInput::text("go")).await.unwrap();
+    let events = read_turn(stream, |_| async {}).await;
+    assert_eq!(stop_reason(&events), Some(StopReason::Completed));
+    assert_eq!(
+        stdin_line(&fake, "hook-model").await,
+        r#"{"response":{"request_id":"hook-model","response":{"systemMessage":"Keep the word ZEPHYR-42"},"subtype":"success"},"type":"control_response"}"#
+    );
+    let notices: Vec<&Value> = events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::ProviderNotice { kind, data } if kind == "compaction_model_ignored" => {
+                Some(data)
+            },
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        notices,
+        [&json!({
+            "provider": "claude_code",
+            "trigger": "auto",
+            "model": "claude-sonnet-4-5",
+            "capability": "compaction_model",
+        })]
+    );
+    assert!(!events.iter().any(|event| matches!(
+        event,
+        AgentEvent::ProviderNotice { kind, .. } if kind == "compaction_model"
+    )));
     session.close().await.unwrap();
 }
 

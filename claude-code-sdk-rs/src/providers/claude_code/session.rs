@@ -985,7 +985,24 @@ impl HookCallback for NeutralHook {
                 // the compaction's custom instructions. It ignores `reason`, and
                 // it rejects `hookSpecificOutput` (no `PreCompact` variant).
                 // Measured on Claude Code 2.1.295 (M2c).
-                Ok(match self.hooks.before_compaction(&info).await {
+                let instructions = self.hooks.before_compaction(&info).await;
+                // Contract v8: the CLI writes the summary with the session's model and has no
+                // way to name another (measured on 2.1.296,
+                // `tests/parity/claude-code-2.1.296/compaction-model-2026-10-18/`). A model
+                // the host names is said to be ignored; the compaction goes on, no error.
+                let directive = self.hooks.compaction_directive(&info).await;
+                if let Some(model) = directive.model_other_than("") {
+                    self.core.emit(AgentEvent::ProviderNotice {
+                        kind: "compaction_model_ignored".to_owned(),
+                        data: json!({
+                            "provider": "claude_code",
+                            "trigger": compact.trigger,
+                            "model": model,
+                            "capability": "compaction_model",
+                        }),
+                    });
+                }
+                Ok(match instructions {
                     Some(instructions) if !instructions.trim().is_empty() => {
                         HookJSONOutput::Sync(SyncHookJSONOutput {
                             system_message: Some(instructions),

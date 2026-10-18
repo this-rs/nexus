@@ -1720,6 +1720,7 @@ const FAKE_ACP_FALLBACK: &[&str] = &[
     "subagents",
     "compaction_signal",
     "compaction_manual",
+    "compaction_model",
     "images",
     "set_model_live",
     "native_question",

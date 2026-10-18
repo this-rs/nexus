@@ -349,6 +349,7 @@ mod tests {
                 "subagents": "nested",
                 "compaction_signal": true,
                 "compaction_manual": false,
+                "compaction_model": false,
                 "thinking": true,
                 "images": true,
                 "tools": true,
