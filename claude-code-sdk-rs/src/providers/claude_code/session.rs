@@ -1929,10 +1929,11 @@ mod tests {
             now_ms(),
         )
         .expect("a background Bash opens a task");
-        let mut child = std::process::Command::new("sleep")
+        let mut child = crate::transport::spawn::isolated_command("sleep", &Default::default())
             .arg("30")
             .spawn()
             .expect("sleep starts");
+        let pid = child.id().expect("the child has a pid");
         {
             let mut state = core.lock();
             state.tasks.start(task);
@@ -1942,7 +1943,7 @@ mod tests {
         }
         core.finish_claim("toolu_bg", |taken| {
             assert!(taken.is_empty(), "no other task owns a process");
-            Some(child.id())
+            Some(pid)
         })
         .await;
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
@@ -1951,7 +1952,7 @@ mod tests {
                 break Some(status);
             }
             if std::time::Instant::now() > deadline {
-                let _ = child.kill();
+                let _ = child.kill().await;
                 break None;
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
@@ -1959,7 +1960,7 @@ mod tests {
         assert!(status.is_some(), "the replayed stop reached the process");
         let state = core.lock();
         let task = state.tasks.get("toolu_bg").unwrap();
-        assert_eq!(task.pid, Some(child.id()));
+        assert_eq!(task.pid, Some(pid));
         assert_eq!(task.status, BackgroundTaskStatus::Killed);
         assert!(state.claims.is_empty() && state.stop_requested.is_empty());
     }
