@@ -50,7 +50,7 @@ flowchart TD
         CLIENTS["✅ clients : InteractiveClient (= ClaudeSDKClientDefault),<br/>ClaudeSDKClient, ClaudeSDKClientWorking, OptimizedClient, Query, query<br/>— tous construisent SubprocessTransport en dur<br/><i>vérifié : grep 'SubprocessTransport::new' src → 5 fichiers<br/>(client, client_working, optimized_client, interactive, query)</i>"]
         HOOKFN["✅ fonctions libres de hook : is_hook_callback,<br/>dispatch_hook_from_registry, build_hook_response_json<br/>(le backend les appelle depuis sa pompe de contrôle)<br/><i>vérifié : tests/interactive_client_fake_cli.rs</i>"]
         TRANSPORTX["✅ transport : trait Transport, SubprocessTransport, MockTransport,<br/>find_claude_cli, get_cli_version, SemVer, describe_command_redacted<br/><i>vérifié : nexus-sdk-transport (faux CLI)</i>"]
-        TYPESX["✅ types : Message, ContentBlock, StreamEventData, ClaudeCodeOptions,<br/>PermissionMode, SDKControlRequest, Hook*, McpServerConfig, PermissionResult<br/><i>vérifié : nexus-sdk-types (parseur rejoué)</i>"]
+        TYPESX["✅ types : Message, ContentBlock, StreamEventData, ClaudeCodeOptions,<br/>PermissionMode, SDKControlRequest, Hook* (dont SessionStartHookInput et NotificationHookInput, ISO1), McpServerConfig, PermissionResult<br/><i>vérifié : nexus-sdk-types (parseur rejoué)</i>"]
         REST["✅ cli_download (download_cli, get_cached_cli_path), memory,<br/>sdk_mcp (SdkMcpServer), token_tracker, model_recommendation<br/><i>vérifié : nexus-sdk-util, nexus-sdk-memory</i>"]
     end
 
