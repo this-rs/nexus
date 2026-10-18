@@ -321,6 +321,239 @@ pub trait SessionHooks: Send + Sync {
     async fn run_subagent(&self, _request: &SubagentRequest) -> Result<String, String> {
         Err("this host runs no sub-agent".to_owned())
     }
+
+    /// Called once per session, before its first turn (Claude Code's `SessionStart`, contract
+    /// v7). [`HookReply::additional_context`] reaches the model with the first turn;
+    /// [`HookReply::system_message`] is shown to the user
+    /// (`provider_notice { kind: "hook_system_message" }`). A session start cannot be blocked:
+    /// [`HookReply::block`] is ignored.
+    async fn session_start(&self, _info: &SessionStartInfo) -> HookReply {
+        HookReply::none()
+    }
+
+    /// Called when the user's input of a turn arrives, before anything of the turn runs
+    /// (Claude Code's `UserPromptSubmit`, contract v7). [`HookReply::block`] stops the turn
+    /// before any model request: the input is not kept, `provider_notice { kind:
+    /// "prompt_blocked" }` then `done { completed, num_turns: 0 }` whose `result_text` names the
+    /// reason. [`HookReply::additional_context`] reaches the model with the input.
+    async fn user_prompt_submit(&self, _prompt: &PromptInfo) -> HookReply {
+        HookReply::none()
+    }
+
+    /// Called right before the turn concludes, when the model answered without calling a tool
+    /// (Claude Code's `Stop`, contract v7). [`HookReply::block`] keeps the turn going: the
+    /// reason reaches the model as a user message (`Stop hook feedback:\n<reason>`) and the
+    /// hook is asked again at the next answer with [`StopInfo::stop_hook_active`]. After
+    /// [`STOP_HOOK_BLOCK_CAP`] blocks in a row the turn ends anyway
+    /// (`provider_notice { kind: "stop_hook_block_cap" }`), as on the CLI.
+    async fn before_stop(&self, _info: &StopInfo) -> HookReply {
+        HookReply::none()
+    }
+
+    /// The same, for a session that is a sub-agent (Claude Code's `SubagentStop`, contract v7):
+    /// a sub-agent the harness runs itself, or a session opened with a `lineage` of depth 1 or
+    /// more. A block keeps the sub-agent working, with the reason as its next message.
+    async fn before_subagent_stop(&self, _info: &SubagentStopInfo) -> HookReply {
+        HookReply::none()
+    }
+
+    /// Called when the harness would notify the user (Claude Code's `Notification`, contract
+    /// v7), e.g. `permission_prompt` when a tool call waits for a human. Observation only, as on
+    /// the CLI: nothing comes back, and the turn does not wait for it.
+    async fn notification(&self, _info: &NotificationInfo) {}
+}
+
+/// How many `Stop` / `SubagentStop` blocks in a row a turn takes before it ends anyway: the
+/// Claude Code CLI's default (2.1.296, measured 18/10/2026: "A hook blocked the turn from ending
+/// 9 consecutive times — overriding and ending turn").
+pub const STOP_HOOK_BLOCK_CAP: u32 = 9;
+
+/// What a `session_start`, `user_prompt_submit`, `before_stop` or `before_subagent_stop` hook
+/// answers: the fields the Claude Code CLI reads from a hook's output (`decision: "block"` +
+/// `reason`, `hookSpecificOutput.additionalContext`, `systemMessage`). Each event reads the
+/// fields that mean something to it (see the hook); the others are ignored.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct HookReply {
+    /// `Some(reason)`: block (`decision: "block"`), with the reason the model reads (a stop) or
+    /// the user reads (a prompt).
+    pub block: Option<String>,
+    /// Text added to the model's context.
+    pub additional_context: Option<String>,
+    /// Text shown to the user, never to the model.
+    pub system_message: Option<String>,
+}
+
+impl HookReply {
+    /// A reply that changes nothing.
+    pub fn none() -> Self {
+        Self::default()
+    }
+
+    /// A reply that blocks, with `reason`.
+    pub fn block(reason: impl Into<String>) -> Self {
+        Self {
+            block: Some(reason.into()),
+            ..Self::default()
+        }
+    }
+
+    /// A reply that adds `text` to the model's context.
+    pub fn context(text: impl Into<String>) -> Self {
+        Self {
+            additional_context: Some(text.into()),
+            ..Self::default()
+        }
+    }
+
+    /// The same reply, with `message` shown to the user.
+    pub fn with_system_message(mut self, message: impl Into<String>) -> Self {
+        self.system_message = Some(message.into());
+        self
+    }
+
+    /// The block reason, when there is one that says something.
+    pub fn block_reason(&self) -> Option<&str> {
+        non_blank(self.block.as_deref())
+    }
+
+    /// The added context, when it says something.
+    pub fn context_text(&self) -> Option<&str> {
+        non_blank(self.additional_context.as_deref())
+    }
+
+    /// The user's message, when it says something.
+    pub fn system_text(&self) -> Option<&str> {
+        non_blank(self.system_message.as_deref())
+    }
+}
+
+fn non_blank(text: Option<&str>) -> Option<&str> {
+    text.filter(|text| !text.trim().is_empty())
+}
+
+/// A session about to run its first turn, as a `session_start` hook sees it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct SessionStartInfo {
+    /// `startup` (a new session) or `resume` (a resumed one), as Claude Code names them.
+    pub source: String,
+}
+
+impl SessionStartInfo {
+    /// A start from `source`.
+    pub fn new(source: impl Into<String>) -> Self {
+        Self {
+            source: source.into(),
+        }
+    }
+}
+
+/// The user's input of a turn, as a `user_prompt_submit` hook sees it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct PromptInfo {
+    /// The text of the input (its text blocks joined).
+    pub prompt: String,
+}
+
+impl PromptInfo {
+    /// The input `prompt`.
+    pub fn new(prompt: impl Into<String>) -> Self {
+        Self {
+            prompt: prompt.into(),
+        }
+    }
+}
+
+/// A turn about to conclude, as a `before_stop` hook sees it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct StopInfo {
+    /// Whether a stop hook already blocked this turn (Claude Code's `stop_hook_active`): a hook
+    /// that blocks should let the turn end when this is true.
+    pub stop_hook_active: bool,
+    /// The model's last answer, when it wrote one.
+    pub last_assistant_message: Option<String>,
+}
+
+impl StopInfo {
+    /// A stop after `last_assistant_message`.
+    pub fn new(stop_hook_active: bool, last_assistant_message: Option<String>) -> Self {
+        Self {
+            stop_hook_active,
+            last_assistant_message,
+        }
+    }
+}
+
+/// A sub-agent about to conclude, as a `before_subagent_stop` hook sees it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct SubagentStopInfo {
+    /// Whether a stop hook already blocked this sub-agent's turn.
+    pub stop_hook_active: bool,
+    /// The sub-agent's last answer, when it wrote one.
+    pub last_assistant_message: Option<String>,
+    /// The sub-agent's identifier, when the provider gives one.
+    pub agent_id: Option<String>,
+    /// The kind of sub-agent (`general-purpose`…), when known.
+    pub agent_type: Option<String>,
+}
+
+impl SubagentStopInfo {
+    /// A sub-agent stop after `last_assistant_message`.
+    pub fn new(stop_hook_active: bool, last_assistant_message: Option<String>) -> Self {
+        Self {
+            stop_hook_active,
+            last_assistant_message,
+            agent_id: None,
+            agent_type: None,
+        }
+    }
+}
+
+/// A notification, as a `notification` hook sees it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct NotificationInfo {
+    /// Claude Code's `notification_type`: `permission_prompt`, `idle_prompt`…
+    pub notification_type: String,
+    /// What the notification says.
+    pub message: String,
+    /// Its title, when it has one.
+    pub title: Option<String>,
+}
+
+impl NotificationInfo {
+    /// A notification of `notification_type` saying `message`.
+    pub fn new(notification_type: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            notification_type: notification_type.into(),
+            message: message.into(),
+            title: None,
+        }
+    }
+
+    /// The notification Claude Code sends when a tool call waits for the user's permission.
+    pub fn permission_prompt(tool: &str) -> Self {
+        Self::new(
+            "permission_prompt",
+            format!("Claude needs your permission to use {tool}"),
+        )
+    }
+}
+
+/// The user message a stop hook's block reason becomes (what the Claude Code CLI writes,
+/// measured on 2.1.296).
+pub fn stop_hook_feedback(reason: &str) -> String {
+    format!("Stop hook feedback:\n{reason}")
+}
+
+/// The `result_text` of a turn a `user_prompt_submit` hook blocked (what the Claude Code CLI
+/// writes, measured on 2.1.296).
+pub fn prompt_blocked_text(reason: &str, prompt: &str) -> String {
+    format!("UserPromptSubmit operation blocked by hook:\n{reason}\n\nOriginal prompt: {prompt}")
 }
 
 /// What the model asked of a sub-agent through the `Agent` tool (see

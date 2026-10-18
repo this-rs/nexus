@@ -755,6 +755,9 @@ async fn execute_drops_a_subagent_stop_without_writing_anything() {
         cwd: "workdir".to_string(),
         permission_mode: None,
         stop_hook_active: true,
+        last_assistant_message: None,
+        agent_id: None,
+        agent_type: None,
     });
     let output = fire(&cb, &input, None).await;
 

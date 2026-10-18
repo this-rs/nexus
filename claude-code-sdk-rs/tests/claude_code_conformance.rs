@@ -1739,3 +1739,280 @@ async fn the_children_of_the_cli_are_killed_at_close() {
     session.close().await.unwrap();
     eventually("the CLI's child is gone after close", || !alive()).await;
 }
+
+// ---------------------------------------------------------------------------
+// 2f. The Claude Code hook events of contract v7: SessionStart, UserPromptSubmit,
+//     Stop, SubagentStop, Notification (ISO1). The answers are the fields the real
+//     CLI reads (measured on 2.1.296, tests/parity/claude-code-2.1.296/hooks-2026-10-18/).
+// ---------------------------------------------------------------------------
+
+use nexus_claude::agent::{
+    HookReply, NotificationInfo, PromptInfo, SessionStartInfo, StopInfo, SubagentStopInfo,
+};
+
+#[derive(Default)]
+struct LifecycleHooks {
+    starts: Mutex<Vec<SessionStartInfo>>,
+    prompts: Mutex<Vec<PromptInfo>>,
+    stops: Mutex<Vec<StopInfo>>,
+    subagent_stops: Mutex<Vec<SubagentStopInfo>>,
+    notifications: Mutex<Vec<NotificationInfo>>,
+    /// `user_prompt_submit` blocks instead of adding context.
+    block_prompt: bool,
+}
+
+#[async_trait]
+impl SessionHooks for LifecycleHooks {
+    async fn session_start(&self, info: &SessionStartInfo) -> HookReply {
+        self.starts.lock().unwrap().push(info.clone());
+        HookReply::context("SESSION-CTX").with_system_message("SESSION-MSG")
+    }
+
+    async fn user_prompt_submit(&self, prompt: &PromptInfo) -> HookReply {
+        self.prompts.lock().unwrap().push(prompt.clone());
+        if self.block_prompt {
+            HookReply::block("prompts about bananas are blocked")
+        } else {
+            HookReply::context("UPS-CTX")
+        }
+    }
+
+    async fn before_stop(&self, info: &StopInfo) -> HookReply {
+        self.stops.lock().unwrap().push(info.clone());
+        HookReply::block("write ZEPHYR-42 first")
+    }
+
+    async fn before_subagent_stop(&self, info: &SubagentStopInfo) -> HookReply {
+        self.subagent_stops.lock().unwrap().push(info.clone());
+        HookReply::block("sub: one more line").with_system_message("SUB-MSG")
+    }
+
+    async fn notification(&self, info: &NotificationInfo) {
+        self.notifications.lock().unwrap().push(info.clone());
+    }
+}
+
+fn notices<'a>(events: &'a [AgentEvent], wanted: &str) -> Vec<&'a Value> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::ProviderNotice { kind, data } if kind == wanted => Some(data),
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn the_v7_hook_events_are_registered_and_answered_with_the_fields_the_cli_reads() {
+    let (fake, provider, mut spec) = stage(until_closed(
+        Transcript::new()
+            .capture_hooks()
+            // SessionStart never reaches an SDK callback (measured): the façade asks it and
+            // its context opens the first message the CLI receives.
+            .await_stdin_containing("SESSION-CTX\\n\\nhello")
+            .init("fake-session")
+            .emit_hook(
+                "UserPromptSubmit",
+                "h-ups",
+                hook_input("UserPromptSubmit", json!({"prompt": "hello"})),
+                None,
+            )
+            .emit_hook(
+                "SubagentStop",
+                "h-sub",
+                hook_input(
+                    "SubagentStop",
+                    json!({"stop_hook_active": false, "last_assistant_message": "sub-done",
+                           "agent_id": "a1", "agent_type": "general-purpose"}),
+                ),
+                None,
+            )
+            .emit_hook(
+                "Notification",
+                "h-notif",
+                hook_input(
+                    "Notification",
+                    json!({"message": "Claude is waiting for your input",
+                           "notification_type": "idle_prompt"}),
+                ),
+                None,
+            )
+            .emit_hook(
+                "Stop",
+                "h-stop",
+                hook_input(
+                    "Stop",
+                    json!({"stop_hook_active": false, "last_assistant_message": "hi"}),
+                ),
+                None,
+            )
+            .system(
+                "notification",
+                json!({"key": "stop-hook-block-cap", "text": "A hook blocked the turn from ending 9 consecutive times"}),
+            )
+            .result_ok("done"),
+    ));
+    let hooks = Arc::new(LifecycleHooks::default());
+    spec.hooks = Some(hooks.clone());
+    let session = open(&provider, spec).await;
+    let stream = session.send_turn(TurnInput::text("hello")).await.unwrap();
+    let events = read_turn(stream, |_| async {}).await;
+    assert_eq!(stop_reason(&events), Some(StopReason::Completed));
+
+    let init = fake
+        .stdin_json()
+        .into_iter()
+        .find(|line| line["request"]["subtype"] == "initialize")
+        .expect("the hooks are registered with the CLI");
+    for event in ["UserPromptSubmit", "Stop", "SubagentStop", "Notification"] {
+        let matchers = init["request"]["hooks"][event].as_array().unwrap();
+        assert_eq!(matchers.len(), 1, "{event}");
+        assert_eq!(matchers[0]["matcher"], Value::Null, "{event}");
+    }
+    assert!(init["request"]["hooks"]["SessionStart"].is_null());
+
+    assert_eq!(
+        stdin_line(&fake, "h-ups").await,
+        r#"{"response":{"request_id":"h-ups","response":{"hookSpecificOutput":{"additionalContext":"UPS-CTX","hookEventName":"UserPromptSubmit"}},"subtype":"success"},"type":"control_response"}"#
+    );
+    assert_eq!(
+        stdin_line(&fake, "h-stop").await,
+        r#"{"response":{"request_id":"h-stop","response":{"decision":"block","reason":"write ZEPHYR-42 first"},"subtype":"success"},"type":"control_response"}"#
+    );
+    assert_eq!(
+        stdin_line(&fake, "h-sub").await,
+        r#"{"response":{"request_id":"h-sub","response":{"decision":"block","reason":"sub: one more line","systemMessage":"SUB-MSG"},"subtype":"success"},"type":"control_response"}"#
+    );
+    assert_eq!(
+        stdin_line(&fake, "h-notif").await,
+        r#"{"response":{"request_id":"h-notif","response":{},"subtype":"success"},"type":"control_response"}"#
+    );
+
+    assert_eq!(
+        hooks.starts.lock().unwrap().as_slice(),
+        [SessionStartInfo::new("startup")]
+    );
+    assert_eq!(
+        hooks.prompts.lock().unwrap().as_slice(),
+        [PromptInfo::new("hello")]
+    );
+    assert_eq!(
+        hooks.stops.lock().unwrap().as_slice(),
+        [StopInfo::new(false, Some("hi".into()))]
+    );
+    let sub = hooks.subagent_stops.lock().unwrap().clone();
+    assert_eq!(sub.len(), 1);
+    assert_eq!(sub[0].last_assistant_message.as_deref(), Some("sub-done"));
+    assert_eq!(sub[0].agent_type.as_deref(), Some("general-purpose"));
+    assert_eq!(sub[0].agent_id.as_deref(), Some("a1"));
+    let notifications = hooks.notifications.lock().unwrap().clone();
+    assert_eq!(notifications.len(), 1);
+    assert_eq!(notifications[0].notification_type, "idle_prompt");
+
+    // The user-facing messages and the cap, under the native harness's notices.
+    let shown: Vec<_> = notices(&events, "hook_system_message")
+        .into_iter()
+        .map(|data| (data["hook"].clone(), data["message"].clone()))
+        .collect();
+    assert!(
+        shown.contains(&(json!("before_subagent_stop"), json!("SUB-MSG"))),
+        "{events:?}"
+    );
+    assert_eq!(
+        notices(&events, "stop_hook_block_cap").len(),
+        1,
+        "{events:?}"
+    );
+    // The session start's message was shown before the turn opened: out of band.
+    let mut out_of_band = session.out_of_band().expect("the out-of-band stream");
+    let mut early = Vec::new();
+    while let Ok(Some(event)) =
+        tokio::time::timeout(Duration::from_millis(200), out_of_band.next()).await
+    {
+        early.push(event);
+    }
+    let all: Vec<AgentEvent> = early.into_iter().chain(events).collect();
+    assert!(
+        notices(&all, "hook_system_message")
+            .iter()
+            .any(|data| data["hook"] == "session_start" && data["message"] == "SESSION-MSG"),
+        "{all:?}"
+    );
+    session.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_blocked_prompt_is_answered_with_a_block_and_told_to_the_host() {
+    let (fake, provider, mut spec) = stage(until_closed(
+        Transcript::new()
+            .capture_hooks()
+            .await_stdin_containing("bananas")
+            .init("fake-session")
+            .emit_hook(
+                "UserPromptSubmit",
+                "h-ups",
+                hook_input("UserPromptSubmit", json!({"prompt": "bananas"})),
+                None,
+            )
+            .result_ok("UserPromptSubmit operation blocked by hook"),
+    ));
+    let hooks = Arc::new(LifecycleHooks {
+        block_prompt: true,
+        ..LifecycleHooks::default()
+    });
+    spec.hooks = Some(hooks.clone());
+    let session = open(&provider, spec).await;
+    let stream = session.send_turn(TurnInput::text("bananas")).await.unwrap();
+    let events = read_turn(stream, |_| async {}).await;
+    assert_eq!(
+        stdin_line(&fake, "h-ups").await,
+        r#"{"response":{"request_id":"h-ups","response":{"decision":"block","reason":"prompts about bananas are blocked"},"subtype":"success"},"type":"control_response"}"#
+    );
+    let blocked = notices(&events, "prompt_blocked");
+    assert_eq!(blocked.len(), 1, "{events:?}");
+    assert_eq!(blocked[0]["reason"], "prompts about bananas are blocked");
+    session.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_permission_prompt_is_notified_to_the_host_as_claude_code_does() {
+    let (_fake, provider, mut spec) = stage(until_closed(
+        Transcript::new()
+            .await_stdin_containing("run it")
+            .init("fake-session")
+            .tool_use("toolu_1", "Bash", json!({"command": "ls"}))
+            .json(can_use_tool(
+                "perm-1",
+                "Bash",
+                json!({"command": "ls"}),
+                Some("toolu_1"),
+            ))
+            .await_stdin_containing("perm-1")
+            .result_ok("done"),
+    ));
+    let hooks = Arc::new(LifecycleHooks::default());
+    spec.hooks = Some(hooks.clone());
+    let session = open(&provider, spec).await;
+    let stream = session.send_turn(TurnInput::text("run it")).await.unwrap();
+    let events = read_turn(stream, |event| {
+        let session = Arc::clone(&session);
+        async move {
+            if let AgentEvent::PermissionAsk { request_id, .. } = event {
+                session
+                    .answer_permission(&request_id, PermissionDecision::deny())
+                    .await
+                    .unwrap();
+            }
+        }
+    })
+    .await;
+    assert_eq!(stop_reason(&events), Some(StopReason::Completed));
+    let notified =
+        support::poll_until(WAIT, || !hooks.notifications.lock().unwrap().is_empty()).await;
+    assert!(notified);
+    assert_eq!(
+        hooks.notifications.lock().unwrap().as_slice(),
+        [NotificationInfo::permission_prompt("Bash")]
+    );
+    session.close().await.unwrap();
+}

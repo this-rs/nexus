@@ -84,6 +84,7 @@ flowchart TD
 
         t_hookout["🔴 HookJSONOutput — untagged, Async en premier<br/>la PRÉSENCE de la clé async décide, pas sa valeur<br/>async à false choisit quand même Async<br/>async avec continue jette continue et stopReason"]
         t_hookout --> t_hooksync["✅ SyncHookJSONOutput — tous champs Option<br/>un objet vide est une sortie valide ne rien faire"]
+        t_hookin["✅ HookInput — tag hook_event_name : PreToolUse, PostToolUse, UserPromptSubmit, Stop, SubagentStop, PreCompact,<br/>SessionStart et Notification (ISO1) ; Stop/SubagentStop : last_assistant_message optionnel, SubagentStop : agent_id/agent_type<br/><i>relevé du CLI 2.1.296, tests/parity/claude-code-2.1.296/hooks-2026-10-18</i>"]
 
         t_mcp["✅ McpServerConfig — Serialize et Deserialize écrits à la main"]
         t_mcp -->|"Stdio, Sse, Http"| t_mcp_ok["✅ aller-retour fidèle, valeurs comparées"]

@@ -250,7 +250,7 @@ async fn deepseek_reasoning_comes_back_with_the_tools_on_every_later_request() {
 
     let requests = h.chat();
     assert_eq!(requests.len(), 3);
-    // Round two of the first turn: the assistant message of the tool call carries
+    // Round two of the first turn: the assistant  of the tool call carries
     // its reasoning back (tools are offered).
     let assistant = &requests[1]["messages"][1];
     assert_eq!(assistant["role"], "assistant");
@@ -4204,5 +4204,285 @@ async fn the_harness_gives_its_own_read_the_directory_where_a_result_is_persiste
     assert!(
         argv.contains("--add-dir") && argv.contains(&dir.display().to_string()),
         "the output directory is not in the scope of the session's Read: {argv}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The Claude Code hook events of contract v7 (ISO1): SessionStart, UserPromptSubmit,
+// Stop, SubagentStop, Notification — the semantics measured on the real CLI 2.1.296
+// (tests/parity/claude-code-2.1.296/hooks-2026-10-18/).
+// ---------------------------------------------------------------------------
+
+use nexus_claude::agent::{
+    HookReply, NotificationInfo, PromptInfo, STOP_HOOK_BLOCK_CAP, SessionStartInfo, StopInfo,
+    SubagentStopInfo, prompt_blocked_text,
+};
+
+/// Hooks for the v7 events, each answering what it is given and recording what it saw.
+#[derive(Default)]
+struct LifecycleHooks {
+    start: HookReply,
+    prompt: HookReply,
+    /// `before_stop` / `before_subagent_stop` block while `stop_hook_active` is false
+    /// (the advice of the CLI), or always when `always_block`.
+    stop_block: Option<String>,
+    always_block: bool,
+    starts: Mutex<Vec<SessionStartInfo>>,
+    prompts: Mutex<Vec<PromptInfo>>,
+    stops: Mutex<Vec<StopInfo>>,
+    subagent_stops: Mutex<Vec<SubagentStopInfo>>,
+    notifications: Mutex<Vec<NotificationInfo>>,
+}
+
+impl LifecycleHooks {
+    fn stop_reply(&self, active: bool) -> HookReply {
+        match &self.stop_block {
+            Some(reason) if self.always_block || !active => HookReply::block(reason.clone()),
+            _ => HookReply::none(),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl SessionHooks for LifecycleHooks {
+    async fn session_start(&self, info: &SessionStartInfo) -> HookReply {
+        self.starts.lock().unwrap().push(info.clone());
+        self.start.clone()
+    }
+
+    async fn user_prompt_submit(&self, prompt: &PromptInfo) -> HookReply {
+        self.prompts.lock().unwrap().push(prompt.clone());
+        if prompt.prompt.contains("banana") {
+            self.prompt.clone()
+        } else {
+            let mut reply = self.prompt.clone();
+            reply.block = None;
+            reply
+        }
+    }
+
+    async fn before_stop(&self, info: &StopInfo) -> HookReply {
+        self.stops.lock().unwrap().push(info.clone());
+        self.stop_reply(info.stop_hook_active)
+    }
+
+    async fn before_subagent_stop(&self, info: &SubagentStopInfo) -> HookReply {
+        self.subagent_stops.lock().unwrap().push(info.clone());
+        self.stop_reply(info.stop_hook_active)
+    }
+
+    async fn notification(&self, info: &NotificationInfo) {
+        self.notifications.lock().unwrap().push(info.clone());
+    }
+}
+
+async fn lifecycle_session(h: &Harness, hooks: Arc<LifecycleHooks>) -> Arc<dyn AgentSession> {
+    let mut spec = h.spec();
+    spec.hooks = Some(hooks);
+    h.open(spec).await
+}
+
+fn done_text(events: &[AgentEvent]) -> (Option<String>, u32) {
+    match done(events) {
+        AgentEvent::Done {
+            result_text,
+            num_turns,
+            ..
+        } => (result_text.clone(), *num_turns),
+        other => panic!("expected done, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn a_session_start_hook_is_asked_once_and_its_context_opens_the_first_turn() {
+    let h = Harness::new(vec![
+        text_reply(Some("FIRST-Q"), "one", None, None),
+        text_reply(Some("SECOND-Q"), "two", None, None),
+    ])
+    .await;
+    let hooks = Arc::new(LifecycleHooks {
+        start: HookReply::context("SESSION-CTX").with_system_message("SESSION-MSG"),
+        ..LifecycleHooks::default()
+    });
+    let session = lifecycle_session(&h, hooks.clone()).await;
+    let first = turn(&*session, "FIRST-Q").await;
+    turn(&*session, "SECOND-Q").await;
+
+    assert_eq!(
+        hooks.starts.lock().unwrap().as_slice(),
+        [SessionStartInfo::new("startup")]
+    );
+    let chat = h.chat();
+    let opening = last_user_text(&chat[0]);
+    assert!(opening.contains("SESSION-CTX"), "{opening}");
+    assert!(
+        opening.find("SESSION-CTX") < opening.find("FIRST-Q"),
+        "{opening}"
+    );
+    // Committed with the first turn, not repeated.
+    assert!(!last_user_text(&chat[1]).contains("SESSION-CTX"));
+    let shown = notice(&first, "hook_system_message").expect("the message is shown");
+    assert_eq!(shown["hook"], "session_start");
+    assert_eq!(shown["message"], "SESSION-MSG");
+}
+
+#[tokio::test]
+async fn a_user_prompt_submit_context_follows_the_prompt() {
+    let h = Harness::new(vec![text_reply(Some("hello"), "hi", None, None)]).await;
+    let hooks = Arc::new(LifecycleHooks {
+        prompt: HookReply::context("UPS-CTX"),
+        ..LifecycleHooks::default()
+    });
+    let session = lifecycle_session(&h, hooks.clone()).await;
+    turn(&*session, "hello").await;
+    assert_eq!(
+        hooks.prompts.lock().unwrap().as_slice(),
+        [PromptInfo::new("hello")]
+    );
+    let text = last_user_text(&h.chat()[0]);
+    assert!(text.find("hello") < text.find("UPS-CTX"), "{text}");
+}
+
+#[tokio::test]
+async fn a_blocked_prompt_ends_the_turn_before_any_request_and_is_not_kept() {
+    let h = Harness::new(vec![text_reply(Some("apples"), "ok", None, None)]).await;
+    let hooks = Arc::new(LifecycleHooks {
+        prompt: HookReply::block("prompts about bananas are blocked"),
+        ..LifecycleHooks::default()
+    });
+    let session = lifecycle_session(&h, hooks.clone()).await;
+    let events = turn(&*session, "tell me about bananas").await;
+    assert_eq!(stop_reason(&events), StopReason::Completed);
+    assert_eq!(
+        done_text(&events),
+        (
+            Some(prompt_blocked_text(
+                "prompts about bananas are blocked",
+                "tell me about bananas"
+            )),
+            0
+        )
+    );
+    let blocked = notice(&events, "prompt_blocked").expect("the block is told");
+    assert_eq!(blocked["reason"], "prompts about bananas are blocked");
+    assert!(h.chat().is_empty(), "no request for a blocked prompt");
+    // The next turn runs, and the blocked prompt is not in its history.
+    turn(&*session, "apples").await;
+    let chat = h.chat();
+    assert_eq!(chat.len(), 1);
+    assert!(!chat[0].to_string().contains("bananas"));
+}
+
+#[tokio::test]
+async fn a_blocking_stop_hook_runs_the_turn_on_with_its_reason_as_a_user_message() {
+    let h = Harness::new(vec![
+        text_reply(Some("go"), "hello", None, None),
+        text_reply(Some("Stop hook feedback"), "ZEPHYR-42", None, None),
+    ])
+    .await;
+    let hooks = Arc::new(LifecycleHooks {
+        stop_block: Some("write ZEPHYR-42 first".into()),
+        ..LifecycleHooks::default()
+    });
+    let session = lifecycle_session(&h, hooks.clone()).await;
+    let events = turn(&*session, "go").await;
+    assert_eq!(stop_reason(&events), StopReason::Completed);
+    assert_eq!(done_text(&events), (Some("ZEPHYR-42".into()), 2));
+    let chat = h.chat();
+    assert_eq!(chat.len(), 2);
+    assert_eq!(
+        last_user_text(&chat[1]),
+        "Stop hook feedback:\nwrite ZEPHYR-42 first"
+    );
+    assert_eq!(
+        hooks.stops.lock().unwrap().as_slice(),
+        [
+            StopInfo::new(false, Some("hello".into())),
+            StopInfo::new(true, Some("ZEPHYR-42".into())),
+        ]
+    );
+    // A top-level session never asks the sub-agent hook.
+    assert!(hooks.subagent_stops.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn a_stop_hook_that_always_blocks_is_overridden_at_the_cli_cap() {
+    let h = Harness::new(vec![text_reply(None, "n", None, None)]).await;
+    let hooks = Arc::new(LifecycleHooks {
+        stop_block: Some("one more".into()),
+        always_block: true,
+        ..LifecycleHooks::default()
+    });
+    let session = lifecycle_session(&h, hooks.clone()).await;
+    let events = turn(&*session, "count").await;
+    assert_eq!(stop_reason(&events), StopReason::Completed);
+    // As on the CLI: the ninth block in a row ends the turn (eight continuations).
+    assert_eq!(
+        hooks.stops.lock().unwrap().len(),
+        STOP_HOOK_BLOCK_CAP as usize
+    );
+    assert_eq!(h.chat().len(), STOP_HOOK_BLOCK_CAP as usize);
+    let cap = notice(&events, "stop_hook_block_cap").expect("the cap is told");
+    assert_eq!(cap["cap"], STOP_HOOK_BLOCK_CAP);
+}
+
+#[tokio::test]
+async fn a_sub_agent_session_asks_before_subagent_stop_and_keeps_working_on_a_block() {
+    let h = Harness::new(vec![
+        text_reply(Some("task"), "sub-done", None, None),
+        text_reply(Some("Stop hook feedback"), "sub-done ZEPHYR-42", None, None),
+    ])
+    .await;
+    let hooks = Arc::new(LifecycleHooks {
+        stop_block: Some("also write ZEPHYR-42".into()),
+        ..LifecycleHooks::default()
+    });
+    let mut spec = h.spec();
+    spec.hooks = Some(hooks.clone());
+    spec.lineage = Some(nexus_claude::agent::Lineage {
+        parent_session_id: "parent".to_owned(),
+        root_session_id: "parent".to_owned(),
+        depth: 1,
+        spawned_by: "delegation".to_owned(),
+    });
+    let session = h.open(spec).await;
+    let events = turn(&*session, "task").await;
+    assert_eq!(done_text(&events), (Some("sub-done ZEPHYR-42".into()), 2));
+    let stops = hooks.subagent_stops.lock().unwrap().clone();
+    assert_eq!(stops.len(), 2);
+    assert!(!stops[0].stop_hook_active && stops[1].stop_hook_active);
+    assert!(hooks.stops.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn a_permission_prompt_notifies_the_host_without_waiting_for_it() {
+    let h = Harness::new(vec![
+        tool_reply(Some("go"), &[write_call()], None, None),
+        text_reply(Some(TOOL), "done", None, None),
+    ])
+    .await;
+    let log_dir = tempfile::tempdir().unwrap();
+    let hooks = Arc::new(LifecycleHooks::default());
+    let mut spec = h.spec_with_mcp(&log_path(&log_dir));
+    spec.policy = ToolPolicy::new(PolicyMode::Ask);
+    spec.hooks = Some(hooks.clone());
+    let session = h.open(spec).await;
+    let events = turn_deciding(&*session, "go", |_| PermissionDecision::deny()).await;
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::PermissionAsk { .. }))
+    );
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while hooks.notifications.lock().unwrap().is_empty() && Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let notifications = hooks.notifications.lock().unwrap().clone();
+    assert_eq!(notifications.len(), 1, "{notifications:?}");
+    assert_eq!(notifications[0].notification_type, "permission_prompt");
+    assert!(
+        notifications[0].message.contains("write"),
+        "{:?}",
+        notifications[0]
     );
 }
