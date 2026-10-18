@@ -74,6 +74,7 @@ pub const ACP_BEHAVIOURS: &[&str] = &[
     "subagents_fallback",
     "compaction_signal_fallback",
     "compaction_manual_fallback",
+    "compaction_model_fallback",
     "background_tasks_fallback",
     "tool_cancel_fallback",
     "native_question_fallback",

@@ -1,0 +1,53 @@
+{
+ "scenario": "compaction_model",
+ "question": "Le CLI accepte-t-il un modèle de compaction distinct du modèle de la session ?",
+ "measured_at": "2026-10-18",
+ "claude_code_version": "2.1.296",
+ "model_alias": "haiku",
+ "model_resolved": "claude-haiku-5-5",
+ "static": {
+  "help_flags_about_compaction": ["--autocompact <auto|tokens>"],
+  "help_flags_about_models": ["--model <model>", "--fallback-model <model>"],
+  "compaction_env_vars_in_binary": [
+   "CLAUDE_AFTER_LAST_COMPACT",
+   "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE",
+   "CLAUDE_CODE_AUTO_COMPACT_WINDOW",
+   "CLAUDE_CODE_COLD_COMPACT",
+   "CLAUDE_CODE_DISABLE_PRECOMPACT_SKIP",
+   "CLAUDE_CODE_IDLE_COMPACT_MIN_TOKENS",
+   "CLAUDE_CODE_SLEEP_COMPACT",
+   "CLAUDE_CODE_SLEEP_COMPACT_AFTER_MS",
+   "DISABLE_AUTO_COMPACT",
+   "DISABLE_COMPACT"
+  ],
+  "compaction_model_keys_in_binary": [],
+  "summary_request_model": "cacheSafeParams.model ?? options.mainLoopModel (querySource \"compact\", forkLabel \"compact\" / \"reactive-compact\")",
+  "pre_compact_hook_output_fields": ["continue", "suppressOutput", "stopReason", "decision", "systemMessage"]
+ },
+ "turns": [
+  {
+   "name": "session",
+   "command": "claude -p \"List three colours, one per line, nothing else.\" --model haiku --output-format json",
+   "model_usage": ["claude-haiku-5-5"]
+  },
+  {
+   "name": "second_turn",
+   "command": "claude -p --resume <session> \"Now three fruits, one per line.\" --model haiku --output-format json",
+   "model_usage": ["claude-haiku-5-5"]
+  },
+  {
+   "name": "compact_with_small_fast_model",
+   "env": { "ANTHROPIC_SMALL_FAST_MODEL": "claude-sonnet-4-5" },
+   "command": "claude -p --resume <session> \"/compact\" --model haiku --output-format stream-json --verbose",
+   "events": [
+    "system/status compacting",
+    "system/status compact_result=success",
+    "system/compact_boundary trigger=manual pre_tokens=40712 post_tokens=3856",
+    "result is_error=false"
+   ],
+   "model_usage": ["claude-haiku-5-5"]
+  }
+ ],
+ "verdict": "NOT_ACCEPTED",
+ "cost_usd_total": 0.03
+}

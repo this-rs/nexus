@@ -31,19 +31,20 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use futures::StreamExt;
-use serde_json::json;
+use serde_json::{Value, json};
 use tokio::task::JoinHandle;
 use tokio::time::timeout;
 
 use super::scripted::{Script, ScriptedProvider, Step, steps};
 use crate::agent::{
     AgentEvent, AgentProvider, AgentSession, BackgroundTask, BackgroundTaskKind,
-    BackgroundTaskStatus, CancelScope, Capabilities, CompactionPhase, CompactionTrigger, CostBasis,
-    DeltaKind, EventStream, HookSupport, HookVerdict, InputBlock, InterruptScope, McpServerSpec,
-    ModelInfo, PermissionDecision, PermissionScope, PolicyMode, ProviderError, ProviderKind,
-    QuestionAnswer, QuestionAnswerItem, QuestionReply, ResumeToken, SandboxLevel, SessionHooks,
-    SessionSpec, StopReason, SubagentSupport, ToolCallInfo, ToolCategory, ToolPolicy,
-    ToolResultInfo, TurnContext, TurnDirective, TurnInput,
+    BackgroundTaskStatus, CancelScope, Capabilities, CompactionDirective, CompactionInfo,
+    CompactionPhase, CompactionTrigger, CostBasis, DeltaKind, EventStream, HookSupport,
+    HookVerdict, InputBlock, InterruptScope, McpServerSpec, ModelInfo, PermissionDecision,
+    PermissionScope, PolicyMode, ProviderError, ProviderKind, QuestionAnswer, QuestionAnswerItem,
+    QuestionReply, ResumeToken, SandboxLevel, SessionHooks, SessionSpec, StopReason,
+    SubagentSupport, ToolCallInfo, ToolCategory, ToolPolicy, ToolResultInfo, TurnContext,
+    TurnDirective, TurnInput,
 };
 
 /// Longest wait for one step of a scenario: an answer to a call, the next event
@@ -246,7 +247,12 @@ pub enum Scenario {
     /// completed`, in the turn or out of band).
     ///
     /// Checked: a `compaction completed`; a `started`, if any, comes first.
-    /// Fallback (`compaction_signal: false`): no `compaction`.
+    /// Fallback (`compaction_signal: false`): no `compaction`. The session is opened with
+    /// hooks whose `compaction_directive` names another model (contract v8): with
+    /// `compaction_model`, a directive asked is announced (`provider_notice
+    /// { compaction_model }`), never said ignored; without, one asked is said with
+    /// `provider_notice { compaction_model_ignored }` and the turn completes all the same.
+    /// `compaction_manual`: `compact` works, or answers `Unsupported { compaction_manual }`.
     Compaction,
     /// Stage: the session emits at least one event with no turn running, then
     /// runs one plain turn.
@@ -418,7 +424,7 @@ impl Scenario {
             Self::Reprise => &["resume"],
             Self::MessageImages => &["images"],
             Self::SousAgent => &["subagents"],
-            Self::Compaction => &["compaction_signal", "compaction_manual"],
+            Self::Compaction => &["compaction_signal", "compaction_manual", "compaction_model"],
             Self::HorsTour => &["hooks"],
             Self::FinUsageCout => &["cost", "context_window"],
             Self::FluxDeltas
@@ -456,6 +462,7 @@ pub fn capability_present(capabilities: &Capabilities, field: &str) -> bool {
         "subagents" => capabilities.subagents != SubagentSupport::None,
         "compaction_signal" => capabilities.compaction_signal,
         "compaction_manual" => capabilities.compaction_manual,
+        "compaction_model" => capabilities.compaction_model,
         "thinking" => capabilities.thinking,
         "images" => capabilities.images,
         "tools" => capabilities.tools,
@@ -2245,7 +2252,14 @@ async fn sous_agent(ctx: &mut Ctx, prepared: &Prepared) {
 }
 
 async fn compaction(ctx: &mut Ctx, prepared: &Prepared) {
-    let Some(session) = open(ctx, prepared).await else {
+    // Hooks whose `compaction_directive` names another model of the catalogue (contract v8).
+    let hooks = Arc::new(CompactionModelHooks {
+        model: other_model(prepared).await,
+        calls: AtomicU32::new(0),
+    });
+    let mut spec = prepared.spec.clone();
+    spec.hooks = Some(hooks.clone());
+    let Some(session) = open_with(ctx, prepared, spec).await else {
         return;
     };
     let Some(out_of_band) = OutOfBand::take(ctx, &*session) else {
@@ -2290,6 +2304,7 @@ async fn compaction(ctx: &mut Ctx, prepared: &Prepared) {
         // Leave a late signal the time to show up before judging its absence.
         tokio::time::sleep(QUIET_WINDOW).await;
     }
+    check_compaction_model(ctx, prepared, &hooks, &events, &out_of_band);
     // `compaction_manual`: present, `compact` is not refused as unsupported; absent,
     // its fallback is the typed refusal naming the capability.
     match session.compact(None).await {
@@ -2309,6 +2324,87 @@ async fn compaction(ctx: &mut Ctx, prepared: &Prepared) {
     }
     out_of_band.check(ctx);
     finish(ctx, &*session).await;
+}
+
+/// Hooks whose `compaction_directive` names a model and counts its calls (contract v8).
+struct CompactionModelHooks {
+    model: String,
+    calls: AtomicU32,
+}
+
+#[async_trait]
+impl SessionHooks for CompactionModelHooks {
+    async fn compaction_directive(&self, _info: &CompactionInfo) -> CompactionDirective {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        CompactionDirective::model(self.model.clone())
+    }
+}
+
+fn notice_of<'a>(events: &'a [AgentEvent], wanted: &str) -> Option<&'a Value> {
+    events.iter().find_map(|event| match event {
+        AgentEvent::ProviderNotice { kind, data } if kind == wanted => Some(data),
+        _ => None,
+    })
+}
+
+/// `compaction_model` (contract v8). Present: a directive the provider asked for is never said
+/// to be ignored, and one naming another model than the spec's is announced with
+/// `provider_notice { compaction_model }` naming it. Absent: no `compaction_model` notice, and a
+/// directive the provider asked for is said with `provider_notice { compaction_model_ignored }`.
+/// Either way the turn completed (no error): checked by the turn itself. A provider that never
+/// asks the hook (no `PreCompact` from its CLI, hooks not honoured) has nothing to say, unless it
+/// declares the capability while honouring hooks and compacting: then it must ask.
+fn check_compaction_model(
+    ctx: &mut Ctx,
+    prepared: &Prepared,
+    hooks: &CompactionModelHooks,
+    events: &[AgentEvent],
+    out_of_band: &OutOfBand,
+) {
+    let mut stream = events.to_vec();
+    stream.extend(out_of_band.snapshot());
+    let asked = hooks.calls.load(Ordering::SeqCst) > 0;
+    let other = prepared.spec.model.as_deref() != Some(hooks.model.as_str());
+    let announced = notice_of(&stream, "compaction_model");
+    let ignored = notice_of(&stream, "compaction_model_ignored");
+    let compacted = stream.iter().any(|event| {
+        matches!(
+            event,
+            AgentEvent::Compaction {
+                phase: CompactionPhase::Completed,
+                ..
+            }
+        )
+    });
+    if ctx.caps.compaction_model {
+        if ctx.caps.hooks == HookSupport::InProtocol && compacted && !asked {
+            ctx.fail(
+                "`compaction_model` is declared and hooks are `in_protocol` but `compaction_directive` was not asked before the compaction",
+            );
+        }
+        if ignored.is_some() {
+            ctx.fail("`compaction_model` is declared but the directive was said to be ignored");
+        }
+        match announced {
+            Some(data) if data["model"].as_str() != Some(hooks.model.as_str()) => ctx.fail(format!(
+                "`provider_notice {{ compaction_model }}` must name the model of the directive (`{}`), got {data}",
+                hooks.model
+            )),
+            None if asked && other && prepared.spec.model.is_some() => ctx.fail(
+                "`compaction_model` is declared: a directive naming another model must be announced with `provider_notice { compaction_model }`",
+            ),
+            _ => {},
+        }
+    } else {
+        if announced.is_some() {
+            ctx.fail("`compaction_model` is absent but a `provider_notice { compaction_model }` says the directive was applied");
+        }
+        if asked && other && ignored.is_none() {
+            ctx.fail(
+                "`compaction_model` is absent: a directive the provider asked for must be said with `provider_notice { compaction_model_ignored }`",
+            );
+        }
+    }
 }
 
 fn is_hooks_notice(event: &AgentEvent) -> bool {

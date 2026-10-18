@@ -938,7 +938,7 @@ impl Shared {
         }
     }
 
-    async fn run_hooks(&self, event: &AgentEvent) {
+    async fn run_hooks(&self, origin: Origin, event: &AgentEvent) {
         let Some(hooks) = &self.hooks else { return };
         match event {
             AgentEvent::ToolCall {
@@ -982,6 +982,28 @@ impl Shared {
                     custom_instructions: None,
                 };
                 let _ = hooks.before_compaction(&info).await;
+                // Contract v8: a scripted summary has no model to change; the directive is
+                // said, honoured or ignored after the capability, like a real provider does.
+                let directive = hooks.compaction_directive(&info).await;
+                let current = lock(&self.model).clone();
+                if let Some(model) = directive.model_other_than(&current) {
+                    let (kind, data) = if self.capabilities.compaction_model {
+                        (
+                            "compaction_model",
+                            json!({ "provider": "scripted", "model": model, "session_model": current }),
+                        )
+                    } else {
+                        (
+                            "compaction_model_ignored",
+                            json!({ "provider": "scripted", "model": model, "capability": "compaction_model" }),
+                        )
+                    };
+                    let notice = AgentEvent::ProviderNotice {
+                        kind: kind.to_owned(),
+                        data,
+                    };
+                    self.emit(&mut self.lock(), origin, notice);
+                }
             },
             _ => {},
         }
@@ -1008,7 +1030,7 @@ impl Shared {
                     return Flow::Stop;
                 }
                 // After the emission: a `tool_call` is known to the session by then.
-                self.run_hooks(event).await;
+                self.run_hooks(origin, event).await;
                 Flow::Continue
             },
             Step::Sleep { ms } => {

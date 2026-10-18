@@ -1316,6 +1316,10 @@ async fn compact_history(
         (Some(text), None) => Some(text.to_owned()),
         (None, hook) => hook,
     };
+    // Contract v8: the host may name the model that writes this summary (same endpoint, this
+    // summary only — the session's model does not change). Said before it is asked.
+    let directed = summary_model(core, signal, trigger, asked, model).await;
+    let model = directed.as_deref().unwrap_or(model);
     let config = core.settings.compaction;
     let request = summary_request(model, &messages[..split], instructions.as_deref(), &config);
     let summary_prompt_estimate = estimate_tokens(&request.messages);
@@ -1385,6 +1389,42 @@ async fn compact_history(
         summarised: split,
         after: estimate_tokens(messages) + system,
     }
+}
+
+/// The model `compaction_directive` names for this summary, when it names one other than the
+/// session's `current` model; announced with `provider_notice { compaction_model }`. A hook
+/// that does not answer in time is skipped like the others (`hook_timeout`): the summary is
+/// written by `current`.
+async fn summary_model(
+    core: &Core,
+    signal: &TurnSignal,
+    trigger: CompactionTrigger,
+    asked: Option<&str>,
+    current: &str,
+) -> Option<String> {
+    let hooks = core.hooks.as_ref()?;
+    let info = CompactionInfo {
+        trigger: trigger.as_str().to_owned(),
+        custom_instructions: asked.map(str::to_owned),
+    };
+    let directive = hook_call(
+        core,
+        signal,
+        "compaction_directive",
+        hooks.compaction_directive(&info),
+    )
+    .await?;
+    let model = directive.model_other_than(current)?.to_owned();
+    core.emit(AgentEvent::ProviderNotice {
+        kind: "compaction_model".to_owned(),
+        data: json!({
+            "provider": "native",
+            "trigger": trigger.as_str(),
+            "model": model,
+            "session_model": current,
+        }),
+    });
+    Some(model)
 }
 
 /// Manual compaction (`AgentSession::compact`): the same summary as the automatic one,
