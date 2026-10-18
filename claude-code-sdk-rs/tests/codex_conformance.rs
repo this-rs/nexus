@@ -359,11 +359,80 @@ async fn the_codex_adapter_passes_the_conformance_suite() {
 // ---------------------------------------------------------------------------
 
 fn health_provider(version: &str, home: &Path) -> CodexProvider {
+    health_provider_playing(version, home, "health_probe")
+}
+
+/// `health()` now starts a throwaway `app-server` (CODEX-163): the instance's
+/// explicit variables reach it, so the transcript it plays is set there.
+fn health_provider_playing(version: &str, home: &Path, probe: &str) -> CodexProvider {
     let mut config = config(home);
     config
         .env_set
         .insert("FAKE_CODEX_VERSION".to_owned(), version.to_owned());
+    config.env_set.insert(
+        "FAKE_CODEX_TRANSCRIPT".to_owned(),
+        transcript(probe).display().to_string(),
+    );
     CodexProvider::new(config)
+}
+
+/// CODEX-163: a `codex` whose `--version` is recent enough and which has a login, but
+/// whose `app-server` does not answer the handshake, was shown HEALTHY (health read
+/// only the version and `auth.json`) while every `open` failed. The probe makes it
+/// unavailable, typed, with the version and the reason.
+#[tokio::test]
+async fn a_codex_whose_app_server_does_not_answer_the_handshake_is_not_healthy() {
+    let home = tempfile::tempdir().unwrap();
+    std::fs::write(home.path().join("auth.json"), "{}").unwrap();
+    let health = health_provider_playing("0.162.1", home.path(), "health_probe_dead")
+        .health()
+        .await;
+    assert_eq!(health.status, HealthStatus::Unavailable, "{health:?}");
+    assert!(
+        matches!(health.error, Some(ProviderError::ProcessExited { .. })),
+        "{health:?}"
+    );
+    assert_eq!(health.version.as_deref(), Some("0.162.1"));
+    let detail = health.detail.expect("a typed explanation");
+    assert!(detail.contains("initialize"), "{detail}");
+}
+
+/// The probe is `initialize` only: no `initialized`, no thread (so no model call),
+/// no API key in its environment, and the process is gone afterwards.
+#[tokio::test]
+async fn the_health_probe_sends_initialize_only_and_no_credential() {
+    let home = tempfile::tempdir().unwrap();
+    std::fs::write(home.path().join("auth.json"), "{}").unwrap();
+    let record = home.path().join("probe-record.jsonl");
+    let mut config = config(home.path());
+    config
+        .env_set
+        .insert("FAKE_CODEX_VERSION".to_owned(), "0.162.1".to_owned());
+    config.env_set.insert(
+        "FAKE_CODEX_TRANSCRIPT".to_owned(),
+        transcript("health_probe").display().to_string(),
+    );
+    config
+        .env_set
+        .insert("FAKE_CODEX_RECORD".to_owned(), record.display().to_string());
+    let health = CodexProvider::new(config).health().await;
+    assert_eq!(health.status, HealthStatus::Ok, "{health:?}");
+    let text = std::fs::read_to_string(&record).expect("the probe ran the fake");
+    let lines: Vec<Value> = text
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let start = lines
+        .iter()
+        .find(|line| line["kind"] == "start")
+        .unwrap_or_else(|| panic!("no start in {text}"));
+    assert!(start["api_key_len"].is_null(), "{start}");
+    let methods: Vec<&str> = lines
+        .iter()
+        .filter(|line| line["kind"] == "in")
+        .filter_map(|line| line["method"].as_str())
+        .collect();
+    assert_eq!(methods, ["initialize"], "{text}");
 }
 
 #[tokio::test]

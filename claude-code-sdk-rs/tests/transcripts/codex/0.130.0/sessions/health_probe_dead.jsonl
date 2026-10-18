@@ -1,0 +1,4 @@
+# health() probe (CODEX-163): a `codex` whose version is fine but whose app-server never
+# answers the handshake (it dies first). health() must not say it is healthy.
+{"op":"stderr","line":"Error: no transport configured"}
+{"op":"exit","code":1}

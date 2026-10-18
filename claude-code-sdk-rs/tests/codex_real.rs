@@ -102,3 +102,20 @@ async fn the_real_app_server_accepts_our_handshake_and_creates_a_thread() {
         home.display()
     );
 }
+
+/// CODEX-163: `health()` starts a throwaway `app-server` and needs its `initialize`
+/// answered. Against the real binary that must still say healthy once a login is
+/// present. The `auth.json` here is an empty object, not a credential: what this proves
+/// is that the server answers the handshake with one there (measured on 0.162.1), not
+/// that the login is valid (NOT VERIFIED without a human login, A27).
+#[tokio::test]
+#[ignore = "needs a real codex >= MIN_APP_SERVER_VERSION; set NEXUS_REAL_CODEX"]
+async fn health_probes_the_real_app_server_handshake() {
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let home = dir.path().join("codex-home");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::write(home.join("auth.json"), "{}").unwrap();
+    let health = provider(dir.path()).health().await;
+    assert_eq!(health.status, HealthStatus::Ok, "{health:?}");
+    assert!(health.version.is_some(), "{health:?}");
+}
