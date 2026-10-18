@@ -26,8 +26,9 @@
 //! to the CLI ([`super::cancel`]); `interrupt(turn_only)` only writes the
 //! interrupt request. A complete `tool_call` of `Bash { run_in_background }` or
 //! `Monitor` opens a background task ([`super::tasks`]); its process is claimed a
-//! second later from the descendants that appeared since, and every change to
-//! the table is followed by a complete `background_tasks` snapshot.
+//! second later from the descendants that appeared since (else the one recent
+//! descendant no other task owns, when the CLI forked before the first
+//! reading), and every change to the table is followed by a complete `background_tasks` snapshot.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::pin::Pin;
@@ -77,6 +78,12 @@ const PID_CLAIM_DELAY: Duration = Duration::from_secs(1);
 /// How long `cancel_tools(task)` waits for a claim still in flight before it
 /// decides the task has no known process.
 const PID_CLAIM_WAIT: Duration = Duration::from_millis(2_500);
+
+/// Margin over the time since the tool call was seen within which a descendant
+/// already present at the first reading still counts as the task's: `etime`
+/// is truncated to the second, and the call reaches the adapter a little after
+/// the CLI printed it.
+const PID_CLAIM_AGE_SLACK_SECS: u64 = 2;
 
 /// Builds the client of a session from its options. The default spawns the CLI;
 /// a test kit substitutes an in-memory transport.
@@ -367,6 +374,9 @@ struct State {
     tasks: TaskTable,
     /// Tasks whose process is being looked for (a claim in flight).
     claims: HashSet<String>,
+    /// Tasks whose `cancel_tools` gave up waiting for a claim still in flight:
+    /// the stop is replayed when the claim finds the process.
+    stop_requested: HashSet<String>,
 }
 
 impl State {
@@ -450,6 +460,7 @@ impl Core {
                 session_id: None,
                 tasks: TaskTable::new(),
                 claims: HashSet::new(),
+                stop_requested: HashSet::new(),
             }),
             wake: Notify::new(),
             shutdown: Notify::new(),
@@ -483,29 +494,70 @@ impl Core {
 
     /// Looks for the process of a background task started by `task_id`: the
     /// CLI's descendants are read now and again after [`PID_CLAIM_DELAY`]; the
-    /// youngest newcomer is the task's. Runs on its own task so the pump never
+    /// youngest newcomer is the task's. The CLI forks the tool right after it
+    /// prints the call, often before the first reading: without a newcomer, the
+    /// one recent descendant that no other task owns is the task's
+    /// ([`cancel::claim_recent_pid`]). Runs on its own task so the pump never
     /// waits; needs a runtime, without one the pid simply stays unknown.
     fn schedule_pid_claim(self: &Arc<Self>, task_id: String, cli_pid: u32) {
         let Ok(handle) = tokio::runtime::Handle::try_current() else {
             return;
         };
+        let seen = std::time::Instant::now();
         self.lock().claims.insert(task_id.clone());
         let core = Arc::clone(self);
         handle.spawn(async move {
             let before = cancel::descendant_pids(cli_pid).await;
             tokio::time::sleep(PID_CLAIM_DELAY).await;
             let after = cancel::descendant_rows(cli_pid).await;
-            let claimed = cancel::claim_pid(&before, &after);
-            let mut state = core.lock();
-            state.claims.remove(&task_id);
+            let max_age = seen.elapsed().as_secs() + PID_CLAIM_AGE_SLACK_SECS;
+            core.finish_claim(&task_id, |taken| {
+                let free = cancel::outside_of(&after, taken);
+                cancel::claim_pid(&before, &free)
+                    .or_else(|| cancel::claim_recent_pid(&free, max_age))
+            })
+            .await;
+        });
+    }
+
+    /// Ends the claim of `task_id`: `choose` gets the pids of the other tasks
+    /// and names the process, recorded on the task. A `cancel_tools` that gave
+    /// up waiting meanwhile is replayed now: the subtree is signalled and the
+    /// task is `killed`.
+    async fn finish_claim(&self, task_id: &str, choose: impl FnOnce(&[u32]) -> Option<u32>) {
+        let (claimed, stop) = {
+            let mut state = self.lock();
+            let taken: Vec<u32> = state
+                .tasks
+                .snapshot()
+                .iter()
+                .filter(|task| task.id != task_id)
+                .filter_map(|task| task.pid)
+                .collect();
+            let claimed = choose(&taken);
+            state.claims.remove(task_id);
+            let stop = state.stop_requested.remove(task_id);
             match claimed {
-                Some(pid) if state.tasks.set_pid(&task_id, pid) => state.route_tasks(),
+                Some(pid) if state.tasks.set_pid(task_id, pid) => state.route_tasks(),
                 Some(_) => {},
-                None => debug!(%task_id, "no new descendant of the CLI to attribute to the task"),
+                None => debug!(%task_id, "no descendant of the CLI to attribute to the task"),
+            }
+            (claimed, stop)
+        };
+        self.wake.notify_waiters();
+        if let (Some(pid), true) = (claimed, stop) {
+            let killed = cancel::signal_subtree(pid).await;
+            debug!(%task_id, ?killed, "stop replayed once the claim found the process");
+            let mut state = self.lock();
+            if state
+                .tasks
+                .set_status(task_id, BackgroundTaskStatus::Killed)
+            {
+                state.route_tasks();
             }
             drop(state);
-            core.wake.notify_waiters();
-        });
+            self.wake.notify_waiters();
+        }
     }
 
     /// Waits for a claim in flight on `task_id`, at most [`PID_CLAIM_WAIT`].
@@ -1411,6 +1463,9 @@ impl AgentSession for ClaudeCodeSession {
     /// `invalid_request`; a task whose process was never found (the claim found
     /// no newcomer, or there is no process behind this transport) is left as it
     /// is and `tools_cancelled` is 0 — never a `killed` nothing was sent to.
+    /// When the claim is still in flight after [`PID_CLAIM_WAIT`], the answer is
+    /// the same and the stop is replayed as soon as the claim finds the process
+    /// (the task then turns `killed` in a later snapshot).
     async fn cancel_tools(&self, scope: CancelScope) -> Result<CancelOutcome, ProviderError> {
         self.usable()?;
         // Capability absent (over SSH, off Unix): the written fallback (§5), never a
@@ -1444,12 +1499,18 @@ impl AgentSession for ClaudeCodeSession {
                 }
                 self.core.await_pid_claim(&id).await;
                 let target = {
-                    let state = self.core.lock();
+                    let mut state = self.core.lock();
                     Core::check_usable(&state)?;
-                    state.tasks.get(&id).and_then(|task| task.pid)
+                    let target = state.tasks.get(&id).and_then(|task| task.pid);
+                    if target.is_none() && state.claims.contains(&id) {
+                        // The claim outlived the wait (a loaded machine): the
+                        // stop is replayed once it finds the process.
+                        state.stop_requested.insert(id.clone());
+                    }
+                    target
                 };
                 let Some(target) = target else {
-                    debug!(task = %id, "background task without a known process: nothing signalled");
+                    debug!(task = %id, "background task without a known process yet: nothing signalled now");
                     return Ok(CancelOutcome {
                         tools_cancelled: 0,
                         diagnostic: diagnostic(Vec::new()),
@@ -1851,6 +1912,57 @@ mod tests {
         // Without a runtime no claim was scheduled: the pids stay unknown.
         assert!(state.claims.is_empty());
         assert!(state.tasks.snapshot().iter().all(|task| task.pid.is_none()));
+    }
+
+    /// A `cancel_tools(task)` that gave up waiting for a claim in flight (a
+    /// loaded machine) is not lost: when the claim finds the process, the stop
+    /// is replayed — the process dies and the task is `killed`.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_stop_that_outlived_the_claim_wait_is_replayed_when_the_claim_lands() {
+        let core = core();
+        let task = task_from_tool_call(
+            "toolu_bg",
+            "Bash",
+            &json!({"command": "sleep 30", "run_in_background": true}),
+            None,
+            now_ms(),
+        )
+        .expect("a background Bash opens a task");
+        let mut child = crate::transport::spawn::isolated_command("sleep", &Default::default())
+            .arg("30")
+            .spawn()
+            .expect("sleep starts");
+        let pid = child.id().expect("the child has a pid");
+        {
+            let mut state = core.lock();
+            state.tasks.start(task);
+            state.claims.insert("toolu_bg".to_owned());
+            // What `cancel_tools` records when the wait expires first.
+            state.stop_requested.insert("toolu_bg".to_owned());
+        }
+        core.finish_claim("toolu_bg", |taken| {
+            assert!(taken.is_empty(), "no other task owns a process");
+            Some(pid)
+        })
+        .await;
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let status = loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                break Some(status);
+            }
+            if std::time::Instant::now() > deadline {
+                let _ = child.kill().await;
+                break None;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        };
+        assert!(status.is_some(), "the replayed stop reached the process");
+        let state = core.lock();
+        let task = state.tasks.get("toolu_bg").unwrap();
+        assert_eq!(task.pid, Some(pid));
+        assert_eq!(task.status, BackgroundTaskStatus::Killed);
+        assert!(state.claims.is_empty() && state.stop_requested.is_empty());
     }
 
     #[tokio::test]

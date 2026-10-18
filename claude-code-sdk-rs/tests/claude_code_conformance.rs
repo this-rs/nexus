@@ -2016,3 +2016,69 @@ async fn a_permission_prompt_is_notified_to_the_host_as_claude_code_does() {
     );
     session.close().await.unwrap();
 }
+
+/// The CLI forks a background tool right after it prints the call, often before
+/// the adapter's first reading of the process table: the process is then no
+/// newcomer between the two readings. The claim still attributes it (the one
+/// recent descendant no other task owns) and the stop reaches it. Deterministic
+/// form of the race: the process is forked before the call is even printed.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_background_process_forked_before_the_first_reading_is_claimed_and_stopped() {
+    let dir = tempfile::tempdir().unwrap();
+    let pid_file = dir.path().join("bg.pid");
+    let script = format!("echo $$ > '{}'; exec sleep 120", pid_file.display());
+    let (_fake, provider, spec) = stage(until_closed(
+        answer(
+            Transcript::new()
+                .await_stdin_containing("early fork")
+                .init("fake-session")
+                .directive(json!({"op": "spawn_child", "program": "sh", "args": ["-c", script]}))
+                .json(tool_use(
+                    "toolu_bg",
+                    "Bash",
+                    json!({"command": "sleep 120", "run_in_background": true}),
+                ))
+                .json(tool_result("toolu_bg", "started", false)),
+            "started a task",
+        )
+        .wait_children_exit(15_000),
+    ));
+    let session = open(&provider, spec).await;
+    let stream = session
+        .send_turn(TurnInput::text("early fork"))
+        .await
+        .unwrap();
+    let events = read_turn(stream, |_| async {}).await;
+    assert_eq!(stop_reason(&events), Some(StopReason::Completed));
+    eventually("the background process wrote its pid", || {
+        std::fs::read_to_string(&pid_file).is_ok_and(|text| text.trim().parse::<u32>().is_ok())
+    })
+    .await;
+    let pid: u32 = std::fs::read_to_string(&pid_file)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    let outcome = session
+        .cancel_tools(CancelScope::Task {
+            id: "toolu_bg".into(),
+        })
+        .await
+        .expect("cancel_tools(task) answers");
+    assert_eq!(
+        outcome.tools_cancelled, 1,
+        "the process of the task was claimed: {outcome:?}"
+    );
+    assert!(
+        outcome
+            .diagnostic
+            .as_ref()
+            .is_some_and(|diagnostic| diagnostic.killed_pids.contains(&pid)),
+        "the stop reached the task's process {pid}: {outcome:?}"
+    );
+    // SAFETY: signal 0 only checks that the process exists.
+    let alive = || unsafe { libc::kill(pid as i32, 0) == 0 };
+    eventually("the background process is gone after the stop", || !alive()).await;
+    session.close().await.unwrap();
+}

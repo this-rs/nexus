@@ -7,7 +7,9 @@
 //! CLI itself alone; cancelling one background task means signalling that task's
 //! own subtree. Which process belongs to which task is a guess by elimination
 //! ([`claim_pid`]): the descendants that appeared after the tool call, youngest
-//! first — what the orchestrator did before the contract existed.
+//! first — what the orchestrator did before the contract existed; when the CLI
+//! forked before the first reading, the one recent descendant no other task
+//! owns ([`claim_recent_pid`]).
 //!
 //! The process table is read once per call with `ps` through the single
 //! launcher of `transport::spawn` (an allowlist environment, like every process
@@ -99,6 +101,45 @@ pub fn claim_pid(before: &[u32], after: &[ProcessRow]) -> Option<u32> {
         .filter(|row| !before.contains(&row.pid))
         .min_by_key(|row| (row.elapsed_secs, row.pid))
         .map(|row| row.pid)
+}
+
+/// The rows of `after` outside the subtree of every pid in `taken` (the
+/// processes already attributed to other tasks): what a claim may choose from,
+/// so a child that the process of another task spawns is never taken for a new
+/// task.
+pub fn outside_of(after: &[ProcessRow], taken: &[u32]) -> Vec<ProcessRow> {
+    let mut excluded: Vec<u32> = taken.to_vec();
+    for pid in taken {
+        excluded.extend(descendants_in(after, *pid).iter().map(|row| row.pid));
+    }
+    after
+        .iter()
+        .filter(|row| !excluded.contains(&row.pid))
+        .copied()
+        .collect()
+}
+
+/// The fallback of [`claim_pid`] when nothing new appeared between the two
+/// readings: the CLI may fork the task's process right after it prints the tool
+/// call, before the first reading, so the process is already in `before`.
+///
+/// Candidates: the rows of `after` (the CLI's descendants not attributed to
+/// another task, see [`outside_of`]) at most `max_age_secs` old. Among them,
+/// the **roots** — whose parent is not itself a candidate — are processes
+/// started for a tool; exactly one root is the task's. Several roots is
+/// ambiguous (another tool started in the same window): `None`, never a guess.
+pub fn claim_recent_pid(after: &[ProcessRow], max_age_secs: u64) -> Option<u32> {
+    let candidates: Vec<&ProcessRow> = after
+        .iter()
+        .filter(|row| row.elapsed_secs <= max_age_secs)
+        .collect();
+    let mut roots = candidates
+        .iter()
+        .filter(|row| !candidates.iter().any(|parent| parent.pid == row.ppid));
+    match (roots.next(), roots.next()) {
+        (Some(root), None) => Some(root.pid),
+        _ => None,
+    }
 }
 
 /// Reads the process table once. Empty when `ps` is missing, fails or times out.
@@ -316,6 +357,36 @@ mod tests {
         assert_eq!(claim_pid(&[], &[]), None);
         // Same age: the smaller pid, so the choice is deterministic.
         assert_eq!(claim_pid(&[], &[row(7, 1, 1), row(5, 1, 1)]), Some(5));
+    }
+
+    #[test]
+    fn without_a_newcomer_the_one_recent_root_outside_other_tasks_is_claimed() {
+        // CLI = 1. 50: an old shell; 60: a task forked before the first reading,
+        // with its child 61; 70: the process of another task, with a young child.
+        let after = [
+            row(50, 1, 300),
+            row(60, 1, 2),
+            row(61, 60, 1),
+            row(70, 1, 40),
+            row(71, 70, 0),
+        ];
+        let free = outside_of(&after, &[70]);
+        let pids: Vec<u32> = free.iter().map(|r| r.pid).collect();
+        assert_eq!(pids, [50, 60, 61]);
+        assert_eq!(claim_recent_pid(&free, 3), Some(60));
+        // Too old for the window: nothing.
+        assert_eq!(claim_recent_pid(&free, 0), None);
+        // The young child of another task is not a candidate root …
+        assert_eq!(
+            claim_recent_pid(&outside_of(&[row(70, 1, 40), row(71, 70, 0)], &[70]), 3),
+            None
+        );
+        // … nor a newcomer.
+        assert_eq!(claim_pid(&[70], &outside_of(&after[3..], &[70])), None);
+        // Two recent roots: ambiguous, refused.
+        let two = [row(60, 1, 1), row(62, 1, 0)];
+        assert_eq!(claim_recent_pid(&two, 3), None);
+        assert_eq!(claim_recent_pid(&[], 3), None);
     }
 
     #[test]
