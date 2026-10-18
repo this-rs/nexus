@@ -1,6 +1,6 @@
 %% name: nexus-ci-pipeline
 %% covers: .github/workflows/ci.yml, .github/workflows/release.yml
-%% verified: 2026-10-17
+%% verified: 2026-10-18
 flowchart TD
     subgraph PR["Pull Request"]
         direction TB
@@ -11,6 +11,7 @@ flowchart TD
         drift --> ok
         push --> clippy["clippy\n✅ -D warnings\n(features : scripts/nexus-features.sh = toutes sauf nexus-tools/obscura, partout)"]
         push --> test["test matrix\nmacOS stable · Windows stable\nLinux beta + nightly (advisory)\ncargo test (build + doc tests)"]
+        push --> conf["conformance (one job per provider)\nclaude-code · native · codex · acp · scripted\ncargo test -p nexus-claude, that provider's features only\nagainst its fake executable (fake_claude, fake_openai + fake_mcp, fake_codex, fake_acp)\nreal-CLI tests stay ignored (docs/CI_CD.md)"]
         push --> cov["ubuntu stable: test + coverage\ncargo llvm-cov (the one run of the suite)\n+ doc tests + logic-only report"]
         push --> docs["docs\ncargo doc"]
         push --> obscura["obscura (Linux)\nV8 épinglé, SHA-256 vérifié (scripts/rusty-v8-cache.sh)\nclippy + test nexus-tools --features obscura\n+ cargo nextest des crates obscura/ (un processus par test, --target explicite)"]
@@ -19,12 +20,13 @@ flowchart TD
         fmt --> ok{CI Success}
         clippy --> ok
         test --> ok
+        conf --> ok
         cov --> ok
         docs --> ok
         msrv --> ok
         obscura --> ok
 
-        cov --> cc["Codecov\n🟠 project: informational\n✅ patch: blocking ≥80 %"]
+        cov --> cc["Codecov\n🟠 project: informational\n✅ patch: blocking ≥80 %\n✅ patch agent/ + providers/*/map_events.rs: blocking ≥90 %"]
     end
 
     subgraph REL["Release (tag v*)"]

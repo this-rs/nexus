@@ -65,6 +65,7 @@ Runs on every push and pull request to `main` and version branches.
 | `fmt` | Check code formatting with rustfmt | ubuntu-latest |
 | `clippy` | Run Clippy lints with `-D warnings` | ubuntu-latest |
 | `test` | Run test matrix | ubuntu, macos, windows |
+| `conformance` | The agent contract per provider, against its fake executable (see below) | ubuntu-latest |
 | `coverage` | Generate code coverage report | ubuntu-latest |
 | `docs` | Build documentation | ubuntu-latest |
 | `security` | Run cargo-deny audit | ubuntu-latest |
@@ -81,6 +82,44 @@ strategy:
       - os: ubuntu-latest
         toolchain: nightly
 ```
+
+#### Conformance per provider
+
+The `conformance` job runs once per provider, with that provider's features only
+(`--no-default-features --features testkit,<provider>`), against its fake executable.
+A broken scenario turns the job named after the provider red.
+
+| Job | Features | Tests | Fake |
+|-----|----------|-------|------|
+| `Conformance (claude-code)` | `testkit` | `claude_code_conformance` | `fake_claude` |
+| `Conformance (native)` | `testkit,provider-native` | `native_conformance` | `fake_openai` + `fake_mcp` |
+| `Conformance (codex)` | `testkit,provider-codex` | `codex_conformance` | `fake_codex` |
+| `Conformance (acp)` | `testkit,provider-acp` | `acp_conformance`, `acp_conformance_matrix` | `fake_acp` |
+| `Conformance (scripted)` | `testkit` | `agent_conformance` (the suite and its negative controls) | `ScriptedProvider` |
+
+Locally: `cargo test -p nexus-claude --no-default-features --features testkit,provider-codex --test codex_conformance`.
+
+#### Live tests (ignored, never in CI)
+
+These need a real executable, a real machine, a key or the internet. They are `#[ignore]`d,
+no CI job passes `--ignored`, and no workflow holds a secret for them. Run them by hand:
+
+| Test | Needs | Command |
+|------|-------|---------|
+| `claude-code-sdk-rs/tests/codex_real.rs` | a real `codex` ≥ `MIN_APP_SERVER_VERSION` (`NEXUS_REAL_CODEX`, default `codex`) | `cargo test -p nexus-claude --features provider-codex --test codex_real -- --ignored` |
+| `claude-code-sdk-rs/tests/codex_schema_drift.rs` (`real_codex_schema_still_names_everything_we_use`) | a real `codex` ≥ 0.130.0 (`CODEX_BIN`) | `cargo test -p nexus-claude --features provider-codex --test codex_schema_drift -- --ignored` |
+| `claude-code-sdk-rs/tests/real_claude_gateway.rs` | the real `claude` CLI (no model call) | `cargo test -p nexus-claude --test real_claude_gateway -- --ignored --test-threads=1` |
+| `claude-code-sdk-rs/tests/optimized_api_test.rs` | the real `claude` CLI, configured | `cargo test -p nexus-claude --test optimized_api_test -- --ignored` |
+| `claude-code-sdk-rs/tests/claude_code_remote_real.rs` | a real machine over SSH (`NEXUS_REAL_REMOTE_HOST`, `_USER`, `_KEY`, `_IDENTITY`) | `cargo test -p nexus-claude --all-features --test claude_code_remote_real -- --ignored --nocapture` |
+| `claude-code-sdk-rs/tests/native_context.rs` (two DeepSeek tests) | `DEEPSEEK_API_KEY` | `cargo test -p nexus-claude --features provider-native --test native_context -- --ignored --nocapture deepseek` |
+| `claude-code-sdk-rs/tests/native_context.rs` (`reference_benchmark`) | nothing (a measurement) | `cargo test -p nexus-claude --features provider-native --test native_context -- --ignored --nocapture reference_benchmark` |
+| `claude-code-sdk-rs/src/cli_download.rs` (one test) | the network | `cargo test -p nexus-claude --lib cli_download -- --ignored` |
+| `nexus-tools/tests/native_browser.rs` | a real Obscura (`NEXUS_REAL_OBSCURA`) | `cargo test -p nexus-tools --features test-tools --test native_browser -- --ignored` |
+| `nexus-tools/tests/web.rs`, `nexus-tools/tests/obscura_embedded.rs` (one each) | the internet | `cargo test -p nexus-tools --test web -- --ignored` |
+| `claude-code-api` storage tests (`core/storage/*`, `neo4j_hook_callback.rs`) | a live Neo4j / Meilisearch | `cargo test -p claude-code-api -- --ignored` |
+
+The other `#[ignore]`s of the repository are not live tests: each documents, in its reason string, a known bug or an
+out-of-scope change (it passes once the fix lands), or a slow wait run on demand.
 
 ### Release Workflow (`release.yml`)
 
@@ -158,6 +197,8 @@ Reusable action for Rust toolchain setup with caching.
 1. **Coverage** - Patch gate blocks at ≥ 80 % (lines changed by a PR must be covered);
    project-wide gate is informational until baselines are raised
    (sdk ≈ 69 %, api ≈ 39 % measured with `--ignore-filename-regex` on tests/examples).
+   A second patch gate, `agent-contract`, blocks at ≥ 90 % on `claude-code-sdk-rs/src/agent/**` and
+   `claude-code-sdk-rs/src/providers/*/map_events.rs`.
 2. **Security** - cargo-deny audit (advisory only)
 
 ## Local Development

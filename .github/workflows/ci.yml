@@ -134,6 +134,45 @@ jobs:
         if: runner.os == 'Windows'
         run: cargo test --features auto-download
 
+  # One job per provider: the conformance suite of the agent contract against that provider's
+  # fake executable (fake_claude, fake_openai + fake_mcp, fake_codex, fake_acp), built with that
+  # provider's features only. The same tests also run inside `coverage`; here a broken scenario
+  # turns ONE named job red (the provider is in the job name), and a provider whose tests only
+  # pass with another provider's feature turned on is caught. No real CLI, no key, no network
+  # beyond 127.0.0.1. The real-CLI tests stay `#[ignore]`d (docs/CI_CD.md, "Live tests").
+  conformance:
+    name: Conformance (${{ matrix.provider }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - provider: claude-code
+            features: testkit
+            tests: --test claude_code_conformance
+          - provider: native
+            features: testkit,provider-native
+            tests: --test native_conformance
+          - provider: codex
+            features: testkit,provider-codex
+            tests: --test codex_conformance
+          - provider: acp
+            features: testkit,provider-acp
+            tests: --test acp_conformance --test acp_conformance_matrix
+          # The suite itself, on the scripted provider: its negative controls prove each
+          # faulty provider makes the suite fail (a suite that cannot fail proves nothing).
+          - provider: scripted
+            features: testkit
+            tests: --test agent_conformance
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-rust
+        with:
+          components: ''
+      - name: Conformance against the fake executable
+        run: cargo test -p nexus-claude --no-default-features --features "${{ matrix.features }}" ${{ matrix.tests }}
+
   # Ubuntu / stable: the test suite, run once, instrumented. Its result is the platform's test
   # verdict AND the coverage figure; there is no second plain run.
   coverage:
@@ -290,7 +329,7 @@ jobs:
   ci-success:
     name: CI Success
     runs-on: ubuntu-latest
-    needs: [fmt, diagram-drift, clippy, test, coverage, docs, msrv, obscura]
+    needs: [fmt, diagram-drift, clippy, test, conformance, coverage, docs, msrv, obscura]
     if: always()
     steps:
       - name: Check all jobs passed
@@ -298,6 +337,7 @@ jobs:
           if [[ "${{ needs.fmt.result }}" != "success" ]] || \
              [[ "${{ needs.clippy.result }}" != "success" ]] || \
              [[ "${{ needs.test.result }}" != "success" ]] || \
+             [[ "${{ needs.conformance.result }}" != "success" ]] || \
              [[ "${{ needs.coverage.result }}" != "success" ]] || \
              [[ "${{ needs.docs.result }}" != "success" ]] || \
              [[ "${{ needs.obscura.result }}" != "success" ]] || \

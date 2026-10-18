@@ -18,6 +18,13 @@ coverage:
       default:
         target: 80%
         # Blocking: lines changed by a PR must be >=80% covered.
+      agent-contract:
+        target: 90%
+        # Blocking, stricter: the agent contract and the event mapping of the providers are
+        # what every host relies on; lines a PR changes there must be >=90% covered.
+        paths:
+          - "claude-code-sdk-rs/src/agent/**"
+          - "claude-code-sdk-rs/src/providers/*/map_events.rs"
 
 parsers:
   gcov:
