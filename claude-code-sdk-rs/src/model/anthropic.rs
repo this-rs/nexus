@@ -2,7 +2,7 @@
 //! harness (CTX5): Anthropic's own API, or a gateway that speaks the same protocol.
 //!
 //! The wire itself (request JSON, the three `cache_control` points, the stream) is
-//! [`super::anthropic_wire`]. This file is the HTTP side, with the security properties
+//! `super::anthropic_wire`. This file is the HTTP side, with the security properties
 //! of [`super::OpenAiEndpoint`] (decision A36): every request goes through the
 //! [`EndpointGuard`] and is pinned on the validated addresses, no proxy, no redirect;
 //! the credential is resolved for **each** request, sent as a sensitive header, and
