@@ -515,10 +515,10 @@ sur un provider, aucune forme sérialisée ne bouge : `CONTRACT_VERSION` reste 5
   `method not found`.
 
 Écarts constatés à l'implémentation de Codex (`claude-code-sdk-rs/src/providers/codex/`, feature
-`provider-codex`, `CodexProvider` / `CodexConfig`) ; **vérifié sur un vrai `codex-cli` 0.160.0 jusqu'à la
-création d'un thread** (poignée de main `initialize`, `initialized` et `thread/start`, dans un `CODEX_HOME`
+`provider-codex`, `CodexProvider` / `CodexConfig`) ; **vérifié sur de vrais `codex-cli` 0.160.0 (05/10/2026) et 0.162.1 (18/10/2026, CODEX-163) jusqu’à la
+création d’un thread** (poignée de main `initialize`, `initialized` et `thread/start`, dans un `CODEX_HOME`
 jetable, sans connexion ni appel de modèle : `tests/codex_real.rs`, ignoré, `NEXUS_REAL_CODEX` ;
-`tests/codex_real_schema.rs`, hors ligne ; fichiers réels sous `tests/transcripts/codex/0.160.0/`, dont
+`tests/codex_real_schema.rs`, hors ligne ; fichiers réels sous `tests/transcripts/codex/0.160.0/` et `0.162.1/`, dont
 `PROVENANCE.md`). Cela a trouvé un bug que le faux exécutable cachait : `sandbox` de `thread/start` est en
 **kebab-case** (`workspace-write`), le serveur refusait `workspaceWrite` (`-32600`) ; `turn/start` garde son
 objet `sandboxPolicy` en camelCase. **Aucun tour réel, aucun appel d'outil réel, aucune approbation réelle** :
@@ -557,7 +557,10 @@ contre `fake_codex` et des transcriptions écrites depuis le README de `codex-rs
   `endpoint_unreachable`, `Unauthorized` → `unauthorized` ou `auth_required`, `BadRequest` → `invalid_request`,
   `SandboxError` / `InternalServerError` / `Other` → `protocol`) ; `error { process_exited }` terminal
   seulement quand le processus meurt (la session est alors morte).
-- **Processus** : un `codex app-server` par session, lancé par `isolated_command` (liste blanche d'environnement,
+- **Processus** : un `codex app-server` (sans sous-commande : transport stdio par défaut, `--listen stdio://`, mesuré
+  sur 0.162.1) par session — jamais le daemon partagé (`codex app-server daemon`, paquet 0.163.0) ni `codex
+  app-server proxy --sock …`, dont le protocole est NON VÉRIFIÉ (une ligne `initialize` par le proxy n'obtient
+  aucune réponse) —, lancé par `isolated_command` (liste blanche d'environnement,
   `CODEX_HOME` et `CODEX_API_KEY` posés explicitement) ; `CODEX_HOME` persistant **par instance** (créé `0700`) ;
   serveurs MCP de la session par `-c mcp_servers.<nom>.…` (jamais de secret sur argv : `env_vars`,
   `bearer_token_env_var`, `env_http_headers` par nom de variable) ; `close` tue le processus **et ses
@@ -567,12 +570,15 @@ contre `fake_codex` et des transcriptions écrites depuis le README de `codex-rs
   variable, sont refusés (`invalid_request`) au lieu de se partager le secret de l'autre.
 - **`open` / `resume`** contrôlent la version comme `health()` : < `MIN_APP_SERVER_VERSION` →
   `Unsupported { app_server }`, avant toute résolution de clé ou tout lancement du serveur.
-- **`health()`** : `codex --version` seul ; version < `MIN_APP_SERVER_VERSION` (0.130.0) → `Unavailable`,
+- **`health()`** : `codex --version`, puis la connexion, puis (CODEX-163) un `codex app-server` jetable qui doit
+  répondre à `initialize` (tué aussitôt ; ni `initialized`, ni thread, ni appel de modèle, ni clé dans son
+  environnement ; il crée le `CODEX_HOME` de l'instance s'il manque, le vrai serveur refusant un `CODEX_HOME`
+  absent) ; sans réponse → `Unavailable` typé (`process_exited`, `timeout`, `protocol`) avec la version et
+  la raison, au lieu d'un « sain » qu'ouvrir une session démentirait ; version < `MIN_APP_SERVER_VERSION` (0.130.0) → `Unavailable`,
   `error: Unsupported { app_server }` ; binaire absent → `cli_not_found` ; ni clé configurée ni
   `<CODEX_HOME>/auth.json` → `auth_required` avec `login_hint` = `CODEX_HOME=<dir> codex login` (jamais exécutée,
   A27).
-- **Non vérifié** : tout le protocole (aucune session réelle) ; en particulier l'orthographe d'`approvalPolicy`
-  et de `sandbox` à `thread/start`, la forme de `thread/tokenUsage/updated`, `_meta` de l'élicitation MCP et
+- **Non vérifié** : un tour réel (connexion humaine requise, A27) ; la forme de `thread/tokenUsage/updated`, `_meta` de l'élicitation MCP et
   la réponse d'une approbation persistante, `-c` avant `app-server`, `CODEX_API_KEY` lue par `app-server`.
 
 Écarts constatés à l'implémentation d'ACP (`claude-code-sdk-rs/src/providers/acp/`, feature `provider-acp`,

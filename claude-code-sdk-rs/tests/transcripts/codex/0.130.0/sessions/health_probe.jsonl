@@ -1,0 +1,4 @@
+# health() probe (CODEX-163): `initialize` only, then the adapter kills the process.
+# Shape of the answer as on the real 0.162.1 (userAgent, codexHome, platformFamily, platformOs).
+{"op":"expect","method":"initialize","reply":{"userAgent":"fake_codex/0.130.0","codexHome":"/fake/codex-home","platformFamily":"unix","platformOs":"macos"}}
+{"op":"wait_eof"}

@@ -14,12 +14,27 @@
 //!
 //! # What is **not** established
 //!
-//! No real `codex app-server` was ever run: the `codex` installed where this was
-//! written is 0.38.0, which has no `app-server`. Everything comes from the README of
-//! `codex-rs/app-server` at tag `rust-v0.130.0` and from `docs/…/review-5`, and is
-//! exercised against `fake_codex`, a fake executable replaying JSONL transcripts
-//! (`tests/transcripts/codex/<version>/`). Marked **NOT VERIFIED** where they occur
-//! (source comments, schema, fixtures) and listed here:
+//! The adapter was written from the README of `codex-rs/app-server` at tag
+//! `rust-v0.130.0` and from `docs/…/review-5`, and is exercised against `fake_codex`,
+//! a fake executable replaying JSONL transcripts (`tests/transcripts/codex/<version>/`).
+//! A **real** `app-server` has since been run by `tests/codex_real.rs` — codex-cli
+//! 0.160.0 (05/10/2026) and **0.162.1** (18/10/2026, CODEX-163): the handshake
+//! (`initialize`), `thread/start` and the `health()` probe pass, and the request
+//! schemas of 0.162.1 (`tests/transcripts/codex/0.162.1/`) only ADD optional fields
+//! to those of 0.160.0.
+//!
+//! **Launch.** `codex app-server` with no subcommand is still the stdio server on
+//! 0.162.1 (`--listen <URL>`, default `stdio://`; the subcommands `daemon`, `proxy`,
+//! `generate-ts`, `generate-json-schema` are optional). The shared local daemon
+//! (`codex app-server daemon …`, a 0.163.0 package listening on
+//! `~/.codex/app-server-control/app-server-control.sock`) and `codex app-server proxy
+//! --sock <path>` are **not** used: a session gets its own process in the instance's
+//! `CODEX_HOME`. NOT VERIFIED: the daemon's wire protocol — through `proxy`, an
+//! `initialize` line gets no answer at all (stdout empty, exit 0, with or without a
+//! `jsonrpc` header), so nothing here relies on it.
+//!
+//! What remains unestablished is marked **NOT VERIFIED** where it occurs (source
+//! comments, schema, fixtures) and listed here:
 //!
 //! - ~~the exact spelling of `approvalPolicy` and `sandbox` accepted by `thread/start`~~:
 //!   **VERIFIED on codex-cli 0.160.0** by `tests/codex_real.rs` (the real server answered
@@ -34,7 +49,14 @@
 //! - that `-c key=value` placed before the `app-server` subcommand is honoured;
 //! - that the server accepts `CODEX_API_KEY` from its environment;
 //! - that the events of a sub-agent thread reach this client (`collabToolCall`);
-//! - that `<CODEX_HOME>/auth.json` is where the login lives (used by `health`).
+//! - that `<CODEX_HOME>/auth.json` is where the login lives (used by `health`; what
+//!   is verified on 0.162.1 is only that the server STARTS with one present);
+//! - a real turn, tool call or approval: they need a login in the instance's home,
+//!   which a human does (A27).
+//!
+//! `health()` = `codex --version` ≥ [`MIN_APP_SERVER_VERSION`], a login, then a
+//! throwaway `app-server` that must answer `initialize` (killed right after; no
+//! thread, no model call, no credential handed to it).
 //!
 //! # Capabilities (per model, contract §5)
 //!
@@ -129,6 +151,11 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Timeout of `codex --version`.
 const VERSION_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Timeout of the `initialize` that `health()` sends to a throwaway `app-server`
+/// (CODEX-163). Measured on codex-cli 0.162.1: the answer comes in well under a
+/// second; the margin is for a cold start on a loaded machine.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Configuration of one Codex instance.
 #[derive(Clone)]
@@ -407,6 +434,40 @@ impl CodexProvider {
         Ok(self.config.codex_home.join("auth.json").is_file())
     }
 
+    /// Starts `codex app-server` (stdio, the default `--listen stdio://`) the way
+    /// `open` does, sends `initialize` and reads the answer, then kills the process.
+    /// No `initialized`, no thread, no model call, no credential in its environment:
+    /// it only proves that the binary still speaks the protocol the adapter speaks
+    /// (CODEX-163 — before this, `health()` only read `codex --version` and the login,
+    /// so a binary that version-checked but would not answer the handshake showed as
+    /// healthy while every `open` failed).
+    ///
+    /// The real `app-server` refuses a `CODEX_HOME` that does not exist (measured on
+    /// 0.162.1: `Error: CODEX_HOME points to "…", but that path does not exist`), so
+    /// the instance home is created first, as `open` would.
+    async fn probe_app_server(&self) -> Result<(), ProviderError> {
+        self.ensure_home()?;
+        let launch = Launch {
+            program: self.config.program.clone(),
+            args: vec!["app-server".to_owned()],
+            env_policy: self.base_policy(&[]),
+            env: self.instance_env(),
+            cwd: self.config.codex_home.clone(),
+        };
+        let (process, _inbound) = Process::spawn(&launch)?;
+        let answer = process
+            .request(
+                "initialize",
+                to_value(&InitializeParams::for_adapter()),
+                PROBE_TIMEOUT,
+            )
+            .await;
+        process.shutdown().await;
+        serde_json::from_value::<InitializeResult>(answer?)
+            .map(|_| ())
+            .map_err(|_| ProviderError::protocol("malformed `initialize` result"))
+    }
+
     async fn build(
         &self,
         spec: SessionSpec,
@@ -644,7 +705,18 @@ impl AgentProvider for CodexProvider {
             return health;
         }
         match self.logged_in().await {
-            Ok(true) => ProviderHealth::ok(Some(version)),
+            Ok(true) => match self.probe_app_server().await {
+                Ok(()) => ProviderHealth::ok(Some(version)),
+                Err(error) => {
+                    let detail = format!(
+                        "codex {version} did not answer the app-server handshake (`initialize`): {error}"
+                    );
+                    let mut health = ProviderHealth::unavailable(error);
+                    health.version = Some(version);
+                    health.detail = Some(detail);
+                    health
+                },
+            },
             Ok(false) => {
                 let mut health = ProviderHealth::unavailable(ProviderError::AuthRequired {
                     login_hint: Some(self.login_command()),

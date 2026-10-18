@@ -1,11 +1,12 @@
 //! What the adapter SENDS, checked against the REAL schema of `codex app-server`
-//! 0.160.0, offline; and what the real server ANSWERED, read by our types.
+//! 0.160.0 and 0.162.1 (`REAL_VERSIONS`), offline; and what the real server ANSWERED,
+//! read by our types.
 //!
 //! `codex_schema_drift.rs` compares our types to a schema that was derived from the
 //! documentation (0.130.0). That is how `sandbox: "workspaceWrite"` stayed wrong: the
 //! types, the schema and the fake agreed with each other and with nothing real. A real
 //! `app-server` refused it (`tests/codex_real.rs` found it). The files under
-//! `tests/transcripts/codex/0.160.0/` come from a REAL Codex:
+//! `tests/transcripts/codex/<version>/` come from a REAL Codex:
 //!
 //! - `schema/*.json`: `codex app-server generate-json-schema`, the request parameters
 //!   the adapter builds (see `PROVENANCE.md` there);
@@ -22,12 +23,19 @@ use nexus_claude::providers::codex::wire::{
 };
 use serde_json::{Value, json};
 
-fn dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/transcripts/codex/0.160.0")
+/// The real Codex versions captured under `tests/transcripts/codex/<version>/`: what
+/// the adapter sends must satisfy the schema of EACH, and our types must read the
+/// answers of each (0.162.1 added by CODEX-163).
+const REAL_VERSIONS: [&str; 2] = ["0.160.0", "0.162.1"];
+
+fn dir(version: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/transcripts/codex")
+        .join(version)
 }
 
-fn read(path: &str) -> Value {
-    let full = dir().join(path);
+fn read_in(version: &str, path: &str) -> Value {
+    let full = dir(version).join(path);
     let text = std::fs::read_to_string(&full)
         .unwrap_or_else(|error| panic!("cannot read {}: {error}", full.display()));
     serde_json::from_str(&text).unwrap_or_else(|error| panic!("{}: {error}", full.display()))
@@ -134,18 +142,26 @@ fn check(root: &Value, schema: &Value, instance: &Value, path: &str) -> Result<(
 }
 
 fn must_satisfy(schema_file: &str, sent: &Value) {
-    let root = read(&format!("schema/{schema_file}"));
-    if let Err(reason) = check(&root, &root, sent, "$") {
-        panic!("what the adapter sends does not satisfy the real {schema_file}: {reason}\n{sent}");
+    for version in REAL_VERSIONS {
+        let root = read_in(version, &format!("schema/{schema_file}"));
+        if let Err(reason) = check(&root, &root, sent, "$") {
+            panic!(
+                "what the adapter sends does not satisfy the real {schema_file} of {version}: \
+                 {reason}\n{sent}"
+            );
+        }
     }
 }
 
 fn must_not_satisfy(schema_file: &str, sent: &Value) {
-    let root = read(&format!("schema/{schema_file}"));
-    assert!(
-        check(&root, &root, sent, "$").is_err(),
-        "the checker accepted {sent} against {schema_file}: it cannot fail, so it proves nothing"
-    );
+    for version in REAL_VERSIONS {
+        let root = read_in(version, &format!("schema/{schema_file}"));
+        assert!(
+            check(&root, &root, sent, "$").is_err(),
+            "the checker accepted {sent} against {schema_file} of {version}: it cannot fail, \
+             so it proves nothing"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -252,21 +268,27 @@ fn the_initialize_the_adapter_sends_satisfies_the_real_schema() {
 
 #[test]
 fn our_types_read_the_real_initialize_answer() {
-    let real = read("real/initialize_result.json");
-    let result: InitializeResult = serde_json::from_value(real).expect("the real answer parses");
-    assert!(result.user_agent.contains("0.160.0"), "{result:?}");
-    assert!(result.codex_home.is_some());
+    for version in REAL_VERSIONS {
+        let real = read_in(version, "real/initialize_result.json");
+        let result: InitializeResult =
+            serde_json::from_value(real).expect("the real answer parses");
+        assert!(result.user_agent.contains(version), "{version}: {result:?}");
+        assert!(result.codex_home.is_some(), "{version}");
+    }
 }
 
 #[test]
 fn our_types_read_the_real_thread_start_answer() {
-    let real = read("real/thread_start_result.json");
-    let result: ThreadResult =
-        serde_json::from_value(real.clone()).expect("the real answer parses");
-    assert!(!result.thread.id.is_empty());
-    assert_eq!(result.model.as_deref(), real["model"].as_str());
-    // The response reports the sandbox as a tagged object, not the request's string: a
-    // type that read the response with the request's enum would have refused it.
-    assert_eq!(real["sandbox"]["type"], "workspaceWrite");
-    assert_eq!(real["approvalPolicy"], "on-request");
+    for version in REAL_VERSIONS {
+        let real = read_in(version, "real/thread_start_result.json");
+        let result: ThreadResult =
+            serde_json::from_value(real.clone()).expect("the real answer parses");
+        assert!(!result.thread.id.is_empty(), "{version}");
+        assert_eq!(result.model.as_deref(), real["model"].as_str(), "{version}");
+        assert_eq!(real["thread"]["cliVersion"], version);
+        // The response reports the sandbox as a tagged object, not the request's string:
+        // a type that read the response with the request's enum would have refused it.
+        assert_eq!(real["sandbox"]["type"], "workspaceWrite", "{version}");
+        assert_eq!(real["approvalPolicy"], "on-request", "{version}");
+    }
 }
