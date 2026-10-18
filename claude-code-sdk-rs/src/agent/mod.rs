@@ -55,11 +55,11 @@ pub use registry::{
 };
 pub use resume::ResumeToken;
 pub use spec::{
-    CancelOutcome, CancelScope, CompactionInfo, EnvSpec, HookVerdict, InputBlock, InterruptOutcome,
-    InterruptScope, Lineage, McpServerSpec, PermissionDecision, ProcessDiagnostic, QuestionAnswer,
-    QuestionAnswerItem, SessionHooks, SessionLimits, SessionSpec, SubagentRequest,
-    SystemPromptMode, SystemPromptSpec, ToolCallInfo, ToolResultInfo, TurnContext, TurnDirective,
-    TurnInput,
+    CancelOutcome, CancelScope, CompactOutcome, CompactionInfo, EnvSpec, HookVerdict, InputBlock,
+    InterruptOutcome, InterruptScope, Lineage, McpServerSpec, PermissionDecision,
+    ProcessDiagnostic, QuestionAnswer, QuestionAnswerItem, SessionHooks, SessionLimits,
+    SessionSpec, SubagentRequest, SystemPromptMode, SystemPromptSpec, ToolCallInfo, ToolResultInfo,
+    TurnContext, TurnDirective, TurnInput,
 };
 
 /// Version of the contract. Goes up by one whenever a serialised shape
@@ -67,7 +67,7 @@ pub use spec::{
 /// [`ResumeToken`]) or a trait signature changes. The JSON snapshots in
 /// `tests/agent_contract_snapshots.rs` carry it: changing a shape without
 /// changing the version fails that test.
-pub const CONTRACT_VERSION: u32 = 5;
+pub const CONTRACT_VERSION: u32 = 6;
 
 /// Events of a turn, or of the out-of-band channel.
 pub type EventStream = Pin<Box<dyn Stream<Item = AgentEvent> + Send>>;
@@ -313,6 +313,19 @@ pub trait AgentSession: Send + Sync {
         mode: PolicyMode,
         native: Option<&str>,
     ) -> Result<(), ProviderError>;
+
+    /// Compacts the history **now**, outside any threshold (§4 `compaction_manual`).
+    ///
+    /// `instructions` are added to the summary request. Only a provider that owns
+    /// its history can honour it; the default answers
+    /// `ProviderError::Unsupported { capability: "compaction_manual" }` (the Claude
+    /// Code, Codex and ACP CLIs compact on their own). While a turn is running:
+    /// [`ProviderError::TurnInProgress`]. A summary that cannot be written is an
+    /// error and leaves the history intact.
+    async fn compact(&self, instructions: Option<String>) -> Result<CompactOutcome, ProviderError> {
+        let _ = instructions;
+        Err(ProviderError::unsupported("compaction_manual"))
+    }
 
     /// Events that arrive outside a turn. Single consumer: the first call returns
     /// the stream, later calls return `None`.

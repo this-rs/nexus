@@ -131,6 +131,9 @@ pub struct Capabilities {
     pub subagents: SubagentSupport,
     /// The provider signals context compaction.
     pub compaction_signal: bool,
+    /// `AgentSession::compact` works: the history can be compacted on request.
+    #[serde(default)]
+    pub compaction_manual: bool,
     /// The provider emits reasoning.
     pub thinking: bool,
     /// The provider accepts image input.
@@ -166,6 +169,7 @@ impl Capabilities {
             hooks: HookSupport::None,
             subagents: SubagentSupport::None,
             compaction_signal: false,
+            compaction_manual: false,
             thinking: false,
             images: false,
             tools: false,
@@ -179,9 +183,9 @@ impl Capabilities {
         }
     }
 
-    /// Names of the 18 fields, in declaration order. The conformance suite walks
+    /// Names of the 19 fields, in declaration order. The conformance suite walks
     /// this list so that a capability added without a scenario fails a test.
-    pub const FIELDS: [&'static str; 18] = [
+    pub const FIELDS: [&'static str; 19] = [
         "interactive_permissions",
         "permission_scopes",
         "sandbox",
@@ -190,6 +194,7 @@ impl Capabilities {
         "hooks",
         "subagents",
         "compaction_signal",
+        "compaction_manual",
         "thinking",
         "images",
         "tools",

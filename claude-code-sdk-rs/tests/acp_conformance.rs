@@ -1719,6 +1719,7 @@ const FAKE_ACP_FALLBACK: &[&str] = &[
     "hooks",
     "subagents",
     "compaction_signal",
+    "compaction_manual",
     "images",
     "set_model_live",
     "native_question",

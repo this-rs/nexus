@@ -227,6 +227,7 @@ fn claude_code_like_capabilities() -> Capabilities {
     caps.hooks = HookSupport::InProtocol;
     caps.subagents = SubagentSupport::Nested;
     caps.compaction_signal = true;
+    caps.compaction_manual = true;
     caps.thinking = true;
     caps.tools = true;
     caps.context_window = Some(ContextWindow {

@@ -67,6 +67,7 @@ pub fn full_capabilities() -> Capabilities {
     capabilities.hooks = HookSupport::InProtocol;
     capabilities.subagents = SubagentSupport::Nested;
     capabilities.compaction_signal = true;
+    capabilities.compaction_manual = true;
     capabilities.thinking = true;
     capabilities.images = true;
     capabilities.tools = true;

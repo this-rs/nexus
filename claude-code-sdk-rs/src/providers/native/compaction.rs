@@ -5,8 +5,10 @@
 //! tools) and the last `keep_recent` messages stay **intact** — in particular
 //! their `reasoning`, which DeepSeek wants back with the tool calls (A39).
 //!
-//! Only automatic compaction exists: the contract has no manual trigger for the
-//! native harness. With an unknown context window nothing is compacted; the
+//! Compaction is automatic (at the threshold) or manual (`AgentSession::compact`,
+//! outside any threshold, with optional instructions): one function does both, so the
+//! summary, the `before_compaction` hook and the events are the same, only the trigger
+//! differs. With an unknown context window nothing is compacted automatically; the
 //! endpoint's refusal then surfaces as the typed `context_too_small`.
 //!
 //! A summary that cannot be written never fails the turn: compaction is a

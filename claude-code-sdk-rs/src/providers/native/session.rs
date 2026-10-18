@@ -46,8 +46,8 @@ use super::transcript::TranscriptStore;
 use super::{ModelFacts, NativeConfig as Settings, r#loop};
 use crate::agent::BackgroundTaskStatus;
 use crate::agent::{
-    AgentEvent, AgentSession, CancelOutcome, CancelScope, Capabilities, CostBasis, EventStream,
-    InputBlock, InterruptOutcome, InterruptScope, PermissionDecision, PermissionScope,
+    AgentEvent, AgentSession, CancelOutcome, CancelScope, Capabilities, CompactOutcome, CostBasis,
+    EventStream, InputBlock, InterruptOutcome, InterruptScope, PermissionDecision, PermissionScope,
     PolicyDecision, PolicyMode, ProcessDiagnostic, ProviderError, ProviderKind, QuestionAnswer,
     ResumeToken, SessionHooks, SessionLimits, TaskPhase, ToolPolicy, TurnInput,
 };
@@ -145,6 +145,8 @@ pub(crate) struct State {
     /// The session cannot go on (an MCP server died): the error `send_turn` answers.
     pub(crate) dead: Option<ProviderError>,
     pub(crate) turn: Option<mpsc::UnboundedSender<AgentEvent>>,
+    /// A manual compaction is running: no turn may start meanwhile.
+    pub(crate) compacting: bool,
     pub(crate) signal: Option<Arc<TurnSignal>>,
     pub(crate) out_of_band: VecDeque<AgentEvent>,
     out_of_band_dropped: u64,
@@ -280,6 +282,7 @@ impl Core {
             closed: false,
             dead: None,
             turn: None,
+            compacting: false,
             signal: None,
             out_of_band: VecDeque::new(),
             out_of_band_dropped: 0,
@@ -604,7 +607,7 @@ impl AgentSession for NativeSession {
             if state.closed {
                 return Err(ProviderError::Closed);
             }
-            if state.turn.is_some() {
+            if state.turn.is_some() || state.compacting {
                 return Err(ProviderError::TurnInProgress);
             }
             state.turn = Some(sender);
@@ -614,6 +617,11 @@ impl AgentSession for NativeSession {
         Ok(Box::pin(
             tokio_stream::wrappers::UnboundedReceiverStream::new(receiver),
         ))
+    }
+
+    async fn compact(&self, instructions: Option<String>) -> Result<CompactOutcome, ProviderError> {
+        self.core.usable()?;
+        r#loop::compact_now(&self.core, instructions).await
     }
 
     async fn answer_permission(

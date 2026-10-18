@@ -41,7 +41,7 @@ Règle transversale (contrainte `d79436cc`) : **une capacité absente rend `Prov
 ## 2. Traits
 
 ```rust
-pub const CONTRACT_VERSION: u32 = 5;
+pub const CONTRACT_VERSION: u32 = 6;
 
 pub type EventStream = Pin<Box<dyn Stream<Item = AgentEvent> + Send>>;
 
@@ -81,6 +81,9 @@ pub trait AgentSession: Send + Sync {
     /// Seul le MODE est modifiable à chaud ; `allow`/`deny` sont figés à l'ouverture.
     async fn set_policy_mode(&self, mode: PolicyMode, native: Option<&str>)
         -> Result<(), ProviderError>;
+    /// v6 : compacte l'historique MAINTENANT, hors seuil ; `instructions` s'ajoutent au résumé.
+    /// Défaut : `Unsupported { capability: "compaction_manual" }`.
+    async fn compact(&self, instructions: Option<String>) -> Result<CompactOutcome, ProviderError>;
     /// Flux hors tour, à prendre UNE fois (§9). `None` : déjà pris.
     fn out_of_band(&self) -> Option<EventStream>;
     async fn close(&self) -> Result<(), ProviderError>;
@@ -266,6 +269,7 @@ puis affectation des champs.
 | `hooks` | `in_protocol \| command \| none` | `spec.hooks` ignoré + `provider_notice { kind: "hooks_not_supported" }` ; repli backend (A7) |
 | `subagents` | `nested \| separate_thread \| none` | `none` : repli par session enfant PO (A18) ; `separate_thread` : les événements de l'enfant portent `parent` = identifiant du fil enfant |
 | `compaction_signal` | `bool` | Aucun `compaction` émis ; le backend ne promet pas de bandeau ; `before_compaction` jamais appelé |
+| `compaction_manual` | `bool` | `compact` → `Unsupported { capability: "compaction_manual" }` (le CLI compacte seul : Claude Code reçoit `/compact` comme un prompt) ; le backend n'offre pas de compaction manuelle. Présent : `compact(instructions)` résume l'historique hors seuil (voir ci-dessous) |
 | `thinking` | `bool` | Aucun `thinking` ; pas d'erreur |
 | `images` | `bool` | `send_turn` avec un bloc image → `Unsupported { capability: "images" }` |
 | `tools` | `bool` | `open()` avec `mcp_servers` non vide ou préflight d'outil → `ModelNoTools` |
@@ -289,6 +293,7 @@ Valeurs de référence (v1, à confirmer par la conformité de chaque adaptateur
 | hooks | in_protocol | in_protocol (boucle locale) | command | none |
 | subagents | nested | none (outil `Agent` du harnais quand l'hôte le sert : `SessionHooks::run_subagent`, repli A18) | separate_thread | none |
 | compaction_signal | oui | oui | oui | non |
+| compaction_manual | non (le CLI compacte seul) | oui | non | non |
 | thinking | oui | selon modèle | oui | oui |
 | images | oui (A12 révisée : blocs de contenu dans l'ordre de l'utilisateur, local et SSH) | selon modèle (v5 : catalogue, sonde d'un pixel en option, déclaration d'instance) | non | non |
 
@@ -315,7 +320,7 @@ préfixe `data:` ni blanc, au plus 5 Mio décodés (`MAX_IMAGE_BYTES` du `Read` 
 Anthropic derrière le CLI) ; sinon `InvalidRequest`, rien n'est écrit et aucun tour n'est ouvert. Un tour de texte seul
 reste la chaîne `content: "<texte>"` d'avant, octet pour octet. `message_images` est joué (et non replié) par
 `claude_code_conformance` ; le bloc traverse le faux ssh (`claude_code_remote`). Changement de VALEUR d'une capacité
-sur un provider, aucune forme sérialisée ne bouge : `CONTRACT_VERSION` reste 5 (§16).
+sur un provider, aucune forme sérialisée ne bouge : `CONTRACT_VERSION` reste 5 à cette date (§16 ; 6 depuis `compact`).
 | tools | oui | selon modèle (sonde) | oui | oui |
 | context_window | reported | configured / probed | configured | None |
 | set_model_live | oui (`set_model` de contrôle ; `before_turn` → `set_model` écrit avant l'entrée du tour) | oui (entre deux tours ; `before_turn` appliqué au tour qui commence, fenêtre et coût du modèle actif) | oui (par tour ; hooks `none` : `before_turn` jamais appelé) | non (directive → `model_directive_ignored` si les hooks étaient honorés ; ils ne le sont pas) |
@@ -352,6 +357,17 @@ sur un provider, aucune forme sérialisée ne bouge : `CONTRACT_VERSION` reste 5
   compaction (`maybe_compact`) et le coût du tour (`terminal_event`) lisent l'ACTIF, pas l'instantané : un
   modèle plus petit choisi pour un tour compacte là où celui d'ouverture ne compactait pas, un modèle sans
   prix rend `cost.usd = None` même si celui d'ouverture en avait un.
+- **Compaction manuelle (v6, `compaction_manual` = oui)** : `compact(instructions)` réutilise la compaction
+  automatique HORS seuil (`loop::compact_history`, la même fonction) sur l'historique validé : même résumé
+  (`SUMMARY_SYSTEM_PROMPT`), les `instructions` (vides ignorées) ajoutées au prompt du résumé, puis le
+  `systemMessage` de `before_compaction` (appelé avec `trigger: "manual"` et `custom_instructions`) AJOUTÉ après
+  elles ; `keep_recent` derniers messages intacts ; événements `compaction started` / `completed` avec
+  `trigger: manual` sur le flux hors tour (aucun tour en cours), `images_compacted` si besoin. Refusée en
+  `TurnInProgress` pendant un tour, et un tour est refusé pendant qu'elle court. `CompactOutcome { compacted,
+  tokens_before, tokens_after, messages_summarised }` (estimations, système compris) ; historique trop court
+  ⇒ `compacted: false`, aucun appel à l'endpoint. Un résumé qui échoue rend l'erreur typée (et
+  `provider_notice { compaction_failed, trigger: "manual" }`), l'historique reste intact et rien n'est
+  réécrit dans le transcript. `compaction.enabled = false` ne l'empêche pas : il règle l'automatique.
 - **`capabilities(model)` est synchrone** : il lit ce qui a été sondé. Tant qu'un modèle n'est pas sondé
   (`refresh_capabilities(model)`, ou `open`, qui sonde), `tools` est `false`, `thinking` `false`,
   `context_window` `None` ; rien n'est affirmé sans preuve. `thinking` = la sonde a vu un champ de
@@ -1230,7 +1246,10 @@ jeton, `add_dirs` ← `extra_dirs`, `env` ← `EnvSpec.set`, `cli_path` ← exte
   à défaut `ModelEndpoint::probe_images(&str) -> Option<bool>` (ajout compatible : un endpoint v4 rend `None`,
   inconnu) et décision `images` par modèle du natif (§5 ; champs optionnels `EndpointProbe.images`,
   `ChatMessage.images`, `EndpointQuirks.vision_probe` / `vision`, hors formes listées ci-dessous :
-  `tests/snapshots/agent_contract_v5.json` ne diffère de v4 que par la version). Le fichier
+  `tests/snapshots/agent_contract_v5.json` ne diffère de v4 que par la version) ; **v6** = v5 + méthode à
+  défaut `AgentSession::compact(Option<String>) -> Result<CompactOutcome, ProviderError>`, type
+  `CompactOutcome` et champ `Capabilities::compaction_manual` (`#[serde(default)]`, `false` : un pair v5
+  qui l'ignore reste correct), scénario `compaction` étendu à ce champ (19 champs). Le fichier
   `tests/snapshots/agent_contract_v2.json` est conservé : le backend et le frontend, tant qu'ils sont en
   v2, le copient comme fixture.
   L'instantané v2 porte aussi `provider_instance_config` (natif avec préréglage, prix et extension ; ACP ; Claude Code) : une entrée d'instantané ajoutée pour une
