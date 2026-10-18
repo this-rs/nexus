@@ -31,7 +31,7 @@
 //! | Kind | Built by | Needs |
 //! |---|---|---|
 //! | `claude_code` | `ClaudeCodeProvider` | nothing |
-//! | `native` | `NativeProvider` on an `OpenAiEndpoint` | `endpoint`; cargo feature `provider-native` (else `Unsupported { provider_native }`) |
+//! | `native` | `NativeProvider` on an `OpenAiEndpoint`, or on an `AnthropicEndpoint` when the extension `model_protocol` is `anthropic_messages` (CTX5) | `endpoint` (optional on `anthropic_messages`: Anthropic's own API); cargo feature `provider-native` (else `Unsupported { provider_native }`) |
 //! | `codex` | `CodexProvider` driving `codex app-server`; cargo feature `provider-codex` (else `Unsupported { provider_codex }`) | optional `command` (the program, nothing else), `cost_source`, `prices`, `context_window`, `default_model`, `env_inherit`, `credential` (`CODEX_API_KEY`), extension `codex_home` |
 //! | `acp` | `AcpProvider` driving any ACP agent; cargo feature `provider-acp` (else `Unsupported { provider_acp }`) | `command` (program + arguments, no secret), `cost_source`, `prices`, `context_window`, `default_model`, `env_inherit`, extensions `env` (object of non-secret variables), `thinking` (bool), `login_hint` (string) |
 //! | `scripted` | no built-in constructor: register a factory (tests) | |
@@ -51,7 +51,11 @@
 //! the cheap tier that stubs old tool results before a summary), `codex_home` (string,
 //! codex: the instance's persistent
 //! `CODEX_HOME`), `env` (object of strings, acp), `thinking` (bool, acp), `login_hint`
-//! (string, acp), `acp_home` (string, acp: the instance's dedicated `HOME`, created `0700`). Their types are checked by
+//! (string, acp), `acp_home` (string, acp: the instance's dedicated `HOME`, created `0700`),
+//! `model_protocol` (`openai_chat`, the default, or `anthropic_messages`, native),
+//! `anthropic_auth` (`bearer` or `api_key`), `anthropic_thinking` (an object with a `type`: the
+//! `thinking` of every request) and `anthropic_prompt_cache` (bool, default `true`: the three
+//! `cache_control` points). Their types are checked by
 //! [`ProviderInstanceConfig::validate`]; other keys are kept untouched for the
 //! factory of the kind to read. A key whose name looks like a credential is refused.
 //!
@@ -81,7 +85,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::credentials::{CredentialRef, CredentialResolver, is_sensitive_name, redact};
-use super::model_provider::ModelProviderConfig;
+use super::model_provider::{ModelProtocol, ModelProviderConfig};
 use super::{
     AgentProvider, AgentSession, Capabilities, ContextWindow, ContextWindowSource, CostBasis,
     HealthStatus, ModelInfo, ModelPrice, ProviderError, ProviderHealth, ProviderKind, SessionSpec,
@@ -355,8 +359,16 @@ impl ProviderInstanceConfig {
                 }
             },
             ProviderKind::Native => {
-                if self.endpoint.is_none() {
+                // Anthropic's own API needs no endpoint; an OpenAI-compatible one does.
+                if self.endpoint.is_none()
+                    && self.native_protocol() != ModelProtocol::AnthropicMessages
+                {
                     return bad("native requires an endpoint");
+                }
+                if self.native_protocol() != ModelProtocol::OpenAiChat
+                    && (self.preset.is_some() || self.quirks.is_some())
+                {
+                    return bad("preset and quirks apply to openai_chat native instances only");
                 }
             },
             ProviderKind::Codex => {},
@@ -461,6 +473,14 @@ impl ProviderInstanceConfig {
                     .is_some_and(|env| env.values().all(Value::is_string)),
                 "thinking" => value.is_boolean(),
                 "login_hint" => value.as_str().is_some_and(|hint| !hint.is_empty()),
+                "model_protocol" => {
+                    matches!(value.as_str(), Some("openai_chat" | "anthropic_messages"))
+                },
+                "anthropic_auth" => matches!(value.as_str(), Some("bearer" | "api_key")),
+                "anthropic_thinking" => value
+                    .get("type")
+                    .is_some_and(|kind| kind.as_str().is_some_and(|kind| !kind.is_empty())),
+                "anthropic_prompt_cache" => value.is_boolean(),
                 _ => true,
             };
             if !well_typed {
@@ -470,6 +490,19 @@ impl ProviderInstanceConfig {
             }
         }
         Ok(())
+    }
+
+    /// The protocol a `native` instance speaks to its model: its `model_protocol`
+    /// extension, `openai_chat` when absent (every instance written before CTX5).
+    pub fn native_protocol(&self) -> ModelProtocol {
+        match self
+            .extensions
+            .get("model_protocol")
+            .and_then(Value::as_str)
+        {
+            Some("anthropic_messages") => ModelProtocol::AnthropicMessages,
+            _ => ModelProtocol::OpenAiChat,
+        }
     }
 
     #[cfg(feature = "provider-native")]
@@ -1117,18 +1150,26 @@ impl ProviderRegistry {
         config: &ProviderInstanceConfig,
         credential_owner: &str,
     ) -> Result<BuiltProvider, ProviderError> {
-        use crate::model::{OpenAiEndpoint, OpenAiEndpointConfig};
+        use crate::model::{ModelEndpoint, OpenAiEndpoint, OpenAiEndpointConfig};
         use crate::providers::native::{NativeConfig, NativeProvider};
 
-        let base_url = config
-            .endpoint
-            .clone()
-            .ok_or_else(|| ProviderError::invalid("native requires an endpoint"))?;
-        let mut endpoint = OpenAiEndpointConfig::new(credential_owner, base_url);
-        endpoint.credential = config.credential.clone();
-        endpoint.quirks = config.effective_quirks()?;
-        endpoint.allow_private_network = config.extension_bool("allow_private_network");
-        let endpoint = Arc::new(OpenAiEndpoint::new(endpoint, Arc::clone(&self.resolver)));
+        let endpoint: Arc<dyn ModelEndpoint> = match config.native_protocol() {
+            ModelProtocol::AnthropicMessages => Arc::new(crate::model::AnthropicEndpoint::new(
+                anthropic_endpoint_of(config, credential_owner),
+                Arc::clone(&self.resolver),
+            )),
+            _ => {
+                let base_url = config
+                    .endpoint
+                    .clone()
+                    .ok_or_else(|| ProviderError::invalid("native requires an endpoint"))?;
+                let mut endpoint = OpenAiEndpointConfig::new(credential_owner, base_url);
+                endpoint.credential = config.credential.clone();
+                endpoint.quirks = config.effective_quirks()?;
+                endpoint.allow_private_network = config.extension_bool("allow_private_network");
+                Arc::new(OpenAiEndpoint::new(endpoint, Arc::clone(&self.resolver)))
+            },
+        };
 
         let mut native = NativeConfig::new(&config.id);
         native.default_model = config.default_model.clone();
@@ -1159,6 +1200,46 @@ impl ProviderRegistry {
     ) -> Result<BuiltProvider, ProviderError> {
         Err(ProviderError::unsupported("provider_native"))
     }
+}
+
+/// The endpoint of a native instance on the Anthropic Messages protocol (CTX5).
+///
+/// No endpoint: Anthropic's own API, key as `x-api-key`. An endpoint: a gateway, key as
+/// `Authorization: Bearer` — the same default as a Claude Code binding (§13.2) — unless
+/// `anthropic_auth` says `api_key`. `anthropic_thinking` (an object with a `type`) is the
+/// `thinking` sent with every request; `anthropic_prompt_cache: false` removes the three
+/// cache points.
+#[cfg(feature = "provider-native")]
+fn anthropic_endpoint_of(
+    config: &ProviderInstanceConfig,
+    credential_owner: &str,
+) -> crate::model::AnthropicEndpointConfig {
+    use crate::model::{AnthropicAuth, AnthropicEndpointConfig};
+
+    let mut endpoint = match &config.endpoint {
+        Some(base_url) => AnthropicEndpointConfig::gateway(credential_owner, base_url.clone()),
+        None => AnthropicEndpointConfig::new(credential_owner),
+    };
+    match config
+        .extensions
+        .get("anthropic_auth")
+        .and_then(Value::as_str)
+    {
+        Some("api_key") => endpoint.auth = AnthropicAuth::ApiKey,
+        Some("bearer") => endpoint.auth = AnthropicAuth::Bearer,
+        _ => {},
+    }
+    endpoint.credential = config.credential.clone();
+    endpoint.allow_private_network = config.extension_bool("allow_private_network");
+    endpoint.thinking = config.extensions.get("anthropic_thinking").cloned();
+    if let Some(cache) = config
+        .extensions
+        .get("anthropic_prompt_cache")
+        .and_then(Value::as_bool)
+    {
+        endpoint.prompt_cache = cache;
+    }
+    endpoint
 }
 
 /// The context-economy knobs a native instance sets through its `extensions`:
@@ -1344,7 +1425,10 @@ impl ProviderInstanceConfig {
     /// pair `(kind, model provider)`. `None` for an agent that picks its own model
     /// (`acp`, `scripted`).
     pub fn model_provider(&self) -> Option<ModelProviderConfig> {
-        let protocol = self.kind.default_model_protocol()?;
+        let protocol = match self.kind {
+            ProviderKind::Native => self.native_protocol(),
+            kind => kind.default_model_protocol()?,
+        };
         let mut provider = ModelProviderConfig::new(self.id.clone(), protocol);
         provider.endpoint = self.endpoint.clone();
         provider.credential = self.credential.clone();
@@ -1355,10 +1439,15 @@ impl ProviderInstanceConfig {
         provider.context_window = self.context_window;
         provider.cost_source = self.cost_source;
         provider.prices = self.prices.clone();
-        if let Some(allow) = self.extensions.get("allow_private_network") {
-            provider
-                .extensions
-                .insert("allow_private_network".to_owned(), allow.clone());
+        for key in [
+            "allow_private_network",
+            "anthropic_auth",
+            "anthropic_thinking",
+            "anthropic_prompt_cache",
+        ] {
+            if let Some(value) = self.extensions.get(key) {
+                provider.extensions.insert(key.to_owned(), value.clone());
+            }
         }
         Some(provider)
     }
@@ -1553,6 +1642,11 @@ impl ProviderRegistry {
         config.prices = provider.prices.clone();
         config.extensions = harness.extensions.clone();
         config.extensions.extend(provider.extensions.clone());
+        // The wire is the model provider's, whatever the harness instance speaks itself.
+        config.extensions.insert(
+            "model_protocol".to_owned(),
+            Value::from(provider.protocol.as_str()),
+        );
         // The key is resolved for the model provider, not for the composed instance.
         let built = self.build_native_for(&config, &provider.id)?;
         Ok(self

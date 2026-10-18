@@ -949,6 +949,48 @@ pub type CompletionStream = Pin<Box<dyn Stream<Item = Result<CompletionChunk, Pr
   `EndpointProbe.parallel_tools` reprend le drapeau déclaré (`explicit_parallel_tool_calls`), il n'est pas
   mesuré ; `CompletionRequest.stream = false` est réservé (le fil est toujours en flux).
 
+### 12.1 `AnthropicEndpoint` : l'API Messages dans le natif (CTX5)
+
+Second `ModelEndpoint`, à côté d'`OpenAiEndpoint` : `model::anthropic` (HTTP) et `model::anthropic_wire`
+(pur). Mêmes garanties A36 (garde, épinglage, ni proxy ni redirection, clé résolue à chaque requête et
+masquée des erreurs).
+
+- Fil : `POST {base}/v1/messages` en flux SSE (`message_start`, `content_block_start|delta|stop`,
+  `message_delta`, `message_stop`, `ping`, `error`), en-tête `anthropic-version: 2023-06-01`. Une base qui
+  finit déjà par `/v1` n'en reçoit pas un second. Sans endpoint : `https://api.anthropic.com`.
+- Clé : `x-api-key` (`AnthropicAuth::ApiKey`, l'API d'Anthropic) ou `Authorization: Bearer`
+  (`AnthropicAuth::Bearer`, une passerelle). La valeur vient du `CredentialResolver`, jamais de la
+  configuration.
+- Transcription : système de tête → `system` (un bloc) ; système tardif → bloc `<system-reminder>` côté
+  utilisateur ; images → blocs `image` base64 ; `tool` → `tool_result` ; blocs consécutifs d'un même côté =
+  un message (résultats d'outils d'abord, puis les images qu'un outil a rendues) ; aucun bloc vide.
+- **Trois points `cache_control: {"type": "ephemeral"}`** : dernière définition d'outil, bloc système,
+  dernier bloc du dernier message (jamais un bloc de raisonnement). Trois des quatre permis.
+  `wire_messages` (l'empreinte de l'historique du journal de requêtes) les omet : le marqueur qui avance
+  n'est pas une réécriture. Extension `anthropic_prompt_cache: false` pour les retirer.
+- **Raisonnement** : `thinking_delta` → `reasoning`, `signature_delta` gardé ; un message qui a raisonné
+  émet `CompletionChunk::Echo(WireEcho { protocol: "anthropic_messages", content })` avant `usage` : ses
+  blocs dans l'ordre, signature comprise. La boucle le range dans `ChatMessage.wire_echo` (champ ajouté,
+  absent si vide) et le fil le renvoie **tel quel** ; sans écho (ou si ses `tool_use` ne sont plus ceux du
+  message), le message est rebâti de ses champs et le raisonnement non signé n'est pas renvoyé. Après une
+  réécriture de l'historique (bouchons CTX3, résumé de compaction), `model::forget_echoed_reasoning` retire
+  les blocs de raisonnement des échos : un bloc rejoué après une modification de ce qui le précède est
+  refusé par l'API. Au repos, l'écho est masqué comme le contenu ; si le masquage touche un bloc, l'écho perd
+  son raisonnement (un texte masqué ne correspond plus à sa signature). La copie d'affichage n'a pas d'écho.
+- `thinking` envoyé : l'extension `anthropic_thinking` (objet avec `type`, p. ex. `{"type": "adaptive"}`),
+  sinon rien (le défaut du modèle). `max_tokens` requis : celui de la requête, sinon 32 000.
+  `parallel_tool_calls: false` → `tool_choice: {type: auto, disable_parallel_tool_use: true}`.
+- Fins : `end_turn`/`stop_sequence` → `stop`, `max_tokens`/`model_context_window_exceeded` → `length`,
+  `tool_use` → `tool_calls`, `refusal` → `content_filter`, le reste → `other`. Événement `error` :
+  `overloaded_error` → `overloaded`, `rate_limit_error` → `rate_limited`, `authentication_error` /
+  `permission_error` → `unauthorized`, « prompt is too long » → `context_too_small`.
+- Usage : `input_tokens` (hors cache), `cache_read_input_tokens`, `cache_creation_input_tokens` repris
+  tels quels ; la taille de prompt que la boucle retient compte les trois.
+- Sonde : **aucune requête au modèle** (les modèles Claude de l'API Messages prennent outils, images et
+  raisonnement) ; `GET /v1/models` (paginé) fixe la fenêtre (`max_input_tokens`) et corrige `images`
+  (`capabilities.image_input.supported`) et `thinking` (`capabilities.thinking.supported`) ; un catalogue
+  illisible laisse la fenêtre inconnue.
+
 ## 13. `ProviderRegistry` (A1, A32)
 
 Unique, dans nexus. Le backend n'a qu'un résolveur (quel provider/modèle pour quelle demande).
@@ -1001,7 +1043,11 @@ instance intégrée, toujours présente.
   de la surcharge quand elle les fixe. Une surcharge ne retire pas un drapeau du préréglage.
 - Clés d'`extensions` lues : `allow_private_network` (bool), `cli_path` (chaîne), `compaction_keep_recent`
   (entier), `compaction_keep_tool_rounds` (entier), `compaction_stub_ratio` (nombre, 0 à 1),
-  `compaction_stub_block` (entier), `codex_home` (chaîne), `env` (objet de chaînes, acp), `thinking` (bool, acp), `login_hint` (chaîne, acp) ; une clé dont le nom évoque un identifiant est refusée.
+  `compaction_stub_block` (entier), `codex_home` (chaîne), `env` (objet de chaînes, acp), `thinking` (bool, acp), `login_hint` (chaîne, acp),
+  `model_protocol` (`openai_chat` par défaut ou `anthropic_messages`, native), `anthropic_auth` (`bearer` ou
+  `api_key`), `anthropic_thinking` (objet avec `type`), `anthropic_prompt_cache` (bool) ; une clé dont le nom évoque un identifiant est refusée.
+  Une instance `native` en `anthropic_messages` n'exige pas d'endpoint (sans : l'API d'Anthropic, clé en
+  `x-api-key` ; avec : une passerelle, `Bearer` sauf `anthropic_auth: api_key`) et refuse `preset`/`quirks`.
 - Kinds : `claude_code`, `native`, `codex` et `acp` construits ; `scripted` sans constructeur répond
   `Unsupported { provider_scripted }` ; sans la feature `provider-native`, `native` répond
   `Unsupported { provider_native }`, sans `provider-codex`, `codex` répond `Unsupported { provider_codex }`, sans `provider-acp`, `acp` répond `Unsupported { provider_acp }`.
@@ -1026,7 +1072,7 @@ qu'un harnais parle à son modèle.
 | Harnais | Protocole consommé (`ProviderKind::model_protocols`) | Lien appliqué par `open_session` |
 |---|---|---|
 | `claude_code` | `anthropic_messages` | oui : `ANTHROPIC_BASE_URL` et la clé en variables explicites, l'autre variable d'authentification posée **vide** (§13.2) |
-| `native` | `openai_chat` | oui : provider composé sur l'endpoint du fournisseur de modèle ; identifiant résolu **pour le fournisseur de modèle** |
+| `native` | `openai_chat` (défaut), `anthropic_messages` (CTX5, §12.1) | oui : provider composé sur l'endpoint du fournisseur de modèle, dans SON protocole ; identifiant résolu **pour le fournisseur de modèle** |
 | `codex` | `openai_responses` | non : `Unsupported { model_binding }` — la configuration de fournisseur personnalisé de Codex n'est pas vérifiée contre un vrai `app-server` |
 | `acp`, `scripted` | l'agent choisit son modèle | refusé : `ModelProtocolMismatch` avec `accepts` vide |
 

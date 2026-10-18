@@ -107,6 +107,10 @@ name = "native_conformance"
 required-features = ["testkit", "provider-native"]
 
 [[test]]
+name = "native_anthropic"
+required-features = ["testkit", "provider-native"]
+
+[[test]]
 name = "native_harness"
 required-features = ["provider-native"]
 
