@@ -599,6 +599,9 @@ pub struct StopHookInput {
     pub permission_mode: Option<String>,
     /// Whether stop hook is active
     pub stop_hook_active: bool,
+    /// The model's last answer (sent by the CLI since 2.1.x).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_assistant_message: Option<String>,
 }
 
 /// Input data for SubagentStop hook events
@@ -615,6 +618,59 @@ pub struct SubagentStopHookInput {
     pub permission_mode: Option<String>,
     /// Whether stop hook is active
     pub stop_hook_active: bool,
+    /// The sub-agent's last answer (sent by the CLI since 2.1.x).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_assistant_message: Option<String>,
+    /// The sub-agent's identifier.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<String>,
+    /// The kind of sub-agent (e.g. "general-purpose").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_type: Option<String>,
+}
+
+/// Input data for SessionStart hook events
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionStartHookInput {
+    /// Session ID for this conversation
+    pub session_id: String,
+    /// Path to the transcript file
+    #[serde(default)]
+    pub transcript_path: String,
+    /// Current working directory
+    #[serde(default)]
+    pub cwd: String,
+    /// Permission mode (optional)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permission_mode: Option<String>,
+    /// `startup`, `resume`, `clear`, `compact` or `fork`
+    #[serde(default)]
+    pub source: String,
+}
+
+/// Input data for Notification hook events
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NotificationHookInput {
+    /// Session ID for this conversation
+    pub session_id: String,
+    /// Path to the transcript file
+    #[serde(default)]
+    pub transcript_path: String,
+    /// Current working directory
+    #[serde(default)]
+    pub cwd: String,
+    /// Permission mode (optional)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permission_mode: Option<String>,
+    /// What the notification says
+    #[serde(default)]
+    pub message: String,
+    /// Its title, when it has one
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// `permission_prompt`, `idle_prompt`, `auth_success`…
+    #[serde(default)]
+    pub notification_type: String,
 }
 
 /// Input data for PreCompact hook events
@@ -658,6 +714,12 @@ pub enum HookInput {
     /// PreCompact hook input
     #[serde(rename = "PreCompact")]
     PreCompact(PreCompactHookInput),
+    /// SessionStart hook input (command hooks; the CLI does not send it to SDK callbacks)
+    #[serde(rename = "SessionStart")]
+    SessionStart(SessionStartHookInput),
+    /// Notification hook input
+    #[serde(rename = "Notification")]
+    Notification(NotificationHookInput),
 }
 
 // ============================================================================
@@ -3267,6 +3329,7 @@ mod tests {
             cwd: "/".into(),
             permission_mode: None,
             stop_hook_active: true,
+            last_assistant_message: None,
         });
         let val = serde_json::to_value(&input).unwrap();
         assert_eq!(val["hook_event_name"], "Stop");
@@ -3286,6 +3349,9 @@ mod tests {
             cwd: "/sub".into(),
             permission_mode: None,
             stop_hook_active: false,
+            last_assistant_message: None,
+            agent_id: None,
+            agent_type: None,
         });
         let val = serde_json::to_value(&input).unwrap();
         assert_eq!(val["hook_event_name"], "SubagentStop");
@@ -4191,6 +4257,7 @@ mod tests {
             cwd: "/tmp".into(),
             permission_mode: None,
             stop_hook_active: true,
+            last_assistant_message: None,
         });
         let output = callback
             .execute(&input, None, &HookContext { signal: None })

@@ -45,9 +45,11 @@ use super::session::{ConsentRoute, Core, PendingAsk, StopCause, TurnSignal};
 use super::tools::{ToolEntry, ToolRegistry};
 use crate::agent::{
     AgentEvent, CompactOutcome, CompactionInfo, CompactionPhase, CompactionTrigger, Cost,
-    CostBasis, DeltaKind, HookVerdict, InputBlock, ModelUsage, PermissionDecision, PolicyDecision,
-    ProviderError, QuestionReply, StopReason, ToolCallInfo, ToolCategory, ToolOutput,
-    ToolResultInfo, TurnContext, TurnInput, Usage,
+    CostBasis, DeltaKind, HookReply, HookVerdict, InputBlock, ModelUsage, NotificationInfo,
+    PermissionDecision, PolicyDecision, PromptInfo, ProviderError, QuestionReply,
+    STOP_HOOK_BLOCK_CAP, SessionStartInfo, StopInfo, StopReason, SubagentStopInfo, ToolCallInfo,
+    ToolCategory, ToolOutput, ToolResultInfo, TurnContext, TurnInput, Usage, prompt_blocked_text,
+    stop_hook_feedback,
 };
 use crate::model::{
     ChatMessage, CompletionChunk, CompletionRequest, FinishReason, ImagePart, Role, ToolCallChunk,
@@ -126,10 +128,42 @@ pub(crate) async fn run_turn(core: Arc<Core>, input: TurnInput, signal: Arc<Turn
             signal.stop(StopCause::TimedOut(ms));
         })
     });
-    // Read, not taken: a turn that is not committed leaves it for the next one.
-    let note = core.lock().pending_note.clone();
-    let user = user_message(&input, note.as_deref());
-    before_turn(&core, &signal, input.joined_text().len()).await;
+    // Claude Code's `SessionStart` then `UserPromptSubmit` (contract v7), before anything of
+    // the turn runs. A blocked prompt ends the turn here: no request, nothing committed.
+    session_start(&core, &signal).await;
+    let prompt = input.joined_text();
+    let submitted = user_prompt_submit(&core, &signal, &prompt).await;
+    if let Some(reason) = submitted.block_reason() {
+        if let Some(timer) = timer {
+            timer.abort();
+        }
+        core.emit(AgentEvent::ProviderNotice {
+            kind: "prompt_blocked".to_owned(),
+            data: json!({ "provider": "native", "hook": "user_prompt_submit", "reason": reason }),
+        });
+        let model = core.lock().model.clone();
+        let text = prompt_blocked_text(reason, &prompt);
+        let terminal = terminal_event(
+            &core,
+            &signal,
+            &model,
+            Outcome::Stop(StopKind::Completed, Some(text)),
+            &acc,
+        );
+        core.emit(terminal);
+        return;
+    }
+    // Read, not taken: a turn that is not committed leaves them for the next one.
+    let (note, session_context) = {
+        let state = core.lock();
+        (state.pending_note.clone(), state.session_context.clone())
+    };
+    let user = user_message(
+        &input,
+        [note.as_deref(), session_context.as_deref()],
+        submitted.context_text(),
+    );
+    before_turn(&core, &signal, prompt.len()).await;
     let (model, images) = {
         let state = core.lock();
         (state.model.clone(), state.active_images)
@@ -332,10 +366,12 @@ pub(crate) fn time_limit_note(limit_ms: u64, elapsed_ms: u64) -> String {
 }
 
 /// The user message of a turn: the text blocks joined, then the images (sent
-/// as `image_url` parts, kept whole in the transcript). A pending `note` comes
-/// first, on its own line: it is part of the new message, so the prefix the
-/// endpoint has cached (system prompt, earlier messages) does not change.
-fn user_message(input: &TurnInput, note: Option<&str>) -> ChatMessage {
+/// as `image_url` parts, kept whole in the transcript). What comes `before` (a
+/// pending note, the `session_start` hook's context) opens it and what a
+/// `user_prompt_submit` hook added (`after`) closes it, each in its own
+/// paragraph: they are part of the new message, so the prefix the endpoint has
+/// cached (system prompt, earlier messages) does not change.
+fn user_message(input: &TurnInput, before: [Option<&str>; 2], after: Option<&str>) -> ChatMessage {
     let images = input
         .blocks
         .iter()
@@ -350,11 +386,127 @@ fn user_message(input: &TurnInput, note: Option<&str>) -> ChatMessage {
             _ => None,
         })
         .collect();
-    let text = match note {
-        Some(note) => format!("{note}\n\n{}", input.joined_text()),
-        None => input.joined_text(),
-    };
+    let joined = input.joined_text();
+    let text = before
+        .into_iter()
+        .flatten()
+        .chain(std::iter::once(joined.as_str()))
+        .chain(after)
+        .collect::<Vec<_>>()
+        .join("\n\n");
     ChatMessage::user_with_images(text, images)
+}
+
+/// Asks the `session_start` hook once per session, before its first turn (Claude Code's
+/// `SessionStart`): what it adds for the model waits in `State::session_context` until a turn
+/// commits it; its `system_message` is shown to the user.
+async fn session_start(core: &Core, signal: &TurnSignal) {
+    let Some(hooks) = &core.hooks else {
+        return;
+    };
+    {
+        let mut state = core.lock();
+        if state.session_start_asked {
+            return;
+        }
+        state.session_start_asked = true;
+    }
+    let source = if core.resumed { "resume" } else { "startup" };
+    let info = SessionStartInfo::new(source);
+    let Some(reply) = hook_call(core, signal, "session_start", hooks.session_start(&info)).await
+    else {
+        return;
+    };
+    hook_system_message(core, "session_start", &reply);
+    if let Some(context) = reply.context_text() {
+        core.lock().session_context = Some(context.to_owned());
+    }
+}
+
+/// Asks the `user_prompt_submit` hook about the input of the turn (Claude Code's
+/// `UserPromptSubmit`). No hook, or one that does not answer in time: nothing to add, nothing
+/// blocked.
+async fn user_prompt_submit(core: &Core, signal: &TurnSignal, prompt: &str) -> HookReply {
+    let Some(hooks) = &core.hooks else {
+        return HookReply::none();
+    };
+    let info = PromptInfo::new(prompt);
+    let reply = hook_call(
+        core,
+        signal,
+        "user_prompt_submit",
+        hooks.user_prompt_submit(&info),
+    )
+    .await
+    .unwrap_or_default();
+    hook_system_message(core, "user_prompt_submit", &reply);
+    reply
+}
+
+/// Asks the stop hook (`before_stop`, or `before_subagent_stop` for a sub-agent) whether the
+/// turn may end after the model answered `last` without calling a tool. `Some(reason)`: it may
+/// not, the model reads the reason and goes on. `blocks` counts the blocks of this turn; the
+/// one that reaches [`STOP_HOOK_BLOCK_CAP`] is overridden, as the Claude Code CLI does.
+async fn stop_hook(
+    core: &Core,
+    signal: &TurnSignal,
+    last: &str,
+    blocks: &mut u32,
+) -> Option<String> {
+    let hooks = core.hooks.as_ref()?;
+    let active = *blocks > 0;
+    let last = (!last.is_empty()).then(|| last.to_owned());
+    let (name, reply) = if core.is_subagent {
+        let info = SubagentStopInfo::new(active, last);
+        let name = "before_subagent_stop";
+        (
+            name,
+            hook_call(core, signal, name, hooks.before_subagent_stop(&info)).await,
+        )
+    } else {
+        let info = StopInfo::new(active, last);
+        let name = "before_stop";
+        (
+            name,
+            hook_call(core, signal, name, hooks.before_stop(&info)).await,
+        )
+    };
+    let reply = reply?;
+    hook_system_message(core, name, &reply);
+    let reason = reply.block_reason()?.to_owned();
+    *blocks += 1;
+    if *blocks >= STOP_HOOK_BLOCK_CAP {
+        core.emit(AgentEvent::ProviderNotice {
+            kind: "stop_hook_block_cap".to_owned(),
+            data: json!({ "provider": "native", "hook": name, "cap": STOP_HOOK_BLOCK_CAP }),
+        });
+        return None;
+    }
+    Some(reason)
+}
+
+/// Shows a hook's `system_message` to the user (Claude Code: "<Event> says: <message>").
+fn hook_system_message(core: &Core, hook: &str, reply: &HookReply) {
+    if let Some(message) = reply.system_text() {
+        core.emit(AgentEvent::ProviderNotice {
+            kind: "hook_system_message".to_owned(),
+            data: json!({ "provider": "native", "hook": hook, "message": message }),
+        });
+    }
+}
+
+/// Tells the host, without waiting for it, that a tool call waits for the user's permission
+/// (Claude Code's `Notification`, type `permission_prompt`). Its answer is not read.
+fn notify_permission_prompt(core: &Core, tool: &str) {
+    let Some(hooks) = &core.hooks else {
+        return;
+    };
+    let hooks = Arc::clone(hooks);
+    let info = NotificationInfo::permission_prompt(tool);
+    let timeout = core.settings.hook_timeout;
+    tokio::spawn(async move {
+        let _ = tokio::time::timeout(timeout, hooks.notification(&info)).await;
+    });
 }
 
 async fn drive(
@@ -384,8 +536,10 @@ async fn drive(
         {
             let mut state = core.lock();
             state.messages = messages.clone();
-            // The user message just committed carries the note, if there was one.
+            // The user message just committed carries the note and the session start's
+            // context, if there were any.
             state.pending_note = None;
+            state.session_context = None;
         }
         if let Err(error) = core.store.save(&core.transcript_id, &messages) {
             tracing::warn!(
@@ -471,6 +625,8 @@ async fn iterate(
         .flatten()
         .min();
     let mut iterations = 0u32;
+    // Stop-hook blocks of this turn (Claude Code's `stop_hook_active` and its cap).
+    let mut stop_blocks = 0u32;
     loop {
         if signal.token.is_cancelled() {
             return Outcome::Interrupted;
@@ -509,6 +665,14 @@ async fn iterate(
                 Some(FinishReason::ContentFilter) => StopKind::Refusal,
                 _ => StopKind::Completed,
             };
+            // Claude Code's `Stop` / `SubagentStop`: a block keeps the turn going, the
+            // model reads the reason as the next user message (contract v7).
+            if matches!(kind, StopKind::Completed)
+                && let Some(reason) = stop_hook(core, signal, &step.text, &mut stop_blocks).await
+            {
+                messages.push(ChatMessage::user(stop_hook_feedback(&reason)));
+                continue;
+            }
             return Outcome::Stop(kind, Some(step.text));
         }
         if budget_spent(core) {
@@ -1414,6 +1578,10 @@ async fn ask(
             answer,
         },
     );
+    notify_permission_prompt(
+        core,
+        entry.canonical.as_deref().unwrap_or(entry.name.as_str()),
+    );
     core.emit(AgentEvent::PermissionAsk {
         request_id: request_id.clone(),
         tool_name: entry.name.clone(),
@@ -1972,6 +2140,8 @@ mod consent_tests {
             model: "m".to_owned(),
             messages: Vec::new(),
             initial_events: Vec::new(),
+            is_subagent: false,
+            resumed: false,
         });
         (core, hooks)
     }

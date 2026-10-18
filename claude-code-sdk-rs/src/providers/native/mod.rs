@@ -28,7 +28,7 @@
 //! | `resume`, `set_model_live`, `per_session_mcp`, `compaction_signal`, `compaction_manual`, `tool_cancel` | yes |
 //! | `secret_isolation` | yes: stdio servers get an allowlisted environment, credentials are resolved per request and never stored |
 //! | `sandbox` | none: information for the user, not a gate: `trust` opens like on every provider |
-//! | `hooks` | `in_protocol`: `before_tool` (after the exposure check, before the policy, so a replaced input is judged too), `after_tool` (only for a call that ran; its text reaches the model, not the `tool_result` event) and `before_compaction` (its text joins the summary instructions). A hook that does not answer within `NativeConfig::hook_timeout` is skipped with `provider_notice { hook_timeout }` |
+//! | `hooks` | `in_protocol`: `before_tool` (after the exposure check, before the policy, so a replaced input is judged too), `after_tool` (only for a call that ran; its text reaches the model, not the `tool_result` event), `before_compaction` (its text joins the summary instructions), and Claude Code's own events (contract v7): `session_start` once before the first turn (its context opens that turn's user message), `user_prompt_submit` (a block ends the turn before any request, `prompt_blocked`; its context follows the prompt), `before_stop` / `before_subagent_stop` for a sub-agent session (a block keeps the turn going with `Stop hook feedback:\n<reason>` as a user message, overridden at the ninth block in a row, `stop_hook_block_cap`), `notification` (`permission_prompt`, not awaited); a `system_message` becomes `provider_notice { hook_system_message }`. A hook that does not answer within `NativeConfig::hook_timeout` is skipped with `provider_notice { hook_timeout }` |
 //! | `images` | **per model**: what the catalogue says of its vision (`ModelInfo::supports_images`: OpenRouter `architecture.modality`, `input_modalities`, `capabilities`…), else the one-pixel probe when the instance sets `vision_probe`, else the instance's `vision` declaration; `false` when nothing said. A model without vision refuses an image turn with `Unsupported { images }`: the limit of the MODEL, never of the harness |
 //! | `background_tasks` | the session's `nexus` server serves `Bash` (by default, `default_tools` and a model with tools: what `capabilities(model)` says); tasks tracked from the structured results and notifications of `nexus-tools`, `cancel_tools(task)` through its `TaskStop` (see `session.rs`) |
 //! | `native_question` | when `NativeConfig::ask_user_question` is set and the model calls tools: the harness offers its own `AskUserQuestion` (see [`builtin`]), answered by the next turn |
@@ -645,6 +645,11 @@ impl NativeProvider {
             .get(&exposed_name(NEXUS_TOOLS_SERVER, "Bash"))
             .is_some_and(|entry| entry.canonical.as_deref() == Some("Bash"));
 
+        let was_resumed = resumed.is_some();
+        let is_subagent = spec
+            .lineage
+            .as_ref()
+            .is_some_and(|lineage| lineage.depth > 0);
         let (transcript_id, messages) = match resumed {
             Some(found) => found,
             None => (new_transcript_id(), Vec::new()),
@@ -698,6 +703,8 @@ impl NativeProvider {
             model,
             messages,
             initial_events,
+            is_subagent,
+            resumed: was_resumed,
         });
         // The ends of the tasks (and the lines of a `Monitor`) arrive as notifications.
         if core.capabilities.background_tasks

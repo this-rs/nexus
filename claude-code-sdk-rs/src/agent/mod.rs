@@ -55,11 +55,12 @@ pub use registry::{
 };
 pub use resume::ResumeToken;
 pub use spec::{
-    CancelOutcome, CancelScope, CompactOutcome, CompactionInfo, EnvSpec, HookVerdict, InputBlock,
-    InterruptOutcome, InterruptScope, Lineage, McpServerSpec, PermissionDecision,
-    ProcessDiagnostic, QuestionAnswer, QuestionAnswerItem, SessionHooks, SessionLimits,
-    SessionSpec, SubagentRequest, SystemPromptMode, SystemPromptSpec, ToolCallInfo, ToolResultInfo,
-    TurnContext, TurnDirective, TurnInput,
+    CancelOutcome, CancelScope, CompactOutcome, CompactionInfo, EnvSpec, HookReply, HookVerdict,
+    InputBlock, InterruptOutcome, InterruptScope, Lineage, McpServerSpec, NotificationInfo,
+    PermissionDecision, ProcessDiagnostic, PromptInfo, QuestionAnswer, QuestionAnswerItem,
+    STOP_HOOK_BLOCK_CAP, SessionHooks, SessionLimits, SessionSpec, SessionStartInfo, StopInfo,
+    SubagentRequest, SubagentStopInfo, SystemPromptMode, SystemPromptSpec, ToolCallInfo,
+    ToolResultInfo, TurnContext, TurnDirective, TurnInput, prompt_blocked_text, stop_hook_feedback,
 };
 
 /// Version of the contract. Goes up by one whenever a serialised shape
@@ -67,7 +68,7 @@ pub use spec::{
 /// [`ResumeToken`]) or a trait signature changes. The JSON snapshots in
 /// `tests/agent_contract_snapshots.rs` carry it: changing a shape without
 /// changing the version fails that test.
-pub const CONTRACT_VERSION: u32 = 6;
+pub const CONTRACT_VERSION: u32 = 7;
 
 /// Events of a turn, or of the out-of-band channel.
 pub type EventStream = Pin<Box<dyn Stream<Item = AgentEvent> + Send>>;

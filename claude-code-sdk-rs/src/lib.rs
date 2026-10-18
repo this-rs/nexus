@@ -105,6 +105,7 @@ pub use types::{
     HookSpecificOutput,
     McpServerConfig,
     Message,
+    NotificationHookInput,
     // Permission types
     PermissionBehavior,
     PermissionMode,
@@ -135,6 +136,7 @@ pub use types::{
     SandboxSettings,
     SdkBeta,
     SdkPluginConfig,
+    SessionStartHookInput,
     SessionStartHookSpecificOutput,
     // Phase 2 enhancements
     SettingSource,

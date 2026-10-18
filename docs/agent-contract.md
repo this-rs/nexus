@@ -147,7 +147,22 @@ pub struct SessionSpec {
       async fn after_tool(&self, result: &ToolResultInfo) -> Option<String> { None }      // contexte ajouté
       async fn before_compaction(&self, info: &CompactionInfo) -> Option<String> { None } // instructions
       async fn before_turn(&self, ctx: &TurnContext) -> TurnDirective { TurnDirective::default() } // v4
+      // v7 : les événements de Claude Code (ISO1), mêmes champs de sortie que son CLI
+      async fn session_start(&self, info: &SessionStartInfo) -> HookReply { HookReply::none() }
+      async fn user_prompt_submit(&self, prompt: &PromptInfo) -> HookReply { HookReply::none() }
+      async fn before_stop(&self, info: &StopInfo) -> HookReply { HookReply::none() }
+      async fn before_subagent_stop(&self, info: &SubagentStopInfo) -> HookReply { HookReply::none() }
+      async fn notification(&self, info: &NotificationInfo) {}
   }
+  pub struct HookReply { block: Option<String>, additional_context: Option<String>,
+                         system_message: Option<String> }   // decision:"block"+reason, additionalContext, systemMessage
+  pub struct SessionStartInfo { source: String }             // "startup" | "resume"
+  pub struct PromptInfo { prompt: String }
+  pub struct StopInfo { stop_hook_active: bool, last_assistant_message: Option<String> }
+  pub struct SubagentStopInfo { stop_hook_active: bool, last_assistant_message: Option<String>,
+                                agent_id: Option<String>, agent_type: Option<String> }
+  pub struct NotificationInfo { notification_type: String, message: String, title: Option<String> }
+  pub const STOP_HOOK_BLOCK_CAP: u32 = 9;
   pub enum HookVerdict { Continue, Deny { reason: String }, ReplaceInput(Value), AddContext(String),
                          RequireConsent { subject: String, reason: String } }
   pub struct TurnContext { turn_index: u32, current_model: String, input_chars: usize,
@@ -177,6 +192,19 @@ pub struct SessionSpec {
   modèle courant, ou un nom vide, ne fait rien. C'est le point d'entrée du routage cognitif du backend
   (`GraphSessionHooks::before_turn`) : le harnais ne sait pas pourquoi, il obéit. Le changement d'ENDPOINT en
   cours de session n'existe pas (une session = un provider).
+  **Événements de Claude Code (contrat v7, ISO1)** : la sémantique est celle RELEVÉE sur le vrai CLI
+  2.1.296 le 18/10/2026 (`claude-code-sdk-rs/tests/parity/claude-code-2.1.296/hooks-2026-10-18/`), pas
+  celle de sa documentation. Chaque événement lit les champs de `HookReply` qui ont un sens pour lui :
+  | Hook | Quand | `block` | `additional_context` | `system_message` |
+  |---|---|---|---|---|
+  | `session_start` (`SessionStart`) | une fois par session, avant son premier tour ; `source` `startup` / `resume` | ignoré (le CLI ne bloque pas un démarrage) | ouvre le message utilisateur du premier tour (gardé jusqu'au premier tour validé) | notice |
+  | `user_prompt_submit` (`UserPromptSubmit`) | à l'arrivée de l'entrée du tour, avant tout | le tour s'arrête SANS requête : l'entrée n'est pas gardée, `provider_notice { kind: "prompt_blocked", data: { hook, reason } }` puis `done { completed, num_turns: 0, result_text: "UserPromptSubmit operation blocked by hook:\n<reason>\n\nOriginal prompt: <prompt>" }` | suit l'entrée dans le message lu par le modèle | notice |
+  | `before_stop` (`Stop`) | le modèle a répondu sans appeler d'outil, le tour va se clore | le tour CONTINUE : la raison devient un message utilisateur `Stop hook feedback:\n<reason>`, le hook est redemandé à la réponse suivante avec `stop_hook_active: true` ; le 9ᵉ blocage d'affilée (`STOP_HOOK_BLOCK_CAP`, le défaut du CLI) est passé outre : `provider_notice { kind: "stop_hook_block_cap" }` et le tour se clôt | ignoré | notice |
+  | `before_subagent_stop` (`SubagentStop`) | idem pour un sous-agent : le natif l'appelle à la place de `before_stop` dans une session de `lineage.depth >= 1` ; la façade Claude Code, pour les sous-agents du CLI | le sous-agent continue, la raison en message | ignoré | notice |
+  | `notification` (`Notification`) | un appel attend la permission de l'utilisateur (`permission_prompt`, « Claude needs your permission to use <outil> ») ; la façade transmet aussi celles que le CLI envoie (autres types) | — (observation seule ; non attendu par le tour) | — | — |
+  Une notice `system_message` est `provider_notice { kind: "hook_system_message", data: { provider, hook,
+  message } }` (le CLI l'affiche « <Event> says: <message> » à l'utilisateur, jamais au modèle). Un hook
+  sans réponse dans le délai est ignoré comme les autres (`hook_timeout`) : rien n'est bloqué.
   `Capabilities.hooks` dit si le provider les appelle (`in_protocol`), sait seulement lancer une
   commande (`command` — pas d'exécutable relais en v1) ou ne sait pas (`none`). Dans les deux
   derniers cas `open()` **ignore** `spec.hooks` et le backend applique son repli (injection par tour,
@@ -341,7 +369,12 @@ sur un provider, aucune forme sérialisée ne bouge : `CONTRACT_VERSION` reste 5
   texte suit le résultat dans le message d'outil lu par le modèle (pas dans l'événement `tool_result`),
   `before_compaction` joint son texte aux instructions du résumé. Un hook qui ne répond pas dans
   `NativeConfig::hook_timeout` (30 s) est ignoré avec `provider_notice { kind: "hook_timeout" }` ; l'arrêt
-  du tour l'abandonne aussi. Plus de `hooks_not_supported` pour le natif. Un `RequireConsent` y devient une
+  du tour l'abandonne aussi. Plus de `hooks_not_supported` pour le natif. Les événements de Claude Code (v7, §3) :
+  `session_start` et `user_prompt_submit` sont appelés par `run_turn` avant `before_turn` (un prompt bloqué
+  n'appelle pas `before_turn` et ne coûte aucune requête) ; le hook d'arrêt est appelé par `iterate` à une réponse
+  sans appel d'outil terminée normalement (pas `max_tokens`, pas un refus, pas après une question), et un blocage
+  compte comme une itération (`max_turns` le borne aussi) ; `notification` est lancé sans être attendu juste
+  avant chaque `permission_ask`. Un `RequireConsent` y devient une
   question posée par `ask()` (`loop::execute`), donc une `permission_ask` ordinaire : rien de plus n'est
   offert au modèle, et un harnais qui ne peut pas demander (agent, délégation, runner) refuse l'appel avec
   le motif du hook. `before_turn` est appelé par
@@ -1147,11 +1180,12 @@ La projection `Message → AgentEvent` est la fonction publique
 | hook `PreCompact` (callback en protocole, pas un `Message`) | `compaction { phase: started }` | `trigger` ← `HookInput::PreCompact.trigger` ; réponse au CLI : `{"systemMessage": <texte de before_compaction>}` si ce texte n'est pas vide, sinon `{}` (le CLI ajoute `systemMessage` aux instructions du résumé, ignore `reason` et rejette `hookSpecificOutput` : mesuré sur Claude Code 2.1.295, M2c) | `compaction_started` | `trigger` |
 | `System { subtype: task_started \| task_progress \| task_updated \| task_notification }` | `task_update` | `phase` ← suffixe du sous-type ; `task_id` ← `data.task_id` ; `tool_call_id` ← `data.tool_use_id` ; `description`, `status`, `summary` ← clés homonymes ; `event_id` ← `data.uuid` ; `data` ← `data` entier | `workflow` | `subtype` ← `"task_" + phase` ; `data` ← `data` (dédoublonnage sur `event_id`) |
 | `System { subtype: "background_tasks_changed" }` | `background_tasks` | `tasks[]` ← `data.tasks[]` (lecture tolérante : `id`\|`task_id`, `type`\|`kind`, `description`\|`command`, `status`) | (compteur `cli_background_tasks` ← `tasks.len()` ; `active_tasks_update` quand B13b remplace le suivi par PID) | — |
+| `System { subtype: "notification", key: "stop-hook-block-cap" }` | `provider_notice { kind: "stop_hook_block_cap" }` | `data` ← `{ provider: "claude_code", cap: 9, text }` (le CLI a passé outre le 9ᵉ blocage d'affilée d'un hook `Stop` / `SubagentStop`, mesuré 2.1.296) | comme ci-dessous | — |
 | `System` d'un autre sous-type (`status`, inconnu) | `provider_notice` | `kind` ← `subtype` ; `data` ← `data` | en tour : rien ; hors tour : `background_output { source: "system:" + kind, content: pretty(data) }` | vidage opaque, aucun champ lu (seule exception admise à A5 : c'est déjà un vidage JSON aujourd'hui) |
 | `Result` | `done` | `subtype` ← `subtype` ; `stop_reason` ← table ci-dessous ; `is_error` ; `result_text` ← `result` ; `duration_ms` ; `duration_api_ms` ; `num_turns` ; `provider_session_id` ← `session_id` ; `cost` ← `{ usd: total_cost_usd, basis: reported }` (ou `subscription`/`unknown` selon l'instance) ; `usage` ← `usage` (`input_tokens`, `output_tokens`, `cache_read_input_tokens`, `cache_creation_input_tokens`) et `by_model` ← `modelUsage` ; `structured_output` | `result` | `session_id` ← `provider_session_id` ; `duration_ms` ; `cost_usd` ← `cost.usd` ; `subtype` ← `subtype` (défaut d'après `stop_reason`) ; `is_error` ; `num_turns` ; `result_text` ; nouveau : `cost_basis` (A21) |
 | contrôle `can_use_tool` (canal de contrôle, pas un `Message`), outil ≠ `AskUserQuestion` | `permission_ask` | `request_id` ← `request_id`\|`requestId` (racine) ; `tool_name` ← `request.tool_name`\|`toolName` (défaut `"unknown"`) ; `input` ← `request.input` (défaut `{}`) ; `tool_call_id` ← `request.tool_use_id`\|`toolUseId` ; `parent` ← dernier `parent_tool_use_id` vu sur le flux ; `scopes` ← `[once]` si `permission_suggestions` absent ou vide, sinon `[once, session, always]` | `permission_request` | `id` ← `request_id` ; `tool` ← `tool_name` ; `input` ; `parent_tool_use_id` ← `parent` |
 | contrôle `can_use_tool` avec `tool_name == "AskUserQuestion"` | `question { reply: turn }` — l'adaptateur répond lui-même `allow` + `updatedInput: input` (comme le backend aujourd'hui, §15.6) | `question_id` ← `request_id` ; `tool_call_id` ← `tool_use_id` ; `questions` ← `input.questions` (lecture tolérante) ; `input` ← `input` | `ask_user_question` | `id` ← `question_id` ; `tool_call_id` (défaut `""`) ; `questions` ← `input.questions` (brut, défaut `[]`) ; `input` ; `parent_tool_use_id` |
-| contrôle `hook_callback` | (aucun événement : traité par l'adaptateur, appelle `SessionHooks`) | — | — | — |
+| contrôle `hook_callback` | (aucun événement : traité par l'adaptateur, appelle `SessionHooks`) ; v7 : `UserPromptSubmit` → `user_prompt_submit` (réponse `{decision:"block", reason}` et notice `prompt_blocked`, ou `hookSpecificOutput.additionalContext`), `Stop` → `before_stop` et `SubagentStop` → `before_subagent_stop` (réponse `{decision:"block", reason}`), `Notification` → `notification` (réponse `{}` ; le type `permission_prompt` n'est pas retransmis : la façade le dit elle-même à chaque `can_use_tool`, que le CLI n'envoie pas en notification aux callbacks SDK), `systemMessage` ← `HookReply::system_message` et notice `hook_system_message`. `SessionStart` n'arrive JAMAIS à un callback SDK (mesuré) : la façade appelle `session_start` elle-même avant le premier tour et ouvre le premier message envoyé au CLI par son contexte | — | — | — |
 | fin du flux SDK sans `Result` (processus mort) | `error { process_exited }` | `code` si connu | `session_error` | `reason: "subprocess_exited"`, message fixe |
 | erreur d'item du flux SDK | `error { … }` (classée, §7) | — | `error` (ou `retrying` si `retryable()` et aucun octet émis) | `message` ← `"Error: " + Display` |
 
@@ -1232,7 +1266,7 @@ portées qu'elle sait ne pas pouvoir honorer.
 `permission_prompt_tool_name` ← `"stdio"`, `cli_channel_buffer_size` ← 8192, `mcp_servers`,
 `allowed_tools` / `disallowed_tools` ← `policy.allow` / `policy.deny` (omis si vides), `resume` ←
 jeton, `add_dirs` ← `extra_dirs`, `env` ← `EnvSpec.set`, `cli_path` ← extension, hooks
-`PreToolUse` / `PostToolUse` / `PreCompact` (matcher `None`) ← `SessionHooks` quand présent (`before_compaction` → `systemMessage`, cf. §14.1).
+`PreToolUse` / `PostToolUse` / `PreCompact` / `UserPromptSubmit` / `Stop` / `SubagentStop` / `Notification` (matcher `None`) ← `SessionHooks` quand présent (`before_compaction` → `systemMessage`, cf. §14.1 ; v7 : pas de `SessionStart`, que le CLI n'envoie pas aux callbacks SDK).
 
 ## 16. Versionnement et features cargo (A12, A14)
 
@@ -1249,7 +1283,13 @@ jeton, `add_dirs` ← `extra_dirs`, `env` ← `EnvSpec.set`, `cli_path` ← exte
   `tests/snapshots/agent_contract_v5.json` ne diffère de v4 que par la version) ; **v6** = v5 + méthode à
   défaut `AgentSession::compact(Option<String>) -> Result<CompactOutcome, ProviderError>`, type
   `CompactOutcome` et champ `Capabilities::compaction_manual` (`#[serde(default)]`, `false` : un pair v5
-  qui l'ignore reste correct), scénario `compaction` étendu à ce champ (19 champs). Le fichier
+  qui l'ignore reste correct), scénario `compaction` étendu à ce champ (19 champs). ; **v7** = v6 + cinq méthodes à défaut de `SessionHooks` (`session_start`, `user_prompt_submit`, `before_stop`,
+  `before_subagent_stop`, `notification` : les événements de Claude Code, ISO1), le type `HookReply` et les
+  types d'entrée `SessionStartInfo` / `PromptInfo` / `StopInfo` / `SubagentStopInfo` / `NotificationInfo`
+  (ajout compatible : un hôte v6 n'implémente rien et rien ne change pour lui ; aucune forme sérialisée ne
+  bouge : `tests/snapshots/agent_contract_v7.json` ne diffère de v6 que par la version) ; côté SDK,
+  variantes `HookInput::SessionStart` / `HookInput::Notification` et champs optionnels
+  `last_assistant_message` (`Stop`, `SubagentStop`), `agent_id` / `agent_type` (`SubagentStop`). Le fichier
   `tests/snapshots/agent_contract_v2.json` est conservé : le backend et le frontend, tant qu'ils sont en
   v2, le copient comme fixture.
   L'instantané v2 porte aussi `provider_instance_config` (natif avec préréglage, prix et extension ; ACP ; Claude Code) : une entrée d'instantané ajoutée pour une

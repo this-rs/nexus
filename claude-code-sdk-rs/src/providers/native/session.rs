@@ -190,6 +190,11 @@ pub(crate) struct State {
     /// later request, appended after the tools already sent. The list never shrinks during
     /// the session (CTX0: the cached prefix only grows at its tail).
     pub(crate) loaded_tools: Vec<String>,
+    /// Whether the `session_start` hook was asked (once per session, before its first turn).
+    pub(crate) session_start_asked: bool,
+    /// What the `session_start` hook added for the model: read by every turn until one
+    /// commits it in its user message, like `pending_note`.
+    pub(crate) session_context: Option<String>,
 }
 
 impl State {
@@ -248,6 +253,11 @@ pub(crate) struct Core {
     /// request log only: it ties a model request to the host's conversation.
     pub(crate) host_session_id: Option<String>,
     pub(crate) store: Arc<dyn TranscriptStore>,
+    /// Whether the session is a sub-agent (`lineage.depth` 1 or more): its stop hook is
+    /// `before_subagent_stop`, not `before_stop`.
+    pub(crate) is_subagent: bool,
+    /// Whether the session was resumed (`session_start` source `resume`).
+    pub(crate) resumed: bool,
     pub(crate) state: Mutex<State>,
     pub(crate) wake: Notify,
 }
@@ -274,6 +284,8 @@ pub(crate) struct CoreParts {
     pub(crate) model: String,
     pub(crate) messages: Vec<ChatMessage>,
     pub(crate) initial_events: Vec<AgentEvent>,
+    pub(crate) is_subagent: bool,
+    pub(crate) resumed: bool,
 }
 
 impl Core {
@@ -304,6 +316,8 @@ impl Core {
             tasks: TaskTable::default(),
             pending_note: None,
             loaded_tools: Vec::new(),
+            session_start_asked: false,
+            session_context: None,
         };
         for event in parts.initial_events {
             state.push_out_of_band(event);
@@ -325,6 +339,8 @@ impl Core {
             transcript_id: parts.transcript_id,
             host_session_id: parts.host_session_id,
             store: parts.store,
+            is_subagent: parts.is_subagent,
+            resumed: parts.resumed,
             state: Mutex::new(state),
             wake: Notify::new(),
         })

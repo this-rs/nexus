@@ -51,11 +51,11 @@ use super::policy_map::{canonical_name, neutral_to_native, tool_category};
 use super::tasks::{TaskTable, task_from_tool_call};
 use crate::agent::{
     AgentEvent, AgentProvider, AgentSession, BackgroundTaskStatus, CancelOutcome, CancelScope,
-    Capabilities, CompactionInfo, CompactionPhase, CostBasis, EventStream, HealthStatus,
-    HookVerdict, InterruptOutcome, InterruptScope, ModelInfo, PermissionDecision, PermissionScope,
-    PolicyMode, ProcessDiagnostic, ProviderError, ProviderHealth, ProviderKind, QuestionAnswer,
-    ResumeToken, SessionHooks, SessionSpec, TaskPhase, ToolCallInfo, ToolResultInfo, TurnInput,
-    now_ms,
+    Capabilities, CompactionInfo, CompactionPhase, CostBasis, EventStream, HealthStatus, HookReply,
+    HookVerdict, InterruptOutcome, InterruptScope, ModelInfo, NotificationInfo, PermissionDecision,
+    PermissionScope, PolicyMode, ProcessDiagnostic, PromptInfo, ProviderError, ProviderHealth,
+    ProviderKind, QuestionAnswer, ResumeToken, SessionHooks, SessionSpec, SessionStartInfo,
+    StopInfo, SubagentStopInfo, TaskPhase, ToolCallInfo, ToolResultInfo, TurnInput, now_ms,
 };
 use crate::errors::SdkError;
 use crate::interactive::{InteractiveClient, dispatch_hook_from_registry};
@@ -64,7 +64,7 @@ use crate::transport::subprocess::{find_claude_cli, get_cli_version_with_policy,
 use crate::types::{
     ClaudeCodeOptions, HookCallback, HookContext, HookInput, HookJSONOutput, HookMatcher,
     HookSpecificOutput, Message, PostToolUseHookSpecificOutput, PreToolUseHookSpecificOutput,
-    SyncHookJSONOutput,
+    SyncHookJSONOutput, UserPromptSubmitHookSpecificOutput,
 };
 
 /// Capacity of the out-of-band buffer (contract §9).
@@ -141,6 +141,7 @@ impl ClaudeCodeProvider {
         let capabilities = self.config.capabilities(spec.model.as_deref());
         let mut options = build_options(&self.config, &spec, resume.as_deref())?;
         let core = Arc::new(Core::new(capabilities, self.config.cost_basis));
+        let resumed = resume.is_some();
         if let Some(session_id) = resume {
             core.lock().session_id = Some(session_id);
         }
@@ -172,7 +173,13 @@ impl ClaudeCodeProvider {
         let registry = client.hook_callbacks();
         let pid = client.child_pid().await;
         *core.cli_pid.lock().unwrap_or_else(PoisonError::into_inner) = pid;
-        let pump = tokio::spawn(pump(Arc::clone(&core), messages, control_rx, registry));
+        let pump = tokio::spawn(pump(
+            Arc::clone(&core),
+            messages,
+            control_rx,
+            registry,
+            spec.hooks.clone(),
+        ));
         Ok(Arc::new(ClaudeCodeSession {
             core,
             client: tokio::sync::Mutex::new(client),
@@ -183,6 +190,8 @@ impl ClaudeCodeProvider {
                     .or_else(|| self.config.default_model.clone()),
             ),
             turns: std::sync::atomic::AtomicU32::new(0),
+            start_hook: Mutex::new(StartHook::default()),
+            resumed,
             pid,
             machine: self
                 .config
@@ -746,6 +755,7 @@ async fn pump(
     mut messages: MessageStream,
     mut control_rx: Option<mpsc::Receiver<Value>>,
     registry: HookRegistry,
+    hooks: Option<Arc<dyn SessionHooks>>,
 ) {
     loop {
         tokio::select! {
@@ -762,7 +772,7 @@ async fn pump(
                 },
             },
             request = next_control(&mut control_rx) => match request {
-                Some(request) => on_control(&core, request, &registry).await,
+                Some(request) => on_control(&core, request, &registry, hooks.as_ref()).await,
                 None => control_rx = None,
             },
         }
@@ -770,9 +780,28 @@ async fn pump(
     debug!("Claude Code session pump ended");
 }
 
-async fn on_control(core: &Arc<Core>, message: Value, registry: &HookRegistry) {
+async fn on_control(
+    core: &Arc<Core>,
+    message: Value,
+    registry: &HookRegistry,
+    hooks: Option<&Arc<dyn SessionHooks>>,
+) {
     match control::parse_inbound(&message) {
-        InboundControl::CanUseTool(request) => core.on_permission_request(request).await,
+        InboundControl::CanUseTool(request) => {
+            // Claude Code's `Notification` of type `permission_prompt`: the CLI sends none to
+            // SDK callbacks for a `can_use_tool` (measured on 2.1.296), the façade tells the
+            // host itself, without waiting for it, as the native harness does.
+            if let Some(hooks) = hooks
+                && !request.is_question()
+            {
+                let hooks = Arc::clone(hooks);
+                let info = NotificationInfo::permission_prompt(&request.tool_name);
+                tokio::spawn(async move {
+                    let _ = tokio::time::timeout(HOOK_TIMEOUT, hooks.notification(&info)).await;
+                });
+            }
+            core.on_permission_request(request).await
+        },
         InboundControl::HookCallback { request_id } => {
             // A hook may take its time (it calls the host): it must not hold
             // back the events of the turn.
@@ -914,14 +943,102 @@ impl HookCallback for NeutralHook {
                     _ => sync_output(None),
                 })
             },
+            // Contract v7: the CLI's own events, answered with the fields it reads (measured on
+            // 2.1.296, `tests/parity/claude-code-2.1.296/hooks-2026-10-18/`).
+            HookInput::UserPromptSubmit(submit) => {
+                let reply = self
+                    .hooks
+                    .user_prompt_submit(&PromptInfo::new(submit.prompt.clone()))
+                    .await;
+                self.system_message("user_prompt_submit", &reply);
+                if let Some(reason) = reply.block_reason() {
+                    // The CLI then ends the turn itself, with no request and a result that
+                    // names the reason; the notice is the native harness's.
+                    self.core.emit(AgentEvent::ProviderNotice {
+                        kind: "prompt_blocked".to_owned(),
+                        data: json!({
+                            "provider": "claude_code",
+                            "hook": "user_prompt_submit",
+                            "reason": reason,
+                        }),
+                    });
+                }
+                Ok(reply_output(
+                    &reply,
+                    reply.context_text().map(|context| {
+                        HookSpecificOutput::UserPromptSubmit(UserPromptSubmitHookSpecificOutput {
+                            additional_context: Some(context.to_owned()),
+                        })
+                    }),
+                ))
+            },
+            HookInput::Stop(stop) => {
+                let info =
+                    StopInfo::new(stop.stop_hook_active, stop.last_assistant_message.clone());
+                let reply = self.hooks.before_stop(&info).await;
+                self.system_message("before_stop", &reply);
+                Ok(reply_output(&reply, None))
+            },
+            HookInput::SubagentStop(stop) => {
+                let mut info = SubagentStopInfo::new(
+                    stop.stop_hook_active,
+                    stop.last_assistant_message.clone(),
+                );
+                info.agent_id = stop.agent_id.clone();
+                info.agent_type = stop.agent_type.clone();
+                let reply = self.hooks.before_subagent_stop(&info).await;
+                self.system_message("before_subagent_stop", &reply);
+                Ok(reply_output(&reply, None))
+            },
+            HookInput::Notification(notification) => {
+                // The façade tells of a permission prompt itself (`on_control`): the CLI does
+                // not send one to SDK callbacks (measured), and if a later CLI does, it is not
+                // told twice.
+                if notification.notification_type != "permission_prompt" {
+                    let mut info = NotificationInfo::new(
+                        notification.notification_type.clone(),
+                        notification.message.clone(),
+                    );
+                    info.title = notification.title.clone();
+                    self.hooks.notification(&info).await;
+                }
+                Ok(sync_output(None))
+            },
             // Not registered by this adapter.
             _ => Ok(sync_output(None)),
         }
     }
 }
 
+impl NeutralHook {
+    /// Shows a hook's `system_message` to the user, under the same notice as the native
+    /// harness (the CLI also prints its own "<Event> says: …" line).
+    fn system_message(&self, hook: &str, reply: &HookReply) {
+        if let Some(message) = reply.system_text() {
+            self.core.emit(AgentEvent::ProviderNotice {
+                kind: "hook_system_message".to_owned(),
+                data: json!({ "provider": "claude_code", "hook": hook, "message": message }),
+            });
+        }
+    }
+}
+
+/// A neutral [`HookReply`] as the CLI reads it: `decision: "block"` + `reason`, `systemMessage`,
+/// and the event's own output.
+fn reply_output(reply: &HookReply, specific: Option<HookSpecificOutput>) -> HookJSONOutput {
+    let reason = reply.block_reason();
+    HookJSONOutput::Sync(SyncHookJSONOutput {
+        decision: reason.map(|_| "block".to_owned()),
+        reason: reason.map(str::to_owned),
+        system_message: reply.system_text().map(str::to_owned),
+        hook_specific_output: specific,
+        ..SyncHookJSONOutput::default()
+    })
+}
+
 /// The hook map of a session that carries neutral hooks: one matcher without
-/// criteria for each of the three events.
+/// criteria for each event the CLI sends to SDK callbacks (`SessionStart` is not one of
+/// them, measured: the façade asks `session_start` itself, `ClaudeCodeSession::session_start`).
 fn neutral_hooks(
     hooks: Arc<dyn SessionHooks>,
     core: &Arc<Core>,
@@ -930,18 +1047,26 @@ fn neutral_hooks(
         hooks,
         core: Arc::clone(core),
     });
-    ["PreToolUse", "PostToolUse", "PreCompact"]
-        .into_iter()
-        .map(|event| {
-            (
-                event.to_owned(),
-                vec![HookMatcher {
-                    matcher: None,
-                    hooks: vec![Arc::clone(&callback)],
-                }],
-            )
-        })
-        .collect()
+    [
+        "PreToolUse",
+        "PostToolUse",
+        "PreCompact",
+        "UserPromptSubmit",
+        "Stop",
+        "SubagentStop",
+        "Notification",
+    ]
+    .into_iter()
+    .map(|event| {
+        (
+            event.to_owned(),
+            vec![HookMatcher {
+                matcher: None,
+                hooks: vec![Arc::clone(&callback)],
+            }],
+        )
+    })
+    .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -961,6 +1086,11 @@ struct ClaudeCodeSession {
     model: Mutex<Option<String>>,
     /// Turns started so far.
     turns: std::sync::atomic::AtomicU32,
+    /// The `session_start` hook: asked before the first turn, its context sent with the
+    /// first message that reaches the CLI.
+    start_hook: Mutex<StartHook>,
+    /// Whether the session was resumed (`session_start` source `resume`).
+    resumed: bool,
     /// Process identifier of the CLI. Diagnostic only.
     pid: Option<u32>,
     /// The machine the CLI runs on (`user@host:port`), `None` when local. A session
@@ -980,6 +1110,55 @@ impl Drop for ClaudeCodeSession {
 impl ClaudeCodeSession {
     fn usable(&self) -> Result<(), ProviderError> {
         Core::check_usable(&self.core.lock())
+    }
+
+    /// Asks the `session_start` hook once, before the first turn, and returns what it added
+    /// that no message has carried to the CLI yet. The CLI does not send `SessionStart` to SDK
+    /// callbacks (measured on 2.1.296), so the façade asks it itself, as the native harness
+    /// does; its context opens the first message, its `system_message` is a notice.
+    async fn session_start(&self) -> Option<String> {
+        let hooks = self.hooks.as_ref()?;
+        let asked = std::mem::replace(
+            &mut self
+                .start_hook
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .asked,
+            true,
+        );
+        if !asked {
+            let source = if self.resumed { "resume" } else { "startup" };
+            let info = SessionStartInfo::new(source);
+            match tokio::time::timeout(HOOK_TIMEOUT, hooks.session_start(&info)).await {
+                Ok(reply) => {
+                    if let Some(message) = reply.system_text() {
+                        self.core.emit(AgentEvent::ProviderNotice {
+                            kind: "hook_system_message".to_owned(),
+                            data: json!({
+                                "provider": "claude_code",
+                                "hook": "session_start",
+                                "message": message,
+                            }),
+                        });
+                    }
+                    if let Some(context) = reply.context_text() {
+                        self.start_hook
+                            .lock()
+                            .unwrap_or_else(PoisonError::into_inner)
+                            .context = Some(context.to_owned());
+                    }
+                },
+                Err(_) => self.core.emit(AgentEvent::ProviderNotice {
+                    kind: "hook_timeout".to_owned(),
+                    data: json!({ "provider": "claude_code", "hook": "session_start" }),
+                }),
+            }
+        }
+        self.start_hook
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .context
+            .clone()
     }
 
     /// Asks the host which model the turn runs on (`SessionHooks::before_turn`).
@@ -1019,6 +1198,15 @@ impl ClaudeCodeSession {
         self.core.emit(AgentEvent::ModelChanged { model });
         Ok(())
     }
+}
+
+/// The `session_start` hook of a session, on the façade.
+#[derive(Default)]
+struct StartHook {
+    /// Whether it was asked (once per session).
+    asked: bool,
+    /// What it added for the model, until a message carries it to the CLI.
+    context: Option<String>,
 }
 
 /// How long a `before_turn` hook may take before the turn goes on without it.
@@ -1065,20 +1253,37 @@ impl AgentSession for ClaudeCodeSession {
             (receiver, blocks)
         };
         let text = input.joined_text();
+        let session_context = self.session_start().await;
         if let Err(error) = self.before_turn(text.len()).await {
             self.core.lock().turn = None;
             return Err(error);
         }
         // Text only: the string message, unchanged. With an image: the blocks,
-        // in the user's order.
-        let sent = match blocks {
-            None => self.client.lock().await.send_message(text).await,
-            Some(blocks) => self.client.lock().await.send_message_blocks(blocks).await,
+        // in the user's order. The `session_start` hook's context opens the first
+        // message the CLI receives.
+        let sent = match (blocks, &session_context) {
+            (None, None) => self.client.lock().await.send_message(text).await,
+            (None, Some(context)) => {
+                let text = format!("{context}\n\n{text}");
+                self.client.lock().await.send_message(text).await
+            },
+            (Some(mut blocks), context) => {
+                if let Some(context) = context {
+                    blocks.insert(0, crate::transport::UserContentBlock::text(context.clone()));
+                }
+                self.client.lock().await.send_message_blocks(blocks).await
+            },
         };
         if let Err(error) = sent {
             // Nothing reached the CLI: no turn is running.
             self.core.lock().turn = None;
             return Err(error.into());
+        }
+        if session_context.is_some() {
+            self.start_hook
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .context = None;
         }
         Ok(Box::pin(UnboundedReceiverStream::new(receiver)))
     }

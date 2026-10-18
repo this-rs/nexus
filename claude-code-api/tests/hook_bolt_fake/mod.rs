@@ -496,6 +496,7 @@ pub fn stop(stop_hook_active: bool) -> HookInput {
         cwd: "workdir".to_string(),
         permission_mode: None,
         stop_hook_active,
+        last_assistant_message: None,
     })
 }
 

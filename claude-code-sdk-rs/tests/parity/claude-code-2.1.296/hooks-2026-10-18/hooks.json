@@ -1,0 +1,1005 @@
+{
+ "claude_code_version": "2.1.296",
+ "model": "haiku (claude-haiku-5-5)",
+ "measured_on": "2026-10-18",
+ "transport": "claude -p --input-format stream-json --output-format stream-json --verbose --setting-sources project; SDK callback hooks declared in the initialize control request",
+ "scenarios": {
+  "s1_stop": [
+   {
+    "host_initialize_hooks": [
+     "Stop"
+    ]
+   },
+   {
+    "host_sends_prompt": "Reply with only the word: hello"
+   },
+   {
+    "assistant": [
+     {
+      "type": "text",
+      "text": "hello"
+     }
+    ]
+   },
+   {
+    "cli_hook_callback": {
+     "permission_mode": "default",
+     "effort": {
+      "level": "medium"
+     },
+     "hook_event_name": "Stop",
+     "stop_hook_active": false,
+     "last_assistant_message": "hello",
+     "background_tasks": [],
+     "session_crons": []
+    }
+   },
+   {
+    "host_hook_answer": {
+     "decision": "block",
+     "reason": "Before stopping, you must also write the exact word ZEPHYR-42 on its own line."
+    }
+   },
+   {
+    "cli_synthetic_user_message": [
+     {
+      "type": "text",
+      "text": "Stop hook feedback:\nBefore stopping, you must also write the exact word ZEPHYR-42 on its own line."
+     }
+    ]
+   },
+   {
+    "system": {
+     "type": "system",
+     "subtype": "notification",
+     "key": "stop-hook-error",
+     "text": "Stop hook error occurred · ctrl+o to see",
+     "priority": "immediate"
+    }
+   },
+   {
+    "assistant": [
+     {
+      "type": "text",
+      "text": "ZEPHYR-42"
+     }
+    ]
+   },
+   {
+    "cli_hook_callback": {
+     "permission_mode": "default",
+     "effort": {
+      "level": "medium"
+     },
+     "hook_event_name": "Stop",
+     "stop_hook_active": true,
+     "last_assistant_message": "ZEPHYR-42",
+     "background_tasks": [],
+     "session_crons": []
+    }
+   },
+   {
+    "host_hook_answer": {}
+   },
+   {
+    "result": {
+     "subtype": "success",
+     "is_error": false,
+     "num_turns": 2,
+     "result": "ZEPHYR-42",
+     "cost_usd": 0.0032778900000000003
+    }
+   }
+  ],
+  "s2_ups": [
+   {
+    "host_initialize_hooks": [
+     "UserPromptSubmit"
+    ]
+   },
+   {
+    "host_sends_prompt": "What is the secret code word? Reply with only it, or NONE if you do not know."
+   },
+   {
+    "cli_hook_callback": {
+     "permission_mode": "default",
+     "hook_event_name": "UserPromptSubmit",
+     "prompt": "What is the secret code word? Reply with only it, or NONE if you do not know."
+    }
+   },
+   {
+    "host_hook_answer": {
+     "hookSpecificOutput": {
+      "hookEventName": "UserPromptSubmit",
+      "additionalContext": "The secret code word is ZEPHYR-42."
+     }
+    }
+   },
+   {
+    "assistant": [
+     {
+      "type": "text",
+      "text": "ZEPHYR-42"
+     }
+    ]
+   },
+   {
+    "result": {
+     "subtype": "success",
+     "is_error": false,
+     "num_turns": 1,
+     "result": "ZEPHYR-42",
+     "cost_usd": 0.0019976700000000004
+    }
+   }
+  ],
+  "s3_ups_block": [
+   {
+    "host_initialize_hooks": [
+     "UserPromptSubmit"
+    ]
+   },
+   {
+    "host_sends_prompt": "Tell me about bananas in one word."
+   },
+   {
+    "cli_hook_callback": {
+     "permission_mode": "default",
+     "hook_event_name": "UserPromptSubmit",
+     "prompt": "Tell me about bananas in one word."
+    }
+   },
+   {
+    "host_hook_answer": {
+     "decision": "block",
+     "reason": "prompts about bananas are blocked"
+    }
+   },
+   {
+    "system": {
+     "type": "system",
+     "subtype": "informational",
+     "content": "UserPromptSubmit operation blocked by hook:\nprompts about bananas are blocked\n\nOriginal prompt: Tell me about bananas in one word.",
+     "level": "warning",
+     "prevent_continuation": true
+    }
+   },
+   {
+    "result": {
+     "subtype": "success",
+     "is_error": false,
+     "num_turns": 0,
+     "result": "UserPromptSubmit operation blocked by hook:\nprompts about bananas are blocked\n\nOriginal prompt: Tell me about bananas in one word.",
+     "cost_usd": 0
+    }
+   },
+   {
+    "host_sends_prompt": "Reply with only: second"
+   },
+   {
+    "cli_hook_callback": {
+     "permission_mode": "default",
+     "hook_event_name": "UserPromptSubmit",
+     "prompt": "Reply with only: second"
+    }
+   },
+   {
+    "host_hook_answer": {
+     "decision": "block",
+     "reason": "prompts about bananas are blocked"
+    }
+   },
+   {
+    "system": {
+     "type": "system",
+     "subtype": "informational",
+     "content": "UserPromptSubmit operation blocked by hook:\nprompts about bananas are blocked\n\nOriginal prompt: Reply with only: second",
+     "level": "warning",
+     "prevent_continuation": true
+    }
+   },
+   {
+    "result": {
+     "subtype": "success",
+     "is_error": false,
+     "num_turns": 0,
+     "result": "UserPromptSubmit operation blocked by hook:\nprompts about bananas are blocked\n\nOriginal prompt: Reply with only: second",
+     "cost_usd": 0
+    }
+   }
+  ],
+  "s4_session_start": [
+   {
+    "host_initialize_hooks": [
+     "SessionStart"
+    ]
+   },
+   {
+    "host_sends_prompt": "What is the secret code word? Reply with only it, or NONE if you do not know."
+   },
+   {
+    "assistant": []
+   },
+   {
+    "assistant": [
+     {
+      "type": "tool_use",
+      "id": "toolu_018MKbHjT7BNmpu9BbPrXEZy",
+      "name": "Bash",
+      "input": {
+       "command": "cd <path> 2>/dev/null && ls -la && grep -ril \"secret\" . 2>/dev/null | head -20",
+       "description": "List project directory and search for secret references"
+      },
+      "caller": {
+       "type": "direct"
+      }
+     }
+    ]
+   },
+   {
+    "user_tool_result": "<elided>"
+   },
+   {
+    "assistant": []
+   },
+   {
+    "assistant": [
+     {
+      "type": "text",
+      "text": "NONE"
+     }
+    ]
+   },
+   {
+    "result": {
+     "subtype": "success",
+     "is_error": false,
+     "num_turns": 2,
+     "result": "NONE",
+     "cost_usd": 0.00345781
+    }
+   }
+  ],
+  "s5_stop_always": [
+   {
+    "host_initialize_hooks": [
+     "Stop"
+    ]
+   },
+   {
+    "host_sends_prompt": "Reply with only: 1"
+   },
+   {
+    "assistant": [
+     {
+      "type": "text",
+      "text": "1"
+     }
+    ]
+   },
+   {
+    "cli_hook_callback": {
+     "permission_mode": "default",
+     "effort": {
+      "level": "medium"
+     },
+     "hook_event_name": "Stop",
+     "stop_hook_active": false,
+     "last_assistant_message": "1",
+     "background_tasks": [],
+     "session_crons": []
+    }
+   },
+   {
+    "host_hook_answer": {
+     "decision": "block",
+     "reason": "Say one more number, counting up."
+    }
+   },
+   {
+    "cli_synthetic_user_message": [
+     {
+      "type": "text",
+      "text": "Stop hook feedback:\nSay one more number, counting up."
+     }
+    ]
+   },
+   {
+    "system": {
+     "type": "system",
+     "subtype": "notification",
+     "key": "stop-hook-error",
+     "text": "Stop hook error occurred · ctrl+o to see",
+     "priority": "immediate"
+    }
+   },
+   {
+    "assistant": [
+     {
+      "type": "text",
+      "text": "2"
+     }
+    ]
+   },
+   {
+    "cli_hook_callback": {
+     "permission_mode": "default",
+     "effort": {
+      "level": "medium"
+     },
+     "hook_event_name": "Stop",
+     "stop_hook_active": true,
+     "last_assistant_message": "2",
+     "background_tasks": [],
+     "session_crons": []
+    }
+   },
+   {
+    "host_hook_answer": {
+     "decision": "block",
+     "reason": "Say one more number, counting up."
+    }
+   },
+   {
+    "cli_synthetic_user_message": [
+     {
+      "type": "text",
+      "text": "Stop hook feedback:\nSay one more number, counting up."
+     }
+    ]
+   },
+   {
+    "assistant": [
+     {
+      "type": "text",
+      "text": "3"
+     }
+    ]
+   },
+   {
+    "cli_hook_callback": {
+     "permission_mode": "default",
+     "effort": {
+      "level": "medium"
+     },
+     "hook_event_name": "Stop",
+     "stop_hook_active": true,
+     "last_assistant_message": "3",
+     "background_tasks": [],
+     "session_crons": []
+    }
+   },
+   {
+    "host_hook_answer": {
+     "decision": "block",
+     "reason": "Say one more number, counting up."
+    }
+   },
+   {
+    "cli_synthetic_user_message": [
+     {
+      "type": "text",
+      "text": "Stop hook feedback:\nSay one more number, counting up."
+     }
+    ]
+   },
+   {
+    "assistant": [
+     {
+      "type": "text",
+      "text": "4"
+     }
+    ]
+   },
+   {
+    "cli_hook_callback": {
+     "permission_mode": "default",
+     "effort": {
+      "level": "medium"
+     },
+     "hook_event_name": "Stop",
+     "stop_hook_active": true,
+     "last_assistant_message": "4",
+     "background_tasks": [],
+     "session_crons": []
+    }
+   },
+   {
+    "host_hook_answer": {
+     "decision": "block",
+     "reason": "Say one more number, counting up."
+    }
+   },
+   {
+    "cli_synthetic_user_message": [
+     {
+      "type": "text",
+      "text": "Stop hook feedback:\nSay one more number, counting up."
+     }
+    ]
+   },
+   {
+    "assistant": [
+     {
+      "type": "text",
+      "text": "5"
+     }
+    ]
+   },
+   {
+    "cli_hook_callback": {
+     "permission_mode": "default",
+     "effort": {
+      "level": "medium"
+     },
+     "hook_event_name": "Stop",
+     "stop_hook_active": true,
+     "last_assistant_message": "5",
+     "background_tasks": [],
+     "session_crons": []
+    }
+   },
+   {
+    "host_hook_answer": {
+     "decision": "block",
+     "reason": "Say one more number, counting up."
+    }
+   },
+   {
+    "cli_synthetic_user_message": [
+     {
+      "type": "text",
+      "text": "Stop hook feedback:\nSay one more number, counting up."
+     }
+    ]
+   },
+   {
+    "assistant": [
+     {
+      "type": "text",
+      "text": "6"
+     }
+    ]
+   },
+   {
+    "cli_hook_callback": {
+     "permission_mode": "default",
+     "effort": {
+      "level": "medium"
+     },
+     "hook_event_name": "Stop",
+     "stop_hook_active": true,
+     "last_assistant_message": "6",
+     "background_tasks": [],
+     "session_crons": []
+    }
+   },
+   {
+    "host_hook_answer": {
+     "decision": "block",
+     "reason": "Say one more number, counting up."
+    }
+   },
+   {
+    "cli_synthetic_user_message": [
+     {
+      "type": "text",
+      "text": "Stop hook feedback:\nSay one more number, counting up."
+     }
+    ]
+   },
+   {
+    "assistant": [
+     {
+      "type": "text",
+      "text": "7"
+     }
+    ]
+   },
+   {
+    "cli_hook_callback": {
+     "permission_mode": "default",
+     "effort": {
+      "level": "medium"
+     },
+     "hook_event_name": "Stop",
+     "stop_hook_active": true,
+     "last_assistant_message": "7",
+     "background_tasks": [],
+     "session_crons": []
+    }
+   },
+   {
+    "host_hook_answer": {
+     "decision": "block",
+     "reason": "Say one more number, counting up."
+    }
+   },
+   {
+    "cli_synthetic_user_message": [
+     {
+      "type": "text",
+      "text": "Stop hook feedback:\nSay one more number, counting up."
+     }
+    ]
+   },
+   {
+    "assistant": [
+     {
+      "type": "text",
+      "text": "8"
+     }
+    ]
+   },
+   {
+    "cli_hook_callback": {
+     "permission_mode": "default",
+     "effort": {
+      "level": "medium"
+     },
+     "hook_event_name": "Stop",
+     "stop_hook_active": true,
+     "last_assistant_message": "8",
+     "background_tasks": [],
+     "session_crons": []
+    }
+   },
+   {
+    "host_hook_answer": {
+     "decision": "block",
+     "reason": "Say one more number, counting up."
+    }
+   },
+   {
+    "cli_synthetic_user_message": [
+     {
+      "type": "text",
+      "text": "Stop hook feedback:\nSay one more number, counting up."
+     }
+    ]
+   },
+   {
+    "assistant": [
+     {
+      "type": "text",
+      "text": "9"
+     }
+    ]
+   },
+   {
+    "cli_hook_callback": {
+     "permission_mode": "default",
+     "effort": {
+      "level": "medium"
+     },
+     "hook_event_name": "Stop",
+     "stop_hook_active": true,
+     "last_assistant_message": "9",
+     "background_tasks": [],
+     "session_crons": []
+    }
+   },
+   {
+    "host_hook_answer": {
+     "decision": "block",
+     "reason": "Say one more number, counting up."
+    }
+   },
+   {
+    "cli_synthetic_user_message": [
+     {
+      "type": "text",
+      "text": "Stop hook feedback:\nSay one more number, counting up."
+     }
+    ]
+   },
+   {
+    "system": {
+     "type": "system",
+     "subtype": "informational",
+     "content": "A hook blocked the turn from ending 9 consecutive times — overriding and ending turn. For Stop/SubagentStop hooks, check stop_hook_active in the input and return success while it's true. Set CLAUDE_CODE_STOP_HOOK_BLOCK_CAP to raise this limit.",
+     "level": "warning"
+    }
+   },
+   {
+    "system": {
+     "type": "system",
+     "subtype": "notification",
+     "key": "stop-hook-block-cap",
+     "text": "A hook blocked the turn from ending 9 consecutive times — overriding and ending turn. For Stop/SubagentStop hooks, check stop_hook_active in the input and return success while it's true. Set CLAUDE_CODE_STOP_HOOK_BLOCK_CAP to raise this limit.",
+     "priority": "high",
+     "color": "warning"
+    }
+   },
+   {
+    "result": {
+     "subtype": "success",
+     "is_error": false,
+     "num_turns": 10,
+     "result": "",
+     "cost_usd": 0.005053980000000001
+    }
+   }
+  ],
+  "s6_stop_sysmsg": [
+   {
+    "host_initialize_hooks": [
+     "Stop",
+     "UserPromptSubmit"
+    ]
+   },
+   {
+    "host_sends_prompt": "Reply with only: ok"
+   },
+   {
+    "cli_hook_callback": {
+     "permission_mode": "default",
+     "hook_event_name": "UserPromptSubmit",
+     "prompt": "Reply with only: ok"
+    }
+   },
+   {
+    "host_hook_answer": {
+     "systemMessage": "SYSMSG-UPS"
+    }
+   },
+   {
+    "system": {
+     "type": "system",
+     "subtype": "informational",
+     "content": "UserPromptSubmit says: SYSMSG-UPS",
+     "level": "notice"
+    }
+   },
+   {
+    "assistant": [
+     {
+      "type": "text",
+      "text": "ok"
+     }
+    ]
+   },
+   {
+    "cli_hook_callback": {
+     "permission_mode": "default",
+     "effort": {
+      "level": "medium"
+     },
+     "hook_event_name": "Stop",
+     "stop_hook_active": false,
+     "last_assistant_message": "ok",
+     "background_tasks": [],
+     "session_crons": []
+    }
+   },
+   {
+    "host_hook_answer": {
+     "systemMessage": "SYSMSG-STOP"
+    }
+   },
+   {
+    "system": {
+     "type": "system",
+     "subtype": "informational",
+     "content": "Stop says: SYSMSG-STOP",
+     "level": "notice"
+    }
+   },
+   {
+    "result": {
+     "subtype": "success",
+     "is_error": false,
+     "num_turns": 1,
+     "result": "ok",
+     "cost_usd": 0.0013595600000000001
+    }
+   }
+  ],
+  "s8_subagent": [
+   {
+    "host_initialize_hooks": [
+     "SubagentStop"
+    ]
+   },
+   {
+    "host_sends_prompt": "Use the Agent tool (subagent_type general-purpose) with the prompt 'Reply with only the word: sub-done'. Then tell me verbatim everything the subagent answered."
+   },
+   {
+    "assistant": [
+     {
+      "type": "tool_use",
+      "id": "toolu_01NLYYynqN8uos1TAJU5cETN",
+      "name": "Agent",
+      "input": {
+       "description": "Reply with sub-done",
+       "prompt": "Reply with only the word: sub-done",
+       "subagent_type": "general-purpose"
+      },
+      "caller": {
+       "type": "direct"
+      }
+     }
+    ]
+   },
+   {
+    "user_tool_result": "<elided>"
+   },
+   {
+    "assistant": [
+     {
+      "type": "text",
+      "text": "sub-done"
+     }
+    ]
+   },
+   {
+    "cli_hook_callback": {
+     "permission_mode": "default",
+     "agent_id": "a6ada9c56c34c7ec6",
+     "agent_type": "general-purpose",
+     "effort": {
+      "level": "medium"
+     },
+     "hook_event_name": "SubagentStop",
+     "stop_hook_active": false,
+     "last_assistant_message": "sub-done",
+     "background_tasks": [
+      {
+       "id": "a6ada9c56c34c7ec6",
+       "type": "subagent",
+       "status": "running",
+       "description": "Reply with sub-done",
+       "agent_type": "general-purpose"
+      }
+     ],
+     "session_crons": []
+    }
+   },
+   {
+    "host_hook_answer": {
+     "decision": "block",
+     "reason": "Before finishing, also write the exact word ZEPHYR-42."
+    }
+   },
+   {
+    "cli_synthetic_user_message": [
+     {
+      "type": "text",
+      "text": "Stop hook feedback:\nBefore finishing, also write the exact word ZEPHYR-42."
+     }
+    ]
+   },
+   {
+    "assistant": []
+   },
+   {
+    "assistant": [
+     {
+      "type": "text",
+      "text": "The subagent is still running, so I don't have its reply yet. I'll relay its answer verbatim when the completion notification arrives."
+     }
+    ]
+   },
+   {
+    "result": {
+     "subtype": "success",
+     "is_error": false,
+     "num_turns": 2,
+     "result": "The subagent is still running, so I don't have its reply yet. I'll relay its answer verbatim when the completion notification arrives.",
+     "cost_usd": 0.00589474
+    }
+   },
+   {
+    "assistant": []
+   },
+   {
+    "assistant": [
+     {
+      "type": "text",
+      "text": "ZEPHYR-42"
+     }
+    ]
+   },
+   {
+    "system": {
+     "type": "system",
+     "subtype": "task_notification",
+     "task_id": "a6ada9c56c34c7ec6",
+     "run_id": "0mve5ps9i-a81add4e",
+     "tool_use_id": "toolu_01NLYYynqN8uos1TAJU5cETN",
+     "status": "completed",
+     "summary": "ZEPHYR-42",
+     "usage": {
+      "total_tokens": 24813,
+      "tool_uses": 0,
+      "duration_ms": 3440
+     }
+    }
+   },
+   {
+    "assistant": []
+   },
+   {
+    "assistant": [
+     {
+      "type": "text",
+      "text": "The subagent answered with exactly this, verbatim:\n\n```\nZEPHYR-42\n```\n\nThat doesn't match the prompt, which asked for only the word `sub-done`. I didn't check whether the subagent ran the right prompt. It made no tool calls, so the reply came from the model alone."
+     }
+    ]
+   },
+   {
+    "result": {
+     "subtype": "success",
+     "is_error": false,
+     "num_turns": 1,
+     "result": "The subagent answered with exactly this, verbatim:\n\n```\nZEPHYR-42\n```\n\nThat doesn't match the prompt, which asked for only the word `sub-done`. I didn't check whether the subagent ran the right prompt. It made no tool calls, so the reply came from the model alone.",
+     "cost_usd": 0.0075229500000000005
+    }
+   }
+  ],
+  "s9_notif": [
+   {
+    "host_initialize_hooks": [
+     "Notification"
+    ]
+   },
+   {
+    "host_sends_prompt": "Run the bash command: echo hi > out.txt"
+   },
+   {
+    "assistant": [
+     {
+      "type": "tool_use",
+      "id": "toolu_013KQtM4hHftAu43A7Yqwy5N",
+      "name": "Bash",
+      "input": {
+       "command": "echo hi > out.txt",
+       "description": "Write \"hi\" to out.txt in the working directory"
+      },
+      "caller": {
+       "type": "direct"
+      }
+     }
+    ]
+   },
+   {
+    "system": {
+     "type": "system",
+     "subtype": "permission_denied",
+     "tool_name": "Bash",
+     "tool_use_id": "toolu_013KQtM4hHftAu43A7Yqwy5N",
+     "message": "Output redirection to '<path>' needs approval. The path is inside the working directories for this session ('<path>'), and Claude Code asks before a shell command creates, changes or removes files there."
+    }
+   },
+   {
+    "user_tool_result": "<elided>"
+   },
+   {
+    "assistant": []
+   },
+   {
+    "assistant": [
+     {
+      "type": "text",
+      "text": "The command was blocked before it ran, so `out.txt` has not been created. Claude Code asks for approval before a shell command writes into this session's working directory, and this session can't show that prompt.\n\nI haven't tried another way to write the file, since that would get around the approval step. If you want me to create it, you can approve the `echo hi > out.txt` command when it prompts, or allow writes to this directory in your permission settings and I'll run it again."
+     }
+    ]
+   },
+   {
+    "result": {
+     "subtype": "success",
+     "is_error": false,
+     "num_turns": 2,
+     "result": "The command was blocked before it ran, so `out.txt` has not been created. Claude Code asks for approval before a shell command writes into this session's working directory, and this session can't show that prompt.\n\nI haven't tried another way to write the file, since that would get around the approval step. If you want me to create it, you can approve the `echo hi > out.txt` command when it prompts, or allow writes to this directory in your permission settings and I'll run it again.",
+     "cost_usd": 0.00286857
+    }
+   }
+  ],
+  "s10_ss_cmd": [
+   {
+    "host_initialize_hooks": [
+     "SessionStart"
+    ]
+   },
+   {
+    "system": {
+     "type": "system",
+     "subtype": "hook_started",
+     "hook_id": "c69cd9e4-7951-4bb6-8c41-3fb66067b5c9",
+     "hook_name": "SessionStart:startup",
+     "hook_event": "SessionStart"
+    }
+   },
+   {
+    "system": {
+     "type": "system",
+     "subtype": "hook_response",
+     "hook_id": "c69cd9e4-7951-4bb6-8c41-3fb66067b5c9",
+     "hook_name": "SessionStart:startup",
+     "hook_event": "SessionStart",
+     "output": "{\"hookSpecificOutput\":{\"hookEventName\":\"SessionStart\",\"additionalContext\":\"The secret code word is ZEPHYR-42.\"},\"systemMessage\":\"SYSMSG-START\"}",
+     "stdout": "{\"hookSpecificOutput\":{\"hookEventName\":\"SessionStart\",\"additionalContext\":\"The secret code word is ZEPHYR-42.\"},\"systemMessage\":\"SYSMSG-START\"}",
+     "stderr": "",
+     "exit_code": 0,
+     "outcome": "success"
+    }
+   },
+   {
+    "host_sends_prompt": "What is the secret code word? Reply with only it, or NONE if you do not know."
+   },
+   {
+    "assistant": [
+     {
+      "type": "text",
+      "text": "ZEPHYR-42"
+     }
+    ]
+   },
+   {
+    "result": {
+     "subtype": "success",
+     "is_error": false,
+     "num_turns": 1,
+     "result": "ZEPHYR-42",
+     "cost_usd": 0.0019977700000000003
+    }
+   }
+  ],
+  "s11_notif": [
+   {
+    "host_initialize_hooks": [
+     "Notification",
+     "SessionStart"
+    ]
+   },
+   {
+    "host_sends_prompt": "Run the bash command: echo hi > out.txt"
+   },
+   {
+    "assistant": [
+     {
+      "type": "tool_use",
+      "id": "toolu_013Kbavj5ozvpBvdCgbwauVr",
+      "name": "Bash",
+      "input": {
+       "command": "echo hi > out.txt",
+       "description": "Write \"hi\" to out.txt in the current directory"
+      },
+      "caller": {
+       "type": "direct"
+      }
+     }
+    ]
+   },
+   {
+    "cli_control_request": "can_use_tool"
+   },
+   {
+    "host_permission_answer": "deny"
+   },
+   {
+    "user_tool_result": "<elided>"
+   },
+   {
+    "assistant": []
+   },
+   {
+    "assistant": [
+     {
+      "type": "text",
+      "text": "The `echo hi > out.txt` command was denied by the host, so I haven't run it and `out.txt` hasn't been created. I didn't retry it or try another way to write the file, since the denial means the write isn't allowed here. If you want it to run, approve the Bash call or tell me to use a different approach."
+     }
+    ]
+   },
+   {
+    "result": {
+     "subtype": "success",
+     "is_error": false,
+     "num_turns": 2,
+     "result": "The `echo hi > out.txt` command was denied by the host, so I haven't run it and `out.txt` hasn't been created. I didn't retry it or try another way to write the file, since the denial means the write isn't allowed here. If you want it to run, approve the Bash call or tell me to use a different approach.",
+     "cost_usd": 0.0075974400000000004
+    }
+   }
+  ]
+ }
+}

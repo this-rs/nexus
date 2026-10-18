@@ -396,6 +396,18 @@ fn map_system(subtype: &str, data: &Value) -> AgentEvent {
                 .map(|tasks| tasks.iter().filter_map(background_task).collect())
                 .unwrap_or_default(),
         },
+        // The CLI ends a turn its stop hooks blocked too many times in a row (2.1.296: 9) and
+        // says so in a notification: the same notice as the native harness's.
+        "notification" if str_at(data, &["key"]) == Some("stop-hook-block-cap") => {
+            AgentEvent::ProviderNotice {
+                kind: "stop_hook_block_cap".to_owned(),
+                data: json!({
+                    "provider": "claude_code",
+                    "cap": crate::agent::STOP_HOOK_BLOCK_CAP,
+                    "text": str_at(data, &["text"]),
+                }),
+            }
+        },
         other => AgentEvent::ProviderNotice {
             kind: other.to_owned(),
             data: data.clone(),
