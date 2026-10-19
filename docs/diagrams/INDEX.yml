@@ -8,7 +8,7 @@
 # than implicit; binaries, `mod.rs` and re-exporting `lib.rs`
 # files legitimately live there.
 #
-# 19 diagrams, 585/339 source files claimed, 3 unclaimed.
+# 19 diagrams, 586/339 source files claimed, 3 unclaimed.
 
 diagrams:
   - name: nexus-agent-contract
