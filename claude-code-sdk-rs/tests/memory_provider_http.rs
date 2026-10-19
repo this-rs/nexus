@@ -12,7 +12,8 @@
 
 use nexus_claude::memory::{
     ConversationDocument, GetMessagesOptions, MeilisearchMemoryProvider, MemoryConfig, MemoryError,
-    MemoryProvider, MemoryProviderBuilder, MessageDocument, QueryContext, SummaryGenerator,
+    MemoryProvider, MemoryProviderBuilder, MessageDocument, MessageSearchOptions, MessageSort,
+    QueryContext, SummaryGenerator,
 };
 use serde_json::{Value, json};
 use wiremock::matchers::{method, path, path_regex};
@@ -777,7 +778,7 @@ async fn get_conversation_messages_reports_zero_total_when_the_estimate_is_missi
 }
 
 #[tokio::test]
-async fn get_conversation_messages_does_not_escape_the_conversation_id() {
+async fn get_conversation_messages_escapes_the_conversation_id() {
     let server = MockServer::start().await;
     let provider = booted_provider(&server).await;
     Mock::given(method("POST"))
@@ -793,12 +794,145 @@ async fn get_conversation_messages_does_not_escape_the_conversation_id() {
         .await
         .unwrap();
 
-    // Known defect, asserted as-is: the id is interpolated raw into the
-    // filter, so a double quote inside it escapes the literal.
+    // A double quote inside the id is escaped, so it stays inside the string
+    // literal instead of turning the rest of the id into filter syntax.
     assert_eq!(
         body_json(&requests(&server).await[0])["filter"],
-        r#"conversation_id = "x" OR role = "user""#
+        r#"conversation_id = "x\" OR role = \"user""#
     );
+}
+
+#[tokio::test]
+async fn get_conversation_messages_can_sort_on_created_at_ascending() {
+    let server = MockServer::start().await;
+    let provider = booted_provider(&server).await;
+    Mock::given(method("POST"))
+        .and(path("/indexes/nexus_messages/search"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(search_response(
+            vec![message_hit("m1", 0, None), message_hit("m2", 1, None)],
+            Some(2),
+        )))
+        .mount(&server)
+        .await;
+
+    let page = provider
+        .get_conversation_messages(
+            "conv-1",
+            Some(
+                GetMessagesOptions::new()
+                    .sort_by(MessageSort::CreatedAt)
+                    .newest_first(false)
+                    .limit(200),
+            ),
+        )
+        .await
+        .unwrap();
+
+    let body = body_json(&requests(&server).await[0]);
+    assert_eq!(body["filter"], r#"conversation_id = "conv-1""#);
+    assert_eq!(body["sort"], json!(["created_at:asc"]));
+    assert_eq!(body["limit"], 200);
+    assert_eq!(page.total_count, 2);
+    assert!(!page.has_more);
+}
+
+// ---------------------------------------------------------------------------
+// search_messages()
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn search_messages_asks_for_scores_and_returns_the_engine_order_unscored() {
+    let server = MockServer::start().await;
+    let provider = booted_provider(&server).await;
+    Mock::given(method("POST"))
+        .and(path("/indexes/nexus_messages/search"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(search_response(
+            vec![
+                message_hit("m1", 0, Some(0.2)),
+                message_hit("m2", 1, Some(0.9)),
+                message_hit("m3", 2, None),
+            ],
+            Some(3),
+        )))
+        .mount(&server)
+        .await;
+
+    let hits = provider
+        .search_messages("jwt", &MessageSearchOptions::new().limit(100).offset(5))
+        .await
+        .unwrap();
+
+    let body = body_json(&requests(&server).await[0]);
+    assert_eq!(body["q"], "jwt");
+    assert_eq!(
+        body["limit"], 100,
+        "the limit is sent as given, not doubled"
+    );
+    assert_eq!(body["offset"], 5);
+    assert_eq!(body["showRankingScore"], true);
+    assert!(
+        body.get("filter").is_none(),
+        "no conversation filter by default"
+    );
+
+    // No re-ranking, no threshold, no token budget: three hits, engine order,
+    // and a hit without score reads 0.0.
+    assert_eq!(
+        hits.iter()
+            .map(|h| (h.document.id.as_str(), h.ranking_score))
+            .collect::<Vec<_>>(),
+        [("m1", 0.2), ("m2", 0.9), ("m3", 0.0)]
+    );
+}
+
+#[tokio::test]
+async fn search_messages_filters_on_an_escaped_conversation_id() {
+    let server = MockServer::start().await;
+    let provider = booted_provider(&server).await;
+    Mock::given(method("POST"))
+        .and(path("/indexes/nexus_messages/search"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(search_response(Vec::new(), Some(0))),
+        )
+        .mount(&server)
+        .await;
+
+    provider
+        .search_messages(
+            "jwt",
+            &MessageSearchOptions::new().conversation_id(r#"c"1"#),
+        )
+        .await
+        .unwrap();
+
+    let body = body_json(&requests(&server).await[0]);
+    assert_eq!(body["filter"], r#"conversation_id = "c\"1""#);
+    assert_eq!(body["limit"], 20, "the default limit");
+}
+
+#[tokio::test]
+async fn search_messages_surfaces_a_server_rejection() {
+    let server = MockServer::start().await;
+    let provider = booted_provider(&server).await;
+    Mock::given(method("POST"))
+        .and(path("/indexes/nexus_messages/search"))
+        .respond_with(
+            ResponseTemplate::new(400).set_body_json(meili_error("invalid_search_q", "bad query")),
+        )
+        .mount(&server)
+        .await;
+
+    let error = expect_error(
+        provider
+            .search_messages("jwt", &MessageSearchOptions::default())
+            .await,
+    );
+    match error {
+        MemoryError::Meilisearch(message) => {
+            assert!(message.contains("invalid_search_q"), "{message}")
+        },
+        other => panic!("expected a Meilisearch error, got {other:?}"),
+    }
 }
 
 #[tokio::test]

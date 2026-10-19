@@ -16,7 +16,16 @@
 //! - `MessageDocument`: Persistent message storage format
 //! - `ToolContextExtractor`: Extracts context from tool calls
 //! - `RelevanceScorer`: Multi-factor relevance scoring
-//! - `MemoryProvider`: Unified memory access trait
+//! - `MemoryProvider`: Unified memory access trait, implemented by
+//!   `MeilisearchMemoryProvider`, `InMemoryMemoryProvider` and
+//!   `NoopMemoryProvider`; `ContextInjector` holds it as `Arc<dyn MemoryProvider>`
+//!
+//! ## Feature `memory`
+//!
+//! Everything provider-side (the trait, its error type, the three
+//! implementations, `ContextInjector`) is gated by the `memory` cargo feature,
+//! which pulls `meilisearch-sdk` and `chrono`. The in-memory and no-op
+//! providers need no Meilisearch *server*, only the feature.
 
 mod integration;
 mod message_document;
@@ -34,12 +43,17 @@ pub use tool_context::{
 pub use integration::QueryContext;
 
 #[cfg(feature = "memory")]
+mod in_memory;
+#[cfg(feature = "memory")]
 mod provider;
 
 #[cfg(feature = "memory")]
+pub use in_memory::{InMemoryMemoryProvider, NoopMemoryProvider};
+#[cfg(feature = "memory")]
 pub use provider::{
-    ContextFormatter, GetMessagesOptions, MeilisearchMemoryProvider, MemoryError, MemoryProvider,
-    MemoryProviderBuilder, MemoryResult, PaginatedMessages, QueryContext, ScoredMemoryResult,
+    ContextFormatter, ConversationSearchGroup, GetMessagesOptions, MeilisearchMemoryProvider,
+    MemoryError, MemoryProvider, MemoryProviderBuilder, MemoryResult, MessageSearchHit,
+    MessageSearchOptions, MessageSort, PaginatedMessages, QueryContext, ScoredMemoryResult,
 };
 
 #[cfg(feature = "memory")]

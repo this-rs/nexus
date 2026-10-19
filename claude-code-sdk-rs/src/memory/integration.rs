@@ -6,7 +6,7 @@
 #[cfg(feature = "memory")]
 use super::provider::GetMessagesOptions;
 #[cfg(feature = "memory")]
-use super::{ContextFormatter, MeilisearchMemoryProvider, MemoryProvider};
+use super::{ContextFormatter, MeilisearchMemoryProvider, MemoryProvider, NoopMemoryProvider};
 use super::{DefaultToolContextExtractor, MemoryConfig, MessageContextAggregator, MessageDocument};
 
 #[cfg(feature = "memory")]
@@ -375,21 +375,39 @@ impl Default for MemoryIntegrationBuilder {
 }
 
 /// Context injector for formatting and injecting memory context into prompts.
+///
+/// The provider behind it is any [`MemoryProvider`]: `new` picks the
+/// Meilisearch one (or the no-op one for a disabled config), `with_provider`
+/// takes whatever the host built.
 #[cfg(feature = "memory")]
 pub struct ContextInjector {
-    provider: Arc<MeilisearchMemoryProvider>,
+    provider: Arc<dyn MemoryProvider>,
     config: MemoryConfig,
 }
 
 #[cfg(feature = "memory")]
 impl ContextInjector {
     /// Creates a new ContextInjector.
+    ///
+    /// With `config.enabled == false` the injector is built on a
+    /// [`NoopMemoryProvider`]: nothing is sent to the network, `get_context_prefix`
+    /// is `Ok(None)` and `store_messages` is `Ok(())`. Otherwise it boots a
+    /// [`MeilisearchMemoryProvider`], whose index setup is the first request.
     pub async fn new(config: MemoryConfig) -> Result<Self, super::provider::MemoryError> {
+        if !config.enabled {
+            return Ok(Self::with_provider(Arc::new(NoopMemoryProvider), config));
+        }
         let provider = MeilisearchMemoryProvider::new(config.clone()).await?;
-        Ok(Self {
-            provider: Arc::new(provider),
-            config,
-        })
+        Ok(Self::with_provider(Arc::new(provider), config))
+    }
+
+    /// Creates a ContextInjector on a provider the host built.
+    ///
+    /// `config` keeps driving the injector itself (`enabled`,
+    /// `max_context_items`); the provider is used as given, whether or not it
+    /// read the same config.
+    pub fn with_provider(provider: Arc<dyn MemoryProvider>, config: MemoryConfig) -> Self {
+        Self { provider, config }
     }
 
     /// Retrieves and formats context for injection into a prompt.
@@ -437,8 +455,10 @@ impl ContextInjector {
         self.provider.store_messages(messages).await
     }
 
-    /// Returns a reference to the underlying provider.
-    pub fn provider(&self) -> &MeilisearchMemoryProvider {
+    /// Returns the underlying provider.
+    ///
+    /// Deref it to call the trait, clone it to share it with another owner.
+    pub fn provider(&self) -> &Arc<dyn MemoryProvider> {
         &self.provider
     }
 
@@ -1005,12 +1025,12 @@ mod tests {
         }
     }
 
-    /// `ContextInjector::new` goes through `MeilisearchMemoryProvider::new`,
-    /// which refuses a disabled config with `MemoryError::Disabled`. The two
+    /// `ContextInjector::new` never pairs a disabled config with a live
+    /// Meilisearch provider (it picks `NoopMemoryProvider`), but
+    /// `with_provider` lets a host do exactly that. The two
     /// `if !self.config.enabled` guards inside `get_context_prefix` and
-    /// `store_messages` are therefore unreachable through the only public
-    /// constructor; the struct is assembled by hand here to pin what they
-    /// promise — a silent short-circuit, with no request at all.
+    /// `store_messages` are what then keeps the provider idle: a silent
+    /// short-circuit, with no request at all.
     #[cfg(feature = "memory")]
     #[tokio::test]
     async fn a_disabled_injector_short_circuits_without_calling_the_server() {
@@ -1043,10 +1063,10 @@ mod tests {
         // outgoing request would both fail and be visible.
         server.reset().await;
 
-        let injector = ContextInjector {
-            provider: Arc::new(provider),
-            config: mock_config(&server.uri()).with_enabled(false),
-        };
+        let injector = ContextInjector::with_provider(
+            Arc::new(provider),
+            mock_config(&server.uri()).with_enabled(false),
+        );
 
         assert_eq!(
             injector
