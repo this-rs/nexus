@@ -1,6 +1,6 @@
 %% name: nexus-sdk-provider-boundary
 %% covers: claude-code-sdk-rs/src/lib.rs, claude-code-sdk-rs/src/bin/fake_claude.rs
-%% verified: 2026-10-05
+%% verified: 18865f7
 %% ---
 %% PROUVE : où passe la frontière entre « un agent quelconque » et « Claude Code »
 %%   dans ce dépôt, au sha 443a2a0 (relu le 2026-10-02). Ce diagramme possède la
@@ -47,7 +47,7 @@ flowchart TD
 
     subgraph surface["Surface publique — lib.rs : ce que le backend voit"]
         direction TB
-        CLIENTS["✅ clients : InteractiveClient (= ClaudeSDKClientDefault),<br/>ClaudeSDKClient, Query, query<br/>— tous construisent SubprocessTransport en dur<br/><i>vérifié : grep 'SubprocessTransport::new' src → 5 fichiers<br/>(client, client_working, optimized_client, interactive, query)</i>"]
+        CLIENTS["✅ clients : InteractiveClient (= ClaudeSDKClientDefault),<br/>ClaudeSDKClient, query — lancent le CLI en dur ; Query reçoit son transport<br/><i>vérifié : grep 'SubprocessTransport::new' src hors tests → client.rs, interactive.rs ;<br/>query.rs appelle build_cli_command ; internal_query.rs prend un transport en paramètre</i>"]
         HOOKFN["✅ fonctions libres de hook : is_hook_callback,<br/>dispatch_hook_from_registry, build_hook_response_json<br/>(le backend les appelle depuis sa pompe de contrôle)<br/><i>vérifié : tests/interactive_client_fake_cli.rs</i>"]
         TRANSPORTX["✅ transport : trait Transport, SubprocessTransport, MockTransport,<br/>find_claude_cli, get_cli_version, SemVer, describe_command_redacted<br/><i>vérifié : nexus-sdk-transport (faux CLI)</i>"]
         TYPESX["✅ types : Message, ContentBlock, StreamEventData, ClaudeCodeOptions,<br/>PermissionMode, SDKControlRequest, Hook* (dont SessionStartHookInput et NotificationHookInput, ISO1), McpServerConfig, PermissionResult<br/><i>vérifié : nexus-sdk-types (parseur rejoué)</i>"]
@@ -81,7 +81,7 @@ flowchart TD
         C6["✅ System subtypes : init, compact_boundary, task_started / task_progress,<br/>sdk_control:* ; ClaudeCodeOptions presque entièrement propre au CLI<br/>(settings, setting_sources, betas, plugins, sandbox, agents, fork_session)<br/><i>vérifié : nexus-sdk-types</i>"]
         C7["✅ JSON de contrôle écrit à la main dans InteractiveClient :<br/>set_permission_mode, initialize_hooks, send_hook_response, build_interrupt_json<br/><i>vérifié : grep 'control_request' src/interactive.rs</i>"]
         C8["🔴 deux formes filaires d'interrupt coexistent :<br/>ControlRequest::Interrupt (request.type) et Query::interrupt (request.subtype) ;<br/>le faux CLI accepte les deux pour cette raison<br/><i>vérifié : reply_control lit request.subtype OU request.type</i>"]
-        C9["🔴 cinq constructeurs de ligne de commande claude : build_command (SDK),<br/>query_print_mode (query.rs), ClaudeManager (deux fonctions) et<br/>InteractiveSessionManager (claude-code-api, Command::new direct, passent --cwd) ;<br/>plus session_process.rs, jamais compilé (absent de core/mod.rs)<br/><i>vérifié : grep -rn Command::new claude-code-sdk-rs/src claude-code-api/src hors tests</i>"]
+        C9["🔴 cinq constructeurs de ligne de commande claude : build_command (SDK),<br/>query_print_mode (query.rs), ClaudeManager (deux fonctions) et<br/>InteractiveSessionManager (claude-code-api, Command::new direct, passent --cwd)<br/><i>vérifié : grep -rn Command::new claude-code-sdk-rs/src claude-code-api/src hors tests</i>"]
         C1 --> C2
         C3 --> C4 --> C5
         C7 --> C8
