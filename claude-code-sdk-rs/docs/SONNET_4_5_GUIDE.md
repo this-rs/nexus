@@ -33,13 +33,13 @@ async fn main() -> Result<()> {
 }
 ```
 
-### 2. Using Model Recommendation Helper
+### 2. Using a model constant
+
+> The `model_recommendation` helpers (`latest_sonnet()`, `cheapest_model()`) were removed in N13.
 
 ```rust
-use nexus_claude::model_recommendation::latest_sonnet;
-
 let options = ClaudeCodeOptions::builder()
-    .model(latest_sonnet())  // Returns "claude-sonnet-4-5-20250929"
+    .model("claude-sonnet-4-5-20250929")
     .build();
 ```
 
@@ -83,23 +83,11 @@ async fn main() -> Result<()> {
 
 // After (Sonnet 4.5 - Latest)
 .model("claude-sonnet-4-5-20250929")
-// Or simply use the helper
-.model(nexus_claude::model_recommendation::latest_sonnet())
 ```
 
-### Using the Recommendation System
+### Using the Recommendation System (retired)
 
-```rust
-use nexus_claude::model_recommendation::ModelRecommendation;
-
-let recommender = ModelRecommendation::default();
-
-// Sonnet 4.5 is recommended for these task types:
-recommender.suggest("balanced");   // → "claude-sonnet-4-5-20250929"
-recommender.suggest("general");    // → "claude-sonnet-4-5-20250929"
-recommender.suggest("latest");     // → "claude-sonnet-4-5-20250929"
-recommender.suggest("standard");   // → "claude-sonnet-4-5-20250929"
-```
+> `ModelRecommendation` a été retiré du SDK (N13). Pour `balanced`, `general`, `latest` et `standard`, utilisez `"claude-sonnet-4-5-20250929"` directement.
 
 ## Advanced Configuration
 
@@ -182,7 +170,6 @@ println!("Cost: ${:.4}", usage.total_cost_usd);
 
 ```rust
 use nexus_claude::{ClaudeSDKClient, ClaudeCodeOptions, Message, Result};
-use nexus_claude::model_recommendation::latest_sonnet;
 use nexus_claude::token_tracker::BudgetLimit;
 use futures::StreamExt;
 
@@ -190,7 +177,7 @@ use futures::StreamExt;
 async fn main() -> Result<()> {
     // Configure with Sonnet 4.5
     let options = ClaudeCodeOptions::builder()
-        .model(latest_sonnet())
+        .model("claude-sonnet-4-5-20250929")
         .system_prompt("You are a helpful coding assistant")
         .max_output_tokens(3000)
         .build();

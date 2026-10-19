@@ -13,7 +13,7 @@ Mesuré le 2026-10-01 sur `origin/main` @ 3abe13e, avec la commande de la CI (`c
 Constats :
 
 - `claude-code-api` est à 39 % : 25 fichiers sont à 0 % dont `api/chat.rs` (444 lignes), `core/claude_manager.rs` (266), `core/process_pool.rs` (152), `core/cache.rs` (116), `core/model_registry.rs` (115), `main.rs` (102).
-- Gros fichiers faibles du SDK : `transport/subprocess.rs` 998 lignes à 23,9 %, `client.rs` 485 à 24,3 %, `optimized_client.rs` 322 à 18,3 %, `cli_download.rs` 280 à 18,9 %.
+- Gros fichiers faibles du SDK : `transport/subprocess.rs` 998 lignes à 23,9 %, `client.rs` 485 à 24,3 %, `cli_download.rs` 280 à 18,9 %.
 - Les fichiers `neo4j_*` du crate api (hooks, storage) sont à 0 à 23 % : ils ont besoin d'un Neo4j vivant, non provisionné dans ce job CI.
 
 ## Commandes exactes

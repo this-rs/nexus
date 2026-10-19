@@ -28,7 +28,9 @@ pub async fn query(
 - `interrupt() -> Result<()>` - 取消正在进行的操作
 - `disconnect() -> Result<()>` - 断开与 Claude CLI 的连接
 
-### 3. 优化客户端
+### 3. 优化客户端（已移除）
+
+> **已移除（N13）** : `OptimizedClient` et `ClientMode` ne font plus partie du SDK. Le bloc ci-dessous décrit l'API retirée.
 `OptimizedClient` 提供高性能操作模式，支持三种客户端模式：
 
 ```rust
@@ -275,40 +277,15 @@ async fn main() -> Result<()> {
 }
 ```
 
-### 使用优化客户端
-```rust
-use nexus_claude::{OptimizedClient, ClientMode, ClaudeCodeOptions, Result};
+### 使用优化客户端（已移除）
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    let options = ClaudeCodeOptions::default();
-    
-    // 单次请求模式
-    let mut client = OptimizedClient::new(ClientMode::Single, options.clone())?;
-    let response = client.query("What is 2 + 2?").await?;
-    
-    // 批处理模式
-    let mut batch_client = OptimizedClient::new(ClientMode::Batch, options.clone())?;
-    let queries = vec![
-        "解释异步编程",
-        "什么是 Future",
-        "如何使用 tokio"
-    ];
-    
-    for query in queries {
-        let response = batch_client.query(query).await?;
-        println!("Response: {}", response);
-    }
-    
-    Ok(())
-}
-```
+> 已移除（N13）：请改用 `query()` 或 `InteractiveClient`。
 
 ## 性能优化建议
 
 1. **使用适当的客户端模式**
-   - 单次查询使用 `query()` 函数或 `OptimizedClient::Single`
-   - 批量处理使用 `OptimizedClient::Batch`
+   - 单次查询使用 `query()` 函数
+   - 批量处理：`OptimizedClient::Batch` 已移除，请自行并发调用 `query()`
    - 交互式对话使用 `InteractiveClient`
 
 2. **合理配置参数**

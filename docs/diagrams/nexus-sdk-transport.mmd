@@ -247,7 +247,7 @@ flowchart TD
     %% Les liens entre blocs, posés après les blocs pour ne pas
     %% arracher un noeud de son sous-graphe.
     %% ===================================================================
-    CALLER["⚪ appelants : ClaudeSDKClient, InteractiveClient,<br/>Query, OptimizedClient::ConnectionPool"] --> TRAIT
+    CALLER["⚪ appelants : ClaudeSDKClient, InteractiveClient,<br/>Query"] --> TRAIT
     TRAIT --> CTOR
     TRAIT --> MOCK
     TRAIT --> SEND
