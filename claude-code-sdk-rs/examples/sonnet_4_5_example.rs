@@ -4,7 +4,6 @@
 //! Sonnet 4.5 offers the best balance of performance, speed, and cost for most applications.
 
 use futures::StreamExt;
-use nexus_claude::model_recommendation::{balanced_model, latest_sonnet};
 use nexus_claude::{ClaudeCodeOptions, InteractiveClient, Message, Result, query};
 
 /// Simple query using Sonnet 4.5
@@ -95,39 +94,6 @@ async fn interactive_session_example() -> Result<()> {
     }
 
     client.disconnect().await?;
-    Ok(())
-}
-
-/// Using model recommendation helpers
-async fn model_recommendation_example() -> Result<()> {
-    println!("\n=== Using Model Recommendation Helpers ===\n");
-
-    // Get latest Sonnet model programmatically
-    let latest = latest_sonnet();
-    println!("Latest Sonnet model: {}", latest);
-
-    let balanced = balanced_model();
-    println!("Balanced model (also Sonnet 4.5): {}", balanced);
-
-    // Use recommended model
-    let options = ClaudeCodeOptions::builder().model(latest).build();
-
-    let mut messages = query(
-        "What makes you a good choice for most applications?",
-        Some(options),
-    )
-    .await?;
-
-    while let Some(msg) = messages.next().await {
-        if let Ok(Message::Assistant { message, .. }) = msg {
-            for block in message.content {
-                if let nexus_claude::ContentBlock::Text(text) = block {
-                    println!("{}", text.text);
-                }
-            }
-        }
-    }
-
     Ok(())
 }
 
@@ -240,15 +206,11 @@ async fn main() -> Result<()> {
         match args[1].as_str() {
             "simple" => simple_query_example().await?,
             "interactive" => interactive_session_example().await?,
-            "recommendation" => model_recommendation_example().await?,
             "compare" => model_comparison_example().await?,
             "advanced" => advanced_features_example().await?,
             _ => {
                 println!("Unknown command: {}", args[1]);
-                println!(
-                    "Usage: {} [simple|interactive|recommendation|compare|advanced]",
-                    args[0]
-                );
+                println!("Usage: {} [simple|interactive|compare|advanced]", args[0]);
                 println!("\nRunning all examples...\n");
                 run_all_examples().await?;
             },
@@ -263,7 +225,6 @@ async fn main() -> Result<()> {
 async fn run_all_examples() -> Result<()> {
     simple_query_example().await?;
     interactive_session_example().await?;
-    model_recommendation_example().await?;
     model_comparison_example().await?;
     advanced_features_example().await?;
     Ok(())

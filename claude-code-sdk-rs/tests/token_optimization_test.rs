@@ -1,7 +1,6 @@
 //! Tests for token optimization features
 
 use nexus_claude::ClaudeCodeOptions;
-use nexus_claude::model_recommendation::ModelRecommendation;
 use nexus_claude::token_tracker::{BudgetLimit, BudgetManager, BudgetStatus, TokenUsageTracker};
 
 #[test]
@@ -81,38 +80,6 @@ async fn test_budget_manager() {
 
     manager.update_usage(300, 300, 0.05).await;
     assert!(manager.is_exceeded().await);
-}
-
-#[test]
-fn test_model_recommendations() {
-    let recommender = ModelRecommendation::default();
-
-    assert_eq!(
-        recommender.suggest("simple"),
-        Some("claude-3-5-haiku-20241022")
-    );
-    assert_eq!(
-        recommender.suggest("fast"),
-        Some("claude-3-5-haiku-20241022")
-    );
-    // balanced now returns full Sonnet 4.5 model ID
-    assert_eq!(
-        recommender.suggest("balanced"),
-        Some("claude-sonnet-4-5-20250929")
-    );
-    assert_eq!(recommender.suggest("complex"), Some("claude-opus-4-7"));
-    assert_eq!(recommender.suggest("unknown"), None);
-}
-
-#[test]
-fn test_custom_model_recommendations() {
-    let mut recommender = ModelRecommendation::default();
-
-    recommender.add("my_task", "sonnet");
-    assert_eq!(recommender.suggest("my_task"), Some("sonnet"));
-
-    recommender.remove("my_task");
-    assert_eq!(recommender.suggest("my_task"), None);
 }
 
 #[test]

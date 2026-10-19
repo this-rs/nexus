@@ -38,15 +38,11 @@ pub mod cli_download;
 mod client;
 // mod client_v2;  // Has compilation errors
 // mod client_final;  // Has compilation errors
-mod client_working;
 mod errors;
 mod interactive;
 mod internal_query;
 mod message_parser;
 pub mod model;
-pub mod model_recommendation;
-mod optimized_client;
-mod perf_utils;
 pub mod providers;
 mod query;
 mod sdk_mcp;
@@ -63,7 +59,6 @@ pub mod memory;
 pub use client::ClaudeSDKClient;
 // pub use client_v2::ClaudeSDKClientV2;  // Has compilation errors
 // pub use client_final::ClaudeSDKClientFinal;  // Has compilation errors
-pub use client_working::ClaudeSDKClientWorking;
 pub use errors::{Result, SdkError};
 pub use interactive::InteractiveClient;
 pub use interactive::{build_hook_response_json, dispatch_hook_from_registry, is_hook_callback};
@@ -75,9 +70,6 @@ pub use transport::UserContentBlock;
 pub use transport::describe_command_redacted;
 // Keep the old name as an alias for backward compatibility
 pub use interactive::InteractiveClient as SimpleInteractiveClient;
-pub use model_recommendation::ModelRecommendation;
-pub use optimized_client::{ClientMode, OptimizedClient};
-pub use perf_utils::{MessageBatcher, PerformanceMetrics, RetryConfig};
 pub use token_tracker::{BudgetLimit, BudgetManager, BudgetStatus, TokenUsageTracker};
 /// Default interactive client - the recommended client for interactive use
 pub type ClaudeSDKClientDefault = InteractiveClient;
@@ -189,8 +181,7 @@ pub use sdk_mcp::{
 /// Prelude module for convenient imports
 pub mod prelude {
     pub use crate::{
-        ClaudeCodeOptions, ClaudeSDKClient, ClaudeSDKClientWorking, Message, PermissionMode,
-        Result, SdkError, query,
+        ClaudeCodeOptions, ClaudeSDKClient, Message, PermissionMode, Result, SdkError, query,
     };
 }
 
