@@ -14,7 +14,7 @@ Claude Code has weekly usage limits that can be frustrating, especially for heav
 ## Quick Start: Most Effective Strategies
 
 ```rust
-use nexus_claude::{ClaudeCodeOptions, ClaudeSDKClient, ModelRecommendation};
+use nexus_claude::{ClaudeCodeOptions, ClaudeSDKClient};
 use nexus_claude::token_tracker::BudgetLimit;
 
 let options = ClaudeCodeOptions::builder()
@@ -56,23 +56,9 @@ client.set_budget_limit(
 | **Sonnet** (`sonnet`) | **~5x** | Balanced tasks, general use |
 | **Opus** (`opus`) | **~15x** | Complex tasks, critical work |
 
-### Using ModelRecommendation
+### Model choice (ModelRecommendation retired)
 
-```rust
-use nexus_claude::ModelRecommendation;
-
-let recommender = ModelRecommendation::default();
-
-// Automatic recommendations
-let model = recommender.suggest("simple").unwrap();  // → "claude-3-5-haiku-20241022"
-let model = recommender.suggest("balanced").unwrap(); // → "sonnet"
-let model = recommender.suggest("complex").unwrap();  // → "opus"
-
-// Custom recommendations
-let mut custom = ModelRecommendation::default();
-custom.add("code_review", "sonnet");
-custom.add("documentation", "claude-3-5-haiku-20241022");
-```
+> `ModelRecommendation` a été retiré du SDK (N13). Choisissez le modèle explicitement : `"claude-3-5-haiku-20241022"` pour les tâches simples, `"sonnet"` pour l'équilibre, `"opus"` pour les tâches complexes.
 
 ### Rule of Thumb
 
@@ -204,15 +190,13 @@ let options = ClaudeCodeOptions::builder()
 
 ```rust
 use nexus_claude::{ClaudeCodeOptions, ClaudeSDKClient, PermissionMode, Result};
-use nexus_claude::model_recommendation::ModelRecommendation;
 use nexus_claude::token_tracker::BudgetLimit;
 use futures::StreamExt;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // 1. Choose cost-effective model
-    let recommender = ModelRecommendation::default();
-    let model = recommender.suggest("simple").unwrap();
+    // 1. Choose cost-effective model (ModelRecommendation was removed in N13)
+    let model = "claude-3-5-haiku-20241022";
 
     // 2. Configure for minimal token usage
     let options = ClaudeCodeOptions::builder()

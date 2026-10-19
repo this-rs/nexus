@@ -59,11 +59,9 @@
 ```rust
 use nexus_claude::{ClaudeCodeOptions, ClaudeSDKClient, PermissionMode};
 use nexus_claude::token_tracker::BudgetLimit;
-use nexus_claude::model_recommendation::ModelRecommendation;
 
-// 1. 选择性价比高的模型
-let recommender = ModelRecommendation::default();
-let model = recommender.suggest("simple").unwrap(); // → Haiku（最便宜）
+// 1. 选择性价比高的模型（ModelRecommendation 已移除，N13）
+let model = "claude-3-5-haiku-20241022"; // Haiku（最便宜）
 
 // 2. 配置最小token使用
 let options = ClaudeCodeOptions::builder()
@@ -91,7 +89,7 @@ println!("Tokens: {}, 成本: ${:.2}", usage.total_tokens(), usage.total_cost_us
 - ✅ `max_output_tokens` - 精确输出控制（1-32000，优先于环境变量）
 - ✅ `TokenUsageTracker` - 实时token和成本监控
 - ✅ `BudgetLimit` - 设置成本/token上限，80%预警
-- ✅ `ModelRecommendation` - 智能模型选择（Haiku/Sonnet/Opus）
+- ~~`ModelRecommendation`~~ - 已移除（N13）
 
 **模型成本对比：**
 - Haiku: **1x**（基准，最便宜）

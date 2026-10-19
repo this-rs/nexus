@@ -143,10 +143,10 @@ let options = ClaudeCodeOptions::builder()
     .model("claude-sonnet-4-5-20250929")
     .build();
 
-// Method 2: Using helper function
-use nexus_claude::model_recommendation::latest_sonnet;
+// Method 2: a constant in your own code (the model_recommendation helpers were removed in N13)
+const SONNET: &str = "claude-sonnet-4-5-20250929";
 let options = ClaudeCodeOptions::builder()
-    .model(latest_sonnet())
+    .model(SONNET)
     .build();
 
 // Method 3: Via environment variable
@@ -250,11 +250,10 @@ cargo run --example check_current_account
 **A:** See the [Token Optimization Guide](TOKEN_OPTIMIZATION.md), but here are quick tips:
 
 ```rust
-use nexus_claude::model_recommendation::cheapest_model;
 use nexus_claude::token_tracker::BudgetLimit;
 
 let options = ClaudeCodeOptions::builder()
-    .model(cheapest_model())  // Use Haiku
+    .model("claude-3-5-haiku-20241022")  // Use Haiku
     .max_output_tokens(2000)  // Limit response length
     .max_turns(3)             // Limit conversation length
     .build();

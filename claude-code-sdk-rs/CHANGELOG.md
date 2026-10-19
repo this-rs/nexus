@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Removed
+
+- Code mort retiré (N13) : `ClaudeSDKClientWorking` (`client_working.rs`), `OptimizedClient` et `ClientMode` (`optimized_client.rs`), `MessageBatcher`, `PerformanceMetrics` et `RetryConfig` (`perf_utils.rs`), `ModelRecommendation` et ses helpers `latest_sonnet()` / `cheapest_model()` (module public `model_recommendation`), avec leurs exemples et tests.
+- `InteractiveClient`, `Transport` et `MockTransport` sont conservés.
+
 ## [0.4.0] - 2025-12-17
 
 ### 🎯 Major Release: Python SDK v0.1.14 Full Parity & Auto-Download

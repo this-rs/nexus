@@ -1,5 +1,5 @@
 %% name: nexus-sdk-util
-%% covers: claude-code-sdk-rs/src/cli_download.rs, claude-code-sdk-rs/src/model_recommendation.rs, claude-code-sdk-rs/src/perf_utils.rs, claude-code-sdk-rs/src/sdk_mcp.rs, claude-code-sdk-rs/src/token_tracker.rs
+%% covers: claude-code-sdk-rs/src/cli_download.rs, claude-code-sdk-rs/src/sdk_mcp.rs, claude-code-sdk-rs/src/token_tracker.rs
 %% verified: 2026-10-01
 flowchart TD
     subgraph legend["Légende"]
@@ -128,35 +128,6 @@ flowchart TD
     end
 
     %% =================================================================
-    %% 3. Utilitaires de performance — perf_utils.rs
-    %% =================================================================
-    subgraph perf["Performance — perf_utils.rs"]
-        direction TB
-        RETRY["✅ RetryConfig::retry(f)<br/>rejoue tant que retries reste inférieur à max_retries<br/><i>vérifié : horloge Tokio en pause</i>"]
-        RETRYOK["✅ Ok au premier succès, même après des échecs"]
-        RETRYJIT["✅ gigue = rand × delay × jitter_factor, puis abs()<br/>le délai ne peut donc que s’allonger, jamais se raccourcir<br/><i>vérifié : jitter_factor 1.0, durée écoulée minorée</i>"]
-        RETRYBACK["✅ backoff : delay × multiplier, borné par max_delay<br/>la gigue n’est PAS bornée par max_delay"]
-        RETRYERR["✅ retries épuisés → la DERNIÈRE erreur est renvoyée<br/><i>vérifié : messages numérotés</i>"]
-        BATCH["✅ MessageBatcher::run()<br/>timeout(max_wait_time, recv())"]
-        BFULL["✅ buffer ≥ max_batch_size → emit_batch()"]
-        BCLOSE["✅ entrée fermée → vide le buffer puis sort de la boucle"]
-        BTIME["✅ délai écoulé → émet un lot partiel<br/>délai écoulé à vide → ne publie rien et continue d’attendre<br/><i>vérifié : start_paused, aucun sleep réel</i>"]
-        BEMPTY["✅ emit_batch() sur buffer vide → retour immédiat, aucun lot vide publié<br/>garde défensive : les trois appelants testent déjà is_empty()<br/><i>vérifié : appel direct de la méthode privée</i>"]
-        BLOST["✅ récepteur disparu → warn et lot perdu<br/>le buffer est drainé AVANT l’envoi, donc les messages sont détruits<br/><i>vérifié : récepteur droppé</i>"]
-        METRICS["🔴 PerformanceMetrics::record_success<br/>min_latency_ms traite 0 comme non initialisé : un échantillon réel à 0 ms est écrasé par le suivant<br/><i>vérifié : record_success(0) puis record_success(5) donne min = 5</i>"]
-
-        RETRY --> RETRYOK
-        RETRY --> RETRYJIT --> RETRYBACK
-        RETRY --> RETRYERR
-        BATCH --> BFULL
-        BATCH --> BCLOSE
-        BATCH --> BTIME
-        BFULL --> BEMPTY
-        BTIME --> BEMPTY
-        BEMPTY --> BLOST
-    end
-
-    %% =================================================================
     %% 4. Serveur MCP en processus — sdk_mcp.rs
     %% =================================================================
     subgraph mcp["MCP en processus — sdk_mcp.rs"]
@@ -189,27 +160,6 @@ flowchart TD
         CALLOK --> WIRE
         HM --> NOTIF
         HM --> UNKNOWN
-    end
-
-    %% =================================================================
-    %% 5. Choix de modèle — model_recommendation.rs
-    %% =================================================================
-    subgraph reco["Choix de modèle — model_recommendation.rs"]
-        direction TB
-        SUG["✅ ModelRecommendation::suggest(task_type)<br/>recherche exacte dans la table<br/><i>vérifié : casse et espaces</i>"]
-        SUGNONE["✅ absent → None, aucun repli, aucune normalisation<br/>Simple et  simple ne trouvent rien"]
-        DEF["✅ with_defaults() : 14 entrées, 3 niveaux<br/>haiku-3-5, sonnet-4-5, opus-4-7"]
-        CUSTOM["✅ custom() ne valide rien : table vide, clé vide et modèle vide acceptés"]
-        COST["✅ estimate_cost_multiplier(model)<br/>table d’alias exacte, haiku 1.0, sonnet 5.0, opus 15.0"]
-        COSTUNK["🔴 modèle inconnu → 5.0 silencieusement<br/>claude-haiku-4-5 et claude-opus-4-5 sont absents de la table : un Haiku est facturé comme un Sonnet<br/>divergence avec claude-code-api/src/models/claude.rs<br/><i>vérifié : test qui épingle l’écart, non corrigé</i>"]
-        CONS["✅ cohérence interne : chaque modèle recommandé par défaut a un prix explicite, et le prix croît de cheapest à balanced puis à best<br/><i>vérifié : parcours de toute la table</i>"]
-
-        SUG --> SUGNONE
-        SUG --> DEF
-        SUG --> CUSTOM
-        DEF --> COST
-        COST --> COSTUNK
-        COST --> CONS
     end
 
     %% =================================================================

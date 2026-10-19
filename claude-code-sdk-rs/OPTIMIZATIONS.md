@@ -1,5 +1,7 @@
 # Claude Code SDK Optimizations
 
+> **Document retiré (N13).** `OptimizedClient`, `ClientMode`, `RetryConfig`, `MessageBatcher`, `PerformanceMetrics` et `ModelRecommendation` ont été supprimés du SDK (code mort, sans consommateur). Conservé pour l'historique : il ne décrit plus l'API actuelle.
+
 This document describes the performance optimizations implemented in the Claude Code SDK for Rust.
 
 ## Overview

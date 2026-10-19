@@ -1,5 +1,5 @@
 %% name: nexus-sdk-client
-%% covers: claude-code-sdk-rs/src/client.rs, claude-code-sdk-rs/src/client_working.rs, claude-code-sdk-rs/src/internal_query.rs, claude-code-sdk-rs/src/optimized_client.rs, claude-code-sdk-rs/src/query.rs
+%% covers: claude-code-sdk-rs/src/client.rs, claude-code-sdk-rs/src/internal_query.rs, claude-code-sdk-rs/src/query.rs
 %% verified: 2026-10-01
 flowchart TD
     subgraph legend["Légende"]
@@ -182,69 +182,4 @@ flowchart TD
         iq_ctl["✅ interrupt / set_permission_mode<br/>set_model / rewind_files<br/><i>vérifié : faux CLI, un control_request par appel</i>"]
         iq_ctl --> iq_send
         iq_rx["🔴 Query::receive_messages()<br/>expect(Receiver already taken) :<br/>le second appel panique"]
-    end
-
-    %% ===================================================================
-    %% client_working.rs
-    %% ===================================================================
-    subgraph client_working_rs["client_working.rs — ClaudeSDKClientWorking, variante historique"]
-        w_new["🟠 ClaudeSDKClientWorking::new()<br/>pose CLAUDE_CODE_ENTRYPOINT=sdk-rust"]
-        w_new --> w_connect{"🟠 connect(initial_prompt)<br/>déjà Connected ?"}
-        w_connect -->|"oui"| w_noop["🟠 Ok(()) et le prompt est jeté"]
-        w_connect -->|"non"| w_tr["🟠 SubprocessTransport::new()?<br/>honore options.cli_path, puis connect()"]
-        w_tr --> w_pump["🟠 tâche de pompe : receive_messages()<br/>vers un mpsc<br/>aucun tampon, aucun rejeu"]
-        w_send{"🟠 send_user_message()<br/>état == Connected ?"}
-        w_send -->|"non"| w_send_ko["🟠 InvalidState Not connected"]
-        w_send -->|"oui, transport absent"| w_send_lost["🔴 InvalidState Transport not available<br/>état Connected sans transport : incohérent"]
-        w_send -->|"oui"| w_send_ok["🟠 toujours la session default"]
-        w_recv{"🟠 receive_message()<br/>récepteur présent ?"}
-        w_recv -->|"non"| w_recv_ko["🟠 InvalidState Not connected"]
-        w_recv -->|"oui"| w_recv_ok["🟠 rx.recv()<br/>None quand la pompe s'arrête"]
-        w_recv_ok --> w_resp["🟠 receive_response()<br/>accumule jusqu'au Result inclus"]
-        w_disc["🟠 disconnect()<br/>état posé à Disconnected AVANT<br/>le disconnect du transport : un échec<br/>ne laisse pas d'état menteur,<br/>contrairement à client.rs"]
-        w_nodrop["🔴 aucun Drop : un client lâché sans<br/>disconnect() laisse le CLI vivant"]
-    end
-
-    %% ===================================================================
-    %% optimized_client.rs
-    %% ===================================================================
-    subgraph optimized_client_rs["optimized_client.rs — OptimizedClient, pool et lots"]
-        o_new["🟠 OptimizedClient::new(options, mode)<br/>max_connections = max_concurrent en mode Batch,<br/>1 sinon"]
-        o_new --> o_mode{"🟠 ClientMode"}
-        o_mode -->|"OneShot"| o_q
-        o_mode -->|"Interactive"| o_sess
-        o_mode -->|"Batch"| o_batch
-
-        o_q["🟠 query() → query_with_retry(prompt, 3, 100 ms)"]
-        o_q --> o_retry{"🟠 execute_query() a échoué ?"}
-        o_retry -->|"moins de 3 essais"| o_backoff["🔴 attente doublée et nouvel essai<br/>quelle que soit l'erreur : un CliNotFound<br/>est réessayé trois fois"]
-        o_retry -->|"essais épuisés"| o_fail["🟠 l'erreur remonte"]
-        o_backoff --> o_exec
-        o_exec["🟠 execute_query()<br/>acquire → send_message → collect_messages<br/>sous timeout de 120 s"]
-        o_exec --> o_race["🔴 send_message() précède l'abonnement<br/>de collect_messages() : la diffusion ne rejoue<br/>rien, les premiers messages peuvent manquer"]
-        o_exec --> o_norelease["🔴 pool.release() n'est atteint qu'en succès :<br/>un échec perd la connexion au lieu<br/>de la rendre au pool"]
-        o_acq{"🟠 ConnectionPool::acquire()<br/>une connexion oisive est-elle valide ?"}
-        o_acq -->|"oui"| o_reuse["🟠 réutilisée"]
-        o_acq -->|"non"| o_fresh["🔴 nouveau SubprocessTransport ;<br/>le permis du sémaphore est lâché à la sortie<br/>de la fonction, donc rien n'est borné"]
-        o_exec --> o_acq
-        o_collect["🟠 collect_messages()<br/>met à jour le budget sur Result<br/>puis s'arrête au Result"]
-        o_exec --> o_collect
-
-        o_sess{"🟠 start_interactive_session()<br/>mode == Interactive ?"}
-        o_sess -->|"non"| o_sess_ko["🟠 InvalidState Client not in interactive mode"]
-        o_sess -->|"oui"| o_proc
-        o_proc["🔴 start_message_processor()<br/>re-appelle receive_messages() à chaque tour<br/>de boucle — un abonnement neuf par message —<br/>et tient le write lock à travers le await"]
-        o_si{"🟠 send_interactive() / receive_interactive()<br/>session active ?"}
-        o_si -->|"non"| o_si_ko["🟠 InvalidState<br/>No active interactive session"]
-        o_si -->|"oui"| o_si_ok["🟠 InputMessage::user(..., default)"]
-        o_proc --> o_si
-        o_int{"🟠 interrupt()<br/>transport courant présent ?"}
-        o_int -->|"non"| o_int_ko["🟠 InvalidState No active session"]
-        o_int -->|"oui"| o_int_ok["🟠 ControlRequest::Interrupt(uuid v4)<br/>aucun ack n'est attendu,<br/>contrairement à client.rs"]
-        o_end["🟠 end_interactive_session()<br/>rend le transport au pool et oublie le récepteur"]
-
-        o_batch{"🟠 process_batch(prompts)<br/>mode == Batch ?"}
-        o_batch -->|"non"| o_batch_ko["🟠 InvalidState Client not in batch mode"]
-        o_batch -->|"oui"| o_batch_ok["🔴 un spawn par prompt ;<br/>acquire_owned().await.unwrap() panique<br/>si le sémaphore est fermé"]
-        o_batch_ok --> o_q
     end
