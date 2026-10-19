@@ -115,7 +115,7 @@ diagrams:
       - obscura/vendor/**
   - name: nexus-sdk-client
     file: nexus-sdk-client.mmd
-    verified: 2026-10-01
+    verified: 18865f7
     covers:
       - claude-code-sdk-rs/src/client.rs
       - claude-code-sdk-rs/src/internal_query.rs
@@ -127,12 +127,12 @@ diagrams:
       - claude-code-sdk-rs/src/interactive.rs
   - name: nexus-sdk-memory
     file: nexus-sdk-memory.mmd
-    verified: 2026-10-01
+    verified: 18865f7
     covers:
       - claude-code-sdk-rs/src/memory/*.rs
   - name: nexus-sdk-provider-boundary
     file: nexus-sdk-provider-boundary.mmd
-    verified: 2026-10-05
+    verified: 18865f7
     covers:
       - claude-code-sdk-rs/src/lib.rs
       - claude-code-sdk-rs/src/bin/fake_claude.rs
@@ -143,14 +143,14 @@ diagrams:
       - claude-code-sdk-rs/src/transport/*.rs
   - name: nexus-sdk-types
     file: nexus-sdk-types.mmd
-    verified: 2026-10-06
+    verified: 18865f7
     covers:
       - claude-code-sdk-rs/src/types.rs
       - claude-code-sdk-rs/src/message_parser.rs
       - claude-code-sdk-rs/src/errors.rs
   - name: nexus-sdk-util
     file: nexus-sdk-util.mmd
-    verified: 2026-10-01
+    verified: 18865f7
     covers:
       - claude-code-sdk-rs/src/cli_download.rs
       - claude-code-sdk-rs/src/sdk_mcp.rs

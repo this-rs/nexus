@@ -1,6 +1,6 @@
 %% name: nexus-sdk-memory
 %% covers: claude-code-sdk-rs/src/memory/*.rs
-%% verified: 2026-10-01
+%% verified: 18865f7
 flowchart TD
     subgraph legend["Légende"]
         direction LR
@@ -77,7 +77,7 @@ flowchart TD
     subgraph summary["Résumés — integration.rs"]
         sum_need["✅ SummaryGenerator::needs_summary()<br/>content.len() en octets > seuil"]
         sum_gen{"✅ generate_simple_summary()<br/>découpe sur . ! ? puis aiguille sur le nombre de phrases"}
-        sum_0["🔴 0 phrase → content[..seuil]<br/>panique si le seuil tombe au milieu d'un caractère UTF-8<br/><i>test ignoré : correctif hors de ce périmètre</i>"]
+        sum_0["✅ 0 phrase → content[..seuil] en reculant jusqu'à une frontière UTF-8<br/><i>vérifié : generate_simple_summary(\". .\") (test de 06450a9)</i>"]
         sum_1["✅ 1 phrase → la phrase seule"]
         sum_n["✅ 2 phrases ou plus → première + ' ... ' + dernière"]
     end
