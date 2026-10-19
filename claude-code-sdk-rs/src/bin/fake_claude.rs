@@ -279,8 +279,9 @@ fn spawn_stdin_reader() -> (Receiver<String>, std::thread::JoinHandle<()>) {
         for line in BufReader::new(stdin.lock()).lines() {
             let Ok(line) = line else { break };
             if let Some(file) = sink.as_mut() {
-                let _ = writeln!(file, "{line}");
-                let _ = file.flush();
+                // One write per line, so two fakes sharing a sink cannot
+                // interleave their fragments (see fake_acp::record).
+                let _ = file.write_all(format!("{line}\n").as_bytes());
             }
             if tx.send(line).is_err() {
                 break;

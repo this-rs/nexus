@@ -136,8 +136,9 @@ fn mask(value: &Value) -> Value {
 impl Fake {
     fn record(&mut self, entry: &Value) {
         if let Some(file) = &mut self.record {
-            let _ = writeln!(file, "{entry}");
-            let _ = file.flush();
+            // One write per line: concurrent fakes on one record must not
+            // interleave their fragments (see fake_acp::record).
+            let _ = file.write_all(format!("{entry}\n").as_bytes());
         }
     }
 
