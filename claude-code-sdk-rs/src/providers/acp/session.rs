@@ -94,6 +94,12 @@ pub(crate) struct State {
     modes: Vec<ModeInfo>,
     noticed: HashSet<String>,
     map: MapState,
+    /// Text of the session's `SystemPromptSpec`, kept for the FIRST `send_turn` to
+    /// deliver as a leading `text` content block of its `session/prompt` prompt;
+    /// taken (and left `None`) on that first turn. `None` from the start when the
+    /// session was resumed (the agent has that first turn in its history already,
+    /// a notice announced it: resend would duplicate the prompt mid-conversation).
+    pending_system_prompt: Option<String>,
 }
 
 impl State {
@@ -160,6 +166,11 @@ pub(crate) struct CoreParts {
     pub(crate) modes: Option<ModeState>,
     pub(crate) shared: Arc<Shared>,
     pub(crate) initial_events: Vec<AgentEvent>,
+    /// Text of the session's `SystemPromptSpec`, delivered as a leading `text`
+    /// content block of the first `send_turn`. `None` for a resumed session (ACP
+    /// has no system prompt; the agent received it in the first turn of the
+    /// original session, which `session/load` replays).
+    pub(crate) pending_system_prompt: Option<String>,
 }
 
 impl Core {
@@ -191,6 +202,7 @@ impl Core {
                 .unwrap_or_default(),
             noticed: HashSet::new(),
             map,
+            pending_system_prompt: parts.pending_system_prompt,
         };
         for event in parts.initial_events {
             state.push_out_of_band(event);
@@ -530,12 +542,29 @@ impl AgentSession for AcpSession {
         if text.trim().is_empty() {
             return Err(ProviderError::invalid("a turn needs some text"));
         }
-        let params = serde_json::to_value(PromptParams {
-            session_id: self.core.session_id.clone(),
-            prompt: vec![TextBlock {
+        // The session's `SystemPromptSpec`, if any, is delivered as a leading
+        // `text` block of the FIRST `session/prompt` — ACP has no system role —
+        // and consumed there: subsequent turns and resumed sessions do not
+        // carry it (it would duplicate mid-conversation; the agent kept the
+        // first turn in its history).
+        let system_prompt = {
+            let mut state = self.core.lock();
+            state.pending_system_prompt.take()
+        };
+        let mut blocks = Vec::with_capacity(1 + usize::from(system_prompt.is_some()));
+        if let Some(text) = system_prompt {
+            blocks.push(TextBlock {
                 r#type: "text".to_owned(),
                 text,
-            }],
+            });
+        }
+        blocks.push(TextBlock {
+            r#type: "text".to_owned(),
+            text,
+        });
+        let params = serde_json::to_value(PromptParams {
+            session_id: self.core.session_id.clone(),
+            prompt: blocks,
         })
         .map_err(|_| ProviderError::protocol("prompt parameters"))?;
         let (sender, receiver) = mpsc::unbounded_channel();

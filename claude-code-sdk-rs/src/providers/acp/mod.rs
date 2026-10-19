@@ -55,12 +55,23 @@
 //! [`map::neutral_of_mode`]), otherwise `Unsupported { set_policy_mode }`. The neutral
 //! policy also applies locally to every permission request.
 //!
+//! # System prompt
+//!
+//! ACP has no system role: a `SessionSpec::system_prompt` is delivered as a leading
+//! `text` content block of the FIRST `session/prompt` (`provider_notice
+//! { system_prompt_as_prompt_prefix }` announces it), and lives in the agent's
+//! conversation history from there on. `SystemPromptMode::Append` and `::Replace`
+//! both deliver the text (no base prompt exists to append to). A resumed session
+//! never carries it: `session/load` replays the first turn, which already holds
+//! the prompt — resending it would duplicate the instructions mid-conversation
+//! (`provider_notice { system_prompt_already_in_history }`).
+//!
 //! # Refused at opening
 //!
 //! `limits.max_*` and `max_turns` (`Unsupported { limits }`; `turn_timeout_ms` is
-//! honoured), `system_prompt` (`Unsupported { system_prompt }`: ACP has none),
-//! `extra_dirs` (`Unsupported { extra_dirs }`), `trust` (`Unsupported { sandbox }`), a
-//! command whose argument looks like a credential (`invalid_request`).
+//! honoured), `extra_dirs` (`Unsupported { extra_dirs }`), `trust`
+//! (`Unsupported { sandbox }`), a command whose argument looks like a credential
+//! (`invalid_request`).
 //!
 //! # Authentication
 //!
@@ -86,7 +97,7 @@ use serde_json::{Value, json};
 use crate::agent::{
     AgentEvent, AgentProvider, AgentSession, Capabilities, ContextWindow, ContextWindowSource,
     CostBasis, McpServerSpec, McpServerStatus, ModelInfo, PermissionScope, ProviderError,
-    ProviderHealth, ProviderKind, ResumeToken, SessionSpec, redact,
+    ProviderHealth, ProviderKind, ResumeToken, SessionSpec, SystemPromptMode, redact,
 };
 use crate::model::PriceTable;
 use crate::transport::spawn::EnvPolicy;
@@ -441,9 +452,6 @@ impl AcpProvider {
         {
             return Err(ProviderError::unsupported("limits"));
         }
-        if spec.system_prompt.is_some() {
-            return Err(ProviderError::unsupported("system_prompt"));
-        }
         if !spec.extra_dirs.is_empty() {
             return Err(ProviderError::unsupported("extra_dirs"));
         }
@@ -476,6 +484,34 @@ impl AcpProvider {
                     .clone()
                     .or_else(|| self.config.default_model.clone());
                 let mut initial_events = Vec::new();
+                // The session's `SystemPromptSpec` is delivered as a leading
+                // text block of the FIRST `session/prompt` (ACP has no system
+                // role). A resumed session already has that first turn in its
+                // history (`session/load` replays it): resending would duplicate
+                // the instructions, so the text is dropped with a notice.
+                let pending_system_prompt = match (resume.as_deref(), &spec.system_prompt) {
+                    (Some(_), Some(system_prompt)) => {
+                        initial_events.push(AgentEvent::ProviderNotice {
+                            kind: "system_prompt_already_in_history".to_owned(),
+                            data: json!({
+                                "detail": "ACP has no system role: the first turn of the resumed session carries the prompt, resending would duplicate it",
+                                "mode": system_prompt_mode_label(system_prompt.mode),
+                            }),
+                        });
+                        None
+                    },
+                    (None, Some(system_prompt)) => {
+                        initial_events.push(AgentEvent::ProviderNotice {
+                            kind: "system_prompt_as_prompt_prefix".to_owned(),
+                            data: json!({
+                                "detail": "ACP has no system role: the text is prepended as a leading content block of the first `session/prompt`",
+                                "mode": system_prompt_mode_label(system_prompt.mode),
+                            }),
+                        });
+                        Some(system_prompt.text.clone())
+                    },
+                    (_, None) => None,
+                };
                 if spec.hooks.is_some() {
                     initial_events.push(AgentEvent::ProviderNotice {
                         kind: "hooks_not_supported".to_owned(),
@@ -563,6 +599,7 @@ impl AcpProvider {
                         modes: handshake.modes,
                         shared: Arc::clone(&self.shared),
                         initial_events,
+                        pending_system_prompt,
                     },
                     inbound,
                 );
@@ -706,6 +743,16 @@ impl AcpProvider {
 /// does not carry them (`Unsupported { per_session_mcp }` in `build`).
 fn session_carries_mcp(given: bool, dropped: bool, instance: bool) -> bool {
     if given { !dropped } else { instance }
+}
+
+/// Human-readable value of a `SystemPromptMode` for a `provider_notice`'s `data`.
+/// Append and Replace both deliver the text (ACP has no base prompt): the label is
+/// kept so a reader knows what the SPEC asked for.
+fn system_prompt_mode_label(mode: SystemPromptMode) -> &'static str {
+    match mode {
+        SystemPromptMode::Replace => "replace",
+        SystemPromptMode::Append => "append",
+    }
 }
 
 /// `serde_json::to_value` of a wire type (plain structs of strings, options and

@@ -81,6 +81,7 @@ pub const ACP_BEHAVIOURS: &[&str] = &[
     "set_model_live_fallback",
     "sandbox_fallback",
     "mcp_servers_refused_retry",
+    "system_prompt_as_prompt_prefix",
 ];
 
 pub const ACP_AGENTS: &[AcpAgentEntry] = &[
