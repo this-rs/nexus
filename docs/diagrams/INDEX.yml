@@ -21,7 +21,7 @@ diagrams:
       - claude-code-sdk-rs/tests/agent_registry.rs
   - name: nexus-agent-providers
     file: nexus-agent-providers.mmd
-    verified: 2026-10-18
+    verified: 066b243
     covers:
       - docs/diagrams/nexus-agent-providers.mmd
       - docs/harness-consolidation-2026-10-05.md
