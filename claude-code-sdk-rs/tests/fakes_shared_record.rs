@@ -88,3 +88,74 @@ fn fake_codex_records_from_concurrent_processes_stay_one_json_line_each() {
     // Like the real codex, the fake only serves as `codex app-server`.
     every_line_of_a_shared_record_parses(FAKE_CODEX, &["app-server"], "FAKE_CODEX");
 }
+
+/// `fake_claude` records what it READS on stdin (`FAKE_CLAUDE_STDIN_OUT`), not
+/// start/exit entries, so it has its own shape: each fake is fed `LINES` long,
+/// distinct lines; the shared sink must end up with exactly `FAKES * LINES` whole
+/// lines, each one fed to some fake and none glued to or cut by another.
+#[test]
+fn fake_claude_stdin_sink_from_concurrent_processes_keeps_every_line_whole() {
+    use std::io::Write;
+
+    const FAKE_CLAUDE: &str = env!("CARGO_BIN_EXE_fake_claude");
+    const LINES: usize = 32;
+
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let transcript = dir.path().join("wait-eof.jsonl");
+    std::fs::write(&transcript, "{\"op\":\"wait_eof\"}\n").expect("a transcript");
+
+    for round in 0..ROUNDS {
+        let sink = dir.path().join(format!("stdin-{round}.txt"));
+        let mut expected = Vec::new();
+        let children: Vec<_> = (0..FAKES)
+            .map(|fake| {
+                let lines: Vec<String> = (0..LINES)
+                    .map(|n| format!("fake-{fake}-line-{n}-{}", "x".repeat(300)))
+                    .collect();
+                expected.extend(lines.iter().cloned());
+                let mut child = Command::new(FAKE_CLAUDE)
+                    .env("FAKE_CLAUDE_TRANSCRIPT", &transcript)
+                    .env("FAKE_CLAUDE_STDIN_OUT", &sink)
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .spawn()
+                    .expect("the fake starts");
+                (child.stdin.take().expect("a piped stdin"), child, lines)
+            })
+            .collect();
+        // Feed every fake from its own thread at once, so their reader threads
+        // really write to the shared sink at the same time. Feeding them one
+        // after another would serialize the writes and hide the race.
+        let feeders: Vec<_> = children
+            .into_iter()
+            .map(|(mut stdin, mut child, lines)| {
+                std::thread::spawn(move || {
+                    for line in &lines {
+                        writeln!(stdin, "{line}").expect("a line is fed");
+                    }
+                    drop(stdin); // EOF: `wait_eof` returns and the fake exits
+                    let status = child.wait().expect("the fake is waited for");
+                    assert!(status.success(), "a fake failed: {status}");
+                })
+            })
+            .collect();
+        for feeder in feeders {
+            feeder.join().expect("a fake was fed and exited cleanly");
+        }
+
+        let text = std::fs::read_to_string(&sink).expect("the sink was written");
+        let mut got: Vec<&str> = text.lines().collect();
+        got.sort_unstable();
+        expected.sort_unstable();
+        assert_eq!(
+            got.len(),
+            expected.len(),
+            "round {round}: every fed line is recorded once\n{text}"
+        );
+        assert!(
+            got.iter().zip(&expected).all(|(a, b)| a == b),
+            "round {round}: a recorded line was cut or glued to another\n{text}"
+        );
+    }
+}
