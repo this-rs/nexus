@@ -1,6 +1,6 @@
 %% name: nexus-sdk-interactive
 %% covers: claude-code-sdk-rs/src/interactive.rs
-%% verified: 2026-10-01
+%% verified: 8373c29
 flowchart TD
     subgraph legend["Légende"]
         direction LR
@@ -18,8 +18,10 @@ flowchart TD
         new["✅ new()<br/>pose CLAUDE_CODE_ENTRYPOINT=sdk-rust via set_var,<br/>recopie options.hooks, construit SubprocessTransport<br/><i>vérifié : cli_path bidon, test sérialisé</i>"]
         from_tr["✅ from_transport() / from_transport_with_hooks()<br/>mêmes champs, transport fourni par l'appelant<br/><i>vérifié : transport factice et MockTransport</i>"]
         connect["✅ connect()<br/>si self.connected déjà vrai : return Ok sans toucher au transport<br/><i>vérifié : compteur de connect() du transport factice</i>"]
-        guard{"✅ if !self.connected<br/>garde partagée par 7 méthodes"}
-        refus["✅ Err SdkError::InvalidState « Not connected »<br/>les NEUF méthodes de tour : send_and_receive, send_message,<br/>send_control_response, send_and_receive_stream, receive_response,<br/>receive_messages_stream, receive_response_stream,<br/>set_permission_mode, interrupt<br/><i>vérifié : every_turn_operation_is_refused_before_connect, les neuf appels avant connect()</i>"]
+        guard{"✅ if !self.connected<br/>écrite dans 9 méthodes ; les flux d'envoi l'héritent de<br/>send_input_and_receive_stream, receive_response_stream de receive_messages_stream"}
+        refus["✅ Err SdkError::InvalidState « Not connected »<br/>les ONZE méthodes de tour : send_and_receive, send_message, send_message_blocks,<br/>send_control_response, send_and_receive_stream, send_blocks_and_receive_stream,<br/>receive_response, receive_messages_stream, receive_response_stream,<br/>set_permission_mode, interrupt<br/><i>vérifié : every_turn_operation_is_refused_before_connect (neuf appels),<br/>test_send_message_blocks_refuses_empty_and_unconnected, send_blocks_and_receive_stream_refuses_empty_and_unconnected</i>"]
+        blocks["✅ send_message_blocks() / send_blocks_and_receive_stream()<br/>message fait de blocs (texte + images) : InputMessage::user_blocks<br/>liste vide → Err InvalidState, avant tout envoi<br/><i>vérifié : test_send_message_blocks_writes_an_array_content, send_blocks_and_receive_stream_sends_the_array_and_stops_at_the_result</i>"]
+        alive["✅ is_alive()<br/>connected ET transport.is_connected() : un CLI sorti répond false,<br/>l'appelant relance au lieu d'écrire sur un stdin mort<br/><i>vérifié : is_alive_follows_the_transport_and_the_connection</i>"]
         disco["✅ disconnect()<br/>idempotent : si déjà déconnecté, Ok sans appel transport<br/><i>vérifié : double disconnect + fake CLI</i>"]
         nogu["✅ receive_messages_stream() et receive_response_stream()<br/>portent la garde depuis le correctif : elles rendent un Result,<br/>plus un flux VIDE indiscernable d'un tour terminé<br/>RUPTURE : .await devient .await? chez l'appelant<br/><i>vérifié : test rejoué en retirant la seule garde, fake CLI jamais lancé</i>"]
         stdin_cache["✅ connect() clone le stdin_tx du transport et le garde ;<br/>disconnect() le remet à None, un connect() suivant le rearme<br/><i>vérifié : transport factice avec canal stdin, ligne absente après disconnect</i>"]
@@ -36,6 +38,8 @@ flowchart TD
     guard -->|"portée aussi par"| nogu
     connect --> stdin_cache
     disco --> stdin_cache
+    guard -->|"connecté"| blocks
+    caller --> alive
 
     %% ------------------------------------------------------------------
     subgraph tour["Un tour de parole"]
@@ -74,7 +78,7 @@ flowchart TD
         intr["✅ interrupt()<br/>ControlRequest::Interrupt { request_id: uuid }<br/><i>vérifié : tests/e2e_interrupt.rs</i>"]
         bij["✅ build_interrupt_json()<br/>même format que le transport, mais sans lock : pour un stdin_tx cloné<br/><i>vérifié : jeu de clés exact comparé au transport</i>"]
         scr["✅ send_control_response(payload)<br/>le transport enveloppe dans { type: control_response, response }<br/><i>vérifié : MockTransport, allow/deny + reason</i>"]
-        pass["✅ take_sdk_control_receiver / clone_stdin_sender / child_pid / subscribe_messages<br/>délégations nues : None tant que le sous-processus n'existe pas<br/><i>vérifié : fake CLI, avant / pendant / après connect()</i>"]
+        pass["✅ take_sdk_control_receiver / clone_stdin_sender / child_pid / subscribe_messages<br/>délégations nues : None tant que le sous-processus n'existe pas<br/>hook_callbacks() rend le registre même que lit le dispatch<br/><i>vérifié : fake CLI, avant / pendant / après connect() ; hook_callbacks_hands_out_the_very_registry_dispatch_reads</i>"]
     end
 
     guard --> spm
