@@ -161,8 +161,11 @@ fn mask(value: &Value) -> Value {
 impl Fake {
     fn record(&mut self, entry: &Value) {
         if let Some(file) = &mut self.record {
-            let _ = writeln!(file, "{entry}");
-            let _ = file.flush();
+            // One write per line. `writeln!` on a File issues one write(2) per
+            // formatted fragment; two fakes appending to the same record at once
+            // (two sessions opened together) interleaved their fragments, both
+            // lines stopped parsing, and the test read an empty record.
+            let _ = file.write_all(format!("{entry}\n").as_bytes());
         }
     }
 
