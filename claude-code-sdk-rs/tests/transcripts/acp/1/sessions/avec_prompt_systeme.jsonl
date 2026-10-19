@@ -1,0 +1,7 @@
+# Two prompt turns in a row: the session's `SystemPromptSpec` is delivered as a leading
+# text block of the FIRST `session/prompt` (ACP has no system role), and the second
+# turn does not carry it (the agent kept the first turn in its history).
+# Spec-derived, not recorded from a real agent.
+{"op":"include","file":"prelude.jsonl"}
+{"op":"include","file":"turn1_text.jsonl"}
+{"op":"include","file":"turn2_text.jsonl"}

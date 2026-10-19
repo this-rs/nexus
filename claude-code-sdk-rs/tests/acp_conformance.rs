@@ -21,7 +21,8 @@ use nexus_claude::agent::{
     AgentEvent, AgentProvider, AgentSession, CancelScope, Capabilities, CostBasis, EventStream,
     HealthStatus, HookSupport, InterruptScope, McpServerSpec, ModelPrice, PermissionDecision,
     PermissionScope, PolicyMode, ProviderError, ProviderKind, ResumeToken, SandboxLevel,
-    SessionSpec, StopReason, SubagentSupport, ToolCategory, ToolPolicy, TurnInput,
+    SessionSpec, StopReason, SubagentSupport, SystemPromptMode, SystemPromptSpec, ToolCategory,
+    ToolPolicy, TurnInput,
 };
 use nexus_claude::providers::acp::wire;
 use nexus_claude::providers::acp::{AcpConfig, AcpProvider, SUPPORTED_PROTOCOL_VERSION};
@@ -1340,15 +1341,155 @@ async fn what_the_protocol_cannot_honour_is_refused_before_anything_starts() {
     spec.max_turns = Some(2);
     assert_eq!(provider.open(spec).await.err(), refuse("limits"));
     let mut spec = staging.spec("plain");
-    spec.system_prompt = Some(nexus_claude::agent::SystemPromptSpec {
-        text: "be brief".to_owned(),
-        mode: nexus_claude::agent::SystemPromptMode::Append,
-    });
-    assert_eq!(provider.open(spec).await.err(), refuse("system_prompt"));
-    let mut spec = staging.spec("plain");
     spec.extra_dirs.push(PathBuf::from("/tmp"));
     assert_eq!(provider.open(spec).await.err(), refuse("extra_dirs"));
     assert!(staging.recorded().is_empty(), "nothing was started");
+}
+
+// ---------------------------------------------------------------------------
+// System prompt
+//
+// ACP has no system role: `SessionSpec::system_prompt` is delivered as a leading
+// `text` content block of the FIRST `session/prompt`. A resumed session does not
+// carry it (the first turn is in the agent's history).
+// ---------------------------------------------------------------------------
+
+const PO_SYSTEM_PROMPT: &str = "You are a Project Orchestrator agent. Use the mega-tools listed below. \
+     Never paste a secret in the chat.";
+
+#[tokio::test]
+async fn the_system_prompt_is_prepended_as_a_text_block_of_the_first_turn_and_not_the_second() {
+    let staging = Staging::new();
+    let mut spec = staging.spec("avec_prompt_systeme");
+    spec.system_prompt = Some(SystemPromptSpec {
+        text: PO_SYSTEM_PROMPT.to_owned(),
+        mode: SystemPromptMode::Replace,
+    });
+    let session = staging
+        .learned_provider()
+        .await
+        .open(spec)
+        .await
+        .expect("opens");
+    // The notice is emitted at opening: before the first `send_turn` returns, we
+    // can read it out of band.
+    let mut oob = session.out_of_band().expect("out of band");
+    let notice = next_matching(&mut oob, |event| {
+        matches!(event, AgentEvent::ProviderNotice { kind, .. } if kind == "system_prompt_as_prompt_prefix")
+    })
+    .await;
+    assert!(matches!(
+        notice,
+        AgentEvent::ProviderNotice { data, .. } if data["mode"] == json!("replace")
+    ));
+
+    // Two turns in a row, same text payload: the prefix only sits on the first.
+    let turn1 = collect(
+        session
+            .send_turn(TurnInput::text("go"))
+            .await
+            .expect("send_turn"),
+    )
+    .await;
+    assert_eq!(stop_of(&turn1), StopReason::Completed);
+    let turn2 = collect(
+        session
+            .send_turn(TurnInput::text("go"))
+            .await
+            .expect("send_turn"),
+    )
+    .await;
+    assert_eq!(stop_of(&turn2), StopReason::Completed);
+
+    let prompts = staging.requests("session/prompt");
+    assert_eq!(prompts.len(), 2, "two turns were sent");
+    let first: Vec<&str> = prompts[0]["params"]["prompt"]
+        .as_array()
+        .expect("content blocks")
+        .iter()
+        .map(|block| block["text"].as_str().unwrap_or_default())
+        .collect();
+    assert_eq!(
+        first,
+        [PO_SYSTEM_PROMPT, "go"],
+        "the first turn carries the system prompt as a leading block"
+    );
+    let second: Vec<&str> = prompts[1]["params"]["prompt"]
+        .as_array()
+        .expect("content blocks")
+        .iter()
+        .map(|block| block["text"].as_str().unwrap_or_default())
+        .collect();
+    assert_eq!(
+        second,
+        ["go"],
+        "the second turn does not re-send the system prompt"
+    );
+    session.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_turn_without_a_system_prompt_sends_one_text_block_as_before() {
+    // Regression gate: when `SessionSpec::system_prompt` is `None`, the wire shape
+    // of a prompt is still a single `text` block, byte for byte as it was.
+    let staging = Staging::new();
+    let session = staging.open("plain").await;
+    let events = turn(&*session).await;
+    assert_eq!(stop_of(&events), StopReason::Completed);
+    let prompts = staging.requests("session/prompt");
+    let blocks = prompts[0]["params"]["prompt"]
+        .as_array()
+        .expect("content blocks");
+    assert_eq!(blocks.len(), 1);
+    assert_eq!(blocks[0]["type"], json!("text"));
+    assert_eq!(blocks[0]["text"], json!("go"));
+    session.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_resumed_session_does_not_resend_the_system_prompt_the_agent_has_it_in_history() {
+    let staging = Staging::new();
+    let provider = staging.learned_provider().await;
+    assert!(provider.capabilities(None).resume);
+    let mut spec = staging.spec("reprise");
+    spec.system_prompt = Some(SystemPromptSpec {
+        text: PO_SYSTEM_PROMPT.to_owned(),
+        mode: SystemPromptMode::Replace,
+    });
+    let session = provider
+        .resume(spec, token("sess_prev"))
+        .await
+        .expect("loads");
+    let mut oob = session.out_of_band().expect("out of band");
+    let notice = next_matching(&mut oob, |event| {
+        matches!(event, AgentEvent::ProviderNotice { kind, .. } if kind == "system_prompt_already_in_history")
+    })
+    .await;
+    assert!(matches!(
+        notice,
+        AgentEvent::ProviderNotice { data, .. } if data["mode"] == json!("replace")
+    ));
+    let events = turn(&*session).await;
+    assert_eq!(stop_of(&events), StopReason::Completed);
+    let prompts = staging.requests("session/prompt");
+    assert_eq!(prompts.len(), 1);
+    let blocks = prompts[0]["params"]["prompt"]
+        .as_array()
+        .expect("content blocks");
+    assert_eq!(
+        blocks.len(),
+        1,
+        "the resumed turn carries only the user text"
+    );
+    assert_eq!(blocks[0]["text"], json!("go"));
+    assert!(
+        !blocks.iter().any(|block| block["text"]
+            .as_str()
+            .unwrap_or_default()
+            .contains(PO_SYSTEM_PROMPT)),
+        "the system prompt is NOT re-sent after a resume"
+    );
+    session.close().await.unwrap();
 }
 
 #[tokio::test]
@@ -1728,9 +1869,16 @@ const FAKE_ACP_FALLBACK: &[&str] = &[
     "background_tasks",
 ];
 
-/// The one behaviour the suite proves that is not a [`Capabilities`] field:
-/// `openclaw acp` refusing `mcpServers` and the retry without them.
-const FAKE_ACP_EXTRA: &[&str] = &["mcp_servers_refused_retry"];
+/// Behaviours the suite proves that are not [`Capabilities`] fields:
+/// - `mcp_servers_refused_retry`: `openclaw acp` refusing `mcpServers` and the retry
+///   without them;
+/// - `system_prompt_as_prompt_prefix`: ACP has no system role, so a
+///   `SessionSpec::system_prompt` is delivered as a leading `text` block of the
+///   first `session/prompt` and never re-sent (notice on resume).
+const FAKE_ACP_EXTRA: &[&str] = &[
+    "mcp_servers_refused_retry",
+    "system_prompt_as_prompt_prefix",
+];
 
 /// The capability names the suite proves for `fake_acp`, derived from
 /// [`Capabilities::FIELDS`]: every field is classified exactly once, bare or
