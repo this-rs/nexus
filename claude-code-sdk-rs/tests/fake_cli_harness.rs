@@ -903,7 +903,10 @@ async fn a_truncated_final_line_is_dropped() {
     let mut transport = fake.transport();
     transport.connect().await.unwrap();
     let stream = start_turn(&mut transport, "cut me off").await;
-    let messages = collect_n(stream, 2, Duration::from_millis(800)).await;
+    // `WAIT`, not a hand-tuned 800 ms: the "complete" turn has to cross a spawn,
+    // a stdin round-trip and the pipe before it is collected, and a short cap
+    // raced that on a slow Windows runner (`[]` instead of `["complete"]`).
+    let messages = collect_n(stream, 2, WAIT).await;
     transport.disconnect().await.unwrap();
 
     assert_eq!(assistant_texts(&messages), vec!["complete".to_string()]);
