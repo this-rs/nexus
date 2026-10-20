@@ -53,7 +53,7 @@ pub use registry::{
     KindFactory, PriceBook, ProviderInstanceConfig, ProviderRegistry, SECURITY_GATE_CAPABILITY,
     SecurityGate,
 };
-pub use resume::ResumeToken;
+pub use resume::{ResumeFingerprint, ResumeIncompatible, ResumeToken};
 pub use spec::{
     CancelOutcome, CancelScope, CompactOutcome, CompactionDirective, CompactionInfo, EnvSpec,
     HookReply, HookVerdict, InputBlock, InterruptOutcome, InterruptScope, Lineage, McpServerSpec,
