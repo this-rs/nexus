@@ -32,6 +32,8 @@ pub fn claude_to_openai_stream(
                                 },
                                 finish_reason: None,
                             }],
+                            usage: None,
+                            error: None,
                         });
                     }
                 }
@@ -49,6 +51,8 @@ pub fn claude_to_openai_stream(
                     delta: DeltaMessage::default(),
                     finish_reason: Some("stop".to_string()),
                 }],
+                usage: None,
+                error: None,
             });
         },
         _ => {},
@@ -77,6 +81,8 @@ fn convert_claude_event_to_openai(
                 },
                 finish_reason: None,
             }],
+            usage: None,
+            error: None,
         }),
         ClaudeStreamEvent::ContentBlockDelta { delta, .. } => match delta {
             ContentDelta::TextDelta { text } => Some(ChatCompletionStreamResponse {
@@ -93,6 +99,8 @@ fn convert_claude_event_to_openai(
                     },
                     finish_reason: None,
                 }],
+                usage: None,
+                error: None,
             }),
         },
         ClaudeStreamEvent::MessageStop => Some(ChatCompletionStreamResponse {
@@ -105,6 +113,8 @@ fn convert_claude_event_to_openai(
                 delta: DeltaMessage::default(),
                 finish_reason: Some("stop".to_string()),
             }],
+            usage: None,
+            error: None,
         }),
         _ => None,
     }

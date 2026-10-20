@@ -66,13 +66,13 @@ flowchart TD
     nonstream -->|"bloc text"| text["✅ concaténé, token_count = mots"]
     nonstream -->|"bloc tool_use"| tooluse["✅ ToolCall OpenAI<br/>id vide → call_ + uuid, input absent → objet vide"]
     nonstream -->|"bloc tool_result / inconnu"| ignored["✅ journalisé puis ignoré"]
-    nonstream -->|"result avec is_error, ou type error"| silenterr["🔴 traité comme un succès : 200 au contenu vide<br/>build_process_died_event() émet exactement ce message<br/>quand le CLI meurt<br/><i>test rouge ignoré</i>"]
+    nonstream -->|"result avec is_error, ou type error"| silenterr["✅ ApiError::ClaudeProcess<br/>500 claude_process_error portant le texte du CLI<br/>build_process_died_event() émet exactement ce message<br/>quand le CLI meurt : un CLI mort n'est pas un modèle<br/>qui a choisi de ne rien dire (DS-WIRE)<br/><i>vérifié : chat.rs an_errored_result_is_not_a_200 (était #[ignore])</i>"]
     nonstream -->|"budget écoulé"| touto["✅ ApiError::ClaudeProcess 'Timeout … after N seconds'<br/>budget respecté à la seconde<br/><i>vérifié : horloge Tokio arrêtée, 1 s mesuré, pas 5</i>"]
     touto --> closenoop["🔴 claude_manager.close_session(session_id)<br/>no-op sur le chemin interactif :<br/>ces sessions vivent dans InteractiveSessionManager.sessions"]
 
     text --> build{"tool_calls extraits ?"}
     tooluse --> build
-    build -->|"oui + texte"| fstop["✅ finish_reason = stop, contenu conservé"]
+    build -->|"oui + texte"| fstop["✅ finish_reason = tool_calls, contenu conservé<br/>un appel est un appel : `stop` à côté d'un appel rend<br/>l'appel inatteignable, le client ne l'exécute jamais (DS-WIRE)<br/><i>vérifié : chat.rs text_next_to_a_tool_call_still_finishes_on_tool_calls</i>"]
     build -->|"oui, sans texte"| ftool["✅ finish_reason = tool_calls, content = null JSON"]
     build -->|"non, mais JSON + tools déclarés"| heur["✅ detect_and_convert_tool_call()<br/>heuristique héritée : le texte JSON est jeté"]
     build -->|"non"| ftext["✅ réponse texte, finish_reason = stop"]
@@ -90,7 +90,7 @@ flowchart TD
     sse --> rec["✅ record_streamed_turn()<br/>recopie chaque chunk, accumule le texte,<br/>add_message(assistant) à la fin<br/><i>vérifié : conversation = user puis assistant après un POST stream</i>"]
     rec --> frames["✅ create_sse_stream() : une ligne data: par chunk"]
     frames --> nodone["🔴 aucune trame finale data: DONE<br/>utils::streaming::create_sse_stream<br/><i>test rouge ignoré du socle</i>"]
-    sse -.-> silentstream["🔴 même silence côté flux : un result en erreur émet<br/>finish_reason stop, un type error n'émet rien du tout<br/>api::streaming_handler, autre propriétaire"]
+    sse --> streamend["✅ fin de tour côté flux (DS-WIRE) : finish_reason tool_calls<br/>si le tour a appelé un outil, sinon stop ; puis un chunk d'usage<br/>final (choices vide) quand le CLI a rapporté des compteurs —<br/>prompt_tokens = input + cache_read + cache_creation, et RIEN<br/>s'il n'a rien rapporté (inconnu n'est pas zéro).<br/>Un result en erreur ou un type error émet une TRAME D'ERREUR<br/>en bande (error {message, type}, sans finish_reason) et laisse<br/>SseDisconnectGuard ARMÉ, donc la session CLI est interrompue<br/><i>vérifié : tests/sse_stream_conformance.rs, 20 tests 0 ignoré (les deux<br/>#[ignore] levés) ; a_tool_call_is_streamed_then_the_sentinel_closes_the_body<br/>rejoué à travers build_router</i>"]
     rec -.->|"client déconnecté avant la fin"| lost["🟠 rien n'est persisté : le générateur est<br/>abandonné avant add_message"]
     sse -.->|"drop du flux"| guard["✅ SseDisconnectGuard::drop()<br/>interrompt la session CLI si le flux<br/>n'a pas vu de message result"]
 

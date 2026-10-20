@@ -48,6 +48,71 @@ pub(crate) fn fold_late_system(messages: &[ChatMessage]) -> Vec<ChatMessage> {
     out
 }
 
+/// Stands in for the result of a call the transcript never answered.
+pub(crate) const MISSING_RESULT: &str =
+    "[no result: the tool call did not complete in this session]";
+
+/// Makes every `tool_calls`/`tool` pair of a transcript whole, so a history that
+/// was cut, compacted or interrupted mid-turn still forms a request the server
+/// accepts (DeepSeek, like OpenAI, rejects a `tool` message answering a call it
+/// cannot see, and a call left unanswered).
+///
+/// Two repairs, both minimal:
+///
+/// * a `tool` message whose `tool_call_id` answers no call announced earlier (or
+///   answers one twice, or carries no id at all) is **dropped** — its call is
+///   gone, so there is nothing for the server to attach it to;
+/// * a call announced by an assistant message and never answered gets a
+///   synthetic `tool` message carrying [`MISSING_RESULT`], inserted where its
+///   answer belonged.
+///
+/// Assistant messages are never rewritten: the repair only drops and appends
+/// `tool` messages, so the expensive part of the prefix stays byte-identical and
+/// the cache holds. The function is the identity on a well-formed transcript.
+pub(crate) fn pair_tool_messages(messages: &[ChatMessage]) -> Vec<ChatMessage> {
+    let mut out: Vec<ChatMessage> = Vec::with_capacity(messages.len());
+    // Calls announced by the most recent assistant message, still unanswered.
+    let mut pending: Vec<String> = Vec::new();
+    let flush = |out: &mut Vec<ChatMessage>, pending: &mut Vec<String>| {
+        for id in pending.drain(..) {
+            out.push(ChatMessage {
+                role: Role::Tool,
+                content: Some(MISSING_RESULT.to_owned()),
+                images: Vec::new(),
+                reasoning: None,
+                tool_calls: Vec::new(),
+                tool_call_id: Some(id),
+                wire_echo: None,
+            });
+        }
+    };
+    for message in messages {
+        if message.role == Role::Tool {
+            // Answers a call we announced and have not seen answered yet?
+            match message
+                .tool_call_id
+                .as_deref()
+                .and_then(|id| pending.iter().position(|open| open == id))
+            {
+                Some(position) => {
+                    pending.remove(position);
+                    out.push(message.clone());
+                },
+                None => continue,
+            }
+            continue;
+        }
+        // Any non-`tool` message closes the answer block of the previous one.
+        flush(&mut out, &mut pending);
+        out.push(message.clone());
+        if message.role == Role::Assistant {
+            pending = message.tool_calls.iter().map(|c| c.id.clone()).collect();
+        }
+    }
+    flush(&mut out, &mut pending);
+    out
+}
+
 fn message_json(message: &ChatMessage, quirks: &EndpointQuirks) -> Value {
     let mut object = Map::new();
     object.insert("role".into(), json!(message.role.as_str()));
@@ -100,12 +165,18 @@ fn message_json(message: &ChatMessage, quirks: &EndpointQuirks) -> Value {
         // back, tools or not. Dropping it when a later request offers no tools
         // re-serialises the earlier assistant messages differently and breaks
         // the prefix cache on the first tool-less turn after a reasoned one.
+        // A turn that called a tool without reasoning still owes the field: the
+        // server fills it with an empty string, so omitting it re-serialises the
+        // message differently from the way the server stored it.
         if quirks.echo_reasoning_with_tools
-            && let Some(reasoning) = &message.reasoning
+            && let Some(reasoning) = message
+                .reasoning
+                .clone()
+                .or_else(|| (!message.tool_calls.is_empty()).then(String::new))
         {
             object.insert(
                 quirks.reasoning_field.key().into(),
-                Value::String(reasoning.clone()),
+                Value::String(reasoning),
             );
         }
     }
@@ -123,12 +194,16 @@ pub(crate) fn build_request(
     forced_tool: Option<&str>,
 ) -> Value {
     let with_tools = !request.tools.is_empty();
+    // Unconditional: an orphan `tool` message, or a call left unanswered, is
+    // invalid on every OpenAI-compatible server, and the repair is the identity
+    // on a transcript that has neither.
+    let paired = pair_tool_messages(&request.messages);
     let folded;
     let messages: &[ChatMessage] = if quirks.fold_late_system {
-        folded = fold_late_system(&request.messages);
+        folded = fold_late_system(&paired);
         &folded
     } else {
-        &request.messages
+        &paired
     };
     let mut body = Map::new();
     body.insert("model".into(), json!(request.model));
@@ -146,7 +221,13 @@ pub(crate) fn build_request(
     if let Some(max_tokens) = request.max_tokens {
         body.insert("max_tokens".into(), json!(max_tokens));
     }
-    if let Some(temperature) = request.temperature {
+    // An endpoint whose thinking mode pins the temperature is not sent one: see
+    // `EndpointQuirks::thinking_ignores_temperature` for why it would only cost
+    // a prefix-cache miss.
+    if let Some(temperature) = request
+        .temperature
+        .filter(|_| !quirks.thinking_ignores_temperature)
+    {
         body.insert("temperature".into(), json!(temperature));
     }
     if with_tools {
@@ -240,8 +321,11 @@ impl StreamParser {
                 self.read_delta(delta, &mut out)?;
             }
             if let Some(reason) = choice.get("finish_reason").and_then(Value::as_str) {
-                out.extend(self.flush_calls()?);
+                // The reason is read BEFORE the calls are flushed: `length` is what
+                // makes a half-written call an honest truncation instead of a
+                // protocol violation (see `flush_calls`).
                 self.finish = Some(parse_finish(reason));
+                out.extend(self.flush_calls()?);
             }
         }
         if let Some(usage) = value.get("usage").and_then(parse_usage) {
@@ -335,11 +419,29 @@ impl StreamParser {
         }
     }
 
+    /// Turns the calls collected so far into chunks.
+    ///
+    /// A call whose `arguments` are not a complete JSON document is handled by
+    /// what the server said about the turn (decision DS-WIRE):
+    ///
+    /// * under `finish_reason: "length"` the server is telling us it ran out of
+    ///   output budget mid-call. That is a truthful, actionable answer, so the
+    ///   half-written call is **dropped** and the turn still ends as
+    ///   [`FinishReason::Length`] — the caller can raise `max_tokens` and retry.
+    ///   Failing the stream here would replace the one signal that says why.
+    /// * under any other reason (or none) a truncated call is a broken server and
+    ///   stays a protocol error: nothing in the stream explains the hole.
+    ///
+    /// Either way no partial call is ever handed to the agent loop.
     fn flush_calls(&mut self) -> Result<Vec<CompletionChunk>, ProviderError> {
         let calls = std::mem::take(&mut self.calls);
+        let truncation_was_announced = matches!(self.finish, Some(FinishReason::Length));
         let mut out = Vec::with_capacity(calls.len());
         for (position, (_, call)) in calls.into_iter().enumerate() {
             if call.name.is_empty() {
+                if truncation_was_announced {
+                    continue;
+                }
                 return Err(ProviderError::protocol("tool call without a name"));
             }
             let arguments = if call.arguments.trim().is_empty() {
@@ -348,6 +450,9 @@ impl StreamParser {
                 call.arguments
             };
             if serde_json::from_str::<Value>(&arguments).is_err() {
+                if truncation_was_announced {
+                    continue;
+                }
                 return Err(ProviderError::protocol(
                     "tool call arguments are not a complete JSON document",
                 ));
@@ -533,6 +638,140 @@ mod tests {
         assert_eq!(body["messages"][0]["content"].as_array().unwrap().len(), 2);
         let plain = build_request(&self::request(vec![]), &EndpointQuirks::generic(), None);
         assert_eq!(plain["messages"][1]["content"], "hi");
+    }
+
+    /// The roles of a transcript, to read a repair at a glance.
+    fn roles(body: &Value) -> Vec<&str> {
+        body["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m["role"].as_str().unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn pairing_is_the_identity_on_a_well_formed_transcript() {
+        let whole = transcript();
+        assert_eq!(pair_tool_messages(&whole), whole);
+        // And on one with no tool traffic at all.
+        let plain = vec![ChatMessage::user("hi"), ChatMessage::assistant("there")];
+        assert_eq!(pair_tool_messages(&plain), plain);
+    }
+
+    #[test]
+    fn an_orphan_tool_result_never_reaches_the_server() {
+        // The assistant message that asked for `c1` was summarised away; only its
+        // answer survived. DeepSeek rejects the whole request over it.
+        let cut = vec![
+            ChatMessage::system("be brief"),
+            ChatMessage::tool("c1", "contents"),
+            ChatMessage::user("and now?"),
+        ];
+        let mut request = CompletionRequest::new("m", cut);
+        request.tools = vec![tool()];
+        let body = build_request(&request, &EndpointQuirks::deepseek(), None);
+        assert_eq!(roles(&body), ["system", "user"], "{body:#?}");
+        // A result answering a call twice is just as orphan the second time.
+        let twice = vec![
+            transcript()[2].clone(),
+            ChatMessage::tool("c1", "contents"),
+            ChatMessage::tool("c1", "contents again"),
+        ];
+        assert_eq!(pair_tool_messages(&twice).len(), 2);
+        // So is one that names no call at all.
+        let mut nameless = ChatMessage::tool("c1", "contents");
+        nameless.tool_call_id = None;
+        assert_eq!(
+            pair_tool_messages(&[transcript()[2].clone(), nameless]).len(),
+            2,
+            "the unanswered call gets a stand-in, the id-less result does not survive"
+        );
+    }
+
+    #[test]
+    fn a_call_left_unanswered_never_reaches_the_server_bare() {
+        // The turn was interrupted between the call and its result.
+        let interrupted = vec![
+            ChatMessage::system("be brief"),
+            ChatMessage::user("hi"),
+            transcript()[2].clone(),
+        ];
+        let mut request = CompletionRequest::new("m", interrupted);
+        request.tools = vec![tool()];
+        let body = build_request(&request, &EndpointQuirks::deepseek(), None);
+        assert_eq!(roles(&body), ["system", "user", "assistant", "tool"]);
+        assert_eq!(body["messages"][3]["tool_call_id"], "c1");
+        assert_eq!(body["messages"][3]["content"], MISSING_RESULT);
+        // The assistant message itself is untouched: the prefix still hits the cache.
+        assert_eq!(body["messages"][2]["tool_calls"][0]["id"], "c1");
+    }
+
+    #[test]
+    fn an_unanswered_call_is_closed_before_the_next_user_turn() {
+        // Two calls, one answer, then the conversation moves on: the stand-in has
+        // to land between the real answer and the user message, not at the end.
+        let mut call_message = ChatMessage::assistant_tool_calls(vec![
+            ToolCallChunk {
+                id: "c1".into(),
+                name: "read".into(),
+                arguments: r#"{"path":"a"}"#.into(),
+            },
+            ToolCallChunk {
+                id: "c2".into(),
+                name: "read".into(),
+                arguments: r#"{"path":"b"}"#.into(),
+            },
+        ]);
+        call_message.content = None;
+        let half = vec![
+            call_message,
+            ChatMessage::tool("c2", "contents of b"),
+            ChatMessage::user("never mind"),
+        ];
+        let paired = pair_tool_messages(&half);
+        assert_eq!(
+            paired
+                .iter()
+                .map(|m| (m.role, m.tool_call_id.as_deref()))
+                .collect::<Vec<_>>(),
+            [
+                (Role::Assistant, None),
+                (Role::Tool, Some("c2")),
+                (Role::Tool, Some("c1")),
+                (Role::User, None),
+            ]
+        );
+    }
+
+    #[test]
+    fn deepseek_fills_the_reasoning_of_a_tool_call_that_had_none() {
+        // Their server stores "" for a tool-calling turn that did not reason;
+        // leaving the field out re-serialises the message another way.
+        let mut unreasoned = transcript();
+        unreasoned[2].reasoning = None;
+        let mut request = CompletionRequest::new("m", unreasoned);
+        request.tools = vec![tool()];
+        let body = build_request(&request, &EndpointQuirks::deepseek(), None);
+        assert_eq!(body["messages"][2]["reasoning_content"], "");
+        // A plain assistant message with neither reasoning nor calls owes nothing.
+        let plain = CompletionRequest::new("m", vec![ChatMessage::assistant("hi")]);
+        let body = build_request(&plain, &EndpointQuirks::deepseek(), None);
+        assert!(body["messages"][0].get("reasoning_content").is_none());
+    }
+
+    #[test]
+    fn deepseek_sends_no_temperature_because_thinking_pins_it() {
+        let mut request = request(vec![tool()]);
+        request.temperature = Some(0.25);
+        let body = build_request(&request, &EndpointQuirks::deepseek(), None);
+        assert!(
+            body.get("temperature").is_none(),
+            "thinking mode forces 1.0 server-side: asking for 0.25 only breaks the \
+             prefix cache"
+        );
+        let generic = build_request(&request, &EndpointQuirks::generic(), None);
+        assert_eq!(generic["temperature"], 0.25);
     }
 
     #[test]
@@ -763,17 +1002,103 @@ mod tests {
         assert_eq!(calls(&chunks)[0].arguments, r#"{"k":1}"#);
     }
 
+    /// scenario from deepseek-ai/deepseek-recipe (MIT): output truncated inside a
+    /// tool call.
+    ///
+    /// Replaces `truncated_arguments_are_a_protocol_error`, which froze the
+    /// opposite choice. `length` means the server ran out of output budget
+    /// mid-call: that is the one signal that explains the hole, and an error threw
+    /// it away. The half-written call is dropped, the Length reason survives.
     #[test]
-    fn truncated_arguments_are_a_protocol_error() {
-        let error = run(
+    fn arguments_truncated_under_length_keep_the_length_signal() {
+        let chunks = run(
             EndpointQuirks::generic(),
             &[
                 r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c","function":{"name":"x","arguments":"{\"a\":"}}]},"finish_reason":"length"}]}"#,
                 "[DONE]",
             ],
         )
-        .unwrap_err();
-        assert!(matches!(error, ProviderError::Protocol { .. }));
+        .unwrap();
+        assert!(
+            calls(&chunks).is_empty(),
+            "no half-written call reaches the agent loop: {chunks:?}"
+        );
+        assert_eq!(
+            chunks.last(),
+            Some(&CompletionChunk::Finish(FinishReason::Length)),
+            "{chunks:?}"
+        );
+    }
+
+    /// The guard it replaces, kept where it still means something: truncated
+    /// arguments with nothing in the stream to explain them is a broken server.
+    #[test]
+    fn truncated_arguments_without_a_length_reason_are_a_protocol_error() {
+        let truncated_then_tool_calls = r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c","function":{"name":"x","arguments":"{\"a\":"}}]},"finish_reason":"tool_calls"}]}"#;
+        let truncated_with_no_reason = r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c","function":{"name":"x","arguments":"{\"a\":"}}]}}]}"#;
+        for payload in [truncated_then_tool_calls, truncated_with_no_reason] {
+            let error = run(EndpointQuirks::generic(), &[payload, "[DONE]"]).unwrap_err();
+            assert!(
+                matches!(error, ProviderError::Protocol { .. }),
+                "{payload}: {error:?}"
+            );
+        }
+    }
+
+    /// scenario from deepseek-ai/deepseek-recipe (MIT): a multi-byte character cut
+    /// in two.
+    ///
+    /// `sse::every_split_point_gives_the_same_events` covers the cut in the byte
+    /// decoder; this covers the one a server makes on purpose, by splitting a
+    /// character across two `content` deltas of the same completion.
+    #[test]
+    fn a_character_split_across_two_deltas_is_reassembled() {
+        let chunks = run(
+            EndpointQuirks::generic(),
+            &[
+                r#"{"choices":[{"delta":{"content":"caf"}}]}"#,
+                r#"{"choices":[{"delta":{"content":"é chaud"},"finish_reason":"stop"}]}"#,
+                "[DONE]",
+            ],
+        )
+        .unwrap();
+        let text: String = chunks
+            .iter()
+            .filter_map(|c| match c {
+                CompletionChunk::Text(text) => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(text, "café chaud");
+    }
+
+    /// scenario from deepseek-ai/deepseek-recipe (MIT): a stop sequence cut across
+    /// two deltas.
+    ///
+    /// We never ask for client-side stop sequences, so the invariant that carries
+    /// over is the one a consumer scanning for a marker depends on: the pieces
+    /// arrive whole, in order, and nothing in between.
+    #[test]
+    fn a_stop_marker_split_across_two_deltas_arrives_contiguous() {
+        let chunks = run(
+            EndpointQuirks::generic(),
+            &[
+                r#"{"choices":[{"delta":{"content":"done <|"}}]}"#,
+                r#"{"choices":[{"delta":{"reasoning_content":""}}]}"#,
+                r#"{"choices":[{"delta":{"content":"end|>"},"finish_reason":"stop"}]}"#,
+                "[DONE]",
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            chunks,
+            [
+                CompletionChunk::Text("done <|".into()),
+                CompletionChunk::Text("end|>".into()),
+                CompletionChunk::Finish(FinishReason::Stop),
+            ],
+            "an empty reasoning delta must not land between the two halves"
+        );
     }
 
     #[test]

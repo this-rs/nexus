@@ -6,13 +6,13 @@ use crate::{
         claude::ClaudeCodeOutput,
         openai::{
             ChatCompletionStreamResponse, DeltaFunctionCall, DeltaMessage, DeltaToolCall,
-            StreamChoice,
+            StreamError, Usage,
         },
     },
     utils::text_chunker::{ChunkConfig, chunk_text},
 };
-use chrono::Utc;
 use futures::stream::{Stream, StreamExt};
+use serde_json::Value;
 use std::pin::Pin;
 use std::sync::{
     Arc,
@@ -98,6 +98,10 @@ pub async fn handle_enhanced_streaming_response(
 ) -> Pin<Box<dyn Stream<Item = ChatCompletionStreamResponse> + Send>> {
     let stream = async_stream::stream! {
         let stream_id = Uuid::new_v4().to_string();
+        // Did this turn ask for a tool? It decides the `finish_reason`: OpenAI says
+        // `tool_calls` when the model stopped to call one, and a client that drives
+        // an agent loop branches on exactly that.
+        let mut saw_tool_call = false;
 
         // Install disconnect guard if session info is provided.
         // The guard is held alive for the lifetime of the stream.
@@ -112,21 +116,15 @@ pub async fn handle_enhanced_streaming_response(
         });
 
         // First, send the initial message with role
-        yield ChatCompletionStreamResponse {
-            id: stream_id.clone(),
-            object: "chat.completion.chunk".to_string(),
-            created: Utc::now().timestamp(),
-            model: model.clone(),
-            choices: vec![StreamChoice {
-                index: 0,
-                delta: DeltaMessage {
+        yield ChatCompletionStreamResponse::empty(stream_id.clone(), model.clone())
+            .with_choice(
+                DeltaMessage {
                     role: Some("assistant".to_string()),
                     content: None,
                     tool_calls: None,
                 },
-                finish_reason: None,
-            }],
-        };
+                None,
+            );
 
         while let Some(output) = rx.recv().await {
             // Skip messages from subagent sidechains (Task tool executions).
@@ -163,21 +161,18 @@ pub async fn handle_enhanced_streaming_response(
                                         let mut chunker = chunk_text(text.to_string(), Some(config));
 
                                         while let Some(chunk) = chunker.next().await {
-                                            yield ChatCompletionStreamResponse {
-                                                id: stream_id.clone(),
-                                                object: "chat.completion.chunk".to_string(),
-                                                created: Utc::now().timestamp(),
-                                                model: model.clone(),
-                                                choices: vec![StreamChoice {
-                                                    index: 0,
-                                                    delta: DeltaMessage {
-                                                        role: None,
-                                                        content: Some(chunk),
-                                                        tool_calls: None,
-                                                    },
-                                                    finish_reason: None,
-                                                }],
-                                            };
+                                            yield ChatCompletionStreamResponse::empty(
+                                                stream_id.clone(),
+                                                model.clone(),
+                                            )
+                                            .with_choice(
+                                                DeltaMessage {
+                                                    role: None,
+                                                    content: Some(chunk),
+                                                    tool_calls: None,
+                                                },
+                                                None,
+                                            );
                                         }
                                     }
                                 },
@@ -202,31 +197,29 @@ pub async fn handle_enhanced_streaming_response(
 
                                     // Send the complete tool call in a single chunk
                                     // (Claude CLI gives us complete tool_use, not incremental)
-                                    yield ChatCompletionStreamResponse {
-                                        id: stream_id.clone(),
-                                        object: "chat.completion.chunk".to_string(),
-                                        created: Utc::now().timestamp(),
-                                        model: model.clone(),
-                                        choices: vec![StreamChoice {
-                                            index: 0,
-                                            delta: DeltaMessage {
-                                                role: None,
-                                                content: None,
-                                                tool_calls: Some(vec![DeltaToolCall {
-                                                    index: tool_call_index,
-                                                    id: Some(tool_id),
-                                                    tool_type: Some("function".to_string()),
-                                                    function: Some(DeltaFunctionCall {
-                                                        name: Some(tool_name),
-                                                        arguments: Some(tool_input.to_string()),
-                                                    }),
-                                                }]),
-                                            },
-                                            finish_reason: None,
-                                        }],
-                                    };
+                                    yield ChatCompletionStreamResponse::empty(
+                                        stream_id.clone(),
+                                        model.clone(),
+                                    )
+                                    .with_choice(
+                                        DeltaMessage {
+                                            role: None,
+                                            content: None,
+                                            tool_calls: Some(vec![DeltaToolCall {
+                                                index: tool_call_index,
+                                                id: Some(tool_id),
+                                                tool_type: Some("function".to_string()),
+                                                function: Some(DeltaFunctionCall {
+                                                    name: Some(tool_name),
+                                                    arguments: Some(tool_input.to_string()),
+                                                }),
+                                            }]),
+                                        },
+                                        None,
+                                    );
 
                                     tool_call_index += 1;
+                                    saw_tool_call = true;
                                 },
                                 _ => {
                                     debug!("Streaming: ignoring content block type: {}", block_type);
@@ -236,21 +229,38 @@ pub async fn handle_enhanced_streaming_response(
                     }
                 }
                 "result" => {
+                    if is_error_result(&output) {
+                        // A failed turn must not claim it stopped normally: `stop`
+                        // tells the client the answer is complete. It also leaves
+                        // the disconnect guard armed, so the CLI session is
+                        // interrupted instead of left running.
+                        warn!("Streaming: result flagged as an error, emitting an error frame");
+                        yield error_frame(&stream_id, &model, error_message(&output));
+                        continue;
+                    }
+
                     // Defuse the disconnect guard — stream completed normally
                     completed_flag.store(true, Ordering::SeqCst);
 
                     // Send the final chunk with finish_reason
-                    yield ChatCompletionStreamResponse {
-                        id: stream_id.clone(),
-                        object: "chat.completion.chunk".to_string(),
-                        created: Utc::now().timestamp(),
-                        model: model.clone(),
-                        choices: vec![StreamChoice {
-                            index: 0,
-                            delta: DeltaMessage::default(),
-                            finish_reason: Some("stop".to_string()),
-                        }],
-                    };
+                    let finish_reason = if saw_tool_call { "tool_calls" } else { "stop" };
+                    yield ChatCompletionStreamResponse::empty(stream_id.clone(), model.clone())
+                        .with_choice(DeltaMessage::default(), Some(finish_reason.to_string()));
+
+                    // Then the usage chunk, when the CLI reported any. A turn whose
+                    // counts are unknown gets no chunk rather than a chunk of zeros.
+                    if let Some(usage) = usage_of(&output) {
+                        let mut chunk =
+                            ChatCompletionStreamResponse::empty(stream_id.clone(), model.clone());
+                        chunk.usage = Some(usage);
+                        yield chunk;
+                    }
+                }
+                "error" => {
+                    // Without this arm the output fell into `_ => {}` and the client
+                    // was handed a `[DONE]` it could not tell from a short answer.
+                    warn!("Streaming: CLI reported an error output");
+                    yield error_frame(&stream_id, &model, error_message(&output));
                 }
                 _ => {}
             }
@@ -258,6 +268,59 @@ pub async fn handle_enhanced_streaming_response(
     };
 
     Box::pin(stream)
+}
+
+/// Does this `result` output say the turn failed?
+fn is_error_result(output: &ClaudeCodeOutput) -> bool {
+    output.data.get("is_error").and_then(|v| v.as_bool()) == Some(true)
+        || output.subtype.as_deref() == Some("error")
+}
+
+/// The most specific message a failed output carries, or a stand-in.
+fn error_message(output: &ClaudeCodeOutput) -> String {
+    for key in ["error", "message", "result"] {
+        match output.data.get(key) {
+            Some(Value::String(text)) if !text.is_empty() => return text.clone(),
+            Some(Value::Object(object)) => {
+                if let Some(Value::String(text)) = object.get("message") {
+                    return text.clone();
+                }
+            },
+            _ => {},
+        }
+    }
+    format!("the CLI reported a failed `{}` output", output.r#type)
+}
+
+/// One in-band error frame: no choices, no `finish_reason`, an `error` object.
+fn error_frame(stream_id: &str, model: &str, message: String) -> ChatCompletionStreamResponse {
+    let mut chunk = ChatCompletionStreamResponse::empty(stream_id.to_string(), model.to_string());
+    chunk.error = Some(StreamError::upstream(message));
+    chunk
+}
+
+/// The turn's token counts, as OpenAI spells them, from the CLI's `usage` object.
+///
+/// `prompt_tokens` is everything the model read, cache included — that is what an
+/// OpenAI client bills against. `None` when the CLI reported no count at all:
+/// unknown is not zero.
+fn usage_of(output: &ClaudeCodeOutput) -> Option<Usage> {
+    let usage = output.data.get("usage")?;
+    let count = |key: &str| usage.get(key).and_then(|v| v.as_i64());
+    let input = count("input_tokens");
+    let output_tokens = count("output_tokens");
+    if input.is_none() && output_tokens.is_none() {
+        return None;
+    }
+    let prompt_tokens = (input.unwrap_or(0)
+        + count("cache_read_input_tokens").unwrap_or(0)
+        + count("cache_creation_input_tokens").unwrap_or(0)) as i32;
+    let completion_tokens = output_tokens.unwrap_or(0) as i32;
+    Some(Usage {
+        prompt_tokens,
+        completion_tokens,
+        total_tokens: prompt_tokens + completion_tokens,
+    })
 }
 
 /// Configuration for streaming enhancement

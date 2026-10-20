@@ -506,6 +506,86 @@ mod tests {
         ]
     }
 
+    /// A history whose last turn was interrupted between the call and its result —
+    /// what an Escape, a cancelled turn or a dead provider leaves behind.
+    fn interrupted_history() -> Vec<ChatMessage> {
+        let mut history = history();
+        history.push(
+            ChatMessage::assistant_tool_calls(vec![ToolCallChunk {
+                id: "c2".into(),
+                name: "read".into(),
+                arguments: r#"{"path":"b"}"#.into(),
+            }])
+            .with_reasoning("one more look"),
+        );
+        history
+    }
+
+    /// Panics unless the request body pairs every `tool_calls` entry with exactly
+    /// one `tool` message and leaves no `tool` message unaccounted for — the shape
+    /// DeepSeek and OpenAI both require.
+    fn assert_request_is_paired(messages: &[ChatMessage], label: &str) {
+        let request = crate::model::CompletionRequest::new("m", messages.to_vec());
+        let body = crate::model::wire::build_request(
+            &request,
+            &crate::model::quirks::EndpointQuirks::deepseek(),
+            None,
+        );
+        let mut open: Vec<String> = Vec::new();
+        for message in body["messages"].as_array().unwrap() {
+            let role = message["role"].as_str().unwrap();
+            if role == "tool" {
+                let id = message["tool_call_id"]
+                    .as_str()
+                    .unwrap_or_else(|| panic!("{label}: a tool message with no id: {body:#?}"));
+                let position = open.iter().position(|open| open == id).unwrap_or_else(|| {
+                    panic!("{label}: tool result {id} answers no open call: {body:#?}")
+                });
+                open.remove(position);
+                continue;
+            }
+            assert!(
+                open.is_empty(),
+                "{label}: calls {open:?} left unanswered before a {role} message: {body:#?}"
+            );
+            if let Some(calls) = message.get("tool_calls").and_then(|c| c.as_array()) {
+                open = calls
+                    .iter()
+                    .map(|call| call["id"].as_str().unwrap().to_owned())
+                    .collect();
+            }
+        }
+        assert!(open.is_empty(), "{label}: calls {open:?} never answered");
+    }
+
+    /// Whatever the split, a compacted history builds a paired request.
+    ///
+    /// [`split_point`] only keeps the tail from *starting* on a tool result, which
+    /// says nothing about a call the turn was interrupted before answering, nor
+    /// about a stubbing pass crossing a call boundary. The invariant that matters
+    /// is the one on the request that goes out, so that is what this asserts.
+    #[test]
+    fn every_compacted_history_builds_a_paired_request() {
+        for (label, history) in [("whole", history()), ("interrupted", interrupted_history())] {
+            assert_request_is_paired(&history, label);
+            for keep in 1..=history.len() {
+                let Some(split) = split_point(&history, keep) else {
+                    continue;
+                };
+                let compacted = apply(history.clone(), split, "SUMMARY");
+                assert_request_is_paired(&compacted, &format!("{label}, keep {keep}"));
+                // Same again with every result elided down to a stub.
+                let mut stubbed = compacted.clone();
+                let plan = StubPlan {
+                    indices: (0..stubbed.len()).collect(),
+                    chars_freed: 0,
+                };
+                apply_stub(&mut stubbed, &plan);
+                assert_request_is_paired(&stubbed, &format!("{label}, keep {keep}, stubbed"));
+            }
+        }
+    }
+
     #[test]
     fn the_tail_never_starts_on_a_tool_result() {
         let messages = history();
