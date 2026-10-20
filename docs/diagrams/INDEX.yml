@@ -8,7 +8,7 @@
 # than implicit; binaries, `mod.rs` and re-exporting `lib.rs`
 # files legitimately live there.
 #
-# 19 diagrams, 586/339 source files claimed, 3 unclaimed.
+# 19 diagrams, 591/340 source files claimed, 3 unclaimed.
 
 diagrams:
   - name: nexus-agent-contract
@@ -127,9 +127,10 @@ diagrams:
       - claude-code-sdk-rs/src/interactive.rs
   - name: nexus-sdk-memory
     file: nexus-sdk-memory.mmd
-    verified: 18865f7
+    verified: 8373c29
     covers:
       - claude-code-sdk-rs/src/memory/*.rs
+      - claude-code-sdk-rs/tests/memory_*.rs
   - name: nexus-sdk-provider-boundary
     file: nexus-sdk-provider-boundary.mmd
     verified: 18865f7

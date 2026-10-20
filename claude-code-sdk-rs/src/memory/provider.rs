@@ -1,10 +1,19 @@
 //! Memory provider implementations for persistent storage.
 //!
-//! This module provides the Meilisearch-based memory provider that handles:
+//! This module defines the [`MemoryProvider`] trait and its Meilisearch
+//! implementation, which handles:
 //! - Storing and retrieving messages
 //! - Applying multi-factor relevance scoring
 //! - Managing index settings
 //! - Retrieving conversation history with pagination
+//! - Raw full-text search with the engine's ranking score
+//!
+//! Two other implementations live next to it: [`InMemoryMemoryProvider`]
+//! (process-local, for tests and hosts without a Meilisearch server) and
+//! [`NoopMemoryProvider`] (what a disabled config yields).
+//!
+//! [`InMemoryMemoryProvider`]: super::InMemoryMemoryProvider
+//! [`NoopMemoryProvider`]: super::NoopMemoryProvider
 
 use super::{
     ConversationDocument, MemoryConfig, MessageDocument, RelevanceConfig, RelevanceScore,
@@ -90,6 +99,20 @@ pub struct ScoredMemoryResult {
     pub score: RelevanceScore,
 }
 
+/// The field a conversation read is ordered on.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum MessageSort {
+    /// Order on `turn_index` (default). One user and one assistant message
+    /// share a turn, so ties are resolved by the engine.
+    #[default]
+    TurnIndex,
+    /// Order on `created_at`, the Unix timestamp of the message. What a host
+    /// replaying a legacy session by wall-clock wants.
+    CreatedAt,
+}
+
 /// Options for retrieving conversation messages with pagination.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct GetMessagesOptions {
@@ -99,9 +122,13 @@ pub struct GetMessagesOptions {
     /// Number of messages to skip for pagination (default: 0)
     pub offset: Option<usize>,
 
-    /// If true, return newest messages first (descending turn_index).
+    /// If true, return newest messages first (descending sort key).
     /// Default: true (newest first, like a chat UI)
     pub newest_first: Option<bool>,
+
+    /// The field the page is sorted on (default: `turn_index`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sort_by: Option<MessageSort>,
 }
 
 impl GetMessagesOptions {
@@ -128,6 +155,12 @@ impl GetMessagesOptions {
         self
     }
 
+    /// Sets the field the page is sorted on (default: `turn_index`).
+    pub fn sort_by(mut self, sort: MessageSort) -> Self {
+        self.sort_by = Some(sort);
+        self
+    }
+
     /// Returns the effective limit (default: 50).
     pub fn effective_limit(&self) -> usize {
         self.limit.unwrap_or(50)
@@ -141,6 +174,121 @@ impl GetMessagesOptions {
     /// Returns whether to sort newest first (default: true).
     pub fn is_newest_first(&self) -> bool {
         self.newest_first.unwrap_or(true)
+    }
+
+    /// Returns the effective sort key (default: `turn_index`).
+    pub fn effective_sort(&self) -> MessageSort {
+        self.sort_by.unwrap_or_default()
+    }
+}
+
+/// Options for a raw full-text search over messages.
+///
+/// Unlike [`QueryContext`] + `retrieve_context`, nothing here is scored,
+/// budgeted or thresholded: the hits come back as the engine ranked them,
+/// which is what a search UI wants.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MessageSearchOptions {
+    /// Maximum number of hits to return (default: 20).
+    pub limit: usize,
+
+    /// Number of hits to skip (default: 0).
+    pub offset: usize,
+
+    /// Restricts the search to one conversation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conversation_id: Option<String>,
+}
+
+impl Default for MessageSearchOptions {
+    fn default() -> Self {
+        Self {
+            limit: 20,
+            offset: 0,
+            conversation_id: None,
+        }
+    }
+}
+
+impl MessageSearchOptions {
+    /// Creates options with the defaults (20 hits, no filter).
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Sets the maximum number of hits.
+    pub fn limit(mut self, limit: usize) -> Self {
+        self.limit = limit;
+        self
+    }
+
+    /// Sets the number of hits to skip.
+    pub fn offset(mut self, offset: usize) -> Self {
+        self.offset = offset;
+        self
+    }
+
+    /// Restricts the search to one conversation.
+    pub fn conversation_id(mut self, id: impl Into<String>) -> Self {
+        self.conversation_id = Some(id.into());
+        self
+    }
+}
+
+/// One hit of a raw message search, with the score the engine assigned.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MessageSearchHit {
+    /// The message document.
+    pub document: MessageDocument,
+
+    /// The engine's ranking score, normally in `0.0..=1.0`; `0.0` when the
+    /// engine reported none.
+    pub ranking_score: f64,
+}
+
+/// The hits of a raw message search that belong to one conversation.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ConversationSearchGroup {
+    /// The conversation the hits belong to.
+    pub conversation_id: String,
+
+    /// The hits, in the order the engine ranked them.
+    pub hits: Vec<MessageSearchHit>,
+
+    /// The highest `ranking_score` among `hits`.
+    pub best_score: f64,
+}
+
+impl ConversationSearchGroup {
+    /// Groups search hits by conversation.
+    ///
+    /// Groups come back ordered by `best_score` descending (stable, so two
+    /// conversations with the same best score keep the order of their first
+    /// hit); within a group the hits keep the engine's order.
+    pub fn group(hits: Vec<MessageSearchHit>) -> Vec<Self> {
+        let mut groups: Vec<Self> = Vec::new();
+        for hit in hits {
+            match groups
+                .iter_mut()
+                .find(|g| g.conversation_id == hit.document.conversation_id)
+            {
+                Some(group) => {
+                    group.best_score = group.best_score.max(hit.ranking_score);
+                    group.hits.push(hit);
+                },
+                None => groups.push(Self {
+                    conversation_id: hit.document.conversation_id.clone(),
+                    best_score: hit.ranking_score,
+                    hits: vec![hit],
+                }),
+            }
+        }
+        groups.sort_by(|a, b| {
+            b.best_score
+                .partial_cmp(&a.best_score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        groups
     }
 }
 
@@ -164,6 +312,10 @@ pub struct PaginatedMessages {
 }
 
 /// Trait for memory providers.
+///
+/// Object-safe: `ContextInjector` holds an `Arc<dyn MemoryProvider>`, so a
+/// host may hand it any implementation — the Meilisearch one, the in-memory
+/// one, or its own.
 #[async_trait]
 pub trait MemoryProvider: Send + Sync {
     /// Stores a message in memory.
@@ -188,7 +340,10 @@ pub trait MemoryProvider: Send + Sync {
     /// Retrieves all messages for a conversation with pagination.
     ///
     /// By default, messages are returned newest first (descending turn_index),
-    /// which is suitable for chat UI display.
+    /// which is suitable for chat UI display. `GetMessagesOptions::sort_by`
+    /// switches the sort key to `created_at`, and `newest_first(false)` flips
+    /// it ascending: `sort_by(MessageSort::CreatedAt).newest_first(false)` is
+    /// the chronological read of one conversation.
     ///
     /// # Arguments
     ///
@@ -203,6 +358,18 @@ pub trait MemoryProvider: Send + Sync {
         conversation_id: &str,
         options: Option<GetMessagesOptions>,
     ) -> MemoryResult<PaginatedMessages>;
+
+    /// Full-text search over messages, with the engine's ranking score.
+    ///
+    /// Nothing is scored, thresholded or budgeted on top: the hits come back
+    /// in the engine's order with its score, which is what a search UI wants
+    /// (`retrieve_context` is the prompt-injection path). Group them per
+    /// conversation with [`ConversationSearchGroup::group`].
+    async fn search_messages(
+        &self,
+        query: &str,
+        options: &MessageSearchOptions,
+    ) -> MemoryResult<Vec<MessageSearchHit>>;
 
     /// Returns the total count of messages in a conversation.
     ///
@@ -294,10 +461,9 @@ impl MeilisearchMemoryProvider {
     fn build_filter(&self, context: &QueryContext) -> Option<String> {
         let mut filters = Vec::new();
 
-        // Filter by cwd if provided (exact match or prefix)
+        // Filter by cwd if provided (exact match)
         if let Some(ref cwd) = context.cwd {
-            // Use a STARTS_WITH-like filter for cwd matching
-            filters.push(format!("cwd = \"{}\"", cwd));
+            filters.push(filter_eq("cwd", cwd));
         }
 
         if filters.is_empty() {
@@ -306,83 +472,115 @@ impl MeilisearchMemoryProvider {
             Some(filters.join(" AND "))
         }
     }
-
-    /// Computes the age in hours for a message.
-    fn compute_age_hours(&self, created_at: i64) -> f64 {
-        let now = Utc::now().timestamp();
-        let age_seconds = (now - created_at).max(0) as f64;
-        age_seconds / 3600.0
-    }
-
-    /// Applies relevance scoring to search results.
-    fn score_results(
-        &self,
-        hits: Vec<SearchHit>,
-        context: &QueryContext,
-    ) -> Vec<ScoredMemoryResult> {
-        let mut results: Vec<ScoredMemoryResult> = hits
-            .into_iter()
-            .map(|hit| {
-                let age_hours = self.compute_age_hours(hit.document.created_at);
-
-                let score = self.scorer.compute_score(
-                    hit.score.unwrap_or(0.0),
-                    context.cwd.as_deref(),
-                    hit.document.cwd.as_deref(),
-                    &context.files,
-                    &hit.document.files_touched,
-                    age_hours,
-                );
-
-                ScoredMemoryResult {
-                    document: hit.document,
-                    score,
-                }
-            })
-            .collect();
-
-        // Sort by total score descending
-        results.sort_by(|a, b| {
-            b.score
-                .total
-                .partial_cmp(&a.score.total)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-
-        // Filter by minimum relevance score
-        results.retain(|r| r.score.total >= self.config.min_relevance_score);
-
-        results
-    }
-
-    /// Applies token budget to results.
-    fn apply_token_budget(&self, results: Vec<ScoredMemoryResult>) -> Vec<ScoredMemoryResult> {
-        let mut budget_remaining = self.config.token_budget * 4; // ~4 chars per token
-        let mut selected = Vec::new();
-
-        for result in results {
-            let content_len = result.document.display_content().len();
-            if content_len <= budget_remaining {
-                budget_remaining -= content_len;
-                selected.push(result);
-            } else if selected.is_empty() {
-                // Always include at least one result even if over budget
-                selected.push(result);
-                break;
-            }
-        }
-
-        selected
-    }
 }
 
-/// Internal search hit structure.
-#[derive(Debug, Deserialize)]
-struct SearchHit {
-    #[serde(flatten)]
-    document: MessageDocument,
-    #[serde(rename = "_rankingScore")]
-    score: Option<f64>,
+/// `field = "value"` for a Meilisearch filter, with the value escaped.
+///
+/// Meilisearch string literals escape `\` and `"` with a backslash. Without
+/// this a conversation id (or a cwd) containing a double quote closed the
+/// literal and the rest of it became filter syntax.
+pub(super) fn filter_eq(field: &str, value: &str) -> String {
+    let escaped = value.replace('\\', "\\\\").replace('"', "\\\"");
+    format!("{field} = \"{escaped}\"")
+}
+
+/// Computes the age in hours of a message created at `created_at`.
+fn compute_age_hours(created_at: i64) -> f64 {
+    let now = Utc::now().timestamp();
+    let age_seconds = (now - created_at).max(0) as f64;
+    age_seconds / 3600.0
+}
+
+/// Applies multi-factor relevance scoring to raw hits, sorts them by total
+/// score descending and drops those under `config.min_relevance_score`.
+///
+/// Shared by every provider that feeds `retrieve_context`: the ranking is a
+/// property of the memory domain, not of the engine the hits came from.
+pub(super) fn score_hits(
+    scorer: &RelevanceScorer,
+    config: &MemoryConfig,
+    hits: Vec<MessageSearchHit>,
+    context: &QueryContext,
+) -> Vec<ScoredMemoryResult> {
+    let mut results: Vec<ScoredMemoryResult> = hits
+        .into_iter()
+        .map(|hit| {
+            let age_hours = compute_age_hours(hit.document.created_at);
+
+            let score = scorer.compute_score(
+                hit.ranking_score,
+                context.cwd.as_deref(),
+                hit.document.cwd.as_deref(),
+                &context.files,
+                &hit.document.files_touched,
+                age_hours,
+            );
+
+            ScoredMemoryResult {
+                document: hit.document,
+                score,
+            }
+        })
+        .collect();
+
+    // Sort by total score descending
+    results.sort_by(|a, b| {
+        b.score
+            .total
+            .partial_cmp(&a.score.total)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    // Filter by minimum relevance score
+    results.retain(|r| r.score.total >= config.min_relevance_score);
+
+    results
+}
+
+/// Keeps the best-ranked results that fit in `config.token_budget`
+/// (~4 characters per token, measured on `display_content()`).
+///
+/// A result that does not fit is skipped and the loop goes on, so a
+/// lower-ranked but shorter result may still get in; when nothing has been
+/// kept yet the oversized result is kept anyway, so the prefix is never empty
+/// just because the best hit is long.
+pub(super) fn apply_token_budget(
+    config: &MemoryConfig,
+    results: Vec<ScoredMemoryResult>,
+) -> Vec<ScoredMemoryResult> {
+    let mut budget_remaining = config.token_budget * 4; // ~4 chars per token
+    let mut selected = Vec::new();
+
+    for result in results {
+        let content_len = result.document.display_content().len();
+        if content_len <= budget_remaining {
+            budget_remaining -= content_len;
+            selected.push(result);
+        } else if selected.is_empty() {
+            // Always include at least one result even if over budget
+            selected.push(result);
+            break;
+        }
+    }
+
+    selected
+}
+
+/// The whole `retrieve_context` pipeline past the engine: score, threshold,
+/// cap to `max_context_items.min(limit)`, then fit in the token budget.
+pub(super) fn rank_for_context(
+    scorer: &RelevanceScorer,
+    config: &MemoryConfig,
+    hits: Vec<MessageSearchHit>,
+    context: &QueryContext,
+    limit: usize,
+) -> Vec<ScoredMemoryResult> {
+    let scored = score_hits(scorer, config, hits, context);
+    let limited: Vec<_> = scored
+        .into_iter()
+        .take(config.max_context_items.min(limit))
+        .collect();
+    apply_token_budget(config, limited)
 }
 
 #[async_trait]
@@ -432,29 +630,22 @@ impl MemoryProvider for MeilisearchMemoryProvider {
         let results: meilisearch_sdk::search::SearchResults<MessageDocument> =
             search.execute().await?;
 
-        // Convert to SearchHit format
-        let hits: Vec<SearchHit> = results
+        let hits: Vec<MessageSearchHit> = results
             .hits
             .into_iter()
-            .map(|h| SearchHit {
+            .map(|h| MessageSearchHit {
                 document: h.result,
-                score: h.ranking_score,
+                ranking_score: h.ranking_score.unwrap_or(0.0),
             })
             .collect();
 
-        // Score and filter results
-        let scored = self.score_results(hits, context);
-
-        // Apply limits
-        let limited: Vec<_> = scored
-            .into_iter()
-            .take(self.config.max_context_items.min(limit))
-            .collect();
-
-        // Apply token budget
-        let budgeted = self.apply_token_budget(limited);
-
-        Ok(budgeted)
+        Ok(rank_for_context(
+            &self.scorer,
+            &self.config,
+            hits,
+            context,
+            limit,
+        ))
     }
 
     async fn update_conversation(&self, conversation: &ConversationDocument) -> MemoryResult<()> {
@@ -483,13 +674,14 @@ impl MemoryProvider for MeilisearchMemoryProvider {
         let newest_first = opts.is_newest_first();
 
         let index = self.client.index(&self.config.messages_index);
-        let filter = format!("conversation_id = \"{}\"", conversation_id);
+        let filter = filter_eq("conversation_id", conversation_id);
 
         // Sort order: desc for newest first, asc for oldest first
-        let sort = if newest_first {
-            "turn_index:desc"
-        } else {
-            "turn_index:asc"
+        let sort = match (opts.effective_sort(), newest_first) {
+            (MessageSort::TurnIndex, true) => "turn_index:desc",
+            (MessageSort::TurnIndex, false) => "turn_index:asc",
+            (MessageSort::CreatedAt, true) => "created_at:desc",
+            (MessageSort::CreatedAt, false) => "created_at:asc",
         };
 
         // Execute search with empty query to match all documents
@@ -516,9 +708,42 @@ impl MemoryProvider for MeilisearchMemoryProvider {
         })
     }
 
+    async fn search_messages(
+        &self,
+        query: &str,
+        options: &MessageSearchOptions,
+    ) -> MemoryResult<Vec<MessageSearchHit>> {
+        let index = self.client.index(&self.config.messages_index);
+        let filter = options
+            .conversation_id
+            .as_deref()
+            .map(|id| filter_eq("conversation_id", id));
+
+        let mut search = index.search();
+        search.with_query(query);
+        search.with_limit(options.limit);
+        search.with_offset(options.offset);
+        search.with_show_ranking_score(true);
+        if let Some(ref f) = filter {
+            search.with_filter(f);
+        }
+
+        let results: meilisearch_sdk::search::SearchResults<MessageDocument> =
+            search.execute().await?;
+
+        Ok(results
+            .hits
+            .into_iter()
+            .map(|h| MessageSearchHit {
+                document: h.result,
+                ranking_score: h.ranking_score.unwrap_or(0.0),
+            })
+            .collect())
+    }
+
     async fn count_conversation_messages(&self, conversation_id: &str) -> MemoryResult<usize> {
         let index = self.client.index(&self.config.messages_index);
-        let filter = format!("conversation_id = \"{}\"", conversation_id);
+        let filter = filter_eq("conversation_id", conversation_id);
 
         // Execute search with limit 0 to just get the count
         let results = index
@@ -979,61 +1204,62 @@ mod tests {
     }
 
     #[test]
-    fn test_build_filter_interpolates_the_cwd_without_escaping() {
+    fn test_build_filter_escapes_the_cwd() {
         let provider = offline_provider(unreachable_config());
         let ctx = QueryContext::new("jwt").with_cwd(r#"/a" OR role = "user"#);
 
-        // Known defect, documented here rather than silently fixed: a double
-        // quote inside the cwd closes the literal and the remainder is parsed
-        // as filter syntax by the server.
+        // A double quote inside the cwd stays inside the literal: the
+        // remainder is part of the value, not filter syntax for the server.
         assert_eq!(
             provider.build_filter(&ctx).as_deref(),
-            Some(r#"cwd = "/a" OR role = "user""#)
+            Some(r#"cwd = "/a\" OR role = \"user""#)
         );
     }
 
     #[test]
     fn test_compute_age_hours_converts_seconds_to_hours() {
-        let provider = offline_provider(unreachable_config());
         let now = Utc::now().timestamp();
 
-        let age = provider.compute_age_hours(now - 7200);
+        let age = compute_age_hours(now - 7200);
 
         assert!((age - 2.0).abs() < 0.05, "expected ~2 hours, got {age}");
     }
 
     #[test]
     fn test_compute_age_hours_clamps_future_timestamps_to_zero() {
-        let provider = offline_provider(unreachable_config());
         let now = Utc::now().timestamp();
 
         // A clock skew that puts a message in the future must not produce a
         // negative age (which `recency_score` would turn into a full score).
-        assert_eq!(provider.compute_age_hours(now + 86_400), 0.0);
+        assert_eq!(compute_age_hours(now + 86_400), 0.0);
+    }
+
+    fn default_scorer() -> RelevanceScorer {
+        RelevanceScorer::new(RelevanceConfig::default())
     }
 
     #[test]
-    fn test_score_results_sorts_descending_and_drops_below_min_relevance() {
+    fn test_score_hits_sorts_descending_and_drops_below_min_relevance() {
         let now = Utc::now().timestamp();
-        let provider = offline_provider(unreachable_config().with_min_relevance_score(0.3));
+        let config = unreachable_config().with_min_relevance_score(0.3);
 
-        let strong = SearchHit {
+        let strong = MessageSearchHit {
             document: MessageDocument::new("strong", "conv-1", "user", "jwt", 0, now)
                 .with_cwd("/w")
                 .with_files_touched(vec!["/w/a.rs".to_string()]),
-            score: Some(2.0),
+            ranking_score: 2.0,
         };
-        // No `_rankingScore` in the hit: the semantic component falls back to
+        // A hit without `_rankingScore` reads 0.0: the semantic component is
         // 0.0 instead of failing, and only recency keeps this hit alive.
-        let weak = SearchHit {
+        let weak = MessageSearchHit {
             document: MessageDocument::new("weak", "conv-1", "user", "jwt", 1, now),
-            score: None,
+            ranking_score: 0.0,
         };
         let ctx = QueryContext::new("jwt")
             .with_cwd("/w")
             .with_files(vec!["/w/a.rs".to_string()]);
 
-        let results = provider.score_results(vec![weak, strong], &ctx);
+        let results = score_hits(&default_scorer(), &config, vec![weak, strong], &ctx);
 
         assert_eq!(ids(&results), vec!["strong"]);
         assert_eq!(results[0].score.semantic, 1.0);
@@ -1041,22 +1267,22 @@ mod tests {
     }
 
     #[test]
-    fn test_score_results_keeps_weak_hits_when_the_threshold_is_zero() {
+    fn test_score_hits_keeps_weak_hits_when_the_threshold_is_zero() {
         let now = Utc::now().timestamp();
-        let provider = offline_provider(unreachable_config().with_min_relevance_score(0.0));
+        let config = unreachable_config().with_min_relevance_score(0.0);
 
-        let strong = SearchHit {
+        let strong = MessageSearchHit {
             document: MessageDocument::new("strong", "conv-1", "user", "jwt", 0, now)
                 .with_cwd("/w"),
-            score: Some(2.0),
+            ranking_score: 2.0,
         };
-        let weak = SearchHit {
+        let weak = MessageSearchHit {
             document: MessageDocument::new("weak", "conv-1", "user", "jwt", 1, now),
-            score: None,
+            ranking_score: 0.0,
         };
         let ctx = QueryContext::new("jwt").with_cwd("/w");
 
-        let results = provider.score_results(vec![weak, strong], &ctx);
+        let results = score_hits(&default_scorer(), &config, vec![weak, strong], &ctx);
 
         assert_eq!(ids(&results), vec!["strong", "weak"]);
         assert_eq!(results[1].score.semantic, 0.0);
@@ -1064,18 +1290,49 @@ mod tests {
     }
 
     #[test]
-    fn test_score_results_on_no_hits() {
-        let provider = offline_provider(unreachable_config());
-
-        let results = provider.score_results(vec![], &QueryContext::new("jwt"));
+    fn test_score_hits_on_no_hits() {
+        let results = score_hits(
+            &default_scorer(),
+            &unreachable_config(),
+            vec![],
+            &QueryContext::new("jwt"),
+        );
 
         assert!(results.is_empty());
     }
 
     #[test]
+    fn test_rank_for_context_caps_to_max_context_items_min_limit() {
+        let now = Utc::now().timestamp();
+        let config = unreachable_config()
+            .with_min_relevance_score(0.0)
+            .with_max_context_items(5);
+        let hits = (0..4)
+            .map(|i| MessageSearchHit {
+                document: MessageDocument::new(format!("m{i}"), "conv-1", "user", "jwt", i, now),
+                ranking_score: 2.0 - i as f64 * 0.1,
+            })
+            .collect();
+
+        let results = rank_for_context(
+            &default_scorer(),
+            &config,
+            hits,
+            &QueryContext::new("jwt"),
+            2,
+        );
+
+        assert_eq!(
+            ids(&results),
+            vec!["m0", "m1"],
+            "limit = 2 wins over max_context_items = 5"
+        );
+    }
+
+    #[test]
     fn test_apply_token_budget_skips_an_oversized_result_but_keeps_filling() {
         // 10 tokens * 4 chars = 40 characters of budget.
-        let provider = offline_provider(unreachable_config().with_token_budget(10));
+        let config = unreachable_config().with_token_budget(10);
 
         let results = vec![
             scored("a", "x".repeat(30)),
@@ -1085,31 +1342,29 @@ mod tests {
 
         // The budget is a filter, not a prefix: "b" is dropped and the lower
         // ranked "c" takes its place.
-        assert_eq!(ids(&provider.apply_token_budget(results)), vec!["a", "c"]);
+        assert_eq!(ids(&apply_token_budget(&config, results)), vec!["a", "c"]);
     }
 
     #[test]
     fn test_apply_token_budget_always_keeps_one_result_even_over_budget() {
-        let provider = offline_provider(unreachable_config().with_token_budget(0));
+        let config = unreachable_config().with_token_budget(0);
 
         let results = vec![scored("a", "x".repeat(100)), scored("b", "y")];
 
         // With a zero budget the first result is kept anyway and the loop
         // breaks, so "b" never gets a chance.
-        assert_eq!(ids(&provider.apply_token_budget(results)), vec!["a"]);
+        assert_eq!(ids(&apply_token_budget(&config, results)), vec!["a"]);
     }
 
     #[test]
     fn test_apply_token_budget_on_empty_input() {
-        let provider = offline_provider(unreachable_config());
-
-        assert!(provider.apply_token_budget(Vec::new()).is_empty());
+        assert!(apply_token_budget(&unreachable_config(), Vec::new()).is_empty());
     }
 
     #[test]
     fn test_apply_token_budget_measures_the_summary_not_the_content() {
         // 2 tokens * 4 chars = 8 characters of budget.
-        let provider = offline_provider(unreachable_config().with_token_budget(2));
+        let config = unreachable_config().with_token_budget(2);
 
         let summarized = ScoredMemoryResult {
             document: MessageDocument::new(
@@ -1127,7 +1382,10 @@ mod tests {
         // Had the 1000-char content been measured, the "always keep one"
         // branch would have fired and "b" would be missing.
         assert_eq!(
-            ids(&provider.apply_token_budget(vec![summarized, scored("b", "zz")])),
+            ids(&apply_token_budget(
+                &config,
+                vec![summarized, scored("b", "zz")]
+            )),
             vec!["a", "b"]
         );
     }
@@ -1266,5 +1524,103 @@ mod tests {
             .build_config();
 
         assert_eq!(config.summary_threshold, 1234);
+    }
+
+    // ========================================================================
+    // filter_eq, MessageSort, MessageSearchOptions, ConversationSearchGroup
+    // ========================================================================
+
+    #[test]
+    fn test_filter_eq_escapes_quotes_and_backslashes() {
+        assert_eq!(
+            filter_eq("conversation_id", "conv-1"),
+            r#"conversation_id = "conv-1""#
+        );
+        assert_eq!(
+            filter_eq("conversation_id", r#"x" OR role = "user"#),
+            r#"conversation_id = "x\" OR role = \"user""#
+        );
+        assert_eq!(filter_eq("cwd", r"C:\w"), r#"cwd = "C:\\w""#);
+    }
+
+    #[test]
+    fn test_get_messages_options_default_sort_is_turn_index() {
+        let opts = GetMessagesOptions::default();
+        assert_eq!(opts.sort_by, None);
+        assert_eq!(opts.effective_sort(), MessageSort::TurnIndex);
+
+        let opts = GetMessagesOptions::new().sort_by(MessageSort::CreatedAt);
+        assert_eq!(opts.effective_sort(), MessageSort::CreatedAt);
+    }
+
+    #[test]
+    fn test_get_messages_options_sort_by_round_trips_through_serde() {
+        let json = serde_json::to_value(GetMessagesOptions::new().sort_by(MessageSort::CreatedAt))
+            .unwrap();
+        assert_eq!(json["sort_by"], "created_at");
+
+        // An options payload written before `sort_by` existed still parses.
+        let legacy: GetMessagesOptions = serde_json::from_str(r#"{"limit": 3}"#).unwrap();
+        assert_eq!(legacy.effective_sort(), MessageSort::TurnIndex);
+    }
+
+    #[test]
+    fn test_message_search_options_defaults_and_builder() {
+        let opts = MessageSearchOptions::default();
+        assert_eq!(opts.limit, 20);
+        assert_eq!(opts.offset, 0);
+        assert_eq!(opts.conversation_id, None);
+
+        let opts = MessageSearchOptions::new()
+            .limit(7)
+            .offset(2)
+            .conversation_id("conv-9");
+        assert_eq!(opts.limit, 7);
+        assert_eq!(opts.offset, 2);
+        assert_eq!(opts.conversation_id.as_deref(), Some("conv-9"));
+    }
+
+    fn hit(id: &str, conv: &str, score: f64) -> MessageSearchHit {
+        MessageSearchHit {
+            document: MessageDocument::new(id, conv, "user", id, 0, 1_700_000_000),
+            ranking_score: score,
+        }
+    }
+
+    #[test]
+    fn test_group_orders_conversations_by_best_score_and_keeps_engine_order() {
+        let groups = ConversationSearchGroup::group(vec![
+            hit("m1", "conv-a", 0.4),
+            hit("m2", "conv-b", 0.9),
+            hit("m3", "conv-a", 0.7),
+            hit("m4", "conv-b", 0.1),
+        ]);
+
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].conversation_id, "conv-b");
+        assert_eq!(groups[0].best_score, 0.9);
+        assert_eq!(
+            groups[0]
+                .hits
+                .iter()
+                .map(|h| h.document.id.as_str())
+                .collect::<Vec<_>>(),
+            ["m2", "m4"],
+            "hits keep the engine's order inside a group"
+        );
+        assert_eq!(groups[1].conversation_id, "conv-a");
+        assert_eq!(groups[1].best_score, 0.7);
+    }
+
+    #[test]
+    fn test_group_is_stable_on_equal_best_scores_and_empty_on_no_hit() {
+        let groups = ConversationSearchGroup::group(vec![
+            hit("m1", "conv-a", 0.5),
+            hit("m2", "conv-b", 0.5),
+        ]);
+        assert_eq!(groups[0].conversation_id, "conv-a");
+        assert_eq!(groups[1].conversation_id, "conv-b");
+
+        assert!(ConversationSearchGroup::group(Vec::new()).is_empty());
     }
 }

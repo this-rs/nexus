@@ -1,6 +1,6 @@
 %% name: nexus-sdk-memory
-%% covers: claude-code-sdk-rs/src/memory/*.rs
-%% verified: 18865f7
+%% covers: claude-code-sdk-rs/src/memory/*.rs, claude-code-sdk-rs/tests/memory_*.rs
+%% verified: 8373c29
 flowchart TD
     subgraph legend["Légende"]
         direction LR
@@ -90,11 +90,14 @@ flowchart TD
     %% =====================================================================
     %% Démarrage du fournisseur — provider.rs
     %% =====================================================================
-    subgraph boot["Démarrage — provider.rs"]
-        injector["🟠 ContextInjector::new()<br/>enveloppe le fournisseur dans un Arc<br/><i>aucun test : seuls les exemples l'appellent</i>"]
+    subgraph boot["Démarrage — integration.rs, provider.rs, in_memory.rs"]
+        injector{"✅ ContextInjector::new()<br/>config.enabled ?<br/><i>vérifié : tests/memory_context_injector.rs</i>"}
+        inj_noop["✅ Arc::new(NoopMemoryProvider)<br/>désactivée : aucune requête, jamais<br/><i>vérifié : new_builds_a_noop_injector_for_a_disabled_config…</i>"]
+        inj_with["✅ ContextInjector::with_provider(Arc&lt;dyn MemoryProvider&gt;, config)<br/>le fournisseur de l'hôte, la config garde enabled et max_context_items<br/><i>vérifié : tests/memory_in_memory_provider.rs, with_provider_*</i>"]
+        inj_dyn["✅ ContextInjector { provider: Arc&lt;dyn MemoryProvider&gt; }<br/>provider() rend l'Arc : déréférencer pour appeler, cloner pour partager<br/><i>vérifié : provider_exposes_the_underlying_meilisearch_client</i>"]
         pbuild["✅ MemoryProviderBuilder::build()<br/>relaie MeilisearchMemoryProvider::new()<br/><i>vérifié : wiremock + cas Disabled</i>"]
         pnew{"✅ MeilisearchMemoryProvider::new()<br/>config.enabled ?<br/><i>vérifié : wiremock</i>"}
-        pdisabled["✅ Err(MemoryError::Disabled)<br/>option refusée : pas de fournisseur hors ligne"]
+        pdisabled["✅ Err(MemoryError::Disabled)<br/>le fournisseur Meilisearch seul refuse toujours : seul l'injecteur retombe sur Noop<br/><i>vérifié : provider_new_still_refuses_a_disabled_config</i>"]
         pclient["🔴 Client::new()<br/>ne valide ni l'URL ni la clé<br/>le map_err vers MemoryError::Meilisearch est mort :<br/>une URL absurde n'échoue qu'à la première requête<br/><i>vérifié : hôte 'not-a-url'</i>"]
         setup["✅ setup_indexes()<br/>create_index puis set_settings, messages avant conversations<br/><i>vérifié : wiremock, ordre et corps des 4 requêtes</i>"]
         setup_swallow["🔴 let _ = create_index(...)<br/>un 500 du serveur est avalé comme un index déjà présent<br/><i>vérifié : wiremock renvoie 500, new() réussit</i>"]
@@ -102,7 +105,11 @@ flowchart TD
     end
 
     cfg --> pbuild --> pnew
-    app --> injector --> pnew
+    app --> injector
+    injector -->|"désactivée"| inj_noop --> inj_dyn
+    injector -->|"activée"| pnew
+    pnew -->|"activée, Ok"| inj_dyn
+    app --> inj_with --> inj_dyn
     pnew -->|"désactivée"| pdisabled
     pnew -->|"activée"| pclient --> setup
     setup --> setup_swallow
@@ -110,30 +117,49 @@ flowchart TD
     setup --> meili
 
     %% =====================================================================
+    %% Fournisseurs sans réseau — in_memory.rs
+    %% =====================================================================
+    subgraph offline["Fournisseurs sans réseau — in_memory.rs"]
+        inmem["✅ InMemoryMemoryProvider::new(config)<br/>Vec sous RwLock, upsert() sur id comme primaryKey=id<br/><i>vérifié : store_upserts_on_id_like_a_primary_key</i>"]
+        inmem_lex["✅ lexical_hits() / lexical_score()<br/>fraction des termes de la requête trouvés dans display_content()<br/>0 terme trouvé → pas un hit ; requête vide → tout à 1.0<br/>tri score desc puis created_at desc<br/><i>vérifié : search_messages_scores_by_the_fraction_of_terms…</i>"]
+        inmem_ctx["✅ InMemoryMemoryProvider::retrieve_context()<br/>filtre cwd en égalité stricte, truncate(limit * 2), puis rank_for_context()<br/><i>vérifié : retrieve_context_filters_on_cwd_then_ranks…, …caps_to_max_context_items_then_fits_the_token_budget</i>"]
+        inmem_page["✅ InMemoryMemoryProvider::get_conversation_messages()<br/>sort_by_key(turn_index | created_at), reverse() si newest_first<br/>total_count = nombre filtré, jamais 0 par omission<br/><i>vérifié : get_conversation_messages_sorts_on_created_at_ascending_and_paginates</i>"]
+        noop["✅ NoopMemoryProvider<br/>écritures Ok(()) sans effet, lectures vides, health Ok(true)<br/><i>vérifié : noop_provider_accepts_every_write_and_answers_every_read_empty</i>"]
+    end
+
+    app --> inmem
+    inmem --> inmem_lex
+    inmem_lex --> inmem_ctx --> score
+    inmem --> inmem_page
+    inj_noop --> noop
+
+    %% =====================================================================
     %% Lecture et injection — provider.rs + scoring.rs
     %% =====================================================================
     subgraph read["Lecture et injection — provider.rs, scoring.rs"]
-        prefix{"🟠 ContextInjector::get_context_prefix()<br/>config.enabled ?<br/><i>aucun test</i>"}
-        prefix_off["🟠 Ok(None)<br/>désactivée, ou aucun résultat pertinent"]
+        prefix{"✅ ContextInjector::get_context_prefix()<br/>config.enabled ? puis provider.retrieve_context() — quel que soit le fournisseur<br/><i>vérifié : get_context_prefix_wraps_the_retrieved_messages_in_a_prompt_header, a_disabled_injector_short_circuits_without_calling_the_server</i>"}
+        prefix_off["✅ Ok(None)<br/>désactivée, ou aucun résultat pertinent<br/><i>vérifié : get_context_prefix_returns_none_when_the_index_is_empty, …when_every_hit_scores_too_low</i>"]
         retrieve["✅ MeilisearchMemoryProvider::retrieve_context()<br/>limite envoyée = limit * 2, showRankingScore = true<br/><i>vérifié : wiremock, corps de la requête</i>"]
-        filter{"🔴 build_filter()<br/>cwd seul, égalité stricte, interpolé sans échappement<br/>le doc-commentaire annonce 'exact match or prefix'<br/><i>vérifié : filtre exact affirmé, y compris l'injection</i>"}
+        filter{"✅ build_filter() → filter_eq()<br/>cwd seul, égalité stricte, guillemets et antislash échappés<br/><i>vérifié : test_build_filter_escapes_the_cwd, test_filter_eq_escapes_quotes_and_backslashes</i>"}
         filter_none["✅ aucun cwd → aucun filtre envoyé<br/>files n'alimente jamais le filtre, seulement le score"]
-        score["✅ score_results()<br/>compute_age_hours() puis RelevanceScorer::compute_score()<br/><i>vérifié : tri décroissant affirmé</i>"]
+        score["✅ score_hits() — fonction libre partagée par tous les fournisseurs<br/>compute_age_hours() puis RelevanceScorer::compute_score()<br/>un hit sans _rankingScore arrive avec ranking_score = 0.0<br/><i>vérifié : test_score_hits_sorts_descending_and_drops_below_min_relevance</i>"]
         scorer["✅ RelevanceScorer::compute_score()<br/>semantic_score + cwd_match_score + files_overlap_score + recency_score<br/>pondérés par RelevanceConfig<br/><i>vérifié : tests unitaires en ligne</i>"]
-        retain["✅ retain(total >= min_relevance_score)<br/>un hit sans _rankingScore retombe à semantic = 0.0"]
-        take["✅ take(max_context_items.min(limit))<br/>limit = 0 coûte un aller-retour pour rien"]
-        budget{"✅ apply_token_budget()<br/>budget = token_budget * 4 caractères<br/>mesure display_content(), donc le résumé<br/><i>vérifié : ordre de sortie affirmé</i>"}
+        retain["✅ retain(total >= min_relevance_score)"]
+        take["✅ rank_for_context() : take(max_context_items.min(limit))<br/>limit = 0 coûte un aller-retour pour rien<br/><i>vérifié : test_rank_for_context_caps_to_max_context_items_min_limit</i>"]
+        budget{"✅ apply_token_budget() — fonction libre<br/>budget = token_budget * 4 caractères<br/>mesure display_content(), donc le résumé<br/><i>vérifié : ordre de sortie affirmé</i>"}
         budget_skip["✅ trop gros et la sélection n'est pas vide<br/>→ sauté, la boucle continue : un résultat moins bien classé passe devant"]
         budget_one["✅ trop gros et sélection vide<br/>→ gardé quand même puis break"]
-        prefix_empty{"🟠 résultats vides ?<br/><i>aucun test</i>"}
+        prefix_empty{"✅ résultats vides ?<br/><i>vérifié : get_context_prefix_returns_none_when_the_index_is_empty</i>"}
         fmt{"✅ ContextFormatter::format_for_prompt()<br/>liste vide → chaîne vide"}
         fmt_age["✅ format_age()<br/>minutes.max(1) : jamais '0 min', futur ramené à 1 min"]
         fmt_trunc["✅ truncate(content, 200)<br/>recule jusqu'à une frontière de caractère UTF-8<br/><i>vérifié : test rejoué sans le correctif, panique à l'octet 200</i>"]
     end
 
-    injector --> prefix
+    inj_dyn --> prefix
     prefix -->|"désactivée"| prefix_off
-    prefix -->|"activée"| retrieve
+    prefix -->|"activée, provider.retrieve_context()"| retrieve
+    prefix -->|"activée, provider.retrieve_context()"| inmem_ctx
+    prefix -->|"activée, provider.retrieve_context()"| noop
     retrieve --> filter
     filter -->|"cwd absent"| filter_none
     retrieve --> meili
@@ -156,7 +182,7 @@ flowchart TD
         store_empty["✅ Ok(()) sans requête HTTP"]
         store_batch["✅ un seul POST pour tout le lot<br/><i>vérifié : wiremock, une requête, deux documents</i>"]
         upd_conv["✅ update_conversation()<br/>POST sur l'index conversations<br/><i>vérifié : wiremock</i>"]
-        inj_store["🟠 ContextInjector::store_messages()<br/>désactivée ou lot vide → Ok(()) avant tout appel<br/><i>aucun test</i>"]
+        inj_store["✅ ContextInjector::store_messages()<br/>désactivée ou lot vide → Ok(()) avant tout appel, sinon provider.store_messages()<br/><i>vérifié : store_messages_skips_the_round_trip_for_an_empty_batch, store_messages_posts_the_batch_keyed_on_id, with_provider_runs_the_injector_on_the_host_provider</i>"]
     end
 
     pending --> inj_store --> store_many
@@ -169,9 +195,12 @@ flowchart TD
     %% Pagination et santé — provider.rs
     %% =====================================================================
     subgraph page["Pagination et santé — provider.rs"]
-        opt_def["✅ GetMessagesOptions<br/>effective_limit = 50, effective_offset = 0, is_newest_first = true"]
-        getmsgs{"✅ get_conversation_messages()<br/>tri turn_index:desc ou :asc selon newest_first<br/><i>vérifié : wiremock, sort/limit/offset affirmés</i>"}
-        getmsgs_filter["🔴 filtre conversation_id construit par format!<br/>identifiant interpolé sans échappement des guillemets<br/><i>vérifié : wiremock, filtre injecté affirmé tel quel</i>"]
+        opt_def["✅ GetMessagesOptions<br/>effective_limit = 50, effective_offset = 0, is_newest_first = true<br/>effective_sort = MessageSort::TurnIndex ; sort_by absent du JSON legacy → TurnIndex<br/><i>vérifié : test_get_messages_options_sort_by_round_trips_through_serde</i>"]
+        getmsgs{"✅ get_conversation_messages()<br/>tri turn_index ou created_at selon sort_by, :desc ou :asc selon newest_first<br/><i>vérifié : wiremock, sort/limit/offset affirmés ; …can_sort_on_created_at_ascending</i>"}
+        getmsgs_filter["✅ filtre conversation_id par filter_eq()<br/>guillemets échappés : l'identifiant reste dans le littéral<br/><i>vérifié : wiremock, get_conversation_messages_escapes_the_conversation_id</i>"]
+        search["✅ search_messages(query, &MessageSearchOptions)<br/>showRankingScore = true, limit et offset envoyés tels quels, filtre conversation_id optionnel par filter_eq()<br/>aucun score, seuil ni budget par-dessus : l'ordre et le score du moteur<br/><i>vérifié : wiremock, search_messages_asks_for_scores_and_returns_the_engine_order_unscored</i>"]
+        search_hit["✅ MessageSearchHit { document, ranking_score: f64 }<br/>_rankingScore absent → 0.0"]
+        group["✅ ConversationSearchGroup::group()<br/>un groupe par conversation_id, best_score = max, tri best_score desc stable<br/>les hits gardent l'ordre du moteur dans le groupe<br/><i>vérifié : test_group_orders_conversations_by_best_score_and_keeps_engine_order</i>"]
         getmsgs_total["🔴 estimated_total_hits.unwrap_or(0)<br/>le serveur omet l'estimation → total_count = 0<br/>alors que des messages sont renvoyés, et has_more = false<br/><i>vérifié : wiremock, charge sans estimatedTotalHits</i>"]
         count{"✅ count_conversation_messages()<br/>limite 0 : aucun document rapatrié<br/><i>vérifié : wiremock</i>"}
         list["✅ list_conversations()<br/>tri updated_at:desc, aucun filtre<br/><i>vérifié : wiremock</i>"]
@@ -185,6 +214,9 @@ flowchart TD
     getmsgs --> getmsgs_total
     getmsgs --> meili
     getmsgs --> loaded
+    app --> search --> meili
+    search --> search_hit --> group
+    inmem_lex --> search_hit
     app --> count --> meili
     app --> list --> meili
     list --> parse_err

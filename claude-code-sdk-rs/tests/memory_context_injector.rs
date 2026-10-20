@@ -12,7 +12,7 @@
 #![cfg(feature = "memory")]
 
 use nexus_claude::memory::{
-    ContextInjector, MemoryConfig, MemoryError, MemoryProvider, MessageDocument,
+    ContextInjector, MeilisearchMemoryProvider, MemoryConfig, MemoryError, MessageDocument,
 };
 use serde_json::{Value, json};
 use wiremock::matchers::{method, path, path_regex};
@@ -129,23 +129,59 @@ async fn mount_messages_search(server: &MockServer, body: Value) {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn new_refuses_a_disabled_config_without_calling_the_server() {
+async fn new_builds_a_noop_injector_for_a_disabled_config_without_calling_the_server() {
     let server = MockServer::start().await;
     mount_bootstrap(&server).await;
 
-    let error = match ContextInjector::new(config(&server.uri()).with_enabled(false)).await {
-        Err(error) => error,
-        Ok(_) => panic!("a disabled config must not yield an injector"),
-    };
+    let injector = ContextInjector::new(config(&server.uri()).with_enabled(false))
+        .await
+        .expect("a disabled config yields an injector that does nothing");
 
-    // The refusal comes from the provider, before any index is touched: the
-    // `enabled` flag is therefore always true inside a live `ContextInjector`,
-    // which makes its own `if !self.config.enabled` guards unreachable.
-    assert!(matches!(error, MemoryError::Disabled), "got {error:?}");
+    // Neither the constructor nor the calls that follow reach the server: the
+    // disabled injector sits on a `NoopMemoryProvider`, not on Meilisearch.
+    assert_eq!(
+        injector
+            .get_context_prefix("jwt", Some("/w"), &[])
+            .await
+            .unwrap(),
+        None
+    );
+    injector
+        .store_messages(&[MessageDocument::new(
+            "m-1",
+            "conv-1",
+            "user",
+            "bonjour",
+            0,
+            1_700_000_000,
+        )])
+        .await
+        .unwrap();
+    assert!(injector.provider().health_check().await.unwrap());
+    assert_eq!(
+        injector
+            .load_conversation("conv-1", None, None)
+            .await
+            .unwrap()
+            .total_count,
+        0
+    );
     assert!(
         requests(&server).await.is_empty(),
         "nothing is sent for a disabled config"
     );
+}
+
+#[tokio::test]
+async fn provider_new_still_refuses_a_disabled_config() {
+    // The injector's lenience is its own: the Meilisearch provider keeps
+    // refusing to boot on a disabled config, so a host that builds it
+    // directly is told rather than handed a silent client.
+    let error = MeilisearchMemoryProvider::new(config("http://127.0.0.1:1").with_enabled(false))
+        .await
+        .err()
+        .expect("a disabled config must not yield a provider");
+    assert!(matches!(error, MemoryError::Disabled), "got {error:?}");
 }
 
 #[tokio::test]
