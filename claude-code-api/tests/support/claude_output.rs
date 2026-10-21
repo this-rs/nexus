@@ -130,3 +130,18 @@ pub fn channel(outputs: &[ClaudeCodeOutput]) -> mpsc::Receiver<ClaudeCodeOutput>
     drop(tx);
     rx
 }
+
+/// A successful `result` message carrying the turn's token counts, the way the
+/// CLI reports them (`input_tokens` / `output_tokens`, caches separate).
+pub fn result_with_usage(usage: Value) -> ClaudeCodeOutput {
+    ClaudeCodeOutput {
+        r#type: "result".to_string(),
+        subtype: Some("success".to_string()),
+        data: json!({
+            "is_error": false,
+            "num_turns": 1,
+            "duration_ms": 1,
+            "usage": usage,
+        }),
+    }
+}

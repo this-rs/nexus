@@ -639,6 +639,9 @@ async fn handle_non_streaming_response(
     let mut full_content = String::new();
     let mut tool_calls: Vec<ToolCall> = Vec::new();
     let mut token_count = 0;
+    // Prompt tokens as the CLI reported them, when it did. `None` stays `None`:
+    // unknown is not zero.
+    let mut reported_usage: Option<i32> = None;
 
     info!(
         "Waiting for Claude response (timeout: {}s)...",
@@ -745,12 +748,26 @@ async fn handle_non_streaming_response(
                         }
                     },
                     "result" => {
+                        if is_error_output(&output) {
+                            // A dead CLI is not a model that chose to say nothing.
+                            let message = output_error_message(&output);
+                            error!("Claude reported a failed result: {message}");
+                            let _ = claude_manager.close_session(&session_id).await;
+                            return Err(ApiError::ClaudeProcess(message));
+                        }
                         // End of response
+                        reported_usage = reported_prompt_tokens(&output);
                         info!(
                             "Claude response complete, content_len={}, tool_calls={}",
                             full_content.len(),
                             tool_calls.len()
                         );
+                    },
+                    "error" => {
+                        let message = output_error_message(&output);
+                        error!("Claude reported an error output: {message}");
+                        let _ = claude_manager.close_session(&session_id).await;
+                        return Err(ApiError::ClaudeProcess(message));
                     },
                     _ => {
                         debug!("Ignoring output type: {}", output.r#type);
@@ -799,11 +816,10 @@ async fn handle_non_streaming_response(
     let message = if !tool_calls.is_empty() {
         // Structural tool_calls extracted from content blocks — the reliable path
         info!("Returning {} structural tool call(s)", tool_calls.len());
-        let finish = if full_content.is_empty() {
-            "tool_calls"
-        } else {
-            "stop"
-        };
+        // A turn carrying a call finishes on `tool_calls`, text beside it or not:
+        // that field is how an OpenAI client decides to run the tool at all, so
+        // `stop` next to a call makes the call unreachable (decision DS-WIRE).
+        let finish = "tool_calls";
         let content = if full_content.is_empty() {
             None
         } else {
@@ -862,9 +878,9 @@ async fn handle_non_streaming_response(
             finish_reason: Some(message.1.to_string()),
         }],
         usage: Usage {
-            prompt_tokens: 0,
+            prompt_tokens: reported_usage.unwrap_or(0),
             completion_tokens: token_count,
-            total_tokens: token_count,
+            total_tokens: reported_usage.unwrap_or(0) + token_count,
         },
         conversation_id: None,
     };
@@ -879,6 +895,43 @@ async fn handle_non_streaming_response(
     );
 
     Ok(Json(response))
+}
+
+/// Does this CLI output say the turn failed? `is_error` is the flag the CLI sets
+/// on a `result` it could not complete (including the synthetic `process_died`
+/// event); a `subtype` of `error` says the same thing another way.
+fn is_error_output(output: &ClaudeCodeOutput) -> bool {
+    output.data.get("is_error").and_then(|v| v.as_bool()) == Some(true)
+        || output.subtype.as_deref() == Some("error")
+}
+
+/// The most specific message a failed output carries, or a stand-in.
+fn output_error_message(output: &ClaudeCodeOutput) -> String {
+    for key in ["error", "message", "result"] {
+        match output.data.get(key) {
+            Some(serde_json::Value::String(text)) if !text.is_empty() => return text.clone(),
+            Some(serde_json::Value::Object(object)) => {
+                if let Some(serde_json::Value::String(text)) = object.get("message") {
+                    return text.clone();
+                }
+            },
+            _ => {},
+        }
+    }
+    format!("the CLI reported a failed `{}` output", output.r#type)
+}
+
+/// Prompt tokens as OpenAI counts them — everything the model read, caches
+/// included — from the CLI's `usage` object. `None` when it reported none.
+fn reported_prompt_tokens(output: &ClaudeCodeOutput) -> Option<i32> {
+    let usage = output.data.get("usage")?;
+    let count = |key: &str| usage.get(key).and_then(|v| v.as_i64());
+    let input = count("input_tokens")?;
+    Some(
+        (input
+            + count("cache_read_input_tokens").unwrap_or(0)
+            + count("cache_creation_input_tokens").unwrap_or(0)) as i32,
+    )
 }
 
 #[cfg(test)]
@@ -1469,13 +1522,47 @@ mod tests {
         assert_eq!(response.usage.total_tokens, 3);
         assert_eq!(
             response.usage.prompt_tokens, 0,
-            "the gateway never reports prompt tokens"
+            "this `result` reported no usage, so there is nothing to report"
         );
         assert_eq!(response.object, "chat.completion");
         assert_eq!(response.model, "claude-sonnet-5");
         assert!(
             response.conversation_id.is_none(),
             "the conversation id is stamped by chat_completions, not here"
+        );
+    }
+
+    /// When the CLI does report counts, they reach the client: `prompt_tokens` is
+    /// everything the model read, caches included, because that is what an OpenAI
+    /// client bills against.
+    #[tokio::test]
+    async fn the_prompt_tokens_the_cli_reported_reach_the_client() {
+        let response = complete(
+            channel(vec![
+                assistant_text("deux mots"),
+                ClaudeCodeOutput {
+                    r#type: "result".to_string(),
+                    subtype: Some("success".to_string()),
+                    data: json!({
+                        "is_error": false,
+                        "usage": {
+                            "input_tokens": 11,
+                            "output_tokens": 5,
+                            "cache_read_input_tokens": 100,
+                            "cache_creation_input_tokens": 4,
+                        },
+                    }),
+                },
+            ]),
+            None,
+        )
+        .await
+        .expect("a complete transcript");
+
+        assert_eq!(response.usage.prompt_tokens, 115);
+        assert_eq!(
+            response.usage.total_tokens,
+            115 + response.usage.completion_tokens
         );
     }
 
@@ -1569,8 +1656,12 @@ mod tests {
         );
     }
 
+    /// Replaces `text_next_to_a_tool_call_keeps_finish_reason_stop`, whose own
+    /// rationale ("OpenAI clients read finish_reason to decide whether to run the
+    /// tool") argued against the `stop` it asserted: a client that reads `stop`
+    /// never runs the call, so the call was unreachable.
     #[tokio::test]
-    async fn text_next_to_a_tool_call_keeps_finish_reason_stop() {
+    async fn text_next_to_a_tool_call_still_finishes_on_tool_calls() {
         let response = complete(
             channel(vec![
                 assistant_blocks(json!([
@@ -1587,7 +1678,7 @@ mod tests {
         let choice = &response.choices[0];
         assert_eq!(
             choice.finish_reason.as_deref(),
-            Some("stop"),
+            Some("tool_calls"),
             "OpenAI clients read finish_reason to decide whether to run the tool"
         );
         assert_eq!(text_of(&choice.message), Some("je cherche"));
@@ -1751,25 +1842,19 @@ mod tests {
         );
     }
 
-    /// BUG (`handle_non_streaming_response`): a `result` message flagged
-    /// `is_error` is handled exactly like a success.
+    /// A `result` flagged `is_error` is a failure, not an empty answer.
     ///
     /// Triggering input: the synthetic event
     /// `core::interactive_session::build_process_died_event` emits when the CLI
     /// process dies — `{"type": "result", "subtype": "process_died", "is_error":
-    /// true, ...}`. The `"result"` arm only logs, and the `_` arm ignores a
-    /// top-level `"error"` output just as silently.
+    /// true, ...}`. It used to take the success arm and serve `200 OK` with empty
+    /// content, indistinguishable from a model that chose to say nothing.
     ///
-    /// Expected: `ApiError::ClaudeProcess` (500 claude_process_error) carrying the
-    /// CLI's error text. Actual: `200 OK` with empty content, indistinguishable
-    /// from a model that chose to say nothing.
-    /// Not fixed here: the same silent handling sits in
-    /// `api::streaming_handler::handle_enhanced_streaming_response`, which another
-    /// owner holds, and both sites should change in one go — with one decision on
-    /// the status code.
+    /// Was `#[ignore]` pending one decision on the status code across both sites;
+    /// the streaming side now emits an in-band error frame (it has no status code
+    /// left to set), and this side answers `ApiError::ClaudeProcess` → 500.
     #[tokio::test]
-    #[ignore = "documents a bug: an errored result is served as a successful empty completion"]
-    async fn an_errored_result_should_not_be_a_200() {
+    async fn an_errored_result_is_not_a_200() {
         let error = complete(
             channel(vec![ClaudeCodeOutput {
                 r#type: "result".to_string(),

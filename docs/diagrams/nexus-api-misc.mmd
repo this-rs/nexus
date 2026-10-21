@@ -143,7 +143,7 @@ flowchart TD
         cb["🔴 ContentBlock n'a que la variante Text<br/>tool_use, tool_result, thinking et image sont refusés,<br/>donc ClaudeMessage ne sait pas lire un message à outil<br/><i>vérifié : from_value renvoie Err sur chaque sorte</i>"]
         cse["🔴 ClaudeStreamEvent, tags snake_case du flux SSE Anthropic<br/>modèle juste, mais sans consommateur en production<br/><i>vérifié : message_stop et content_block_delta se lisent, ping est refusé</i>"]
         cmodels["✅ ClaudeModel::all<br/>catalogue statique de repli quand ModelRegistry ne joint pas l'API<br/><i>vérifié : models/tests.rs épingle la liste</i>"]
-        oai["✅ ChatCompletionRequest, ChatCompletionResponse, Tool, ToolCall<br/>MessageContent et ContentPart en untagged : texte nu ou parties multimodales<br/>ChatCompletionRequest::default porte encore claude-3-opus-20240229"]
+        oai["✅ ChatCompletionRequest, ChatCompletionResponse, Tool, ToolCall<br/>MessageContent et ContentPart en untagged : texte nu ou parties multimodales<br/>ChatCompletionRequest::default porte encore claude-3-opus-20240229<br/>ChatCompletionStreamResponse porte `usage` et `error` OPTIONNELS (DS-WIRE) :<br/>le chunk d'usage final de stream_options.include_usage, et StreamError<br/>{message, type} pour une trame d'erreur en bande — les deux en<br/>skip_serializing_if, donc un chunk ordinaire garde sa forme exacte<br/><i>vérifié : models/openai.rs a_stream_chunk_with_an_empty_delta_serialises_to_an_empty_object</i>"]
         cse --> cb
     end
 

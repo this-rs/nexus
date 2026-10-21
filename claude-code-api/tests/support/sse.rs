@@ -86,3 +86,21 @@ pub fn tool_calls(chunks: &[ChatCompletionStreamResponse]) -> Vec<(String, Strin
         })
         .collect()
 }
+
+/// The `usage` object of every chunk that carries one, in order.
+pub fn usages(chunks: &[ChatCompletionStreamResponse]) -> Vec<(i32, i32, i32)> {
+    chunks
+        .iter()
+        .filter_map(|chunk| chunk.usage.as_ref())
+        .map(|u| (u.prompt_tokens, u.completion_tokens, u.total_tokens))
+        .collect()
+}
+
+/// The `message` of every in-band error frame, in order.
+pub fn errors(chunks: &[ChatCompletionStreamResponse]) -> Vec<String> {
+    chunks
+        .iter()
+        .filter_map(|chunk| chunk.error.as_ref())
+        .map(|error| error.message.clone())
+        .collect()
+}

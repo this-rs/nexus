@@ -222,7 +222,10 @@ async fn a_tool_call_is_streamed_then_the_sentinel_closes_the_body() {
         sse::tool_calls(&chunks),
         vec![("grep".to_string(), r#"{"q":"x"}"#.to_string())]
     );
-    assert_eq!(sse::finish_reasons(&chunks), vec!["stop".to_string()]);
+    // Through the real router, end to end: a streamed call finishes on
+    // `tool_calls`, not `stop` (see `a_turn_that_called_a_tool_finishes_on_tool_calls`
+    // for the handler-level case and the reason).
+    assert_eq!(sse::finish_reasons(&chunks), vec!["tool_calls".to_string()]);
     assert_eq!(
         sse::frames(&body).last().map(String::as_str),
         Some("[DONE]")
@@ -265,29 +268,85 @@ async fn abandoning_the_stream_early_yields_no_finish_reason() {
 }
 
 // ===========================================================================
-// Bugs outside this file's ownership — evidence, not fixes
+// How a turn ends: finish_reason, usage, errors
 // ===========================================================================
 
-/// BUG (`api::streaming_handler::handle_enhanced_streaming_response`): a `result`
-/// message flagged `is_error: true` is streamed to the client as a **successful**
-/// completion.
-///
-/// Triggering input: `claude_output::result_error("boom")`, i.e. the CLI's
-/// `{"type":"result","subtype":"error","is_error":true}`. The handler matches on
-/// `output.r#type` alone, so the error result takes the same arm as a success: it
-/// emits `finish_reason: "stop"` *and* stores `completed_normally = true`, which
-/// also disarms `SseDisconnectGuard` — so the CLI session is left running instead
-/// of being interrupted.
-///
-/// Expected: no `"stop"`. OpenAI's vocabulary for a turn the model could not
-/// finish is a different `finish_reason` (`"length"`, `"content_filter"`) or an
-/// in-band error frame; `"stop"` tells the client the answer is complete.
-///
-/// The fix belongs to `src/api/streaming_handler.rs`, which this file does not
-/// own, hence `#[ignore]`.
+/// OpenAI says `tool_calls` when the model stopped in order to call a tool, and
+/// `stop` only when the answer is complete. The handler used to say `stop` either
+/// way, so a client driving an agent loop could not tell "here is your answer"
+/// from "run this tool and come back".
 #[tokio::test]
-#[ignore = "api::streaming_handler::handle_enhanced_streaming_response reports a failed result as finish_reason \"stop\""]
-async fn a_failed_result_should_not_be_streamed_as_a_normal_stop() {
+async fn a_turn_that_called_a_tool_finishes_on_tool_calls() {
+    let chunks = chunks_for(&[
+        claude_output::assistant_tool_use("call_1", "Read", serde_json::json!({"file": "a"})),
+        claude_output::result_success(),
+    ])
+    .await;
+
+    assert_eq!(
+        sse::tool_calls(&chunks),
+        [("Read".to_string(), r#"{"file":"a"}"#.to_string())]
+    );
+    assert_eq!(
+        sse::finish_reasons(&chunks),
+        vec!["tool_calls".to_string()],
+        "a turn that stopped to call a tool did not stop normally: {chunks:#?}"
+    );
+}
+
+/// And a turn that only spoke still finishes on `stop`.
+#[tokio::test]
+async fn a_turn_that_only_spoke_finishes_on_stop() {
+    let chunks = chunks_for(&[
+        claude_output::assistant_text("voila"),
+        claude_output::result_success(),
+    ])
+    .await;
+
+    assert_eq!(sse::finish_reasons(&chunks), vec!["stop".to_string()]);
+    assert!(
+        sse::usages(&chunks).is_empty(),
+        "no counts reported, none invented"
+    );
+}
+
+/// `stream_options.include_usage` buys an OpenAI client one last chunk, with no
+/// choices and the turn's token counts. `prompt_tokens` is everything the model
+/// read, caches included, because that is what the client bills against.
+#[tokio::test]
+async fn a_turn_ends_with_the_counts_the_cli_reported() {
+    let chunks = chunks_for(&[
+        claude_output::assistant_text("deux mots"),
+        claude_output::result_with_usage(serde_json::json!({
+            "input_tokens": 11,
+            "output_tokens": 5,
+            "cache_read_input_tokens": 100,
+            "cache_creation_input_tokens": 4,
+        })),
+    ])
+    .await;
+
+    assert_eq!(
+        sse::usages(&chunks),
+        [(115, 5, 120)],
+        "prompt_tokens = input + cache read + cache creation: {chunks:#?}"
+    );
+    let last = chunks.last().expect("a usage chunk");
+    assert!(
+        last.usage.is_some() && last.choices.is_empty(),
+        "the usage chunk comes last and carries no choices: {last:#?}"
+    );
+    assert_eq!(sse::finish_reasons(&chunks), vec!["stop".to_string()]);
+}
+
+/// A `result` message flagged `is_error: true` is not a completed answer.
+///
+/// Was `#[ignore]`: the handler matched on `output.r#type` alone, so an error
+/// result took the success arm — it emitted `finish_reason: "stop"` *and* set
+/// `completed_normally`, which disarmed `SseDisconnectGuard` and left the CLI
+/// session running.
+#[tokio::test]
+async fn a_failed_result_is_not_streamed_as_a_normal_stop() {
     let chunks = chunks_for(&[
         claude_output::assistant_text("partiel"),
         claude_output::result_error("boom"),
@@ -299,25 +358,43 @@ async fn a_failed_result_should_not_be_streamed_as_a_normal_stop() {
         vec!["stop".to_string()],
         "a failed turn must not claim it stopped normally"
     );
+    assert_eq!(
+        sse::errors(&chunks),
+        vec!["boom".to_string()],
+        "the client learns why, in band: {chunks:#?}"
+    );
+    assert_eq!(
+        sse::text(&chunks),
+        "partiel",
+        "what was said is still delivered"
+    );
 }
 
-/// BUG (`api::streaming_handler::handle_enhanced_streaming_response`): a CLI
-/// output of type `error` produces **nothing at all**.
+/// A CLI output of type `error` used to fall into the `_ => {}` arm and produce
+/// nothing: the client got a `[DONE]` it could not tell from a short answer.
 ///
-/// Triggering input: `{"type": "error", …}` — it falls into the `_ => {}` arm, so
-/// the stream ends with the role chunk, no content and no `finish_reason`. The
-/// client is handed a `[DONE]` it cannot distinguish from a successful empty
-/// answer, and never learns the turn failed.
-///
-/// Expected: an in-band error frame, or at least a `finish_reason` that is not
-/// silence. Fix belongs to `src/api/streaming_handler.rs`, hence `#[ignore]`.
+/// Was `#[ignore]`.
 #[tokio::test]
-#[ignore = "api::streaming_handler::handle_enhanced_streaming_response drops `type: error` output silently"]
-async fn an_error_output_should_reach_the_client() {
+async fn an_error_output_reaches_the_client() {
     let chunks = chunks_for(&[claude_output::unknown("error")]).await;
 
     assert!(
         chunks.len() > 1,
         "the client must learn about the error, not just get the role chunk: {chunks:#?}"
     );
+    assert_eq!(sse::errors(&chunks).len(), 1, "{chunks:#?}");
+    assert!(
+        sse::finish_reasons(&chunks).is_empty(),
+        "an error frame is not a finish_reason"
+    );
+}
+
+/// An output type nobody knows is still ignored — the `_ => {}` arm is for the
+/// unknown, not for failures.
+#[tokio::test]
+async fn an_unknown_output_type_is_still_ignored() {
+    let chunks = chunks_for(&[claude_output::unknown("telemetry")]).await;
+
+    assert_eq!(chunks.len(), 1, "the role chunk alone: {chunks:#?}");
+    assert!(sse::errors(&chunks).is_empty());
 }

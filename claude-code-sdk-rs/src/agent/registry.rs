@@ -335,6 +335,8 @@ impl ProviderInstanceConfig {
             },
             fold_late_system: base.fold_late_system || over.fold_late_system,
             tool_args_as_object: base.tool_args_as_object || over.tool_args_as_object,
+            thinking_ignores_temperature: base.thinking_ignores_temperature
+                || over.thinking_ignores_temperature,
             vision_probe: base.vision_probe || over.vision_probe,
             vision: over.vision.or(base.vision),
         })
@@ -2289,6 +2291,17 @@ mod tests {
             .with_preset("vllm")
             .with_quirks(EndpointQuirks::generic());
         assert_eq!(vllm.effective_quirks().unwrap(), EndpointQuirks::vllm());
+        // A preset whose flags are mostly `true` round-trips through the merge
+        // unchanged. `vllm` alone cannot catch a field the merge forgot to carry,
+        // because almost all of its flags are `false` either way.
+        let deepseek = native("n")
+            .with_preset("deepseek")
+            .with_quirks(EndpointQuirks::generic());
+        assert_eq!(
+            deepseek.effective_quirks().unwrap(),
+            EndpointQuirks::deepseek(),
+            "every flag of the preset must survive the merge"
+        );
         assert_eq!(
             native("n").effective_quirks().unwrap(),
             EndpointQuirks::generic()

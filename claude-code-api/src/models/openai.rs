@@ -100,6 +100,63 @@ pub struct ChatCompletionStreamResponse {
     pub created: i64,
     pub model: String,
     pub choices: Vec<StreamChoice>,
+    /// Token counts for the whole turn, on the last chunk of a stream (what
+    /// `stream_options.include_usage` buys an OpenAI client). That chunk carries
+    /// no choices. Absent means the upstream never reported any: unknown is not
+    /// zero, so the field is left out rather than filled with a lie.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<Usage>,
+    /// An in-band error frame: the turn failed and there is no answer coming.
+    /// A client that only reads `choices` sees a stream that stops; one that
+    /// reads this learns why. Never set together with a `finish_reason`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<StreamError>,
+}
+
+/// The payload of an in-band error frame (see
+/// [`ChatCompletionStreamResponse::error`]), shaped like the `error` object the
+/// OpenAI SDKs already know from a non-200 response.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct StreamError {
+    pub message: String,
+    #[serde(rename = "type")]
+    pub error_type: String,
+}
+
+impl StreamError {
+    /// An upstream failure, i.e. the CLI could not finish the turn.
+    pub fn upstream(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            error_type: "upstream_error".to_string(),
+        }
+    }
+}
+
+impl ChatCompletionStreamResponse {
+    /// An envelope with no choices, no usage and no error — the base every frame
+    /// of one turn shares.
+    pub fn empty(id: String, model: String) -> Self {
+        Self {
+            id,
+            object: "chat.completion.chunk".to_string(),
+            created: chrono::Utc::now().timestamp(),
+            model,
+            choices: Vec::new(),
+            usage: None,
+            error: None,
+        }
+    }
+
+    /// The envelope carrying one `choices[0]` delta.
+    pub fn with_choice(mut self, delta: DeltaMessage, finish_reason: Option<String>) -> Self {
+        self.choices = vec![StreamChoice {
+            index: 0,
+            delta,
+            finish_reason,
+        }];
+        self
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -504,6 +561,8 @@ mod tests {
                 delta: DeltaMessage::default(),
                 finish_reason: Some("stop".into()),
             }],
+            usage: None,
+            error: None,
         };
 
         assert_eq!(

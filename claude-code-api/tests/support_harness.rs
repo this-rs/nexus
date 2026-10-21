@@ -309,7 +309,10 @@ async fn streaming_handler_can_be_driven_from_a_channel() {
         sse::tool_calls(&chunks),
         vec![("search".to_string(), r#"{"q":"nexus"}"#.to_string())]
     );
-    assert_eq!(sse::finish_reasons(&chunks), vec!["stop".to_string()]);
+    // The turn asked for a tool, so it finishes on `tool_calls` — a client that
+    // reads `stop` would never run the call (see
+    // `sse_stream_conformance::a_turn_that_called_a_tool_finishes_on_tool_calls`).
+    assert_eq!(sse::finish_reasons(&chunks), vec!["tool_calls".to_string()]);
 }
 
 // ===========================================================================

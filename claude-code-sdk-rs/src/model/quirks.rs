@@ -64,6 +64,13 @@ pub struct EndpointQuirks {
     pub fold_late_system: bool,
     /// Send assistant tool-call `arguments` as a JSON object instead of a string.
     pub tool_args_as_object: bool,
+    /// Never send `temperature`: the endpoint thinks by default and its thinking
+    /// mode pins the temperature server-side (DeepSeek forces `1.0`). Sending one
+    /// changes nothing on the server, and it changes the request bytes, so two
+    /// turns that differ only by a temperature we asked for and never got miss
+    /// the prefix cache. The motive is this flag: a dropped `temperature` is a
+    /// declared quirk of the instance, not a silent loss.
+    pub thinking_ignores_temperature: bool,
     /// When the catalogue says nothing about a model's vision, ask the model: one
     /// tiny request with a one-pixel PNG. A completion means vision; a request
     /// refusal (HTTP 400) that names images means none; anything else (another
@@ -93,11 +100,12 @@ impl EndpointQuirks {
     }
 
     /// DeepSeek: reasoning must come back with tool calls, and thinking mode
-    /// (the default) refuses a forced `tool_choice`.
+    /// (the default) refuses a forced `tool_choice` and pins the temperature.
     pub fn deepseek() -> Self {
         Self {
             echo_reasoning_with_tools: true,
             no_forced_tool_choice: true,
+            thinking_ignores_temperature: true,
             ..Self::default()
         }
     }
@@ -171,7 +179,9 @@ mod tests {
     fn presets_carry_their_documented_flags() {
         assert!(EndpointQuirks::deepseek().echo_reasoning_with_tools);
         assert!(EndpointQuirks::deepseek().no_forced_tool_choice);
+        assert!(EndpointQuirks::deepseek().thinking_ignores_temperature);
         assert!(!EndpointQuirks::generic().no_forced_tool_choice);
+        assert!(!EndpointQuirks::generic().thinking_ignores_temperature);
         assert!(EndpointQuirks::ollama().omit_tool_choice);
         assert_eq!(
             EndpointQuirks::vllm().reasoning_field,
