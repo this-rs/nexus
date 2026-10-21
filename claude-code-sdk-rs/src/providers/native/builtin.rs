@@ -6,7 +6,7 @@
 //! | Tool | Offered when | A call |
 //! |---|---|---|
 //! | `AskUserQuestion` | `NativeConfig::ask_user_question` and a model with tools (`native_question`) | emits `question { reply: turn }`, answers the model that the reply comes as the next user message, and **ends the turn** once the step's calls are done (decision A45: the answer is a user turn) |
-//! | `Agent` | the session's hooks say `runs_subagents()`, a model with tools, and the session is not a child (`lineage.depth == 0` or no lineage) | awaits `SessionHooks::run_subagent` (decision A18: the host's child session), whose answer is the `tool_result` |
+//! | `Agent` | the session's hooks say `runs_subagents()`, a model with tools, and the session is not a child (`lineage.depth == 0` or no lineage) | awaits `SessionHooks::run_subagent` (decision A18: the host's child session), whose answer is the `tool_result`; with `runs_background_subagents()` the schema also offers `run_in_background` and the host answers at once (ISO2) |
 //! | `ToolSearch` | `NativeConfig::deferred_tools` defers at least one tool the session has (see [`super::tools::is_deferred`]) | answers with the full definitions of the deferred tools the query names (`select:A,B`) or matches (keywords), which become **loaded** for the rest of the session: sent with every later request, appended after the tools already sent, callable in the same turn |
 //!
 //! Policy, as on Claude Code:
@@ -101,7 +101,24 @@ pub fn ask_user_question_entry() -> ToolEntry {
 }
 
 /// The entry of `Agent`.
-pub fn agent_entry() -> ToolEntry {
+/// `background`: the host runs sub-agents in the background too (ISO2), so `run_in_background`
+/// is offered.
+pub fn agent_entry(background: bool) -> ToolEntry {
+    let mut schema = json!({
+        "type": "object",
+        "properties": {
+            "description": {"type": "string", "description": "A short (3-5 word) description of the task"},
+            "prompt": {"type": "string", "description": "The task for the sub-agent, in full"},
+            "subagent_type": {"type": "string", "description": "The kind of agent, if a particular one is wanted"}
+        },
+        "required": ["description", "prompt"]
+    });
+    if background {
+        schema["properties"]["run_in_background"] = json!({
+            "type": "boolean",
+            "description": "Run the sub-agent in the background: the call answers at once that it was launched, you keep working, and its end reaches you as a message in this conversation"
+        });
+    }
     ToolEntry::builtin(
         BuiltinTool::Agent,
         AGENT_TOOL,
@@ -112,15 +129,7 @@ pub fn agent_entry() -> ToolEntry {
          searches or investigations that would fill your context, or for independent pieces of \
          work."
             .to_owned(),
-        json!({
-            "type": "object",
-            "properties": {
-                "description": {"type": "string", "description": "A short (3-5 word) description of the task"},
-                "prompt": {"type": "string", "description": "The task for the sub-agent, in full"},
-                "subagent_type": {"type": "string", "description": "The kind of agent, if a particular one is wanted"}
-            },
-            "required": ["description", "prompt"]
-        }),
+        schema,
         ToolCategory::Agent,
     )
 }
@@ -204,7 +213,11 @@ pub fn questions(input: &Value) -> Result<Vec<QuestionSpec>, String> {
 }
 
 /// The sub-agent request of an `Agent` input, or why the call is refused.
-pub fn subagent_request(tool_call_id: &str, input: &Value) -> Result<SubagentRequest, String> {
+pub fn subagent_request(
+    tool_call_id: &str,
+    input: &Value,
+    background_allowed: bool,
+) -> Result<SubagentRequest, String> {
     let text = |key: &str| {
         input
             .get(key)
@@ -218,6 +231,13 @@ pub fn subagent_request(tool_call_id: &str, input: &Value) -> Result<SubagentReq
     let mut request = SubagentRequest::new(tool_call_id, prompt);
     request.description = text("description");
     request.subagent_type = text("subagent_type");
+    // Only a host that said it runs them in the background gets the flag; a call that sets it
+    // anyway (the schema did not offer it) runs in the foreground.
+    request.run_in_background = background_allowed
+        && input
+            .get("run_in_background")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
     request.input = input.clone();
     Ok(request)
 }
@@ -242,11 +262,12 @@ mod tests {
 
     #[test]
     fn an_agent_call_needs_a_prompt() {
-        assert!(subagent_request("c1", &json!({"description": "x"})).is_err());
-        assert!(subagent_request("c1", &json!({"prompt": "   "})).is_err());
+        assert!(subagent_request("c1", &json!({"description": "x"}), false).is_err());
+        assert!(subagent_request("c1", &json!({"prompt": "   "}), false).is_err());
         let request = subagent_request(
             "c1",
             &json!({"description": "find it", "prompt": "Find the spec", "subagent_type": "Explore"}),
+            false,
         )
         .unwrap();
         assert_eq!(request.tool_call_id, "c1");
@@ -258,7 +279,7 @@ mod tests {
     #[test]
     fn the_builtin_tools_keep_claude_codes_names_and_are_read_only() {
         let ask = ask_user_question_entry();
-        let agent = agent_entry();
+        let agent = agent_entry(false);
         let search = tool_search_entry();
         assert_eq!(ask.name, "AskUserQuestion");
         assert_eq!(agent.name, "Agent");

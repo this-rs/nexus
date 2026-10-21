@@ -4699,3 +4699,132 @@ async fn a_hook_sees_the_prompt_size_with_its_cache_reads_and_the_tokens_spent_w
     // 600 not served from the cache, plus 50 of output; the 400 cache reads do not count.
     assert_eq!(contexts[1].tokens_spent, 650);
 }
+
+// ---------------------------------------------------------------------------
+// Sub-agents in the background (ISO2)
+// ---------------------------------------------------------------------------
+
+/// A host that runs sub-agents, in the background when `background` says so: a background call
+/// is launched on a task of the host's own (it ends when `release` is notified) and answered at
+/// once; a foreground call answers at once too.
+struct BackgroundHost {
+    background: bool,
+    asked: std::sync::Mutex<Vec<nexus_claude::agent::SubagentRequest>>,
+    release: Arc<tokio::sync::Notify>,
+    ended: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl BackgroundHost {
+    fn new(background: bool) -> Arc<Self> {
+        Arc::new(Self {
+            background,
+            asked: std::sync::Mutex::new(Vec::new()),
+            release: Arc::new(tokio::sync::Notify::new()),
+            ended: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl nexus_claude::agent::SessionHooks for BackgroundHost {
+    fn runs_subagents(&self) -> bool {
+        true
+    }
+
+    fn runs_background_subagents(&self) -> bool {
+        self.background
+    }
+
+    async fn run_subagent(
+        &self,
+        request: &nexus_claude::agent::SubagentRequest,
+    ) -> Result<String, String> {
+        self.asked.lock().unwrap().push(request.clone());
+        if request.run_in_background {
+            let (release, ended) = (self.release.clone(), self.ended.clone());
+            tokio::spawn(async move {
+                release.notified().await;
+                ended.store(true, std::sync::atomic::Ordering::SeqCst);
+            });
+            return Ok(format!("launched {}", request.tool_call_id));
+        }
+        Ok("foreground answer".to_owned())
+    }
+}
+
+fn background_call(id: &'static str) -> (&'static str, &'static str, Value) {
+    (
+        id,
+        "Agent",
+        json!({"description": "long job", "prompt": "Refactor everything", "run_in_background": true}),
+    )
+}
+
+fn agent_schema(body: &Value) -> Value {
+    body["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["function"]["name"] == "Agent")
+        .expect("the Agent tool is offered")["function"]["parameters"]
+        .clone()
+}
+
+#[tokio::test]
+async fn a_background_subagent_is_launched_at_once_and_the_turn_ends_before_it_does() {
+    let h = Harness::new(vec![
+        tool_reply(Some("launch"), &[background_call("b1")], None, None),
+        text_reply(Some(TOOL), "I carry on while it works", None, None),
+    ])
+    .await;
+    let host = BackgroundHost::new(true);
+    let mut spec = h.spec();
+    spec.hooks = Some(host.clone());
+    let session = h.open(spec).await;
+    let events = turn(&*session, "launch the refactor").await;
+    assert_eq!(stop_reason(&events), StopReason::Completed);
+    // The model read the launch, not the end.
+    assert_eq!(
+        tool_results(&events),
+        vec![("b1".to_owned(), false, "launched b1".to_owned())]
+    );
+    let asked = host.asked.lock().unwrap().clone();
+    assert_eq!(asked.len(), 1);
+    assert!(asked[0].run_in_background);
+    // The turn is over and the sub-agent is still running: nothing of the turn reached it.
+    assert!(!host.ended.load(std::sync::atomic::Ordering::SeqCst));
+    host.release.notify_one();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !host.ended.load(std::sync::atomic::Ordering::SeqCst) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the background sub-agent ends on its own, after the turn");
+    let schema = agent_schema(&h.chat()[0]);
+    assert_eq!(schema["properties"]["run_in_background"]["type"], "boolean");
+}
+
+#[tokio::test]
+async fn without_a_host_that_runs_them_in_the_background_the_flag_is_neither_offered_nor_passed_on()
+{
+    let h = Harness::new(vec![
+        tool_reply(Some("launch"), &[background_call("b1")], None, None),
+        text_reply(Some(TOOL), "done", None, None),
+    ])
+    .await;
+    let host = BackgroundHost::new(false);
+    let mut spec = h.spec();
+    spec.hooks = Some(host.clone());
+    let session = h.open(spec).await;
+    let events = turn(&*session, "launch the refactor").await;
+    assert_eq!(stop_reason(&events), StopReason::Completed);
+    assert_eq!(
+        tool_results(&events),
+        vec![("b1".to_owned(), false, "foreground answer".to_owned())]
+    );
+    assert!(!host.asked.lock().unwrap()[0].run_in_background);
+    let schema = agent_schema(&h.chat()[0]);
+    assert!(schema["properties"].get("run_in_background").is_none());
+    assert!(schema["properties"].get("subagent_type").is_some());
+}
