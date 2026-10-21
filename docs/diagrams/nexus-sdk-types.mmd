@@ -1,6 +1,6 @@
 %% name: nexus-sdk-types
 %% covers: claude-code-sdk-rs/src/types.rs, claude-code-sdk-rs/src/message_parser.rs, claude-code-sdk-rs/src/errors.rs
-%% verified: 18865f7
+%% verified: 2026-10-21
 flowchart TD
     subgraph legend["Légende"]
         direction LR
@@ -18,7 +18,8 @@ flowchart TD
 
         entry["✅ parse_message<br/>aiguille sur le champ type, lu comme chaîne<br/><i>vérifié : JSON forgé en mémoire, aucun CLI</i>"]
 
-        entry -->|"type absent ou non-chaîne"| e_type["✅ SdkError::parse_error — Missing type field<br/><i>vérifié : objet vide, type numérique, tableau</i>"]
+        entry -->        entry -->|"rate_limit_event — émis à chaque tour par le CLI 2.1.296"| p_rl["✅ gardé comme System { subtype: rate_limit_event, data: rate_limit_info } (QUOTA)<br/><i>vérifié : a_rate_limit_event_is_kept_as_a_system_message_carrying_its_rate_limit_info, sur le relevé réel tests/parity/claude-code-2.1.296/rate_limit_event.ndjson</i>"]
+|"type absent ou non-chaîne"| e_type["✅ SdkError::parse_error — Missing type field<br/><i>vérifié : objet vide, type numérique, tableau</i>"]
         entry -->|"type inconnu, ex. compact_boundary"| drop_msg["✅ Ok de None — message jeté sans erreur<br/><i>compatibilité avant : vérifié</i>"]
 
         entry -->|"user"| p_user["✅ parse_user_message"]

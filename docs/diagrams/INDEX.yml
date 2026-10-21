@@ -144,7 +144,7 @@ diagrams:
       - claude-code-sdk-rs/src/transport/*.rs
   - name: nexus-sdk-types
     file: nexus-sdk-types.mmd
-    verified: 18865f7
+    verified: 2026-10-21
     covers:
       - claude-code-sdk-rs/src/types.rs
       - claude-code-sdk-rs/src/message_parser.rs
