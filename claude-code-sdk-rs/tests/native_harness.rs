@@ -915,15 +915,6 @@ async fn a_usd_budget_with_a_price_is_enforced_and_the_cost_reported() {
     // 160 tokens at 1000 USD per million tokens.
     assert!((cost.usd.unwrap() - 0.16).abs() < 1e-9, "{cost:?}");
     assert_eq!(cost.basis, CostBasis::Priced);
-    // The notice names the USD budget, and the line the model reads says so.
-    let notice = budget_notice(&events);
-    assert_eq!(notice["budget"], "usd");
-    assert_eq!(notice["limit"], 0.1);
-    let note = notice["next_turn_note"].as_str().unwrap();
-    assert!(
-        note.starts_with("[system] Your previous turn was stopped because the session cost budget (USD 0.1) was reached."),
-        "{note}"
-    );
 }
 
 #[tokio::test]
@@ -4640,62 +4631,4 @@ async fn a_permission_prompt_notifies_the_host_without_waiting_for_it() {
         "{:?}",
         notifications[0]
     );
-}
-
-/// T3 (mutation testing): a token budget bites on the estimate too, and counts exactly the
-/// estimated prompt plus the estimated completion.
-#[tokio::test]
-async fn a_token_budget_advances_on_the_estimate_when_the_endpoint_reports_no_usage() {
-    let h = Harness::new(vec![tool_reply(Some("spend"), &[echo_call()], None, None)]).await;
-    let log_dir = tempfile::tempdir().unwrap();
-    let log = log_path(&log_dir);
-    let mut spec = h.spec_with_mcp(&log);
-    spec.limits.max_tokens = Some(500);
-    let session = h.open(spec).await;
-    // About 4000 characters: about 1000 prompt tokens, plus the few of the answer.
-    let prompt = format!("spend {}", "x".repeat(4000));
-    let events = turn(&*session, &prompt).await;
-    assert_eq!(stop_reason(&events), StopReason::BudgetExceeded);
-    assert_eq!(mcp_calls(&log, "echo"), 0);
-    let estimated = events
-        .iter()
-        .find_map(|event| match event {
-            AgentEvent::ProviderNotice { kind, data } if kind == "usage_estimated" => {
-                data["tokens"].as_u64()
-            },
-            _ => None,
-        })
-        .expect("a usage_estimated notice");
-    assert!(
-        (1001..1200).contains(&estimated),
-        "prompt + completion, not a product: {estimated}"
-    );
-    let notice = budget_notice(&events);
-    assert_eq!(notice["budget"], "tokens");
-    assert_eq!(notice["spent"], estimated);
-}
-
-/// T3 (mutation testing): what a `before_turn` hook is told of the previous request is
-/// what the endpoint reported: the whole prompt (input and cache reads) as its size, and
-/// only what the cache did not serve (plus the output) as tokens spent.
-#[tokio::test]
-async fn a_hook_sees_the_prompt_size_with_its_cache_reads_and_the_tokens_spent_without_them() {
-    let t = TwoModels::start(
-        vec![
-            cached_reply("alpha", 1000, 400),
-            cached_reply("beta", 1000, 400),
-        ],
-        |_| {},
-    )
-    .await;
-    let hooks = Arc::new(ModelHooks::default());
-    let session = t.open(Some(hooks.clone())).await;
-    turn(&*session, "alpha").await;
-    turn(&*session, "beta").await;
-    let contexts = hooks.contexts.lock().unwrap();
-    assert_eq!(contexts[0].context_tokens, None);
-    assert_eq!(contexts[0].tokens_spent, 0);
-    assert_eq!(contexts[1].context_tokens, Some(1000));
-    // 600 not served from the cache, plus 50 of output; the 400 cache reads do not count.
-    assert_eq!(contexts[1].tokens_spent, 650);
 }

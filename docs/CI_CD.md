@@ -121,46 +121,6 @@ no CI job passes `--ignored`, and no workflow holds a secret for them. Run them 
 The other `#[ignore]`s of the repository are not live tests: each documents, in its reason string, a known bug or an
 out-of-scope change (it passes once the fix lands), or a slow wait run on demand.
 
-#### Mutation testing (manual, never in the required CI)
-
-`cargo-mutants` changes the code one operator at a time and runs the tests; a mutant no test
-fails on is a behaviour nothing pins. T3 ran it on the five zones where a wrong `<` or a deleted
-`match` arm changes what the host sees or what the agent is allowed to do:
-
-| Zone | Files |
-|------|-------|
-| Provider event mapping | `providers/claude_code/map_events.rs`, `providers/acp/map.rs`, `providers/codex/map.rs` |
-| `ToolPolicy` decision | `agent/policy.rs`, `providers/native/policy_args.rs` |
-| `tool_calls` assembly | `model/wire.rs` (stream deltas to `ToolCallChunk`) |
-| Budget | `providers/native/loop.rs`: `spent_budget`, `budget_spent`, `budget_note`, `spend` |
-| Retryable classification | `agent/error.rs` (and the `classify` functions of the codex and ACP maps) |
-
-```sh
-cargo install cargo-mutants --locked
-# zones 1, 2, 3, 5: .cargo/mutants.toml. Unit tests only (a mutant is rebuilt in seconds):
-cargo mutants -p nexus-claude --cargo-arg=--lib -j 2
-# zone 4, the budget, is a slice of one file: .cargo/mutants-budget.toml. Its tests are integration tests:
-cargo mutants -p nexus-claude --config .cargo/mutants-budget.toml -j 2 --cargo-arg=--lib \
-  --cargo-arg=--test --cargo-arg=native_harness --cargo-arg=--test --cargo-arg=native_conformance \
-  --cargo-arg=--test --cargo-arg=native_anthropic
-# one file, or the survivors of a previous run only:
-cargo mutants -p nexus-claude --cargo-arg=--lib -F 'providers/codex/map.rs'
-cargo mutants -p nexus-claude --cargo-arg=--lib --iterate
-```
-
-Read `mutants.out/missed.txt`: it must be empty. `--cargo-arg=--lib` matters: without it
-cargo-mutants rebuilds all ~80 test binaries for every mutant (minutes each). No CI job runs it: a run takes hours (one build and
-one test run per mutant), and the token that pushes this repository cannot create a workflow file. A `timeout` counts as detected
-(the mutant made a test hang); `unviable` mutants do not compile.
-
-Result of the T3 pass (613 mutants listed, 60 unviable): with the tests that existed, **145** survived
-(codex map 48, `policy_args` 46, ACP map 26, `model/wire.rs` 9, `map_events` 9, budget 6, `policy.rs` 1);
-after it, **0** survive except the **5 equivalent mutants** excluded in `.cargo/mutants.toml`, each with
-the reason it cannot be observed (an unreachable guard, a Windows-only operand, a leading `(`
-that `split_into` ignores, a `glob_match` step that reaches the same state one iteration later).
-Two things to know when you rerun it: the order of the printed names is not the order of the
-files, and a line move in one of the 5 excluded spots needs the line numbers in `exclude_re` updated.
-
 ### Release Workflow (`release.yml`)
 
 Triggered when a version tag (`v*`) is pushed.
