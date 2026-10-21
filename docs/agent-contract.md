@@ -461,6 +461,12 @@ sur un provider, aucune forme sérialisée ne bouge : `CONTRACT_VERSION` reste 5
   résultat en erreur, le tour continue) ; l'arrêt du tour ou l'annulation de l'appel abandonne le futur, ce qui
   dit à l'hôte d'arrêter le sous-agent. `subagents` reste `none` : aucun événement ne porte `parent`, le
   sous-agent est la session enfant de l'hôte (A18).
+  **En arrière-plan (ISO2)** : un hôte qui répond `true` à `runs_background_subagents()` (défaut `false`) voit le schéma
+  de `Agent` gagner `run_in_background: boolean` ; un appel qui le pose atteint `run_subagent` avec
+  `SubagentRequest::run_in_background = true`. L hôte répond **tout de suite** (le texte de lancement que le modèle
+  lit) et porte lui-même la vie du sous-agent et sa notification de fin vers la conversation ; le harnais n attend
+  que cette première réponse, donc ni la fin ni le délai du tour n atteignent l enfant. Sans cette capacité le
+  schéma n offre pas le drapeau et un appel qui le pose quand même tourne au premier plan.
 - **Outils différés et `ToolSearch` (CTX2, `NativeConfig::deferred_tools`)** : une liste de noms exacts ou de
   préfixes finissant par `*` (`mcp__po__*`), vide par défaut — **vide, rien ne change** (liste d'outils identique
   octet pour octet à celle d'avant). Quand elle diffère au moins un outil que la session possède, les définitions

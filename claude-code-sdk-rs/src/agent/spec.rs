@@ -322,6 +322,19 @@ pub trait SessionHooks: Send + Sync {
         false
     }
 
+    /// Whether the host also runs a sub-agent **in the background** (ISO2): the `Agent` tool
+    /// then takes `run_in_background` and a call that sets it reaches [`Self::run_subagent`]
+    /// with [`SubagentRequest::run_in_background`] set. The host answers **at once** (the text
+    /// the model reads as the launch: an id to recognise the agent by) and delivers the end of
+    /// the sub-agent itself, to the conversation (Claude Code's `task_notification`); the
+    /// harness only waits for that first answer, so neither the turn's end nor its time limit
+    /// reaches the sub-agent. Asked once, when the session opens, with [`Self::runs_subagents`].
+    /// `false` by default: the schema of `Agent` does not offer `run_in_background`, and a
+    /// call that sets it anyway runs in the foreground.
+    fn runs_background_subagents(&self) -> bool {
+        false
+    }
+
     /// Runs one sub-agent to its end and returns what it answered (`Ok`), or why it could
     /// not run or failed (`Err`); either becomes the `tool_result` of the `Agent` call.
     ///
@@ -583,6 +596,10 @@ pub struct SubagentRequest {
     pub prompt: String,
     /// The kind of agent asked for, when the model named one.
     pub subagent_type: Option<String>,
+    /// The model asked for the sub-agent to run in the background (`run_in_background: true`).
+    /// Only ever set when the host said [`SessionHooks::runs_background_subagents`]: the host
+    /// answers at once and reports the end itself.
+    pub run_in_background: bool,
     /// The call's input as the model wrote it.
     pub input: Value,
 }
@@ -595,6 +612,7 @@ impl SubagentRequest {
             description: None,
             prompt: prompt.into(),
             subagent_type: None,
+            run_in_background: false,
             input: Value::Null,
         }
     }

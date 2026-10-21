@@ -615,7 +615,11 @@ impl NativeProvider {
                     .as_ref()
                     .is_some_and(|hooks| hooks.runs_subagents())
             {
-                registry.insert(builtin::agent_entry())?;
+                registry.insert(builtin::agent_entry(
+                    spec.hooks
+                        .as_ref()
+                        .is_some_and(|hooks| hooks.runs_background_subagents()),
+                ))?;
             }
             // Deferred tools (CTX2): when the configuration defers at least one tool the
             // session has, the model gets `ToolSearch` instead of their definitions. With

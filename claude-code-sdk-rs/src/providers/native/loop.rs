@@ -2041,7 +2041,13 @@ async fn run_subagent(
     token: &CancelToken,
     input: &Value,
 ) -> Option<(String, bool)> {
-    let request = match builtin::subagent_request(&call.id, input) {
+    let request = match builtin::subagent_request(
+        &call.id,
+        input,
+        core.hooks
+            .as_ref()
+            .is_some_and(|hooks| hooks.runs_background_subagents()),
+    ) {
         Ok(request) => request,
         Err(reason) => return Some((reason, true)),
     };
