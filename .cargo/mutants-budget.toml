@@ -1,0 +1,5 @@
+# Zone 4 (budget): the spend accounting and the "budget spent" decision of the native loop.
+# Run: cargo mutants -p nexus-claude --config .cargo/mutants-budget.toml
+additional_cargo_args = ["--features", "testkit provider-native provider-codex provider-acp"]
+examine_globs = ["**/src/providers/native/loop.rs"]
+examine_re = [" in (spent_budget|budget_spent|budget_note|spend)$"]

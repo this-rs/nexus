@@ -1398,4 +1398,145 @@ mod tests {
             }
         }
     }
+
+    // ----- mutation-testing additions (T3) -----
+
+    #[test]
+    fn the_interrupt_flag_reads_back_what_was_set() {
+        let mut state = MapState::new();
+        assert!(!state.interrupt_requested());
+        state.set_interrupt_requested(true);
+        assert!(state.interrupt_requested());
+        state.set_interrupt_requested(false);
+        assert!(!state.interrupt_requested());
+    }
+
+    #[test]
+    fn a_result_subtype_decides_the_stop_reason_before_the_error_flag_does() {
+        assert_eq!(stop_reason("success", true, false), StopReason::Completed);
+        assert_eq!(stop_reason("success", false, false), StopReason::Completed);
+        assert_eq!(
+            stop_reason("error_max_turns", false, false),
+            StopReason::MaxTurns
+        );
+        assert_eq!(
+            stop_reason("error_during_execution", false, false),
+            StopReason::Error
+        );
+        assert_eq!(
+            stop_reason("error_during_execution", true, true),
+            StopReason::Interrupted
+        );
+        assert_eq!(
+            stop_reason("error_max_budget_usd", false, false),
+            StopReason::BudgetExceeded
+        );
+        // An unknown subtype follows the error flag.
+        assert_eq!(stop_reason("something_new", true, false), StopReason::Error);
+        assert_eq!(
+            stop_reason("something_new", false, false),
+            StopReason::Completed
+        );
+    }
+
+    #[test]
+    fn a_user_message_never_echoes_thinking_or_tool_use_blocks() {
+        let thinking: ContentBlock = serde_json::from_value(json!({
+            "type": "thinking", "thinking": "hm", "signature": "sig"
+        }))
+        .unwrap();
+        let tool_use: ContentBlock = serde_json::from_value(json!({
+            "type": "tool_use", "id": "t", "name": "Read", "input": {}
+        }))
+        .unwrap();
+        for block in [&thinking, &tool_use] {
+            assert!(map_block(block, Some(1), &None, true).is_none());
+            assert!(map_block(block, Some(1), &None, false).is_some());
+        }
+    }
+
+    #[test]
+    fn only_the_stop_hook_cap_notification_becomes_that_notice() {
+        let notified = |key: Option<&str>| {
+            let mut payload = json!({"text": "capped"});
+            if let Some(key) = key {
+                payload["key"] = json!(key);
+            }
+            one(&system("notification", payload), &mut MapState::new())
+        };
+        match notified(Some("stop-hook-block-cap")) {
+            AgentEvent::ProviderNotice { kind, data } => {
+                assert_eq!(kind, "stop_hook_block_cap");
+                assert_eq!(data["provider"], "claude_code");
+                assert_eq!(data["text"], "capped");
+            },
+            other => panic!("{other:?}"),
+        }
+        for key in [Some("another-key"), None] {
+            match notified(key) {
+                AgentEvent::ProviderNotice { kind, .. } => assert_eq!(kind, "notification"),
+                other => panic!("{other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn background_tasks_keep_their_kind() {
+        let event = one(
+            &system(
+                "background_tasks_changed",
+                json!({"tasks": [
+                    {"id": "1", "type": "monitor"},
+                    {"id": "2", "type": "shell"},
+                    {"id": "3", "type": "agent"},
+                    {"id": "4", "type": "other-thing"},
+                ]}),
+            ),
+            &mut MapState::new(),
+        );
+        match event {
+            AgentEvent::BackgroundTasks { tasks } => {
+                let kinds: Vec<BackgroundTaskKind> = tasks.iter().map(|task| task.kind).collect();
+                assert_eq!(
+                    kinds,
+                    [
+                        BackgroundTaskKind::Monitor,
+                        BackgroundTaskKind::Shell,
+                        BackgroundTaskKind::Agent,
+                        BackgroundTaskKind::Other
+                    ]
+                );
+            },
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn lasting_scopes_are_offered_only_with_non_empty_permission_suggestions() {
+        let scopes = |suggestions: Option<Value>| {
+            let request = PermissionRequest {
+                request_id: "r".into(),
+                tool_name: "Bash".into(),
+                input: json!({}),
+                tool_use_id: None,
+                permission_suggestions: suggestions,
+            };
+            match permission_event(&request, &MapState::new()) {
+                AgentEvent::PermissionAsk { scopes, .. } => scopes,
+                other => panic!("{other:?}"),
+            }
+        };
+        let once = vec![PermissionScope::Once];
+        assert_eq!(scopes(None), once);
+        assert_eq!(scopes(Some(json!([]))), once);
+        assert_eq!(scopes(Some(json!("not-a-list"))), once);
+        assert_eq!(
+            scopes(Some(json!([{"type": "addRules"}]))),
+            [
+                PermissionScope::Once,
+                PermissionScope::Session,
+                PermissionScope::Always
+            ]
+        );
+    }
 }

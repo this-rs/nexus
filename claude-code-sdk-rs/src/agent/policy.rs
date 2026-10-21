@@ -392,6 +392,12 @@ mod tests {
     }
 
     #[test]
+    fn a_bare_legacy_colon_star_argument_is_kept_as_written() {
+        // `Bash(:*)` has no command prefix to rewrite into `<prefix> *`.
+        assert_eq!(pattern("Bash(:*)").arg.as_deref(), Some(":*"));
+    }
+
+    #[test]
     fn malformed_patterns_are_errors_never_skipped() {
         for bad in [
             "", "Bash(", "Bash()", "Bash(git", "Ba sh", "(x)", "Bash(a)b",

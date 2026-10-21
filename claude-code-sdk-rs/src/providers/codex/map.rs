@@ -1231,4 +1231,638 @@ mod tests {
             ProviderError::unsupported("permission_updated_input")
         );
     }
+
+    // ----- mutation-testing additions (T3): one test per behaviour a mutant showed unpinned -----
+
+    fn turn_event(status: &str) -> Notification {
+        Notification::TurnCompleted(TurnEnvelope {
+            thread_id: Some("thr_1".into()),
+            turn: Turn {
+                id: "t".into(),
+                status: status.into(),
+                error: None,
+            },
+        })
+    }
+
+    fn item_event(item: ThreadItem) -> ItemEnvelope {
+        ItemEnvelope {
+            thread_id: None,
+            turn_id: None,
+            item,
+        }
+    }
+
+    fn done_of(events: &[AgentEvent]) -> &AgentEvent {
+        events
+            .iter()
+            .find(|event| matches!(event, AgentEvent::Done { .. }))
+            .expect("a done event")
+    }
+
+    #[test]
+    fn the_main_thread_is_none_until_it_is_set_and_then_the_first_one_wins() {
+        let mut fresh = MapState::new(MapConfig {
+            deltas: true,
+            cost_basis: CostBasis::Unknown,
+            prices: PriceTable::new(),
+            login_hint: None,
+        });
+        assert_eq!(fresh.main_thread(), None);
+        fresh.set_main_thread("thr_a".to_owned());
+        fresh.set_main_thread("thr_b".to_owned());
+        assert_eq!(fresh.main_thread(), Some("thr_a"));
+    }
+
+    #[test]
+    fn a_new_turn_forgets_what_the_previous_one_left_behind() {
+        let mut state = state();
+        // Previous turn: a final text, a usage counted live, a non-retried error.
+        state.map(Notification::TurnStarted(TurnEnvelope {
+            thread_id: None,
+            turn: Turn {
+                id: "t0".into(),
+                status: "inProgress".into(),
+                error: None,
+            },
+        }));
+        state.map(Notification::ItemCompleted(item_event(
+            ThreadItem::AgentMessage {
+                id: "m".into(),
+                text: "old answer".into(),
+            },
+        )));
+        state.map(Notification::TokenUsage(
+            serde_json::from_value(json!({"tokenUsage": {"total": {"totalTokens": 90, "inputTokens": 60, "outputTokens": 30}}}))
+                .unwrap(),
+        ));
+        state.map(Notification::Error(
+            serde_json::from_value(
+                json!({"error": {"message": "old failure"}, "willRetry": false}),
+            )
+            .unwrap(),
+        ));
+        state.begin_turn();
+        let events = state.map(turn_event("failed"));
+        match done_of(&events) {
+            AgentEvent::Done {
+                result_text,
+                usage,
+                error,
+                duration_ms,
+                ..
+            } => {
+                assert_eq!(result_text, &None, "the old answer is not this turn's");
+                assert_eq!(usage, &Usage::default(), "nothing was counted this turn");
+                assert!(
+                    matches!(error, Some(ProviderError::Protocol { detail }) if detail.contains("no error")),
+                    "the old failure is not this turn's: {error:?}"
+                );
+                assert!(*duration_ms < 60_000, "the clock restarted: {duration_ms}");
+            },
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn deltas_are_dropped_when_not_asked_for_or_empty_for_text_and_for_thinking() {
+        let delta = |text: &str| DeltaEnvelope {
+            thread_id: Some("thr_1".into()),
+            item_id: "i".into(),
+            delta: text.into(),
+        };
+        let mut quiet = state();
+        quiet.config.deltas = false;
+        assert!(
+            quiet
+                .map(Notification::AgentMessageDelta(delta("x")))
+                .is_empty()
+        );
+        assert!(
+            quiet
+                .map(Notification::ReasoningTextDelta(delta("x")))
+                .is_empty()
+        );
+        let mut loud = state();
+        assert!(
+            loud.map(Notification::AgentMessageDelta(delta("")))
+                .is_empty()
+        );
+        assert!(
+            loud.map(Notification::ReasoningSummaryDelta(delta("")))
+                .is_empty()
+        );
+        assert_eq!(
+            loud.map(Notification::AgentMessageDelta(delta("x"))).len(),
+            1
+        );
+        assert_eq!(
+            loud.map(Notification::ReasoningTextDelta(delta("x"))).len(),
+            1
+        );
+    }
+
+    #[test]
+    fn only_an_error_of_the_main_thread_the_server_will_not_retry_explains_a_failed_turn() {
+        let error = |thread: Option<&str>, will_retry: bool| {
+            Notification::Error(
+                serde_json::from_value(json!({
+                    "threadId": thread,
+                    "error": {"message": "the real cause", "codexErrorInfo": "BadRequest"},
+                    "willRetry": will_retry,
+                }))
+                .unwrap(),
+            )
+        };
+        let failed_with = |notification: Notification| {
+            let mut state = state();
+            state.begin_turn();
+            state.map(notification);
+            let events = state.map(turn_event("failed"));
+            match done_of(&events) {
+                AgentEvent::Done { error, .. } => {
+                    error.clone().expect("a failed turn has an error")
+                },
+                _ => unreachable!(),
+            }
+        };
+        assert_eq!(failed_with(error(None, false)).kind(), "invalid_request");
+        assert_eq!(
+            failed_with(error(Some("thr_1"), false)).kind(),
+            "invalid_request"
+        );
+        // A retried error is transient; a sub-agent's is not the turn's.
+        assert_eq!(failed_with(error(None, true)).kind(), "protocol");
+        assert_eq!(
+            failed_with(error(Some("thr_child"), false)).kind(),
+            "protocol"
+        );
+    }
+
+    #[test]
+    fn empty_reasoning_parts_are_left_out_of_the_joined_thinking() {
+        let mut state = state();
+        let events = state.map(Notification::ItemCompleted(item_event(
+            ThreadItem::Reasoning {
+                id: "r".into(),
+                summary: vec!["first".into(), String::new(), "second".into()],
+                content: Vec::new(),
+            },
+        )));
+        assert!(
+            matches!(&events[0], AgentEvent::Thinking { text, .. } if text == "first\n\nsecond"),
+            "{events:?}"
+        );
+    }
+
+    #[test]
+    fn finishing_one_mcp_call_leaves_the_other_open_calls_of_the_server_to_match_an_approval() {
+        let mut state = state();
+        let call = |id: &str, status: &str| ThreadItem::McpToolCall {
+            id: id.into(),
+            server: "acme".into(),
+            tool: "t".into(),
+            status: status.into(),
+            arguments: json!({}),
+            result: None,
+            error: None,
+        };
+        state.map(Notification::ItemStarted(item_event(call(
+            "c1",
+            "inProgress",
+        ))));
+        state.map(Notification::ItemStarted(item_event(call(
+            "c2",
+            "inProgress",
+        ))));
+        state.map(Notification::ItemCompleted(item_event(call(
+            "c2",
+            "completed",
+        ))));
+        let request: ElicitationRequest = serde_json::from_value(json!({
+            "serverName": "acme",
+            "message": "ok?",
+            "_meta": {"codex_approval_kind": "mcp_tool_call", "tool_name": "t"},
+        }))
+        .unwrap();
+        let ask = state.ask_for(&ServerRequest::Elicitation(request)).unwrap();
+        assert!(
+            matches!(&ask.events[0], AgentEvent::PermissionAsk { tool_call_id: Some(id), .. } if id == "c1"),
+            "{:?}",
+            ask.events
+        );
+    }
+
+    #[test]
+    fn tool_like_items_announce_themselves_as_the_calls_they_are() {
+        let started = |item: ThreadItem| {
+            let mut state = state();
+            let events = state.map(Notification::ItemStarted(item_event(item)));
+            assert_eq!(events.len(), 1, "{events:?}");
+            events.into_iter().next().unwrap()
+        };
+        match started(ThreadItem::CommandExecution {
+            id: "x".into(),
+            command: json!(["git", "status"]),
+            cwd: Some("/w".into()),
+            status: "inProgress".into(),
+            aggregated_output: None,
+            exit_code: None,
+        }) {
+            AgentEvent::ToolCall {
+                id,
+                name,
+                canonical,
+                category,
+                input,
+                ..
+            } => {
+                assert_eq!((id.as_str(), name.as_str()), ("x", "shell"));
+                assert_eq!(canonical.as_deref(), Some("Bash"));
+                assert_eq!(category, ToolCategory::Command);
+                assert_eq!(input, json!({"command": "git status", "cwd": "/w"}));
+            },
+            other => panic!("{other:?}"),
+        }
+        match started(ThreadItem::FileChange {
+            id: "y".into(),
+            changes: vec![json!({"path": "a.rs"})],
+            status: "inProgress".into(),
+        }) {
+            AgentEvent::ToolCall {
+                name,
+                canonical,
+                category,
+                input,
+                ..
+            } => {
+                assert_eq!(name, "apply_patch");
+                assert_eq!(canonical.as_deref(), Some("Edit"));
+                assert_eq!(category, ToolCategory::Edit);
+                assert_eq!(input, json!({"changes": [{"path": "a.rs"}]}));
+            },
+            other => panic!("{other:?}"),
+        }
+        match started(ThreadItem::WebSearch {
+            id: "z".into(),
+            query: "rust".into(),
+        }) {
+            AgentEvent::ToolCall {
+                name,
+                canonical,
+                category,
+                input,
+                ..
+            } => {
+                assert_eq!(name, "web_search");
+                assert_eq!(canonical.as_deref(), Some("WebSearch"));
+                assert_eq!(category, ToolCategory::Web);
+                assert_eq!(input, json!({"query": "rust"}));
+            },
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_command_approval_announces_the_command_only_once() {
+        let request = || {
+            ServerRequest::CommandApproval(
+                serde_json::from_value(json!({
+                    "itemId": "cmd",
+                    "command": ["rm", "-rf", "x"],
+                    "cwd": "/w",
+                    "reason": "cleanup",
+                }))
+                .unwrap(),
+            )
+        };
+        let mut state = state();
+        let first = state.ask_for(&request()).unwrap();
+        let names: Vec<&str> = first.events.iter().map(AgentEvent::type_name).collect();
+        assert_eq!(names, ["tool_call", "permission_ask"]);
+        assert_eq!(first.arg, "rm -rf x");
+        let second = state.ask_for(&request()).unwrap();
+        let names: Vec<&str> = second.events.iter().map(AgentEvent::type_name).collect();
+        assert_eq!(names, ["permission_ask"], "already announced");
+    }
+
+    #[test]
+    fn an_elicitation_of_another_kind_or_in_url_mode_is_not_a_tool_approval() {
+        let ask = |kind: &str, mode: Option<&str>| {
+            let request: ElicitationRequest = serde_json::from_value(json!({
+                "serverName": "acme",
+                "message": "m",
+                "mode": mode,
+                "_meta": {"codex_approval_kind": kind, "tool_name": "t"},
+            }))
+            .unwrap();
+            state()
+                .ask_for(&ServerRequest::Elicitation(request))
+                .is_some()
+        };
+        assert!(ask("mcp_tool_call", None));
+        assert!(ask("mcp_tool_call", Some("form")));
+        assert!(!ask("mcp_tool_call", Some("url")));
+        assert!(!ask("something_else", None));
+        assert!(!ask("something_else", Some("url")));
+    }
+
+    #[test]
+    fn the_scopes_of_a_command_approval_follow_the_decisions_the_server_offers() {
+        let scopes = |available: Option<Vec<Value>>| decision_scopes(available.as_deref());
+        let once = vec![PermissionScope::Once];
+        let both = vec![PermissionScope::Once, PermissionScope::Session];
+        assert_eq!(scopes(None), both);
+        assert_eq!(scopes(Some(vec![json!("accept"), json!("decline")])), once);
+        assert_eq!(scopes(Some(vec![json!("acceptForSession")])), both);
+        assert_eq!(scopes(Some(Vec::new())), once);
+    }
+
+    #[test]
+    fn a_command_is_its_string_its_argv_joined_or_nothing() {
+        assert_eq!(command_text(&json!("ls -l")), "ls -l");
+        assert_eq!(command_text(&json!(["git", "log", 3])), "git log");
+        assert_eq!(command_text(&Value::Null), "");
+        assert_eq!(command_text(&json!({"k": 1})), "{\"k\":1}");
+    }
+
+    #[test]
+    fn every_answer_names_the_scope_it_was_given() {
+        let all = [
+            PermissionScope::Once,
+            PermissionScope::Session,
+            PermissionScope::Always,
+        ];
+        let allow = |kind: &AskKind, scope: PermissionScope| {
+            answer_for(
+                kind,
+                &all,
+                &PermissionDecision::Allow {
+                    scope,
+                    updated_input: None,
+                },
+            )
+            .unwrap()
+            .0
+        };
+        assert_eq!(
+            allow(&AskKind::Decision, PermissionScope::Session),
+            json!({"decision": "acceptForSession"})
+        );
+        assert_eq!(
+            allow(&AskKind::Decision, PermissionScope::Once),
+            json!({"decision": "accept"})
+        );
+        assert_eq!(
+            allow(&AskKind::Elicitation, PermissionScope::Session)["_meta"],
+            json!({"persist": "session"})
+        );
+        assert_eq!(
+            allow(&AskKind::Elicitation, PermissionScope::Always)["_meta"],
+            json!({"persist": "always"})
+        );
+        assert!(
+            allow(&AskKind::Elicitation, PermissionScope::Once)
+                .get("_meta")
+                .is_none()
+        );
+        let profile = AskKind::Permissions(json!({"network": true}));
+        assert_eq!(
+            allow(&profile, PermissionScope::Session)["scope"],
+            json!("session")
+        );
+        assert!(
+            allow(&profile, PermissionScope::Once)
+                .get("scope")
+                .is_none()
+        );
+        assert!(
+            allow(&profile, PermissionScope::Always)
+                .get("scope")
+                .is_none()
+        );
+    }
+
+    fn result_of(item: ThreadItem) -> (Option<ToolOutput>, bool) {
+        match tool_result(&item, "id".to_owned(), None) {
+            AgentEvent::ToolResult {
+                output, is_error, ..
+            } => (output, is_error),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_command_result_carries_its_output_and_fails_on_status_or_exit_code() {
+        let command = |status: &str, output: Option<&str>, exit_code: Option<i64>| {
+            result_of(ThreadItem::CommandExecution {
+                id: "c".into(),
+                command: json!("x"),
+                cwd: None,
+                status: status.into(),
+                aggregated_output: output.map(str::to_owned),
+                exit_code,
+            })
+        };
+        assert_eq!(
+            command("completed", Some("out"), Some(0)),
+            (Some(ToolOutput::Text("out".into())), false)
+        );
+        assert_eq!(command("completed", None, None), (None, false));
+        assert!(command("completed", None, Some(2)).1, "non-zero exit");
+        assert!(command("failed", None, Some(0)).1);
+        assert!(command("declined", None, None).1);
+        assert!(!command("inProgress", None, Some(0)).1);
+    }
+
+    #[test]
+    fn a_file_change_result_says_when_it_was_declined_and_fails_on_failed_or_declined() {
+        let change = |status: &str| {
+            result_of(ThreadItem::FileChange {
+                id: "f".into(),
+                changes: Vec::new(),
+                status: status.into(),
+            })
+        };
+        assert_eq!(
+            change("declined"),
+            (Some(ToolOutput::Text("declined".into())), true)
+        );
+        assert_eq!(change("failed"), (None, true));
+        assert_eq!(change("completed"), (None, false));
+    }
+
+    #[test]
+    fn an_mcp_result_is_its_blocks_its_json_or_its_error_message() {
+        let call = |status: &str, result: Option<Value>, error: Option<Value>| {
+            result_of(ThreadItem::McpToolCall {
+                id: "m".into(),
+                server: "s".into(),
+                tool: "t".into(),
+                status: status.into(),
+                arguments: json!({}),
+                result,
+                error,
+            })
+        };
+        assert_eq!(
+            call(
+                "completed",
+                Some(json!({"content": [{"type": "text", "text": "ok"}]})),
+                None
+            ),
+            (
+                Some(ToolOutput::Blocks(vec![
+                    json!({"type": "text", "text": "ok"})
+                ])),
+                false
+            )
+        );
+        assert_eq!(
+            call("completed", Some(json!({"a": 1})), None),
+            (Some(ToolOutput::Text("{\"a\":1}".into())), false)
+        );
+        assert_eq!(
+            call("completed", None, Some(json!({"message": "bad"}))),
+            (Some(ToolOutput::Text("bad".into())), true)
+        );
+        // A null error is no error.
+        assert_eq!(call("failed", None, Some(Value::Null)), (None, true));
+        assert_eq!(call("completed", None, Some(Value::Null)), (None, false));
+    }
+
+    #[test]
+    fn a_collab_call_result_fails_only_when_the_call_failed() {
+        let call = |status: &str| {
+            result_of(ThreadItem::CollabToolCall {
+                id: "k".into(),
+                tool: "spawn_agent".into(),
+                status: status.into(),
+                prompt: None,
+                new_thread_id: None,
+            })
+        };
+        assert_eq!(call("failed"), (None, true));
+        assert_eq!(call("declined"), (None, true));
+        assert_eq!(call("completed"), (None, false));
+    }
+
+    #[test]
+    fn additional_details_are_appended_to_the_message_only_when_there_are_some() {
+        let detail = |extra: Option<&str>| {
+            let payload: ErrorPayload = serde_json::from_value(json!({
+                "message": "boom",
+                "codexErrorInfo": "BadRequest",
+                "additionalDetails": extra,
+            }))
+            .unwrap();
+            match classify(&payload, None) {
+                ProviderError::InvalidRequest { detail } => detail,
+                other => panic!("{other:?}"),
+            }
+        };
+        assert_eq!(detail(None), "boom");
+        assert_eq!(detail(Some("")), "boom");
+        assert_eq!(detail(Some("more")), "boom (more)");
+    }
+
+    #[test]
+    fn a_turn_status_decides_the_stop_reason_and_only_other_statuses_are_errors() {
+        let done = |status: &str| {
+            let mut state = state();
+            state.begin_turn();
+            let events = state.map(turn_event(status));
+            match done_of(&events) {
+                AgentEvent::Done {
+                    stop_reason,
+                    is_error,
+                    subtype,
+                    ..
+                } => (*stop_reason, *is_error, subtype.clone()),
+                _ => unreachable!(),
+            }
+        };
+        assert_eq!(
+            done("completed"),
+            (StopReason::Completed, false, Some("completed".to_owned()))
+        );
+        assert_eq!(
+            done("interrupted"),
+            (
+                StopReason::Interrupted,
+                false,
+                Some("interrupted".to_owned())
+            )
+        );
+        assert_eq!(
+            done("failed"),
+            (StopReason::Error, true, Some("failed".to_owned()))
+        );
+    }
+
+    #[test]
+    fn an_mcp_approval_offers_the_lasting_scopes_it_persists_as_a_string_or_a_list() {
+        let scopes = |persist: Value| {
+            let request: ElicitationRequest = serde_json::from_value(json!({
+                "serverName": "acme",
+                "message": "ok?",
+                "_meta": {"codex_approval_kind": "mcp_tool_call", "tool_name": "t", "persist": persist},
+            }))
+            .unwrap();
+            state()
+                .ask_for(&ServerRequest::Elicitation(request))
+                .unwrap()
+                .scopes
+        };
+        let once = vec![PermissionScope::Once];
+        assert_eq!(scopes(Value::Null), once);
+        assert_eq!(
+            scopes(json!("session")),
+            [PermissionScope::Once, PermissionScope::Session]
+        );
+        assert_eq!(
+            scopes(json!("always")),
+            [PermissionScope::Once, PermissionScope::Always]
+        );
+        assert_eq!(
+            scopes(json!(["session", "always", 3])),
+            [
+                PermissionScope::Once,
+                PermissionScope::Session,
+                PermissionScope::Always
+            ]
+        );
+        assert_eq!(scopes(json!(["other"])), once);
+    }
+
+    #[test]
+    fn a_collab_call_is_announced_as_an_agent_tool_with_its_prompt() {
+        let mut state = state();
+        let events = state.map(Notification::ItemStarted(item_event(
+            ThreadItem::CollabToolCall {
+                id: "k".into(),
+                tool: "spawn_agent".into(),
+                status: "inProgress".into(),
+                prompt: Some("do it".into()),
+                new_thread_id: Some("thr_2".into()),
+            },
+        )));
+        match &events[..] {
+            [
+                AgentEvent::ToolCall {
+                    name,
+                    canonical,
+                    category,
+                    input,
+                    ..
+                },
+            ] => {
+                assert_eq!(name, "spawn_agent");
+                assert_eq!(canonical.as_deref(), Some("spawn_agent"));
+                assert_eq!(*category, ToolCategory::Agent);
+                assert_eq!(input, &json!({"prompt": "do it", "new_thread_id": "thr_2"}));
+            },
+            other => panic!("{other:?}"),
+        }
+    }
 }
