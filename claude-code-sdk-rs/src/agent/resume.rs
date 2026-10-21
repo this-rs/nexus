@@ -81,6 +81,78 @@ impl ResumeToken {
     }
 }
 
+/// What a resumed session must still share with the one that issued its token
+/// (PYSR-2). Only STABLE inputs: the model in force, the NAMES of the attached MCP
+/// servers (never their env or headers, which carry credentials), and a digest the
+/// host computes over the stable parts of its prompt. Comparing the whole prompt
+/// would refuse every resume, since it embeds the date and the live context.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct ResumeFingerprint {
+    /// Model in force when the token was issued.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Names of the MCP servers attached, sorted.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mcp_servers: Vec<String>,
+    /// Opaque digest of the stable part of the prompt, computed by the host.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_digest: Option<String>,
+}
+
+/// A resume refused because the session no longer matches its token.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResumeIncompatible {
+    /// The field that differs: `model`, `mcp_servers` or `prompt`.
+    pub field: &'static str,
+}
+
+impl std::fmt::Display for ResumeIncompatible {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "cannot resume: the {} changed since the session was opened",
+            self.field
+        )
+    }
+}
+
+impl std::error::Error for ResumeIncompatible {}
+
+impl ResumeFingerprint {
+    /// Builds a fingerprint; `mcp_servers` is sorted and deduplicated.
+    pub fn new(
+        model: Option<String>,
+        mcp_servers: impl IntoIterator<Item = String>,
+        prompt_digest: Option<String>,
+    ) -> Self {
+        let mut mcp_servers: Vec<String> = mcp_servers.into_iter().collect();
+        mcp_servers.sort();
+        mcp_servers.dedup();
+        Self {
+            model,
+            mcp_servers,
+            prompt_digest,
+        }
+    }
+
+    /// Checks that `now` still matches `self`. A side left unset (`None`) on the stored
+    /// fingerprint is not compared: a token issued before PYSR-2 carries none.
+    pub fn check(&self, now: &ResumeFingerprint) -> Result<(), ResumeIncompatible> {
+        if self.model.is_some() && self.model != now.model {
+            return Err(ResumeIncompatible { field: "model" });
+        }
+        if !self.mcp_servers.is_empty() && self.mcp_servers != now.mcp_servers {
+            return Err(ResumeIncompatible {
+                field: "mcp_servers",
+            });
+        }
+        if self.prompt_digest.is_some() && self.prompt_digest != now.prompt_digest {
+            return Err(ResumeIncompatible { field: "prompt" });
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -115,5 +187,61 @@ mod tests {
         let error = ResumeToken::from_wire("{not json sk-secretsecretsecretsecret").unwrap_err();
         assert!(!error.to_string().contains("secretsecret"));
         assert!(ResumeToken::from_wire(r#"{"k":"martian","v":1,"d":{}}"#).is_err());
+    }
+    fn fp(model: &str, mcp: &[&str], digest: &str) -> ResumeFingerprint {
+        ResumeFingerprint::new(
+            Some(model.into()),
+            mcp.iter().map(|s| s.to_string()),
+            Some(digest.into()),
+        )
+    }
+
+    #[test]
+    fn a_resume_with_the_same_fingerprint_is_accepted() {
+        let a = fp("m1", &["po", "nexus"], "d");
+        assert!(a.check(&fp("m1", &["nexus", "po"], "d")).is_ok());
+    }
+
+    #[test]
+    fn a_changed_model_names_the_model() {
+        let err = fp("m1", &["po"], "d")
+            .check(&fp("m2", &["po"], "d"))
+            .unwrap_err();
+        assert_eq!(err.field, "model");
+    }
+
+    #[test]
+    fn changed_mcp_servers_name_mcp_servers() {
+        let err = fp("m1", &["po"], "d")
+            .check(&fp("m1", &["po", "x"], "d"))
+            .unwrap_err();
+        assert_eq!(err.field, "mcp_servers");
+    }
+
+    #[test]
+    fn a_changed_prompt_digest_names_the_prompt() {
+        let err = fp("m1", &["po"], "d")
+            .check(&fp("m1", &["po"], "e"))
+            .unwrap_err();
+        assert_eq!(err.field, "prompt");
+        assert!(err.to_string().contains("prompt"));
+    }
+
+    #[test]
+    fn a_token_without_fingerprint_is_never_refused() {
+        assert!(
+            ResumeFingerprint::default()
+                .check(&fp("m9", &["z"], "q"))
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn the_fingerprint_never_carries_a_server_value() {
+        let wire = serde_json::to_string(&fp("m1", &["po"], "d")).unwrap();
+        assert_eq!(
+            wire,
+            r#"{"model":"m1","mcp_servers":["po"],"prompt_digest":"d"}"#
+        );
     }
 }
