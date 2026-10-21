@@ -27,6 +27,12 @@ pub fn parse_message(json: Value) -> Result<Option<Message>> {
         "system" => parse_system_message(json),
         "result" => parse_result_message(json),
         "stream_event" => parse_stream_event(json),
+        // The CLI reports the account's limits at every turn (`rate_limit_info`). Kept as a
+        // system message so the `Message` enum stays as it is; the provider layer maps it.
+        "rate_limit_event" => Ok(Some(Message::System {
+            subtype: "rate_limit_event".to_string(),
+            data: json.get("rate_limit_info").cloned().unwrap_or(Value::Null),
+        })),
         _ => {
             debug!("Ignoring message type: {}", msg_type);
             Ok(None)

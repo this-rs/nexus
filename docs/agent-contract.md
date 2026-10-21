@@ -264,6 +264,7 @@ regrouper une sortie hors tour en un seul `background_output`).
 | `policy_mode_changed` | `mode: PolicyMode`, `native_mode: Option<String>` |
 | `done` | `stop_reason: StopReason`, `subtype: Option<String>`, `is_error: bool`, `result_text: Option<String>`, `usage: Usage`, `cost: Cost`, `duration_ms: u64`, `duration_api_ms: Option<u64>`, `num_turns: u32`, `model: Option<String>`, `provider_session_id: Option<String>`, `structured_output: Option<Value>`, `error: Option<ProviderError>` (échec classé derrière `is_error` ; le tour finit quand même par `done`, usage et coût conservés) |
 | `error` | `error: ProviderError` — TERMINAL pour le tour (ou la session si `!error.retryable()` et que le processus est mort) |
+| `quota` | `quota: QuotaSnapshot { windows: Vec<QuotaWindow { kind, utilization: Option<f64> (0..1), resets_at_ms: Option<u64>, status: allowed \| warning \| exhausted }>, source: live \| manual, observed_at_ms: Option<u64> }` — contrat v9 (QUOTA) : ce que le provider dit des limites du COMPTE ; émis par Claude Code à chaque tour (`rate_limit_event.rate_limit_info`, relevé réel dans `tests/parity/claude-code-2.1.296/rate_limit_event.ndjson`) et par Codex à chaque `account/rateLimits/updated` ; non terminal, jamais une erreur. `observed_at_ms` est posé par l'hôte à la réception. |
 | `provider_notice` | `kind: String`, `data: Value` — diagnostic propre au provider ; **aucune information affichée aujourd'hui pour Claude Code n'y passe** (A5) |
 
 Types liés :
@@ -781,7 +782,7 @@ ACP : `session/set_mode` quand l'agent publie des modes, sinon `Unsupported`.
 | `endpoint_unreachable` | `detail` | oui | 502 |
 | `model_no_tools` | `model` | non | 422 |
 | `context_too_small` | `needed: Option<u64>`, `available: Option<u64>` | non | 422 |
-| `rate_limited` | `retry_after_ms: Option<u64>` | oui | 429 |
+| `rate_limited` | `retry_after_ms: Option<u64>`, `resets_at_ms: Option<u64>` (v9 : l'instant où la limite se lève, quand le provider le dit : dernier `rate_limit_event` / `account/rateLimits/updated` refusant le compte, `Retry-After` ou `x-ratelimit-reset-*` d'un 429 HTTP) | oui | 429 |
 | `overloaded` | — | oui | 503 |
 | `timeout` | `after_ms: u64` | oui | 504 |
 | `process_exited` | `code: Option<i32>` | non | 502 |

@@ -63,6 +63,9 @@ pub enum ProviderError {
         /// Delay requested by the provider, in milliseconds.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         retry_after_ms: Option<u64>,
+        /// When the limit lifts (epoch ms), when the provider says so (contract v9).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        resets_at_ms: Option<u64>,
     },
     /// The provider is temporarily overloaded.
     #[error("provider overloaded")]

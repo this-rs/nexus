@@ -28,6 +28,7 @@ pub mod error;
 pub mod event;
 pub mod model_provider;
 pub mod policy;
+pub mod quota;
 pub mod registry;
 pub mod resume;
 pub mod spec;
@@ -48,6 +49,7 @@ pub use event::{
 };
 pub use model_provider::{ModelBinding, ModelProtocol, ModelProviderConfig, ProtocolSupport};
 pub use policy::{PolicyDecision, PolicyMode, ToolCategory, ToolPattern, ToolPolicy};
+pub use quota::{QuotaSnapshot, QuotaSource, QuotaStatus, QuotaWindow, window_kind_from_minutes};
 pub use registry::{
     BUILTIN_ANTHROPIC_PROVIDER_ID, BUILTIN_CLAUDE_CODE_ID, BuiltProvider, CapabilityRefresher,
     KindFactory, PriceBook, ProviderInstanceConfig, ProviderRegistry, SECURITY_GATE_CAPABILITY,
@@ -69,7 +71,7 @@ pub use spec::{
 /// [`ResumeToken`]) or a trait signature changes. The JSON snapshots in
 /// `tests/agent_contract_snapshots.rs` carry it: changing a shape without
 /// changing the version fails that test.
-pub const CONTRACT_VERSION: u32 = 8;
+pub const CONTRACT_VERSION: u32 = 9;
 
 /// Events of a turn, or of the out-of-band channel.
 pub type EventStream = Pin<Box<dyn Stream<Item = AgentEvent> + Send>>;

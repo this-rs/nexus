@@ -59,6 +59,7 @@ pub fn classify_result_error(text: &str) -> Option<ProviderError> {
     if has("rate limit") || has("rate_limit") || has("api error: 429") {
         return Some(ProviderError::RateLimited {
             retry_after_ms: None,
+            resets_at_ms: None,
         });
     }
     if has("authentication_error")
@@ -154,13 +155,15 @@ mod tests {
                 r#"API Error: 429 {"type":"error","error":{"type":"rate_limit_error"}}"#
             ),
             Some(ProviderError::RateLimited {
-                retry_after_ms: None
+                retry_after_ms: None,
+                resets_at_ms: None,
             })
         );
         assert_eq!(
             classify_result_error("Rate limit reached, try again later"),
             Some(ProviderError::RateLimited {
-                retry_after_ms: None
+                retry_after_ms: None,
+                resets_at_ms: None,
             })
         );
         assert_eq!(

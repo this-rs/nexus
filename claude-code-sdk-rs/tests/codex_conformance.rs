@@ -1332,7 +1332,8 @@ async fn a_failed_turn_is_a_done_carrying_the_classified_error() {
     assert_eq!(
         error,
         ProviderError::RateLimited {
-            retry_after_ms: None
+            retry_after_ms: None,
+            resets_at_ms: None,
         }
     );
     assert!(error.retryable());

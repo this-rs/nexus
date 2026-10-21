@@ -667,6 +667,7 @@ pub fn classify_rpc_error(error: &RpcError) -> ProviderError {
     if has(&["rate limit", "rate_limit", "429", "too many requests"]) {
         return ProviderError::RateLimited {
             retry_after_ms: retry_after_ms(&text),
+            resets_at_ms: None,
         };
     }
     if has(&["overloaded", "503", "529"]) {
@@ -1056,7 +1057,8 @@ mod tests {
         assert_eq!(
             classify_rpc_error(&error),
             ProviderError::RateLimited {
-                retry_after_ms: Some(3_000)
+                retry_after_ms: Some(3_000),
+                resets_at_ms: None,
             }
         );
     }
@@ -1085,7 +1087,7 @@ mod tests {
             detail: detail.map(str::to_owned),
         };
         let delay = |error: &RpcError| match classify_rpc_error(error) {
-            ProviderError::RateLimited { retry_after_ms } => retry_after_ms,
+            ProviderError::RateLimited { retry_after_ms, .. } => retry_after_ms,
             other => panic!("not a rate limit: {other}"),
         };
         assert_eq!(

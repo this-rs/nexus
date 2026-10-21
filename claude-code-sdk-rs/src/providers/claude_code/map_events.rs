@@ -15,8 +15,9 @@ use super::error_map::classify_result_error;
 use super::policy_map::{canonical_name, native_to_neutral, tool_category};
 use crate::agent::{
     AgentEvent, BackgroundTask, BackgroundTaskKind, CompactionPhase, CompactionTrigger, Cost,
-    CostBasis, DeltaKind, McpServerStatus, ModelUsage, PermissionScope, QuestionReply,
-    QuestionSpec, StopReason, TaskPhase, ToolOutput, Usage,
+    CostBasis, DeltaKind, McpServerStatus, ModelUsage, PermissionScope, ProviderError,
+    QuestionReply, QuestionSpec, QuotaSnapshot, QuotaStatus, QuotaWindow, StopReason, TaskPhase,
+    ToolOutput, Usage,
 };
 use crate::types::{ContentBlock, ContentValue, Message, StreamDelta, StreamEventData};
 
@@ -30,6 +31,11 @@ pub struct MapState {
     /// Tool call opened at a content-block index of the message being streamed,
     /// by `(parent, index)`: what gives a `tool_input` delta its `tool_call_id`.
     open_tool_blocks: HashMap<(Option<String>, usize), String>,
+    /// Reset instant (epoch ms) of the last `rate_limit_event` that refused the account:
+    /// what a rate-limited `done` is told, since the result text carries no time.
+    exhausted_until_ms: Option<u64>,
+    /// The last `rate_limit_event` refused the account (whether or not it said when it resets).
+    exhausted: bool,
 }
 
 impl Default for MapState {
@@ -53,6 +59,8 @@ impl MapState {
             interrupt_requested: false,
             cost_basis: basis,
             open_tool_blocks: HashMap::new(),
+            exhausted_until_ms: None,
+            exhausted: false,
         }
     }
 
@@ -144,6 +152,12 @@ pub fn map_message(message: &Message, state: &mut MapState) -> Vec<AgentEvent> {
             state.last_parent.clone_from(parent_tool_use_id);
             map_stream_event(event, seq, parent_tool_use_id, state)
         },
+        Message::System { subtype, data } if subtype == "rate_limit_event" => {
+            let quota = quota_from_rate_limit_info(data);
+            state.exhausted_until_ms = quota.exhausted_until_ms();
+            state.exhausted = quota.is_exhausted();
+            vec![AgentEvent::Quota { quota }]
+        },
         Message::System { subtype, data } => vec![map_system(subtype, data)],
         Message::Result {
             subtype,
@@ -166,6 +180,9 @@ pub fn map_message(message: &Message, state: &mut MapState) -> Vec<AgentEvent> {
                 CostBasis::Free => Some(0.0),
                 _ => *total_cost_usd,
             };
+            // A refusal belongs to the turn it was reported in.
+            let exhausted = std::mem::take(&mut state.exhausted);
+            let exhausted_until = state.exhausted_until_ms.take();
             vec![AgentEvent::Done {
                 stop_reason,
                 subtype: Some(subtype.clone()),
@@ -184,12 +201,86 @@ pub fn map_message(message: &Message, state: &mut MapState) -> Vec<AgentEvent> {
                 structured_output: structured_output.clone(),
                 // §7: an Anthropic API failure reported in the result text is
                 // classified here, on the `done` that keeps usage and cost.
-                error: (*is_error && stop_reason == StopReason::Error)
-                    .then(|| result.as_deref().and_then(classify_result_error))
-                    .flatten(),
+                error: (*is_error && (stop_reason == StopReason::Error || exhausted))
+                    .then(|| {
+                        result
+                            .as_deref()
+                            .and_then(classify_result_error)
+                            // A refused account explains the failed turn even when the text does
+                            // not say "rate limit" (the CLI words it as a plain message).
+                            .or(exhausted.then_some(ProviderError::RateLimited {
+                                retry_after_ms: None,
+                                resets_at_ms: None,
+                            }))
+                    })
+                    .flatten()
+                    .map(|error| match error {
+                        ProviderError::RateLimited {
+                            retry_after_ms,
+                            resets_at_ms: None,
+                        } => ProviderError::RateLimited {
+                            retry_after_ms,
+                            resets_at_ms: exhausted_until,
+                        },
+                        other => other,
+                    }),
             }]
         },
     }
+}
+
+/// `rate_limit_event.rate_limit_info` → the windows it reports. `rateLimitType` names the window
+/// the top-level `status` is about; the other windows of `unifiedWindows` are served.
+fn quota_from_rate_limit_info(info: &Value) -> QuotaSnapshot {
+    let status = str_at(info, &["status"]).unwrap_or("allowed");
+    let refused = status == "rejected";
+    let warned = status == "allowed_warning";
+    let limit_type = str_at(info, &["rateLimitType"]);
+    // Epoch seconds from the CLI; a value that big is already milliseconds.
+    let to_ms = |seconds: u64| {
+        if seconds >= 100_000_000_000 {
+            seconds
+        } else {
+            seconds * 1000
+        }
+    };
+    let window_status = |kind: &str| {
+        if limit_type.is_none_or(|t| t == kind) {
+            if refused {
+                QuotaStatus::Exhausted
+            } else if warned {
+                QuotaStatus::Warning
+            } else {
+                QuotaStatus::Allowed
+            }
+        } else {
+            QuotaStatus::Allowed
+        }
+    };
+    let mut windows: Vec<QuotaWindow> = info
+        .get("unifiedWindows")
+        .and_then(Value::as_object)
+        .map(|map| {
+            map.iter()
+                .map(|(kind, window)| QuotaWindow {
+                    kind: kind.clone(),
+                    utilization: window.get("utilization").and_then(Value::as_f64),
+                    resets_at_ms: u64_at(window, &["resetsAt"]).map(to_ms),
+                    status: window_status(kind),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    if windows.is_empty() {
+        let kind = limit_type.unwrap_or("unknown");
+        windows.push(QuotaWindow {
+            kind: kind.to_owned(),
+            utilization: info.get("utilization").and_then(Value::as_f64),
+            resets_at_ms: u64_at(info, &["resetsAt"]).map(to_ms),
+            status: window_status(kind),
+        });
+    }
+    QuotaSnapshot::live(windows)
 }
 
 /// `subtype` → `stop_reason` (rule under the table of §14.1).
@@ -574,6 +665,70 @@ mod tests {
         let mut events = map_message(message, state);
         assert_eq!(events.len(), 1, "{events:?}");
         events.remove(0)
+    }
+
+    // ----- Quota ---------------------------------------------------------------
+
+    /// Recorded from the real CLI 2.1.296 (`claude -p … --output-format stream-json --verbose`).
+    const RECORDED_RATE_LIMIT_EVENT: &str =
+        include_str!("../../../tests/parity/claude-code-2.1.296/rate_limit_event.ndjson");
+
+    fn recorded_message() -> Message {
+        message(serde_json::from_str(RECORDED_RATE_LIMIT_EVENT.trim()).expect("valid JSON"))
+    }
+
+    #[test]
+    fn the_recorded_rate_limit_event_maps_to_a_quota_with_both_windows() {
+        let mut state = MapState::new();
+        let AgentEvent::Quota { quota } = one(&recorded_message(), &mut state) else {
+            panic!("a rate_limit_event maps to quota");
+        };
+        let by_kind = |kind: &str| {
+            quota
+                .windows
+                .iter()
+                .find(|w| w.kind == kind)
+                .unwrap()
+                .clone()
+        };
+        let weekly = by_kind("seven_day");
+        assert_eq!(weekly.utilization, Some(0.97));
+        assert_eq!(weekly.resets_at_ms, Some(1_792_828_800_000));
+        assert_eq!(weekly.status, QuotaStatus::Warning);
+        let session = by_kind("five_hour");
+        assert_eq!(session.utilization, Some(0.09));
+        assert_eq!(session.resets_at_ms, Some(1_792_597_800_000));
+        assert_eq!(session.status, QuotaStatus::Allowed);
+        assert_eq!(quota.windows.len(), 2);
+        assert!(!quota.is_exhausted());
+    }
+
+    #[test]
+    fn a_rejected_event_exhausts_the_named_window_and_tells_the_rate_limited_done_when_it_resets() {
+        let mut value: Value = serde_json::from_str(RECORDED_RATE_LIMIT_EVENT.trim()).unwrap();
+        value["rate_limit_info"]["status"] = json!("rejected");
+        value["rate_limit_info"]["unifiedWindows"]["seven_day"]["utilization"] = json!(1.0);
+        let mut state = MapState::new();
+        let AgentEvent::Quota { quota } = one(&message(value), &mut state) else {
+            panic!("quota");
+        };
+        assert!(quota.is_exhausted());
+        assert_eq!(quota.exhausted_until_ms(), Some(1_792_828_800_000));
+        let result = message(json!({
+            "type": "result", "subtype": "success", "duration_ms": 1, "duration_api_ms": 1,
+            "is_error": true, "num_turns": 1, "session_id": "s",
+            "result": "You have hit your rate limit",
+        }));
+        let AgentEvent::Done { error, .. } = one(&result, &mut state) else {
+            panic!("done");
+        };
+        assert_eq!(
+            error,
+            Some(ProviderError::RateLimited {
+                retry_after_ms: None,
+                resets_at_ms: Some(1_792_828_800_000),
+            })
+        );
     }
 
     // ----- Assistant ---------------------------------------------------------

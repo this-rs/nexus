@@ -1,6 +1,6 @@
 %% name: nexus-agent-providers
 %% covers: docs/diagrams/nexus-agent-providers.mmd, docs/harness-consolidation-2026-10-05.md, claude-code-sdk-rs/src/testkit/*.rs, claude-code-sdk-rs/tests/agent_conformance.rs, claude-code-sdk-rs/src/providers/claude_code/*.rs, claude-code-sdk-rs/src/providers/mod.rs, claude-code-sdk-rs/tests/claude_code_conformance.rs, claude-code-sdk-rs/tests/providers_spawn_guard.rs, claude-code-sdk-rs/src/model/*.rs, claude-code-sdk-rs/src/bin/fake_openai.rs, claude-code-sdk-rs/tests/model_openai_endpoint.rs, claude-code-sdk-rs/tests/support/fake_openai.rs, claude-code-sdk-rs/src/providers/native/*.rs, claude-code-sdk-rs/src/bin/fake_mcp.rs, claude-code-sdk-rs/tests/native_conformance.rs, claude-code-sdk-rs/tests/native_harness.rs, claude-code-sdk-rs/tests/native_request_log.rs, claude-code-sdk-rs/tests/native_context.rs, claude-code-sdk-rs/tests/native_secret_at_rest.rs, claude-code-sdk-rs/tests/support/native.rs, claude-code-sdk-rs/tests/native_anthropic.rs, claude-code-sdk-rs/tests/support/fake_anthropic.rs, claude-code-sdk-rs/src/providers/codex/*.rs, claude-code-sdk-rs/src/bin/fake_codex.rs, claude-code-sdk-rs/tests/codex_conformance.rs, claude-code-sdk-rs/tests/codex_schema_drift.rs, claude-code-sdk-rs/tests/codex_registry.rs, claude-code-sdk-rs/tests/transcripts/codex/**, claude-code-sdk-rs/src/providers/acp/*.rs, claude-code-sdk-rs/src/bin/fake_acp.rs, claude-code-sdk-rs/tests/acp_conformance.rs, claude-code-sdk-rs/tests/acp_schema_drift.rs, claude-code-sdk-rs/tests/acp_registry.rs, claude-code-sdk-rs/tests/transcripts/acp/**
-%% verified: 066b243
+%% verified: 2026-10-21
 %% ---
 %% PROUVE : les adaptateurs CIBLE (façade claude_code, model/ OpenAI-compatible, native,
 %%   codex, opencode) et le banc de conformité (testkit/conformance), face à ce qui existe
@@ -64,6 +64,8 @@ flowchart TD
         CCP -.-> CCLEFT
         CCP --> CCCOMPACT
         CCP -.-> CCGAP
+        QUOTA["✅ QUOTA (contrat v9) — claude_code/map_events.rs `quota_from_rate_limit_info` : `rate_limit_event` (relevé RÉEL du CLI 2.1.296, tests/parity/claude-code-2.1.296/rate_limit_event.ndjson) → `AgentEvent::Quota { QuotaSnapshot }` (fenêtres five_hour / seven_day : utilisation, resets_at_ms, statut) ; le `done` d un tour refusé porte `RateLimited { resets_at_ms }` (test a_rejected_event_exhausts_the_named_window…). Codex : `account/rateLimits/updated` → quota (providers/codex/map.rs `quota_from_rate_limits`, test rate_limit_updates_become_quota…, schéma 0.162.1, pas de transcript réel) ; HTTP : `Retry-After` / `x-ratelimit-reset-*` d un 429 → `RateLimited { resets_at_ms }` (model/openai.rs `rate_limit_resets_at_ms`, tests a_429_is_dated…). 🟠 pas encore émis : un Quota sur les réponses 2xx HTTP (en-têtes x-ratelimit-remaining), ACP"]
+        CCP --> QUOTA
         GUARD -.->|"surveille"| CCP
     end
 
