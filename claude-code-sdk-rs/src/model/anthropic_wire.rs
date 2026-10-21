@@ -603,6 +603,7 @@ pub(crate) fn stream_error(error: &Value) -> ProviderError {
         Some("overloaded_error") => ProviderError::Overloaded,
         Some("rate_limit_error") => ProviderError::RateLimited {
             retry_after_ms: None,
+            resets_at_ms: None,
         },
         Some("authentication_error" | "permission_error") => ProviderError::Unauthorized,
         Some("invalid_request_error") => {
@@ -935,7 +936,8 @@ mod tests {
         assert_eq!(
             error("rate_limit_error", "slow down"),
             ProviderError::RateLimited {
-                retry_after_ms: None
+                retry_after_ms: None,
+                resets_at_ms: None,
             }
         );
         assert!(matches!(

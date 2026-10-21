@@ -956,6 +956,7 @@ impl HttpInner {
                 )),
                 429 => ProviderError::RateLimited {
                     retry_after_ms: None,
+                    resets_at_ms: None,
                 },
                 503 => ProviderError::Overloaded,
                 code => ProviderError::protocol(format!("MCP server answered HTTP {code}")),

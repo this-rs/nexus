@@ -298,12 +298,20 @@ async fn http_429_carries_retry_after() {
         json!({"headers": {"Retry-After": "3"}, "body": "slow down"}),
     ))
     .await;
-    assert_eq!(
-        error,
+    let before = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    match &error {
         ProviderError::RateLimited {
-            retry_after_ms: Some(3000)
-        }
-    );
+            retry_after_ms: Some(3000),
+            resets_at_ms: Some(resets),
+        } => assert!(
+            *resets >= before + 3000 - 1000 && *resets <= before + 3000 + 30_000,
+            "Retry-After: 3 is dated from the clock: {resets} vs {before}"
+        ),
+        other => panic!("expected a dated rate limit, got {other:?}"),
+    }
     assert!(error.retryable());
 }
 
@@ -941,6 +949,7 @@ async fn a_transient_failure_of_the_auto_retry_is_returned_as_is() {
             ),
             ProviderError::RateLimited {
                 retry_after_ms: Some(2000),
+                resets_at_ms: None,
             },
         ),
         (
@@ -961,6 +970,17 @@ async fn a_transient_failure_of_the_auto_retry_is_returned_as_is() {
                 .probe("m")
                 .await,
         );
+        // A 429 is dated from the clock (Retry-After: 2): compare without the instant.
+        let error = match error {
+            ProviderError::RateLimited {
+                retry_after_ms,
+                resets_at_ms: Some(_),
+            } => ProviderError::RateLimited {
+                retry_after_ms,
+                resets_at_ms: None,
+            },
+            other => other,
+        };
         assert_eq!(error, expected);
         // Exactly two requests: no loop on a transient answer.
         assert_eq!(server.requests_to("POST", "/v1/chat/completions").len(), 2);

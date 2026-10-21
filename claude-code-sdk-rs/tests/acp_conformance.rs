@@ -1191,7 +1191,8 @@ async fn a_json_rpc_error_ends_the_turn_with_a_classified_done_and_the_session_s
     assert_eq!(
         error.as_ref(),
         Some(&ProviderError::RateLimited {
-            retry_after_ms: None
+            retry_after_ms: None,
+            resets_at_ms: None,
         })
     );
     assert_eq!(stop_of(&turn(&*session).await), StopReason::Completed);

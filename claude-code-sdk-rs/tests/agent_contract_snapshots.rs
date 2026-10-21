@@ -166,6 +166,27 @@ fn event_samples() -> Vec<AgentEvent> {
         AgentEvent::Error {
             error: ProviderError::RateLimited {
                 retry_after_ms: Some(1500),
+                resets_at_ms: Some(1_792_828_800_000),
+            },
+        },
+        AgentEvent::Quota {
+            quota: QuotaSnapshot {
+                windows: vec![
+                    QuotaWindow {
+                        kind: "five_hour".into(),
+                        utilization: Some(0.09),
+                        resets_at_ms: Some(1_792_597_800_000),
+                        status: QuotaStatus::Allowed,
+                    },
+                    QuotaWindow {
+                        kind: "seven_day".into(),
+                        utilization: Some(1.0),
+                        resets_at_ms: Some(1_792_828_800_000),
+                        status: QuotaStatus::Exhausted,
+                    },
+                ],
+                source: QuotaSource::Live,
+                observed_at_ms: Some(1_792_500_000_000),
             },
         },
         AgentEvent::ProviderNotice {
@@ -195,6 +216,7 @@ fn error_samples() -> Vec<ProviderError> {
         },
         ProviderError::RateLimited {
             retry_after_ms: None,
+            resets_at_ms: None,
         },
         ProviderError::Overloaded,
         ProviderError::Timeout { after_ms: 30_000 },

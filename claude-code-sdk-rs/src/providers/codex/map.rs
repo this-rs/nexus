@@ -17,6 +17,7 @@
 //! | `item/completed` of those | `tool_result` (`is_error` when `failed` / `declined` / exit code ≠ 0) |
 //! | `item/started`, `item/completed` `contextCompaction` | `compaction` `started` / `completed`, trigger `auto` |
 //! | `thread/tokenUsage/updated` | nothing now: folded into the next `done.usage` |
+//! | `account/rateLimits/updated` | `quota { windows }` (primary and secondary window; contract v9) |
 //! | `turn/completed` `completed` / `interrupted` | `done { completed | interrupted }` |
 //! | `turn/completed` `failed` | `done { error, is_error, error: <classified> }` (contract v2) |
 //! | `error` (mid-turn) | nothing now: its classification is used if `turn/completed` carries none |
@@ -47,12 +48,14 @@ use std::time::Instant;
 use serde_json::{Value, json};
 
 use super::wire::{
-    CodexErrorInfo, ElicitationRequest, ErrorPayload, Notification, ServerRequest, ThreadItem,
-    TokenBreakdown, TurnEnvelope, decision_response, elicitation_response, permissions_response,
+    CodexErrorInfo, ElicitationRequest, ErrorPayload, Notification, RateLimitSnapshot,
+    RateLimitWindow, ServerRequest, ThreadItem, TokenBreakdown, TurnEnvelope, decision_response,
+    elicitation_response, permissions_response,
 };
 use crate::agent::{
     AgentEvent, CompactionPhase, CompactionTrigger, Cost, CostBasis, DeltaKind, PermissionDecision,
-    PermissionScope, ProviderError, StopReason, ToolCategory, ToolOutput, Usage, redact,
+    PermissionScope, ProviderError, QuotaSnapshot, QuotaStatus, QuotaWindow, StopReason,
+    ToolCategory, ToolOutput, Usage, redact, window_kind_from_minutes,
 };
 use crate::model::PriceTable;
 
@@ -93,6 +96,8 @@ pub struct MapState {
     turn_live: bool,
     last_text: Option<String>,
     pending_error: Option<ErrorPayload>,
+    /// Reset instant (epoch ms) of the last `account/rateLimits/updated` that refused the account.
+    exhausted_until_ms: Option<u64>,
     turn_started: Option<Instant>,
 }
 
@@ -114,6 +119,7 @@ impl MapState {
             turn_live: false,
             last_text: None,
             pending_error: None,
+            exhausted_until_ms: None,
             turn_started: None,
         }
     }
@@ -198,6 +204,11 @@ impl MapState {
             Notification::ItemCompleted(envelope) => {
                 let parent = self.parent(&envelope.thread_id);
                 self.item_completed(envelope.item, parent)
+            },
+            Notification::RateLimits(envelope) => {
+                let quota = quota_from_rate_limits(&envelope.rate_limits);
+                self.exhausted_until_ms = quota.exhausted_until_ms();
+                vec![AgentEvent::Quota { quota }]
             },
             Notification::TokenUsage(envelope) => {
                 if self.is_main(&envelope.thread_id) {
@@ -367,7 +378,17 @@ impl MapState {
         let error = is_error.then(|| {
             let payload = turn.error.clone().or_else(|| self.pending_error.take());
             match payload {
-                Some(payload) => classify(&payload, self.config.login_hint.as_deref()),
+                Some(payload) => match classify(&payload, self.config.login_hint.as_deref()) {
+                    // The error carries no time; the last rate-limit update does.
+                    ProviderError::RateLimited {
+                        retry_after_ms,
+                        resets_at_ms: None,
+                    } => ProviderError::RateLimited {
+                        retry_after_ms,
+                        resets_at_ms: self.exhausted_until_ms,
+                    },
+                    other => other,
+                },
                 None => ProviderError::protocol(format!(
                     "turn ended with status `{}` and no error",
                     turn.status
@@ -870,6 +891,39 @@ fn tool_result(item: &ThreadItem, id: String, parent: Option<String>) -> AgentEv
     }
 }
 
+/// `account/rateLimits/updated` → the windows it reports. A window is exhausted at 100 %, or
+/// when the account says a limit was reached and the window is the one that is full.
+fn quota_from_rate_limits(snapshot: &RateLimitSnapshot) -> QuotaSnapshot {
+    let reached = snapshot.reached_type.is_some();
+    let windows: Vec<&RateLimitWindow> = snapshot
+        .primary
+        .iter()
+        .chain(snapshot.secondary.iter())
+        .collect();
+    let any_full = windows.iter().any(|w| w.used_percent >= 100.0);
+    let windows = windows
+        .into_iter()
+        .enumerate()
+        .map(|(index, window)| {
+            let full = window.used_percent >= 100.0 || (reached && !any_full);
+            QuotaWindow {
+                kind: window
+                    .window_duration_mins
+                    .map(window_kind_from_minutes)
+                    .unwrap_or_else(|| if index == 0 { "primary" } else { "secondary" }.to_owned()),
+                utilization: Some(window.used_percent / 100.0),
+                resets_at_ms: window.resets_at.map(|s| s * 1000),
+                status: if full {
+                    QuotaStatus::Exhausted
+                } else {
+                    QuotaStatus::Allowed
+                },
+            }
+        })
+        .collect();
+    QuotaSnapshot::live(windows)
+}
+
 /// `codexErrorInfo` → [`ProviderError`] (contract §7).
 ///
 /// | `codexErrorInfo` | error |
@@ -895,6 +949,7 @@ pub fn classify(payload: &ErrorPayload, login_hint: Option<&str>) -> ProviderErr
         },
         "UsageLimitExceeded" => ProviderError::RateLimited {
             retry_after_ms: None,
+            resets_at_ms: None,
         },
         "HttpConnectionFailed"
         | "ResponseStreamDisconnected"
@@ -1075,6 +1130,50 @@ mod tests {
             },
         }));
         assert!(matches!(&events[0], AgentEvent::Text { parent: Some(p), .. } if p == "thr_child"));
+    }
+
+    #[test]
+    fn rate_limit_updates_become_quota_and_date_the_usage_limit_error() {
+        let mut state = state();
+        let update = Notification::parse(
+            "account/rateLimits/updated",
+            &json!({"rateLimits": {
+                "primary": {"usedPercent": 41, "windowDurationMins": 300, "resetsAt": 1_792_597_800u64},
+                "secondary": {"usedPercent": 100, "windowDurationMins": 10080, "resetsAt": 1_792_828_800u64},
+                "rateLimitReachedType": "rate_limit_reached"
+            }}),
+        )
+        .unwrap();
+        let events = state.map(update);
+        let [AgentEvent::Quota { quota }] = events.as_slice() else {
+            panic!("one quota event: {events:?}");
+        };
+        assert_eq!(quota.windows[0].kind, "five_hour");
+        assert_eq!(quota.windows[0].utilization, Some(0.41));
+        assert_eq!(quota.windows[0].status, QuotaStatus::Allowed);
+        assert_eq!(quota.windows[1].kind, "seven_day");
+        assert_eq!(quota.windows[1].status, QuotaStatus::Exhausted);
+        assert_eq!(quota.exhausted_until_ms(), Some(1_792_828_800_000));
+
+        state.begin_turn();
+        state.map(
+            Notification::parse(
+                "error",
+                &json!({"error": {"message": "usage limit", "codexErrorInfo": "UsageLimitExceeded"}, "willRetry": false}),
+            )
+            .unwrap(),
+        );
+        let events = state.map(turn_event("failed"));
+        match done_of(&events) {
+            AgentEvent::Done { error, .. } => assert_eq!(
+                error,
+                &Some(ProviderError::RateLimited {
+                    retry_after_ms: None,
+                    resets_at_ms: Some(1_792_828_800_000),
+                })
+            ),
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]

@@ -27,6 +27,12 @@ pub fn parse_message(json: Value) -> Result<Option<Message>> {
         "system" => parse_system_message(json),
         "result" => parse_result_message(json),
         "stream_event" => parse_stream_event(json),
+        // The CLI reports the account's limits at every turn (`rate_limit_info`). Kept as a
+        // system message so the `Message` enum stays as it is; the provider layer maps it.
+        "rate_limit_event" => Ok(Some(Message::System {
+            subtype: "rate_limit_event".to_string(),
+            data: json.get("rate_limit_info").cloned().unwrap_or(Value::Null),
+        })),
         _ => {
             debug!("Ignoring message type: {}", msg_type);
             Ok(None)
@@ -1730,6 +1736,21 @@ mod tests {
     /// An explicit `"data": null` must NOT win over the flat siblings: null
     /// carries no payload, so taking that branch would throw away exactly the
     /// workflow state the flat-shape handling exists to preserve.
+    #[test]
+    fn a_rate_limit_event_is_kept_as_a_system_message_carrying_its_rate_limit_info() {
+        let recorded = include_str!("../tests/parity/claude-code-2.1.296/rate_limit_event.ndjson");
+        let value: Value = serde_json::from_str(recorded.trim()).unwrap();
+        let message = parse_message(value).unwrap().expect("kept, not dropped");
+        match message {
+            Message::System { subtype, data } => {
+                assert_eq!(subtype, "rate_limit_event");
+                assert_eq!(data["rateLimitType"], "seven_day");
+                assert_eq!(data["unifiedWindows"]["five_hour"]["utilization"], 0.09);
+            },
+            other => panic!("expected a system message, got {other:?}"),
+        }
+    }
+
     #[test]
     fn test_parse_system_message_null_data_falls_back_to_flat_payload() {
         let json = json!({

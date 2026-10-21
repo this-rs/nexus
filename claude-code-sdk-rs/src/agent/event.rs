@@ -9,6 +9,7 @@ use serde_json::Value;
 use super::capabilities::{CostBasis, PermissionScope};
 use super::error::ProviderError;
 use super::policy::{PolicyMode, ToolCategory};
+use super::quota::QuotaSnapshot;
 
 /// One event of an agent session.
 ///
@@ -284,6 +285,13 @@ pub enum AgentEvent {
         /// What went wrong.
         error: ProviderError,
     },
+    /// What the provider says about the account's limits (contract v9, QUOTA). Emitted
+    /// whenever the provider reports them: every turn for Claude Code, on change for
+    /// Codex. Not terminal; a host without quota handling ignores it.
+    Quota {
+        /// The windows reported.
+        quota: QuotaSnapshot,
+    },
     /// Provider-specific diagnostic. Nothing a user sees for Claude Code today
     /// travels through it (A5).
     ProviderNotice {
@@ -320,12 +328,13 @@ impl AgentEvent {
             Self::PolicyModeChanged { .. } => "policy_mode_changed",
             Self::Done { .. } => "done",
             Self::Error { .. } => "error",
+            Self::Quota { .. } => "quota",
             Self::ProviderNotice { .. } => "provider_notice",
         }
     }
 
     /// Every `type` tag of the contract, in declaration order.
-    pub const TYPE_NAMES: [&'static str; 17] = [
+    pub const TYPE_NAMES: [&'static str; 18] = [
         "session_started",
         "user_echo",
         "text",
@@ -342,6 +351,7 @@ impl AgentEvent {
         "policy_mode_changed",
         "done",
         "error",
+        "quota",
         "provider_notice",
     ];
 }

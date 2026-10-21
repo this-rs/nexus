@@ -641,6 +641,42 @@ pub struct DeltaEnvelope {
     pub delta: String,
 }
 
+/// One window of `account/rateLimits/updated`.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct RateLimitWindow {
+    /// Share used, in percent.
+    #[serde(rename = "usedPercent")]
+    pub used_percent: f64,
+    /// Length of the window in minutes.
+    #[serde(default, rename = "windowDurationMins")]
+    pub window_duration_mins: Option<u64>,
+    /// Reset instant, epoch seconds.
+    #[serde(default, rename = "resetsAt")]
+    pub resets_at: Option<u64>,
+}
+
+/// `account/rateLimits/updated.rateLimits`: the primary and secondary windows of the account.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct RateLimitSnapshot {
+    /// Short window (5 hours on a ChatGPT plan).
+    #[serde(default)]
+    pub primary: Option<RateLimitWindow>,
+    /// Long window (weekly).
+    #[serde(default)]
+    pub secondary: Option<RateLimitWindow>,
+    /// Set when the account has hit a limit (`rate_limit_reached`, `workspace_*_depleted`…).
+    #[serde(default, rename = "rateLimitReachedType")]
+    pub reached_type: Option<String>,
+}
+
+/// `account/rateLimits/updated`.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct RateLimitsEnvelope {
+    /// The account's windows.
+    #[serde(rename = "rateLimits")]
+    pub rate_limits: RateLimitSnapshot,
+}
+
 /// `thread/tokenUsage/updated`.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct TokenUsageEnvelope {
@@ -721,6 +757,8 @@ pub enum Notification {
     ReasoningTextDelta(DeltaEnvelope),
     /// `thread/tokenUsage/updated`.
     TokenUsage(TokenUsageEnvelope),
+    /// `account/rateLimits/updated`.
+    RateLimits(RateLimitsEnvelope),
     /// `error`.
     Error(ErrorEnvelope),
     /// `mcpServer/startupStatus/updated`.
@@ -757,6 +795,7 @@ impl Notification {
             },
             "item/reasoning/textDelta" => Self::ReasoningTextDelta(typed(method, params)?),
             "thread/tokenUsage/updated" => Self::TokenUsage(typed(method, params)?),
+            "account/rateLimits/updated" => Self::RateLimits(typed(method, params)?),
             "error" => Self::Error(typed(method, params)?),
             "mcpServer/startupStatus/updated" => Self::McpStartup(typed(method, params)?),
             "serverRequest/resolved" => Self::RequestResolved(typed(method, params)?),
@@ -927,6 +966,7 @@ pub const MESSAGE_KINDS: &[&str] = &[
     "item/reasoning/textDelta",
     "item/commandExecution/outputDelta",
     "thread/tokenUsage/updated",
+    "account/rateLimits/updated",
     "error",
     "mcpServer/startupStatus/updated",
     "serverRequest/resolved",
@@ -969,6 +1009,7 @@ pub fn validate_kind(kind: &str, value: &Value) -> Result<(), String> {
         | "item/reasoning/textDelta"
         | "item/commandExecution/outputDelta" => accepts::<DeltaEnvelope>(value),
         "thread/tokenUsage/updated" => accepts::<TokenUsageEnvelope>(value),
+        "account/rateLimits/updated" => accepts::<RateLimitsEnvelope>(value),
         "error" => accepts::<ErrorEnvelope>(value),
         "mcpServer/startupStatus/updated" => accepts::<McpStartup>(value),
         "serverRequest/resolved" => accepts::<RequestResolved>(value),

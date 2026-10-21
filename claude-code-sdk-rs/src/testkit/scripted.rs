@@ -1587,6 +1587,7 @@ mod tests {
                 Step::Fail(ProviderError::Closed),
                 Step::Fail(ProviderError::RateLimited {
                     retry_after_ms: Some(10),
+                    resets_at_ms: None,
                 }),
                 Step::EndWithoutTerminal,
                 steps::done(&caps),

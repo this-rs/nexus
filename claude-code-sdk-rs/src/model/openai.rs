@@ -641,15 +641,89 @@ pub(crate) async fn send_request(
         .get(RETRY_AFTER)
         .and_then(|v| v.to_str().ok())
         .map(str::to_string);
+    let resets_at_ms = rate_limit_resets_at_ms(response.headers(), now_ms());
     let body = read_body(response, ERROR_BODY_READ_LIMIT, limit)
         .await
         .unwrap_or_default();
-    Err(classify_http(
+    let mut error = classify_http(
         status.as_u16(),
         retry_after.as_deref(),
         &String::from_utf8_lossy(&body),
         secret,
-    ))
+    );
+    // A 429 says when the limit lifts: `Retry-After`, else the `x-ratelimit-reset-*` headers.
+    if let ProviderError::RateLimited {
+        resets_at_ms: slot, ..
+    } = &mut error
+    {
+        *slot = resets_at_ms;
+    }
+    Err(error)
+}
+
+/// Epoch milliseconds now.
+pub(crate) fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// A reset delay as the `x-ratelimit-reset-*` headers write it: `1s`, `20ms`, `6m0s`, `1h2m3.5s`,
+/// or plain seconds (`30`, `1.5`). `None` for anything else.
+pub(crate) fn parse_reset_duration_ms(value: &str) -> Option<u64> {
+    let value = value.trim();
+    if value.is_empty() {
+        return None;
+    }
+    if let Ok(seconds) = value.parse::<f64>() {
+        return (seconds.is_finite() && seconds >= 0.0).then_some((seconds * 1000.0) as u64);
+    }
+    let mut total = 0.0_f64;
+    let mut rest = value;
+    while !rest.is_empty() {
+        let end = rest
+            .find(|c: char| !(c.is_ascii_digit() || c == '.'))
+            .filter(|&e| e > 0)?;
+        let number: f64 = rest[..end].parse().ok()?;
+        rest = &rest[end..];
+        let (factor, len) = if rest.starts_with("ms") {
+            (1.0, 2)
+        } else if rest.starts_with('h') {
+            (3_600_000.0, 1)
+        } else if rest.starts_with('m') {
+            (60_000.0, 1)
+        } else if rest.starts_with('s') {
+            (1000.0, 1)
+        } else {
+            return None;
+        };
+        total += number * factor;
+        rest = &rest[len..];
+    }
+    Some(total as u64)
+}
+
+/// When a rate-limited answer lifts the limit, from its headers (`now_ms` is the clock): the later
+/// of the `x-ratelimit-reset-requests` / `-tokens` windows that are used up (`remaining` is 0, or
+/// not stated), else `Retry-After`.
+pub(crate) fn rate_limit_resets_at_ms(
+    headers: &reqwest::header::HeaderMap,
+    now_ms: u64,
+) -> Option<u64> {
+    let text = |name: &str| headers.get(name).and_then(|v| v.to_str().ok());
+    let from_windows = ["requests", "tokens"]
+        .iter()
+        .filter(|kind| {
+            text(&format!("x-ratelimit-remaining-{kind}"))
+                .is_none_or(|remaining| remaining.trim() == "0")
+        })
+        .filter_map(|kind| text(&format!("x-ratelimit-reset-{kind}")))
+        .filter_map(parse_reset_duration_ms)
+        .max();
+    from_windows
+        .or_else(|| text("retry-after").and_then(parse_retry_after))
+        .map(|delay| now_ms + delay)
 }
 
 pub(crate) fn timeout_error(after: Duration) -> ProviderError {
@@ -744,6 +818,7 @@ pub(crate) fn classify_http(
         401 | 403 => ProviderError::Unauthorized,
         429 => ProviderError::RateLimited {
             retry_after_ms: retry_after.and_then(parse_retry_after),
+            resets_at_ms: None,
         },
         503 | 529 => ProviderError::Overloaded,
         404 => ProviderError::InvalidRequest {
@@ -887,6 +962,47 @@ mod tests {
     }
 
     #[test]
+    fn reset_durations_are_read_in_every_form_openai_writes_them() {
+        assert_eq!(parse_reset_duration_ms("1s"), Some(1000));
+        assert_eq!(parse_reset_duration_ms("20ms"), Some(20));
+        assert_eq!(parse_reset_duration_ms("6m0s"), Some(360_000));
+        assert_eq!(parse_reset_duration_ms("1h2m3.5s"), Some(3_723_500));
+        assert_eq!(parse_reset_duration_ms("30"), Some(30_000));
+        assert_eq!(parse_reset_duration_ms("soon"), None);
+        assert_eq!(parse_reset_duration_ms(""), None);
+    }
+
+    #[test]
+    fn a_429_is_dated_by_the_used_up_window_else_by_retry_after() {
+        use reqwest::header::{HeaderMap, HeaderValue};
+        let headers = |pairs: &[(&str, &str)]| {
+            let mut map = HeaderMap::new();
+            for (name, value) in pairs {
+                map.insert(
+                    reqwest::header::HeaderName::from_bytes(name.as_bytes()).unwrap(),
+                    HeaderValue::from_str(value).unwrap(),
+                );
+            }
+            map
+        };
+        // Requests are used up (resets in 6m), tokens are not: only the first counts.
+        let map = headers(&[
+            ("x-ratelimit-remaining-requests", "0"),
+            ("x-ratelimit-reset-requests", "6m0s"),
+            ("x-ratelimit-remaining-tokens", "5000"),
+            ("x-ratelimit-reset-tokens", "1s"),
+            ("retry-after", "2"),
+        ]);
+        assert_eq!(rate_limit_resets_at_ms(&map, 1_000), Some(361_000));
+        // No x-ratelimit-*: Retry-After is relative to the clock.
+        assert_eq!(
+            rate_limit_resets_at_ms(&headers(&[("retry-after", "7")]), 1_000),
+            Some(8_000)
+        );
+        assert_eq!(rate_limit_resets_at_ms(&headers(&[]), 1_000), None);
+    }
+
+    #[test]
     fn http_statuses_are_classified() {
         assert_eq!(
             classify_http(401, None, "", None),
@@ -899,19 +1015,22 @@ mod tests {
         assert_eq!(
             classify_http(429, Some("7"), "", None),
             ProviderError::RateLimited {
-                retry_after_ms: Some(7000)
+                retry_after_ms: Some(7000),
+                resets_at_ms: None,
             }
         );
         assert_eq!(
             classify_http(429, Some("1.5"), "", None),
             ProviderError::RateLimited {
-                retry_after_ms: Some(1500)
+                retry_after_ms: Some(1500),
+                resets_at_ms: None,
             }
         );
         assert_eq!(
             classify_http(429, Some("Wed, 21 Oct 2026 07:28:00 GMT"), "", None),
             ProviderError::RateLimited {
-                retry_after_ms: None
+                retry_after_ms: None,
+                resets_at_ms: None,
             }
         );
         assert_eq!(
@@ -1057,7 +1176,8 @@ mod tests {
         }
         assert!(!images_refusal(&ProviderError::Unauthorized));
         assert!(!images_refusal(&ProviderError::RateLimited {
-            retry_after_ms: None
+            retry_after_ms: None,
+            resets_at_ms: None,
         }));
         assert!(!images_refusal(&ProviderError::Overloaded));
         assert!(!images_refusal(&ProviderError::protocol(

@@ -536,6 +536,7 @@ pub(crate) fn classify_message(text: &str) -> Option<ProviderError> {
     if lower.contains("rate limit") || lower.contains("rate_limit") {
         return Some(ProviderError::RateLimited {
             retry_after_ms: None,
+            resets_at_ms: None,
         });
     }
     None
