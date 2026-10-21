@@ -1193,4 +1193,93 @@ mod tests {
         );
         assert!(parse_usage(&json!({})).is_none());
     }
+
+    // ----- mutation-testing additions (T3) -----
+
+    #[test]
+    fn calls_without_an_index_are_followed_by_id_and_a_bare_fragment_goes_to_the_last_call() {
+        let chunks = run(
+            EndpointQuirks::generic(),
+            &[
+                r#"{"choices":[{"delta":{"tool_calls":[{"id":"a","function":{"name":"x","arguments":"{\"k\":"}}]}}]}"#,
+                r#"{"choices":[{"delta":{"tool_calls":[{"id":"b","function":{"name":"y","arguments":"{"}}]}}]}"#,
+                // Back to the first call, by its id.
+                r#"{"choices":[{"delta":{"tool_calls":[{"id":"a","function":{"arguments":"1}"}}]}}]}"#,
+                // No id, no index: the last call.
+                r#"{"choices":[{"delta":{"tool_calls":[{"function":{"arguments":"}"}}]},"finish_reason":"tool_calls"}]}"#,
+                "[DONE]",
+            ],
+        )
+        .unwrap();
+        let found = calls(&chunks);
+        assert_eq!(found.len(), 2);
+        assert_eq!(
+            (found[0].id.as_str(), found[0].arguments.as_str()),
+            ("a", r#"{"k":1}"#)
+        );
+        assert_eq!(
+            (found[1].id.as_str(), found[1].arguments.as_str()),
+            ("b", "{}")
+        );
+    }
+
+    #[test]
+    fn usage_is_read_from_any_one_of_prompt_completion_or_total_and_nothing_else_is_usage() {
+        assert_eq!(parse_usage(&json!({})), None);
+        assert_eq!(parse_usage(&json!({"unrelated": 3})), None);
+        let only_prompt = parse_usage(&json!({"prompt_tokens": 7})).unwrap();
+        assert_eq!(only_prompt.input_tokens, Some(7));
+        assert_eq!(only_prompt.context_tokens, None);
+        let only_output = parse_usage(&json!({"completion_tokens": 3})).unwrap();
+        assert_eq!(only_output.output_tokens, Some(3));
+        let only_total = parse_usage(&json!({"total_tokens": 9})).unwrap();
+        assert_eq!(only_total.context_tokens, Some(9));
+    }
+
+    #[test]
+    fn the_context_size_is_prompt_plus_completion_when_the_total_is_not_reported() {
+        let usage = parse_usage(&json!({"prompt_tokens": 10, "completion_tokens": 5})).unwrap();
+        assert_eq!(usage.context_tokens, Some(15));
+        let reported =
+            parse_usage(&json!({"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 99}))
+                .unwrap();
+        assert_eq!(reported.context_tokens, Some(99));
+    }
+
+    #[test]
+    fn every_context_overflow_phrasing_is_context_too_small_and_the_others_are_not() {
+        for phrase in [
+            "This model's maximum Context Length is 8192",
+            "error code: context_length_exceeded",
+            "exceeds the maximum context of the model",
+            "beyond the context window",
+            "too many tokens in the request",
+            "the prompt is too long",
+        ] {
+            assert!(
+                matches!(
+                    classify_message(phrase),
+                    Some(ProviderError::ContextTooSmall { .. })
+                ),
+                "{phrase}"
+            );
+        }
+        assert!(matches!(
+            classify_message("The server is OVERLOADED"),
+            Some(ProviderError::Overloaded)
+        ));
+        for phrase in ["Rate limit reached", "rate_limit_exceeded"] {
+            assert!(
+                matches!(
+                    classify_message(phrase),
+                    Some(ProviderError::RateLimited { .. })
+                ),
+                "{phrase}"
+            );
+        }
+        assert_eq!(classify_message("something else"), None);
+        // Words that only look alike.
+        assert_eq!(classify_message("context"), None);
+        assert_eq!(classify_message("rate"), None);
+    }
 }
