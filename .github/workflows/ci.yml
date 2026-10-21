@@ -110,7 +110,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { os: macos-latest, toolchain: stable }
+          - { os: macos-14, toolchain: stable }
           - { os: windows-latest, toolchain: stable }
           - { os: ubuntu-latest, toolchain: beta }
           - { os: ubuntu-latest, toolchain: nightly }
