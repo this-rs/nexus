@@ -119,8 +119,10 @@ fn message_json(message: &ChatMessage, quirks: &EndpointQuirks) -> Value {
     let content = if message.images.is_empty() {
         match (&message.content, message.tool_calls.is_empty()) {
             (Some(text), _) => Value::String(text.clone()),
-            (None, false) => Value::Null,
-            (None, true) => Value::String(String::new()),
+            // Gemini (OpenAI-compatible) refuse `content: null` sur un message
+            // assistant qui porte des tool_calls ; une chaîne vide est acceptée
+            // partout, donc on la préfère à null.
+            (None, _) => Value::String(String::new()),
         }
     } else {
         // A message with images is a list of parts: its text first, then one
@@ -596,7 +598,7 @@ mod tests {
         assert_eq!(body["tools"][0]["function"]["name"], "read");
         assert!(body.get("parallel_tool_calls").is_none());
         let assistant = &body["messages"][2];
-        assert!(assistant["content"].is_null());
+        assert_eq!(assistant["content"], "");
         assert_eq!(
             assistant["tool_calls"][0]["function"]["arguments"],
             r#"{"path":"a"}"#
