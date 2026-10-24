@@ -210,8 +210,16 @@ fn registry(options: &Options) -> Result<ToolRegistry, String> {
     let mut registry = nexus_tools::files::register(ToolRegistry::new(), &files);
     #[cfg(unix)]
     {
+        // The host's git/gh credential context, when the harness that launched this server
+        // supplied it (`NEXUS_TOOLS_GIT_CONFIG_GLOBAL`, `NEXUS_TOOLS_GH_TOKEN`): the sandboxed
+        // `git`/`gh` then authenticate exactly like the host, while the shell keeps its own HOME.
+        let env = nexus_tools::shell::EnvPolicy::default().with_host_credentials(
+            std::env::var("NEXUS_TOOLS_GIT_CONFIG_GLOBAL").ok(),
+            std::env::var("NEXUS_TOOLS_GH_TOKEN").ok(),
+        );
         let shell = nexus_tools::shell::ShellConfig::new(files.scope(), &output_dir)
-            .map_err(|e| format!("cannot prepare the shell tools: {e}"))?;
+            .map_err(|e| format!("cannot prepare the shell tools: {e}"))?
+            .with_env(env);
         registry = nexus_tools::shell::register(registry, &shell);
     }
     #[cfg(feature = "test-tools")]

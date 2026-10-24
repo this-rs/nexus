@@ -32,6 +32,28 @@ impl Default for EnvPolicy {
 }
 
 impl EnvPolicy {
+    /// Adds the host's git/gh credentials **explicitly** (never by inheritance): `GIT_CONFIG_GLOBAL`
+    /// (the host's git config, where the commit identity and the `gh auth git-credential` helper
+    /// live) and `GH_TOKEN` (the host's `gh` login), when the harness that provides them gives a
+    /// value. `HOME` stays the shell's own: git mirrors the host through the config file, not by
+    /// moving the shell into the user's home. Called only with values a trusted harness supplied
+    /// (`NEXUS_TOOLS_GIT_CONFIG_GLOBAL` / `NEXUS_TOOLS_GH_TOKEN`), so a `GH_TOKEN` sitting in the
+    /// server's own environment never reaches a command by accident.
+    #[must_use]
+    pub fn with_host_credentials(
+        mut self,
+        git_config_global: Option<String>,
+        gh_token: Option<String>,
+    ) -> Self {
+        if let Some(path) = git_config_global {
+            self.set.push(("GIT_CONFIG_GLOBAL".into(), path));
+        }
+        if let Some(token) = gh_token {
+            self.set.push(("GH_TOKEN".into(), token));
+        }
+        self
+    }
+
     /// The environment the child gets: the allow-listed host variables that are set, then
     /// the explicit ones, then `HOME` (always a directory of its own, never the user's).
     pub fn build(
@@ -210,5 +232,36 @@ pub(crate) fn human_bytes(bytes: u64) -> String {
         format!("{} MiB", bytes / (1024 * 1024))
     } else {
         format!("{} KiB", bytes / 1024)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The explicit host-credential variables reach the command, and `HOME` stays its own.
+    #[test]
+    fn host_credentials_are_set_explicitly_and_home_stays_its_own() {
+        let built = EnvPolicy::default()
+            .with_host_credentials(Some("/host/.gitconfig".into()), Some("gho_secret".into()))
+            .build(std::iter::empty(), Path::new("/sandbox/home"));
+        let has = |name: &str, value: &str| built.iter().any(|(n, v)| n == name && v == value);
+        assert!(has("GIT_CONFIG_GLOBAL", "/host/.gitconfig"));
+        assert!(has("GH_TOKEN", "gho_secret"));
+        assert!(has("HOME", "/sandbox/home"));
+        assert!(!has("HOME", "/host"));
+    }
+
+    /// Without values, no credential variable appears: the default policy is unchanged.
+    #[test]
+    fn no_host_credentials_means_no_extra_variable() {
+        let built = EnvPolicy::default()
+            .with_host_credentials(None, None)
+            .build(std::iter::empty(), Path::new("/sandbox/home"));
+        assert!(
+            built
+                .iter()
+                .all(|(n, _)| n != "GIT_CONFIG_GLOBAL" && n != "GH_TOKEN")
+        );
     }
 }
