@@ -45,7 +45,7 @@ tracing = "0.1"
 futures = "0.3"
 async-trait = "0.1"
 neo4rs = "0.8"
-meilisearch-sdk = { version = "0.33", default-features = false, features = ["reqwest", "tls", "jwt_rust_crypto"] }
+meilisearch-sdk = { version = "0.33", default-features = false, features = ["reqwest", "tls"] }
 
 # Obscura's local fixes to two layout/text crates, carried until they land upstream. Only the
 # Obscura crates depend on taffy and cosmic-text.
