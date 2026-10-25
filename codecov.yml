@@ -46,6 +46,7 @@ ignore:
   - "tests/**"
   - "**/test*.rs"
   - "**/mod.rs"  # Module files typically don't have logic
+  - "claude-code-sdk-rs/src/bin/fake_*.rs"  # fakes played as subprocesses (CARGO_BIN_EXE_*): never instrumented, so their lines are not coverable source
 
 flags:
   sdk:
