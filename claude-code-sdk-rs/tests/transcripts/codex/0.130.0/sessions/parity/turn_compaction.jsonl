@@ -1,0 +1,10 @@
+# A turn with very high token usage that triggers compaction.
+# Exercises: compaction (compaction_started + compact_boundary on the thread).
+{"op":"expect","method":"turn/start","reply":{"turn":{"id":"turn_par5","status":"inProgress","items":[],"error":null}}}
+{"op":"notify","method":"turn/started","params":{"threadId":"thr_par1","turn":{"id":"turn_par5","status":"inProgress","items":[],"error":null}}}
+{"op":"notify","method":"item/started","params":{"threadId":"thr_par1","turnId":"turn_par5","item":{"type":"contextCompaction","id":"cmp_par1"}}}
+{"op":"notify","method":"item/completed","params":{"threadId":"thr_par1","turnId":"turn_par5","item":{"type":"contextCompaction","id":"cmp_par1"}}}
+{"op":"notify","method":"item/started","params":{"threadId":"thr_par1","turnId":"turn_par5","item":{"type":"agentMessage","id":"msg_par5","text":""}}}
+{"op":"notify","method":"item/completed","params":{"threadId":"thr_par1","turnId":"turn_par5","item":{"type":"agentMessage","id":"msg_par5","text":"compacted and answered"}}}
+{"op":"notify","method":"thread/tokenUsage/updated","params":{"threadId":"thr_par1","turnId":"turn_par5","tokenUsage":{"total":{"totalTokens":260000,"inputTokens":250000,"cachedInputTokens":0,"outputTokens":10000,"reasoningOutputTokens":0},"last":{"totalTokens":260000,"inputTokens":250000,"cachedInputTokens":0,"outputTokens":10000,"reasoningOutputTokens":0},"modelContextWindow":272000}}}
+{"op":"notify","method":"turn/completed","params":{"threadId":"thr_par1","turn":{"id":"turn_par5","status":"completed","items":[],"error":null}}}

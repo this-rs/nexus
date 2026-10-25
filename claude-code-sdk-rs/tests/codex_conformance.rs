@@ -1501,6 +1501,68 @@ async fn an_old_codex_without_app_server_fails_open_with_a_typed_error() {
     );
 }
 
+// ── defer/reply and emit_json (ISO4-2) ──────────────────────────────────────
+
+#[tokio::test]
+async fn defer_reply_defers_the_turn_start_response_and_answers_later() {
+    let staging = Staging::new();
+    let session = open(&staging, "defer_reply").await;
+    let events = turn(&*session).await;
+    // The turn must complete successfully (the deferred reply reaches the adapter).
+    assert!(
+        matches!(
+            done(&events),
+            AgentEvent::Done {
+                is_error: false,
+                ..
+            }
+        ),
+        "deferred turn/start reply must not break the session: {events:?}"
+    );
+    // The text streamed while the reply was pending must arrive.
+    let text: String = events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::Text { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        text.contains("deferred reply works"),
+        "text during deferred reply must arrive: {text:?}"
+    );
+    session.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn emit_json_sends_raw_json_to_the_adapter() {
+    let staging = Staging::new();
+    let session = open(&staging, "emit_json").await;
+    let events = turn(&*session).await;
+    assert!(
+        matches!(
+            done(&events),
+            AgentEvent::Done {
+                is_error: false,
+                ..
+            }
+        ),
+        "emit_json transcript must complete: {events:?}"
+    );
+    let text: String = events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::Text { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        text.contains("emit_json works"),
+        "text from emit_json must arrive: {text:?}"
+    );
+    session.close().await.unwrap();
+}
+
 #[tokio::test]
 async fn open_and_resume_refuse_a_codex_older_than_the_minimum_like_health_does() {
     let home = tempfile::tempdir().unwrap();

@@ -1,0 +1,6 @@
+# Parity prelude: handshake + thread creation for the full scenario.
+# Thread thr_par1, model gpt-fake.
+{"op":"expect","method":"initialize","reply":{"userAgent":"fake_codex/0.130.0","codexHome":"/fake/codex-home","platformFamily":"unix","platformOs":"macos"}}
+{"op":"expect_notification","method":"initialized"}
+{"op":"expect","method":"thread/start","reply":{"thread":{"id":"thr_par1","preview":"","modelProvider":"openai","createdAt":1730910000},"model":"gpt-fake"}}
+{"op":"notify","method":"thread/started","params":{"thread":{"id":"thr_par1","preview":"","modelProvider":"openai","createdAt":1730910000}}}

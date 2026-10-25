@@ -1,0 +1,10 @@
+# A turn with an MCP tool call that returns a very large result.
+# Exercises: tool_result.huge.
+{"op":"expect","method":"turn/start","reply":{"turn":{"id":"turn_par8","status":"inProgress","items":[],"error":null}}}
+{"op":"notify","method":"turn/started","params":{"threadId":"thr_par1","turn":{"id":"turn_par8","status":"inProgress","items":[],"error":null}}}
+{"op":"notify","method":"item/started","params":{"threadId":"thr_par1","turnId":"turn_par8","item":{"type":"mcpToolCall","id":"call_par_big","server":"fake_mcp","tool":"big","status":"inProgress","arguments":{"n":1000000}}}}
+{"op":"notify","method":"item/completed","params":{"threadId":"thr_par1","turnId":"turn_par8","item":{"type":"mcpToolCall","id":"call_par_big","server":"fake_mcp","tool":"big","status":"completed","arguments":{"n":1000000},"result":{"content":[{"type":"text","text":"PLACEHOLDER_BIG_RESULT"}]}}}}
+{"op":"notify","method":"item/started","params":{"threadId":"thr_par1","turnId":"turn_par8","item":{"type":"agentMessage","id":"msg_par8","text":""}}}
+{"op":"notify","method":"item/completed","params":{"threadId":"thr_par1","turnId":"turn_par8","item":{"type":"agentMessage","id":"msg_par8","text":"answered huge"}}}
+{"op":"notify","method":"thread/tokenUsage/updated","params":{"threadId":"thr_par1","turnId":"turn_par8","tokenUsage":{"total":{"totalTokens":320000,"inputTokens":270000,"cachedInputTokens":0,"outputTokens":50000,"reasoningOutputTokens":0},"last":{"totalTokens":10000,"inputTokens":10000,"cachedInputTokens":0,"outputTokens":0,"reasoningOutputTokens":0},"modelContextWindow":272000}}}
+{"op":"notify","method":"turn/completed","params":{"threadId":"thr_par1","turn":{"id":"turn_par8","status":"completed","items":[],"error":null}}}

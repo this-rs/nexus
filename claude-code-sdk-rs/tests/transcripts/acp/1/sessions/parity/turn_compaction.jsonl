@@ -1,0 +1,6 @@
+# A turn with very high token usage triggering compaction.
+# Exercises: compaction (compaction_started + compact_boundary).
+{"op":"expect","method":"session/prompt","defer":"p_par5"}
+{"op":"notify","method":"session/update","params":{"sessionId":"sess_par1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"compacted and answered"}}}}
+{"op":"notify","method":"session/update","params":{"sessionId":"sess_par1","update":{"sessionUpdate":"usage","totalInputTokens":250000,"totalOutputTokens":10000,"cacheReadTokens":0,"cacheWriteTokens":0}}}
+{"op":"reply","to":"p_par5","result":{"stopReason":"end_turn"}}

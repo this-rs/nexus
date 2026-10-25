@@ -178,3 +178,11 @@ required-features = ["provider-acp"]
 [[test]]
 name = "acp_routing"
 required-features = ["provider-acp"]
+
+[[test]]
+name = "codex_parity"
+required-features = ["testkit", "provider-codex"]
+
+[[test]]
+name = "acp_parity"
+required-features = ["testkit", "provider-acp"]

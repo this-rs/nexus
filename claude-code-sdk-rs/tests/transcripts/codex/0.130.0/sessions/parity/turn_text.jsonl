@@ -1,0 +1,9 @@
+# A simple text-only turn. Exercises: basic turn lifecycle, token usage.
+# Backend uses for: enrichment, refs, session_record, system_init.degraded.
+{"op":"expect","method":"turn/start","reply":{"turn":{"id":"turn_par1","status":"inProgress","items":[],"error":null}}}
+{"op":"notify","method":"turn/started","params":{"threadId":"thr_par1","turn":{"id":"turn_par1","status":"inProgress","items":[],"error":null}}}
+{"op":"notify","method":"item/started","params":{"threadId":"thr_par1","turnId":"turn_par1","item":{"type":"agentMessage","id":"msg_par1","text":""}}}
+{"op":"notify","method":"item/agentMessage/delta","params":{"threadId":"thr_par1","turnId":"turn_par1","itemId":"msg_par1","delta":"parity text"}}
+{"op":"notify","method":"item/completed","params":{"threadId":"thr_par1","turnId":"turn_par1","item":{"type":"agentMessage","id":"msg_par1","text":"parity text"}}}
+{"op":"notify","method":"thread/tokenUsage/updated","params":{"threadId":"thr_par1","turnId":"turn_par1","tokenUsage":{"total":{"totalTokens":50,"inputTokens":40,"cachedInputTokens":0,"outputTokens":10,"reasoningOutputTokens":0},"last":{"totalTokens":50,"inputTokens":40,"cachedInputTokens":0,"outputTokens":10,"reasoningOutputTokens":0},"modelContextWindow":272000}}}
+{"op":"notify","method":"turn/completed","params":{"threadId":"thr_par1","turn":{"id":"turn_par1","status":"completed","items":[],"error":null}}}

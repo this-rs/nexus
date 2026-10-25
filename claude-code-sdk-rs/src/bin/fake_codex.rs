@@ -41,11 +41,16 @@
 //! * `{"op":"include","file":"prelude.jsonl"}` — splice a file of the same directory.
 //! * `{"op":"expect","method":"turn/start","reply":{…}}` — wait for a request of that
 //!   method, answer it (`"error":{"code":…,"message":…}` answers an error instead).
+//!   With `"defer":true` the request id is stored (keyed by `"defer_name"` or the
+//!   method) and NOT answered; use `reply` later.
+//! * `{"op":"reply","name":"turn/start","result":{…}}` — answer a previously deferred
+//!   request by name.
 //! * `{"op":"expect_notification","method":"initialized"}`
 //! * `{"op":"notify","method":"item/started","params":{…}}`
 //! * `{"op":"server_request","id":"s1","method":"mcpServer/elicitation/request","params":{…}}`
 //! * `{"op":"await_response","id":"s1"}` — wait for the answer to a server request.
-//! * `{"op":"emit","line":"raw text"}`, `{"op":"stderr","line":"…"}`, `{"op":"sleep","ms":N}`
+//! * `{"op":"emit","line":"raw text"}`, `{"op":"emit_json","value":{…}}`, `{"op":"stderr","line":"…"}`, `{"op":"sleep","ms":N}`
+//! * `{"op":"wait_file","path":"…"}` — block until a file exists (for test synchronization).
 //! * `{"op":"spawn_child","own_group":true}` — start a `sleep 600` child (in its own
 //!   process group when asked) and record its pid.
 //! * `{"op":"wait_eof"}`, `{"op":"exit","code":N}`
@@ -96,6 +101,8 @@ struct Fake {
     default_wait: Duration,
     /// Responses to server requests that arrived while waiting for something else.
     answers: BTreeMap<String, Value>,
+    /// Ids of requests whose answer is deferred, by name.
+    deferred: BTreeMap<String, Value>,
 }
 
 fn kill_children(children: &Children) {
@@ -221,7 +228,19 @@ impl Fake {
                         }
                         if op == "expect" {
                             let id = message["id"].clone();
-                            if let Some(error) = directive.get("error") {
+                            if directive
+                                .get("defer")
+                                .and_then(Value::as_bool)
+                                .unwrap_or(false)
+                            {
+                                // Store the request id for a later `reply` directive.
+                                let name = directive
+                                    .get("defer_name")
+                                    .and_then(Value::as_str)
+                                    .unwrap_or(method.as_str())
+                                    .to_owned();
+                                self.deferred.insert(name, id);
+                            } else if let Some(error) = directive.get("error") {
                                 self.write_line(&json!({"id": id, "error": error}));
                             } else {
                                 let reply = directive.get("reply").cloned().unwrap_or(json!({}));
@@ -262,15 +281,48 @@ impl Fake {
                         );
                     }
                 },
+                "reply" => {
+                    let name = directive["name"].as_str().unwrap_or("").to_owned();
+                    let id = match self.deferred.remove(&name) {
+                        Some(id) => id,
+                        None => die(
+                            &self.children,
+                            EXIT_BAD_DIRECTIVE,
+                            &format!("reply: no deferred request named `{name}`"),
+                        ),
+                    };
+                    if let Some(error) = directive.get("error") {
+                        self.write_line(&json!({"id": id, "error": error}));
+                    } else {
+                        let result = directive.get("result").cloned().unwrap_or(json!({}));
+                        self.write_line(&json!({"id": id, "result": result}));
+                    }
+                },
                 "emit" => {
                     let mut out = std::io::stdout().lock();
                     let _ = writeln!(out, "{}", directive["line"].as_str().unwrap_or(""));
                     let _ = out.flush();
                 },
+                "emit_json" => self.write_line(directive.get("value").unwrap_or(&json!(null))),
                 "stderr" => eprintln!("{}", directive["line"].as_str().unwrap_or("")),
                 "sleep" => std::thread::sleep(Duration::from_millis(
                     directive.get("ms").and_then(Value::as_u64).unwrap_or(0),
                 )),
+                "wait_file" => {
+                    let path = directive["path"].as_str().unwrap_or("");
+                    let timeout = self.wait(directive);
+                    let deadline = std::time::Instant::now() + timeout;
+                    while !Path::new(path).exists() {
+                        if std::time::Instant::now() >= deadline {
+                            die(
+                                &self.children,
+                                EXIT_TIMEOUT,
+                                &format!("wait_file: `{path}` did not appear in time"),
+                            );
+                        }
+                        std::thread::sleep(Duration::from_millis(20));
+                    }
+                },
                 "spawn_child" => self.spawn_child(directive),
                 "wait_eof" => self.wait_eof(),
                 "exit" => {
@@ -469,6 +521,7 @@ fn main() {
                 .unwrap_or(10_000),
         ),
         answers: BTreeMap::new(),
+        deferred: BTreeMap::new(),
     };
 
     // The start record: argv and environment, never a secret.

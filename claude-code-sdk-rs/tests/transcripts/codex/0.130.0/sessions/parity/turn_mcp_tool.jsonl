@@ -1,0 +1,9 @@
+# A turn with an MCP tool call (no permission needed). Exercises: po_tools, nexus_tools.
+{"op":"expect","method":"turn/start","reply":{"turn":{"id":"turn_par2","status":"inProgress","items":[],"error":null}}}
+{"op":"notify","method":"turn/started","params":{"threadId":"thr_par1","turn":{"id":"turn_par2","status":"inProgress","items":[],"error":null}}}
+{"op":"notify","method":"item/started","params":{"threadId":"thr_par1","turnId":"turn_par2","item":{"type":"mcpToolCall","id":"call_par1","server":"fake_mcp","tool":"echo","status":"inProgress","arguments":{"text":"parity"}}}}
+{"op":"notify","method":"item/completed","params":{"threadId":"thr_par1","turnId":"turn_par2","item":{"type":"mcpToolCall","id":"call_par1","server":"fake_mcp","tool":"echo","status":"completed","arguments":{"text":"parity"},"result":{"content":[{"type":"text","text":"echo: parity"}]}}}}
+{"op":"notify","method":"item/started","params":{"threadId":"thr_par1","turnId":"turn_par2","item":{"type":"agentMessage","id":"msg_par2","text":""}}}
+{"op":"notify","method":"item/completed","params":{"threadId":"thr_par1","turnId":"turn_par2","item":{"type":"agentMessage","id":"msg_par2","text":"tool done"}}}
+{"op":"notify","method":"thread/tokenUsage/updated","params":{"threadId":"thr_par1","turnId":"turn_par2","tokenUsage":{"total":{"totalTokens":100,"inputTokens":80,"cachedInputTokens":0,"outputTokens":20,"reasoningOutputTokens":0},"last":{"totalTokens":50,"inputTokens":40,"cachedInputTokens":0,"outputTokens":10,"reasoningOutputTokens":0},"modelContextWindow":272000}}}
+{"op":"notify","method":"turn/completed","params":{"threadId":"thr_par1","turn":{"id":"turn_par2","status":"completed","items":[],"error":null}}}

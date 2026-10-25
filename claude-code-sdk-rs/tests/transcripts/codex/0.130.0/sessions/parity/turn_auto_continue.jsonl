@@ -1,0 +1,20 @@
+# A turn that ends with max_output_tokens (the tool limit), requiring auto-continue.
+# Exercises: auto_continue.
+{"op":"expect","method":"turn/start","reply":{"turn":{"id":"turn_par7","status":"inProgress","items":[],"error":null}}}
+{"op":"notify","method":"turn/started","params":{"threadId":"thr_par1","turn":{"id":"turn_par7","status":"inProgress","items":[],"error":null}}}
+{"op":"notify","method":"item/started","params":{"threadId":"thr_par1","turnId":"turn_par7","item":{"type":"mcpToolCall","id":"call_par3a","server":"fake_mcp","tool":"echo","status":"inProgress","arguments":{"text":"a"}}}}
+{"op":"notify","method":"item/completed","params":{"threadId":"thr_par1","turnId":"turn_par7","item":{"type":"mcpToolCall","id":"call_par3a","server":"fake_mcp","tool":"echo","status":"completed","arguments":{"text":"a"},"result":{"content":[{"type":"text","text":"echo: a"}]}}}}
+{"op":"notify","method":"item/started","params":{"threadId":"thr_par1","turnId":"turn_par7","item":{"type":"mcpToolCall","id":"call_par3b","server":"fake_mcp","tool":"echo","status":"inProgress","arguments":{"text":"b"}}}}
+{"op":"notify","method":"item/completed","params":{"threadId":"thr_par1","turnId":"turn_par7","item":{"type":"mcpToolCall","id":"call_par3b","server":"fake_mcp","tool":"echo","status":"completed","arguments":{"text":"b"},"result":{"content":[{"type":"text","text":"echo: b"}]}}}}
+{"op":"notify","method":"item/started","params":{"threadId":"thr_par1","turnId":"turn_par7","item":{"type":"mcpToolCall","id":"call_par3c","server":"fake_mcp","tool":"echo","status":"inProgress","arguments":{"text":"c"}}}}
+{"op":"notify","method":"item/completed","params":{"threadId":"thr_par1","turnId":"turn_par7","item":{"type":"mcpToolCall","id":"call_par3c","server":"fake_mcp","tool":"echo","status":"completed","arguments":{"text":"c"},"result":{"content":[{"type":"text","text":"echo: c"}]}}}}
+{"op":"notify","method":"thread/tokenUsage/updated","params":{"threadId":"thr_par1","turnId":"turn_par7","tokenUsage":{"total":{"totalTokens":310200,"inputTokens":260100,"cachedInputTokens":0,"outputTokens":50100,"reasoningOutputTokens":0},"last":{"totalTokens":200,"inputTokens":100,"cachedInputTokens":0,"outputTokens":100,"reasoningOutputTokens":0},"modelContextWindow":272000}}}
+# max_output_tokens: the turn ended because it hit the output limit.
+{"op":"notify","method":"turn/completed","params":{"threadId":"thr_par1","turn":{"id":"turn_par7","status":"completed","items":[],"error":null,"stopReason":"max_output_tokens"}}}
+# Auto-continue: the backend sends another turn/start.
+{"op":"expect","method":"turn/start","reply":{"turn":{"id":"turn_par7b","status":"inProgress","items":[],"error":null}}}
+{"op":"notify","method":"turn/started","params":{"threadId":"thr_par1","turn":{"id":"turn_par7b","status":"inProgress","items":[],"error":null}}}
+{"op":"notify","method":"item/started","params":{"threadId":"thr_par1","turnId":"turn_par7b","item":{"type":"agentMessage","id":"msg_par7b","text":""}}}
+{"op":"notify","method":"item/completed","params":{"threadId":"thr_par1","turnId":"turn_par7b","item":{"type":"agentMessage","id":"msg_par7b","text":"continued"}}}
+{"op":"notify","method":"thread/tokenUsage/updated","params":{"threadId":"thr_par1","turnId":"turn_par7b","tokenUsage":{"total":{"totalTokens":310300,"inputTokens":260200,"cachedInputTokens":0,"outputTokens":50100,"reasoningOutputTokens":0},"last":{"totalTokens":100,"inputTokens":100,"cachedInputTokens":0,"outputTokens":0,"reasoningOutputTokens":0},"modelContextWindow":272000}}}
+{"op":"notify","method":"turn/completed","params":{"threadId":"thr_par1","turn":{"id":"turn_par7b","status":"completed","items":[],"error":null}}}

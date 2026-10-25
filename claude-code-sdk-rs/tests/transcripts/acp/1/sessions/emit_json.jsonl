@@ -1,0 +1,6 @@
+# Test emit_json: emit raw JSON values on stdout (with jsonrpc wrapping done by value).
+{"op":"include","file":"prelude.jsonl"}
+{"op":"include","file":"turn1_start.jsonl"}
+# Emit updates via emit_json: the value must include "jsonrpc":"2.0" since ACP is JSON-RPC.
+{"op":"emit_json","value":{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess_fake1","update":{"sessionUpdate":"agent_message_chunk","messageId":"msg_ej","content":{"type":"text","text":"emit_json works on acp"}}}}}
+{"op":"include","file":"turn1_end.jsonl"}

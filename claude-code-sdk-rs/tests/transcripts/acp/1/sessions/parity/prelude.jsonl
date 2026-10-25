@@ -1,0 +1,4 @@
+# Parity prelude: handshake + session/new with modes.
+# Session id sess_par1.
+{"op":"include","file":"../handshake.jsonl"}
+{"op":"expect","method":"session/new","reply":{"sessionId":"sess_par1","modes":{"currentModeId":"ask","availableModes":[{"id":"ask","name":"Ask","description":"Request permission before changes"},{"id":"plan","name":"Plan"},{"id":"acceptEdits","name":"Accept edits"}]}}}
