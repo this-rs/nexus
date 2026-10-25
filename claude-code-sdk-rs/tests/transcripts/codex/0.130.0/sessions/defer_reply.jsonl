@@ -1,0 +1,11 @@
+# Test defer/reply: receive turn/start but defer the answer, send items, then reply.
+{"op":"include","file":"prelude.jsonl"}
+# Defer turn/start — the response comes later, after item notifications.
+{"op":"expect","method":"turn/start","defer":true,"defer_name":"t1"}
+{"op":"notify","method":"turn/started","params":{"threadId":"thr_fake1","turn":{"id":"turn_d1","status":"inProgress","items":[],"error":null}}}
+{"op":"notify","method":"item/started","params":{"threadId":"thr_fake1","turnId":"turn_d1","item":{"type":"agentMessage","id":"msg_d1","text":""}}}
+{"op":"notify","method":"item/agentMessage/delta","params":{"threadId":"thr_fake1","turnId":"turn_d1","itemId":"msg_d1","delta":"deferred reply works"}}
+{"op":"notify","method":"item/completed","params":{"threadId":"thr_fake1","turnId":"turn_d1","item":{"type":"agentMessage","id":"msg_d1","text":"deferred reply works"}}}
+# Now reply to the deferred turn/start.
+{"op":"reply","name":"t1","result":{"turn":{"id":"turn_d1","status":"inProgress","items":[],"error":null}}}
+{"op":"include","file":"turn1_end.jsonl"}

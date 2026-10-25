@@ -1830,6 +1830,37 @@ async fn an_agent_that_exits_during_its_handshake_fails_the_opening() {
     assert!(opened.is_err(), "the agent exited at once");
 }
 
+// ── emit_json (ISO4-2) ──────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn emit_json_sends_raw_json_to_the_adapter() {
+    let staging = Staging::new();
+    let session = staging.open("emit_json").await;
+    let events = turn(&*session).await;
+    assert!(
+        matches!(
+            done(&events),
+            AgentEvent::Done {
+                is_error: false,
+                ..
+            }
+        ),
+        "emit_json transcript must complete: {events:?}"
+    );
+    let text: String = events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::Text { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        text.contains("emit_json works on acp"),
+        "text from emit_json must arrive: {text:?}"
+    );
+    session.close().await.unwrap();
+}
+
 // ---------------------------------------------------------------------------
 // Matrix cross-link: the suite proves exactly what the registry claims
 // ---------------------------------------------------------------------------

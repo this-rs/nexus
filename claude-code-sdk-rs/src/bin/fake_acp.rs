@@ -53,7 +53,7 @@
 //! * `{"op":"await_response","id":"s1","expect":{…}}` — wait for the answer to an agent
 //!   request (`expect` is compared with its `result`, `expect_error_code` with its
 //!   `error.code`).
-//! * `{"op":"emit","line":"raw text"}`, `{"op":"stderr","line":"…"}`, `{"op":"sleep","ms":N}`
+//! * `{"op":"emit","line":"raw text"}`, `{"op":"emit_json","value":{…}}`, `{"op":"stderr","line":"…"}`, `{"op":"sleep","ms":N}`
 //! * `{"op":"wait_file","env":"FAKE_ACP_GATE"}` — wait until the file named by that
 //!   environment variable exists (the test creates it: a signal, not a delay).
 //! * `{"op":"spawn_child","own_group":true}` — start a `sleep 600` child (in its own
@@ -351,6 +351,7 @@ impl Fake {
                     let _ = writeln!(out, "{}", directive["line"].as_str().unwrap_or(""));
                     let _ = out.flush();
                 },
+                "emit_json" => self.write_line(directive.get("value").unwrap_or(&json!(null))),
                 "stderr" => eprintln!("{}", directive["line"].as_str().unwrap_or("")),
                 "sleep" => std::thread::sleep(Duration::from_millis(
                     directive.get("ms").and_then(Value::as_u64).unwrap_or(0),

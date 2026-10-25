@@ -1,0 +1,8 @@
+# Test emit_json: emit raw JSON values on stdout.
+{"op":"include","file":"prelude.jsonl"}
+{"op":"include","file":"turn1_start.jsonl"}
+# Emit a custom JSON notification via emit_json (written as-is, no wrapping).
+{"op":"emit_json","value":{"method":"item/started","params":{"threadId":"thr_fake1","turnId":"turn_1","item":{"type":"agentMessage","id":"msg_ej","text":""}}}}
+{"op":"emit_json","value":{"method":"item/agentMessage/delta","params":{"threadId":"thr_fake1","turnId":"turn_1","itemId":"msg_ej","delta":"emit_json works"}}}
+{"op":"emit_json","value":{"method":"item/completed","params":{"threadId":"thr_fake1","turnId":"turn_1","item":{"type":"agentMessage","id":"msg_ej","text":"emit_json works"}}}}
+{"op":"include","file":"turn1_end.jsonl"}
