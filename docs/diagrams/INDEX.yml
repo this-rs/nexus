@@ -8,7 +8,7 @@
 # than implicit; binaries, `mod.rs` and re-exporting `lib.rs`
 # files legitimately live there.
 #
-# 19 diagrams, 592/341 source files claimed, 3 unclaimed.
+# 19 diagrams, 615/341 source files claimed, 3 unclaimed.
 
 diagrams:
   - name: nexus-agent-contract
@@ -21,7 +21,7 @@ diagrams:
       - claude-code-sdk-rs/tests/agent_registry.rs
   - name: nexus-agent-providers
     file: nexus-agent-providers.mmd
-    verified: 2026-10-21
+    verified: 2026-10-25
     covers:
       - docs/diagrams/nexus-agent-providers.mmd
       - docs/harness-consolidation-2026-10-05.md
@@ -50,12 +50,14 @@ diagrams:
       - claude-code-sdk-rs/tests/codex_conformance.rs
       - claude-code-sdk-rs/tests/codex_schema_drift.rs
       - claude-code-sdk-rs/tests/codex_registry.rs
+      - claude-code-sdk-rs/tests/codex_parity.rs
       - claude-code-sdk-rs/tests/transcripts/codex/**
       - claude-code-sdk-rs/src/providers/acp/*.rs
       - claude-code-sdk-rs/src/bin/fake_acp.rs
       - claude-code-sdk-rs/tests/acp_conformance.rs
       - claude-code-sdk-rs/tests/acp_schema_drift.rs
       - claude-code-sdk-rs/tests/acp_registry.rs
+      - claude-code-sdk-rs/tests/acp_parity.rs
       - claude-code-sdk-rs/tests/transcripts/acp/**
   - name: nexus-api-core
     file: nexus-api-core.mmd
