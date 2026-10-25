@@ -1,0 +1,15 @@
+# Session resume: the backend restarts and reopens the thread with previous history.
+# Uses the prelude_resume pattern (thread/start with session_load-like context).
+# Exercises: resume.
+{"op":"expect","method":"initialize","reply":{"userAgent":"fake_codex/0.130.0","codexHome":"/fake/codex-home","platformFamily":"unix","platformOs":"macos"}}
+{"op":"expect_notification","method":"initialized"}
+# The backend re-opens the thread (thread/start with a fresh thread id for the resumed session).
+{"op":"expect","method":"thread/start","reply":{"thread":{"id":"thr_par1_r","preview":"","modelProvider":"openai","createdAt":1730910000},"model":"gpt-fake"}}
+{"op":"notify","method":"thread/started","params":{"thread":{"id":"thr_par1_r","preview":"","modelProvider":"openai","createdAt":1730910000}}}
+# A turn on the resumed session.
+{"op":"expect","method":"turn/start","reply":{"turn":{"id":"turn_resumed","status":"inProgress","items":[],"error":null}}}
+{"op":"notify","method":"turn/started","params":{"threadId":"thr_par1_r","turn":{"id":"turn_resumed","status":"inProgress","items":[],"error":null}}}
+{"op":"notify","method":"item/started","params":{"threadId":"thr_par1_r","turnId":"turn_resumed","item":{"type":"agentMessage","id":"msg_resumed","text":""}}}
+{"op":"notify","method":"item/completed","params":{"threadId":"thr_par1_r","turnId":"turn_resumed","item":{"type":"agentMessage","id":"msg_resumed","text":"resumed ok"}}}
+{"op":"notify","method":"thread/tokenUsage/updated","params":{"threadId":"thr_par1_r","turnId":"turn_resumed","tokenUsage":{"total":{"totalTokens":50,"inputTokens":40,"cachedInputTokens":0,"outputTokens":10,"reasoningOutputTokens":0},"last":{"totalTokens":50,"inputTokens":40,"cachedInputTokens":0,"outputTokens":10,"reasoningOutputTokens":0},"modelContextWindow":272000}}}
+{"op":"notify","method":"turn/completed","params":{"threadId":"thr_par1_r","turn":{"id":"turn_resumed","status":"completed","items":[],"error":null}}}

@@ -1,0 +1,5 @@
+# A second text turn (different from the first). For message_queue / NATS testing.
+{"op":"expect","method":"session/prompt","defer":"p_par_next"}
+{"op":"notify","method":"session/update","params":{"sessionId":"sess_par1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"answered second"}}}}
+{"op":"notify","method":"session/update","params":{"sessionId":"sess_par1","update":{"sessionUpdate":"usage","totalInputTokens":80,"totalOutputTokens":20,"cacheReadTokens":0,"cacheWriteTokens":0}}}
+{"op":"reply","to":"p_par_next","result":{"stopReason":"end_turn"}}

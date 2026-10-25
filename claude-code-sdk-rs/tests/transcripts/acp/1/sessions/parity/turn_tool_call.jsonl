@@ -1,0 +1,10 @@
+# A turn with a tool call that needs permission (request_permission).
+# Exercises: permissions.once, tool_timing, po_tools.
+{"op":"expect","method":"session/prompt","defer":"p_par2"}
+{"op":"notify","method":"session/update","params":{"sessionId":"sess_par1","update":{"sessionUpdate":"tool_call","toolCallId":"call_par1","title":"Run echo parity","kind":"execute","status":"pending","rawInput":{"command":"echo parity"}}}}
+{"op":"server_request","id":"perm_par1","method":"session/request_permission","params":{"sessionId":"sess_par1","toolCall":{"toolCallId":"call_par1","title":"Run echo parity","kind":"execute","status":"pending","rawInput":{"command":"echo parity"}},"options":[{"optionId":"allow-once","name":"Allow once","kind":"allow_once"},{"optionId":"allow-always","name":"Always allow","kind":"allow_always"},{"optionId":"reject-once","name":"Reject","kind":"reject_once"}]}}
+{"op":"await_response","id":"perm_par1","expect":{"outcome":{"outcome":"selected","optionId":"allow-once"}}}
+{"op":"notify","method":"session/update","params":{"sessionId":"sess_par1","update":{"sessionUpdate":"tool_call_update","toolCallId":"call_par1","status":"completed","content":[{"type":"content","content":{"type":"text","text":"parity"}}]}}}
+{"op":"notify","method":"session/update","params":{"sessionId":"sess_par1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"Done."}}}}
+{"op":"notify","method":"session/update","params":{"sessionId":"sess_par1","update":{"sessionUpdate":"usage","totalInputTokens":80,"totalOutputTokens":20,"cacheReadTokens":0,"cacheWriteTokens":0}}}
+{"op":"reply","to":"p_par2","result":{"stopReason":"end_turn"}}

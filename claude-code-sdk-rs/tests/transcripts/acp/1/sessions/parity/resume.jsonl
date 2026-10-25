@@ -1,0 +1,11 @@
+# Session resume via session/load: replays history then a new turn.
+# Exercises: resume.
+{"op":"include","file":"../handshake.jsonl"}
+{"op":"expect","method":"session/load","defer":"l_par"}
+{"op":"notify","method":"session/update","params":{"sessionId":"sess_par_prev","update":{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"earlier question"}}}}
+{"op":"notify","method":"session/update","params":{"sessionId":"sess_par_prev","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"earlier answer"}}}}
+{"op":"reply","to":"l_par","result":null}
+{"op":"expect","method":"session/prompt","defer":"p_par_resumed"}
+{"op":"notify","method":"session/update","params":{"sessionId":"sess_par_prev","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"resumed ok"}}}}
+{"op":"notify","method":"session/update","params":{"sessionId":"sess_par_prev","update":{"sessionUpdate":"usage","totalInputTokens":40,"totalOutputTokens":10,"cacheReadTokens":0,"cacheWriteTokens":0}}}
+{"op":"reply","to":"p_par_resumed","result":{"stopReason":"end_turn"}}

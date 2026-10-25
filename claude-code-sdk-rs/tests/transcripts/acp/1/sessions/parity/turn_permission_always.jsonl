@@ -1,0 +1,9 @@
+# A turn with a tool call granted "always". Exercises: permissions.always.
+{"op":"expect","method":"session/prompt","defer":"p_par3"}
+{"op":"notify","method":"session/update","params":{"sessionId":"sess_par1","update":{"sessionUpdate":"tool_call","toolCallId":"call_par2","title":"Run cat always.txt","kind":"execute","status":"pending","rawInput":{"command":"cat always.txt"}}}}
+{"op":"server_request","id":"perm_par2","method":"session/request_permission","params":{"sessionId":"sess_par1","toolCall":{"toolCallId":"call_par2","title":"Run cat always.txt","kind":"execute","status":"pending","rawInput":{"command":"cat always.txt"}},"options":[{"optionId":"allow-once","name":"Allow once","kind":"allow_once"},{"optionId":"allow-always","name":"Always allow","kind":"allow_always"},{"optionId":"reject-once","name":"Reject","kind":"reject_once"}]}}
+{"op":"await_response","id":"perm_par2","expect":{"outcome":{"outcome":"selected","optionId":"allow-always"}}}
+{"op":"notify","method":"session/update","params":{"sessionId":"sess_par1","update":{"sessionUpdate":"tool_call_update","toolCallId":"call_par2","status":"completed","content":[{"type":"content","content":{"type":"text","text":"always content"}}]}}}
+{"op":"notify","method":"session/update","params":{"sessionId":"sess_par1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"Read always."}}}}
+{"op":"notify","method":"session/update","params":{"sessionId":"sess_par1","update":{"sessionUpdate":"usage","totalInputTokens":120,"totalOutputTokens":30,"cacheReadTokens":0,"cacheWriteTokens":0}}}
+{"op":"reply","to":"p_par3","result":{"stopReason":"end_turn"}}

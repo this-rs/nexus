@@ -1,0 +1,7 @@
+# A turn that stalls until the client sends session/cancel.
+# Exercises: message_queue, nats.interrupt, cancel_tools.
+{"op":"expect","method":"session/prompt","defer":"p_par4"}
+{"op":"notify","method":"session/update","params":{"sessionId":"sess_par1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"still thinking..."}}}}
+# The test sends session/cancel here; we wait for it.
+{"op":"expect","method":"session/cancel","reply":{}}
+{"op":"reply","to":"p_par4","result":{"stopReason":"cancelled"}}

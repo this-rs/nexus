@@ -1,0 +1,10 @@
+# A turn that stalls (long sleep) until the client sends turn/interrupt.
+# Exercises: message_queue, nats.interrupt.
+{"op":"expect","method":"turn/start","reply":{"turn":{"id":"turn_par4","status":"inProgress","items":[],"error":null}}}
+{"op":"notify","method":"turn/started","params":{"threadId":"thr_par1","turn":{"id":"turn_par4","status":"inProgress","items":[],"error":null}}}
+{"op":"notify","method":"item/started","params":{"threadId":"thr_par1","turnId":"turn_par4","item":{"type":"agentMessage","id":"msg_par4","text":""}}}
+{"op":"notify","method":"item/agentMessage/delta","params":{"threadId":"thr_par1","turnId":"turn_par4","itemId":"msg_par4","delta":"still thinking..."}}
+# The test sends turn/interrupt here; we wait for it.
+{"op":"expect","method":"turn/interrupt","reply":{}}
+{"op":"notify","method":"item/completed","params":{"threadId":"thr_par1","turnId":"turn_par4","item":{"type":"agentMessage","id":"msg_par4","text":"still thinking..."}}}
+{"op":"notify","method":"turn/completed","params":{"threadId":"thr_par1","turn":{"id":"turn_par4","status":"completed","items":[],"error":null}}}

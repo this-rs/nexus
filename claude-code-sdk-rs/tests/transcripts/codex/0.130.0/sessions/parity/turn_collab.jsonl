@@ -1,0 +1,13 @@
+# A turn with a collabToolCall (sub-agent): spawns a child thread.
+# Exercises: subagents.
+{"op":"expect","method":"turn/start","reply":{"turn":{"id":"turn_par6","status":"inProgress","items":[],"error":null}}}
+{"op":"notify","method":"turn/started","params":{"threadId":"thr_par1","turn":{"id":"turn_par6","status":"inProgress","items":[],"error":null}}}
+{"op":"notify","method":"item/started","params":{"threadId":"thr_par1","turnId":"turn_par6","item":{"type":"collabToolCall","id":"collab_par1","tool":"spawn_agent","status":"inProgress","senderThreadId":"thr_par1","prompt":"find the spec"}}}
+{"op":"notify","method":"item/started","params":{"threadId":"thr_child_par","turnId":"turn_c_par","item":{"type":"agentMessage","id":"msg_c_par","text":""}}}
+{"op":"notify","method":"item/completed","params":{"threadId":"thr_child_par","turnId":"turn_c_par","item":{"type":"agentMessage","id":"msg_c_par","text":"child found the spec"}}}
+{"op":"notify","method":"turn/completed","params":{"threadId":"thr_child_par","turn":{"id":"turn_c_par","status":"completed","items":[],"error":null}}}
+{"op":"notify","method":"item/completed","params":{"threadId":"thr_par1","turnId":"turn_par6","item":{"type":"collabToolCall","id":"collab_par1","tool":"spawn_agent","status":"completed","senderThreadId":"thr_par1","newThreadId":"thr_child_par","prompt":"find the spec"}}}
+{"op":"notify","method":"item/started","params":{"threadId":"thr_par1","turnId":"turn_par6","item":{"type":"agentMessage","id":"msg_par6","text":""}}}
+{"op":"notify","method":"item/completed","params":{"threadId":"thr_par1","turnId":"turn_par6","item":{"type":"agentMessage","id":"msg_par6","text":"The sub-agent reported."}}}
+{"op":"notify","method":"thread/tokenUsage/updated","params":{"threadId":"thr_par1","turnId":"turn_par6","tokenUsage":{"total":{"totalTokens":310000,"inputTokens":260000,"cachedInputTokens":0,"outputTokens":50000,"reasoningOutputTokens":0},"last":{"totalTokens":50000,"inputTokens":10000,"cachedInputTokens":0,"outputTokens":40000,"reasoningOutputTokens":0},"modelContextWindow":272000}}}
+{"op":"notify","method":"turn/completed","params":{"threadId":"thr_par1","turn":{"id":"turn_par6","status":"completed","items":[],"error":null}}}

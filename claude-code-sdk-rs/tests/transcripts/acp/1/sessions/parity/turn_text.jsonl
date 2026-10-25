@@ -1,0 +1,5 @@
+# A simple text-only turn. Exercises: enrichment, refs, session_record.
+{"op":"expect","method":"session/prompt","defer":"p_par1"}
+{"op":"notify","method":"session/update","params":{"sessionId":"sess_par1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"parity text from acp"}}}}
+{"op":"notify","method":"session/update","params":{"sessionId":"sess_par1","update":{"sessionUpdate":"usage","totalInputTokens":40,"totalOutputTokens":10,"cacheReadTokens":0,"cacheWriteTokens":0}}}
+{"op":"reply","to":"p_par1","result":{"stopReason":"end_turn"}}
