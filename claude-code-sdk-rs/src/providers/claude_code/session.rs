@@ -50,6 +50,9 @@ use super::map_events::{MapState, compaction_trigger, map_message, permission_ev
 use super::options::{ClaudeCodeConfig, build_options, ignored_extension_keys};
 use super::policy_map::{canonical_name, neutral_to_native, tool_category};
 use super::tasks::{TaskTable, task_from_tool_call};
+// The rule and the key of a consent about a SUBJECT (N23b): harness-neutral, shared with the
+// native engine, which asks the same question through its own in-band channel.
+use crate::agent::consent::{ConsentRoute, consent_key, consent_route};
 use crate::agent::{
     AgentEvent, AgentProvider, AgentSession, BackgroundTaskStatus, CancelOutcome, CancelScope,
     Capabilities, CompactionInfo, CompactionPhase, CostBasis, EventStream, HealthStatus, HookReply,
@@ -353,7 +356,26 @@ struct PendingPermission {
     input: Value,
     /// The CLI's suggestions for a lasting approval.
     suggestions: Option<Value>,
+    /// The tool the CLI asks about: a consent is kept as `tool` (an ordinary approval) or
+    /// `tool\u{0}subject` ([`consent_key`]).
+    tool: String,
+    /// What the ask is about when a HOOK sent it here (`HookVerdict::RequireConsent`, N23b):
+    /// the origin, the host. `Some` makes the answer the harness's own — see [`answer_line`].
+    subject: Option<String>,
 }
+
+/// A consent question the hook raised about one call, waiting for the CLI's own permission
+/// request for that very call: the CLI's asking channel has no room for a subject, so the
+/// façade carries it from the hook to the answer itself.
+struct ConsentAsk {
+    tool: String,
+    input: Value,
+    subject: String,
+}
+
+/// Unanswered consent asks kept at once: a hook that asked for a call the CLI never requested
+/// leaves its entry behind, and a session must not grow on it.
+const CONSENT_ASK_CAPACITY: usize = 8;
 
 struct State {
     closed: bool,
@@ -366,6 +388,13 @@ struct State {
     out_of_band_taken: bool,
     map: MapState,
     pending: HashMap<String, PendingPermission>,
+    /// What a person allowed for THIS session (N23b): a tool name for an ordinary approval, a
+    /// [`consent_key`] (tool + subject) for one about an origin. The façade's own memory, never
+    /// the CLI's settings: a `session` answer is a scope of the conversation, and the CLI's
+    /// allow rules match looser forms than the subject the person was shown.
+    approved: HashSet<String>,
+    /// The consent questions raised by the hook and not yet matched to a permission request.
+    consent_asks: Vec<ConsentAsk>,
     /// Identifiers of the `tool_call`s emitted so far.
     tool_calls: HashSet<String>,
     session_started: bool,
@@ -455,6 +484,8 @@ impl Core {
                 out_of_band_taken: false,
                 map: MapState::with_cost_basis(cost_basis),
                 pending: HashMap::new(),
+                approved: HashSet::new(),
+                consent_asks: Vec::new(),
                 tool_calls: HashSet::new(),
                 session_started: false,
                 session_id: None,
@@ -571,6 +602,37 @@ impl Core {
     fn emit(&self, event: AgentEvent) {
         self.lock().route(event);
         self.wake.notify_waiters();
+    }
+
+    /// Whether a person already allowed **this** tool on **this** subject for the session
+    /// (N23b). Tool and subject together: a `session` answer for one origin never covers the
+    /// next one.
+    fn consented(&self, tool: &str, subject: &str) -> bool {
+        self.lock().approved.contains(&consent_key(tool, subject))
+    }
+
+    /// Notes that the hook asked a person about `subject` for this exact call, so the CLI's
+    /// permission request that follows is recognised as the consent answer it is: the CLI's
+    /// asking channel carries a tool and its input, never a subject.
+    fn note_consent_ask(&self, tool: &str, input: &Value, subject: &str) {
+        let mut state = self.lock();
+        if state.consent_asks.len() >= CONSENT_ASK_CAPACITY {
+            state.consent_asks.remove(0);
+        }
+        state.consent_asks.push(ConsentAsk {
+            tool: tool.to_owned(),
+            input: input.clone(),
+            subject: subject.to_owned(),
+        });
+    }
+
+    /// The subject a hook asked about for this very call, taken out: one ask is answered once.
+    fn take_consent_ask(state: &mut State, tool: &str, input: &Value) -> Option<String> {
+        let index = state
+            .consent_asks
+            .iter()
+            .position(|ask| ask.tool == tool && ask.input == *input)?;
+        Some(state.consent_asks.remove(index).subject)
     }
 
     /// `Closed` after `close()`, `ProcessExited` once the CLI is gone.
@@ -730,6 +792,7 @@ impl Core {
         });
         state.dead = true;
         state.pending.clear();
+        state.consent_asks.clear();
         drop(state);
         self.wake.notify_waiters();
     }
@@ -751,11 +814,17 @@ impl Core {
                 {
                     request.tool_use_id = None;
                 }
+                // The tool name the CLI names is the one the hook saw (`pre.tool_name`), so a
+                // consent question raised for this very call is found by tool AND input.
+                let subject =
+                    Core::take_consent_ask(&mut state, &request.tool_name, &request.input);
                 state.pending.insert(
                     request.request_id.clone(),
                     PendingPermission {
                         input: request.input.clone(),
                         suggestions: request.permission_suggestions.clone(),
+                        tool: request.tool_name.clone(),
+                        subject,
                     },
                 );
             }
@@ -890,6 +959,85 @@ async fn on_control(
 // Hooks
 // ---------------------------------------------------------------------------
 
+/// What a `session` answer about a subject is remembered under, if any (N23b): the consent key of
+/// the tool and its subject, or `None` when the answer is not a session approval about a subject
+/// (an ordinary tool approval stays the CLI's and the backend's business).
+fn session_consent(pending: &PendingPermission, decision: &PermissionDecision) -> Option<String> {
+    match (decision, &pending.subject) {
+        (
+            PermissionDecision::Allow {
+                scope: PermissionScope::Session,
+                ..
+            },
+            Some(subject),
+        ) => Some(consent_key(&pending.tool, subject)),
+        _ => None,
+    }
+}
+
+/// The line answering the CLI's permission request `pending` with `decision`, and whether the
+/// turn must be interrupted. Pure, so the rule is tested without a CLI.
+///
+/// Two rules, in order:
+///
+/// * An answer about a SUBJECT (a hook asked a human about an origin, N23b) is the harness's own,
+///   never the CLI's. Nothing is promoted into the CLI's settings, which hold rules about a WHOLE
+///   tool: allowing `WebSearch` there would open every engine and every later page, where the
+///   person answered about one origin. A `session` answer is remembered by `answer_permission`
+///   for that tool and that subject; an `always` answer was already written by the orchestrator
+///   in the project's consent document — one store, the one the settings route writes. The call
+///   runs, once.
+/// * Otherwise the CLI's own suggestions carry the scope (`once`/`session`/`always`), and a scope
+///   it gave no suggestion for is `Unsupported` rather than silently downgraded to a plain allow.
+fn answer_line(
+    request_id: &str,
+    pending: &PendingPermission,
+    decision: &PermissionDecision,
+) -> Result<(String, bool), ProviderError> {
+    match decision {
+        PermissionDecision::Allow {
+            scope,
+            updated_input,
+        } => {
+            // No replacement: the original input is replayed (§15.1).
+            let input = updated_input.as_ref().unwrap_or(&pending.input);
+            if pending.subject.is_some() {
+                return Ok((control::permission_allow(request_id, input), false));
+            }
+            let destination = match scope {
+                PermissionScope::Session => Some("session"),
+                PermissionScope::Always => Some("localSettings"),
+                _ => None,
+            };
+            let updates = destination.and_then(|destination| {
+                control::scoped_permission_updates(pending.suggestions.as_ref(), destination)
+            });
+            // Session/Always without CLI suggestions: the scope cannot be honoured — the CLI gave
+            // no `permission_suggestions` to promote. The caller re-inserts the request so it can
+            // be retried with `Once`, and the answer is a typed error, never a silent allow.
+            if destination.is_some() && updates.is_none() {
+                return Err(ProviderError::unsupported("permission_scope"));
+            }
+            Ok((
+                match updates {
+                    Some(updates) => {
+                        control::permission_allow_with_updates(request_id, input, &updates)
+                    },
+                    None => control::permission_allow(request_id, input),
+                },
+                false,
+            ))
+        },
+        PermissionDecision::Deny { message, interrupt } => Ok((
+            control::permission_deny(request_id, message.as_deref()),
+            *interrupt,
+        )),
+        // `PermissionDecision` is `#[non_exhaustive]`.
+        #[allow(unreachable_patterns)]
+        _ => Err(ProviderError::unsupported("permission_decision")),
+    }
+}
+
 /// The one callback registered for `PreToolUse`, `PostToolUse` and `PreCompact`:
 /// it calls the host's neutral [`SessionHooks`] and translates the verdict.
 struct NeutralHook {
@@ -939,14 +1087,35 @@ impl HookCallback for NeutralHook {
                     HookVerdict::Deny { reason } => decided(Some("deny"), Some(reason), None, None),
                     HookVerdict::ReplaceInput(input) => decided(None, None, Some(input), None),
                     HookVerdict::AddContext(context) => decided(None, None, None, Some(context)),
-                    // A hook asks a human to consent to a subject (N23b). This façade has no
-                    // in-band answer of its own on the hook path — the CLI's own permission flow
-                    // is the only asking channel — so it refuses rather than let the call run:
-                    // a `Continue` here would be a silent allow. The in-band question exists on
-                    // the native harness (`providers::native::r#loop`); parity for this façade is
-                    // a separate task.
-                    HookVerdict::RequireConsent { reason, .. } => {
-                        decided(Some("deny"), Some(reason), None, None)
+                    // A hook asks a human to consent to a SUBJECT (N23b): the origin a call would
+                    // reach. The rule is the native harness's (`consent_route`), applied to this
+                    // façade's own asking channel — the CLI's permission flow, which is the only
+                    // one Claude Code has.
+                    //
+                    // `ask` is the CLI's "a human decides": it turns into the CLI's own permission
+                    // prompt, which this adapter relays as a `permission_request` and the
+                    // orchestrator shows as a consent card. The subject travels in the façade
+                    // (`note_consent_ask`), because the CLI's request carries a tool and its
+                    // input, never a subject; `answer_line` then keeps the answer where it
+                    // belongs.
+                    //
+                    // Never `Continue` (that would be a silent allow) and never `allow` unless a
+                    // person already answered `session` for this very tool and subject.
+                    HookVerdict::RequireConsent { subject, reason } => {
+                        match consent_route(
+                            self.core.consented(&call.name, &subject),
+                            self.core.capabilities.interactive_permissions,
+                        ) {
+                            ConsentRoute::Approved => decided(Some("allow"), None, None, None),
+                            ConsentRoute::Ask => {
+                                self.core
+                                    .note_consent_ask(&call.name, &call.input, &subject);
+                                decided(Some("ask"), Some(reason), None, None)
+                            },
+                            ConsentRoute::Refused => {
+                                decided(Some("deny"), Some(reason), None, None)
+                            },
+                        }
                     },
                     // `Continue`, and any verdict a later contract adds.
                     _ => sync_output(None),
@@ -1371,49 +1540,25 @@ impl AgentSession for ClaudeCodeSession {
             {
                 return Err(ProviderError::unsupported("permission_scope"));
             }
-            state.pending.remove(request_id).ok_or_else(|| {
+            let pending = state.pending.remove(request_id).ok_or_else(|| {
                 ProviderError::invalid("unknown permission request, or one already answered")
-            })?
+            })?;
+            // An answer about a SUBJECT is remembered here, for that tool and that subject only
+            // (N23b): the CLI's `can_use_tool` carries no subject, so its own settings could only
+            // keep a rule about the whole tool — one page complicit for every other page. The
+            // rule of the hook (which asks again next time) reads this map.
+            if let Some(key) = session_consent(&pending, &decision) {
+                state.approved.insert(key);
+            }
+            pending
         };
-        let (line, interrupt) = match &decision {
-            PermissionDecision::Allow {
-                scope,
-                updated_input,
-            } => {
-                // No replacement: the original input is replayed (§15.1).
-                let input = updated_input.as_ref().unwrap_or(&pending.input);
-                let destination = match scope {
-                    PermissionScope::Session => Some("session"),
-                    PermissionScope::Always => Some("localSettings"),
-                    _ => None,
-                };
-                let updates = destination.and_then(|destination| {
-                    control::scoped_permission_updates(pending.suggestions.as_ref(), destination)
-                });
-                // Session/Always without CLI suggestions: the scope cannot be
-                // honoured — the CLI gave no `permission_suggestions` to promote.
-                // Re-insert the request (it was already removed) so the caller
-                // can retry with `Once`, then return a typed error instead of
-                // silently downgrading to a plain §15.1 allow.
-                if destination.is_some() && updates.is_none() {
-                    core.lock().pending.insert(request_id.to_owned(), pending);
-                    return Err(ProviderError::unsupported("permission_scope"));
-                }
-                let line = match updates {
-                    Some(updates) => {
-                        control::permission_allow_with_updates(request_id, input, &updates)
-                    },
-                    None => control::permission_allow(request_id, input),
-                };
-                (line, false)
+        let (line, interrupt) = match answer_line(request_id, &pending, &decision) {
+            Ok(answered) => answered,
+            Err(error) => {
+                // Not answered: the request can be answered again.
+                core.lock().pending.insert(request_id.to_owned(), pending);
+                return Err(error);
             },
-            PermissionDecision::Deny { message, interrupt } => (
-                control::permission_deny(request_id, message.as_deref()),
-                *interrupt,
-            ),
-            // `PermissionDecision` is `#[non_exhaustive]`.
-            #[allow(unreachable_patterns)]
-            _ => return Err(ProviderError::unsupported("permission_decision")),
         };
         if let Err(error) = core.write(line).await {
             // Not answered: the request can be answered again.
@@ -1634,6 +1779,7 @@ mod tests {
     use super::*;
     use crate::agent::PolicyMode;
     use crate::agent::StopReason;
+    use crate::types::PreToolUseHookInput;
 
     fn core() -> Arc<Core> {
         Arc::new(Core::new(
@@ -2017,5 +2163,198 @@ mod tests {
             .collect();
         assert_eq!(links, [None, Some("toolu_1".to_owned())]);
         assert!(state.pending.contains_key("r1") && state.pending.contains_key("r2"));
+    }
+    // ---------------------------------------------------------------------------------------
+    // N23b — a consent about a SUBJECT, asked through the CLI's own permission channel.
+    // ---------------------------------------------------------------------------------------
+
+    /// The origin a network call would reach: asserted by the harness (the orchestrator's gate),
+    /// never read from the model's text.
+    const ORIGIN: &str = "https://html.duckduckgo.com";
+
+    /// A hook that answers every call with one verdict.
+    struct ConsentVerdict(HookVerdict);
+
+    #[async_trait]
+    impl SessionHooks for ConsentVerdict {
+        async fn before_tool(&self, _call: &ToolCallInfo) -> HookVerdict {
+            self.0.clone()
+        }
+    }
+
+    fn consent_hook(core: &Arc<Core>) -> NeutralHook {
+        NeutralHook {
+            hooks: Arc::new(ConsentVerdict(HookVerdict::RequireConsent {
+                subject: ORIGIN.to_owned(),
+                reason: format!("tool_origin_not_allowed: no consent to the origin {ORIGIN}"),
+            })),
+            core: Arc::clone(core),
+        }
+    }
+
+    /// The decision the façade writes on the wire for one `WebSearch` call, and its reason.
+    async fn pre_tool_reply(core: &Arc<Core>) -> (Option<String>, Option<String>) {
+        let input = HookInput::PreToolUse(PreToolUseHookInput {
+            session_id: "s".to_owned(),
+            transcript_path: String::new(),
+            cwd: "/tmp".to_owned(),
+            permission_mode: None,
+            tool_name: "WebSearch".to_owned(),
+            tool_input: json!({ "query": "cve-2026-43499" }),
+            agent_id: None,
+            agent_type: None,
+        });
+        let output = consent_hook(core)
+            .execute(&input, Some("tu1"), &HookContext { signal: None })
+            .await
+            .expect("the hook answers");
+        let HookJSONOutput::Sync(sync) = output else {
+            panic!("the façade answers synchronously");
+        };
+        let Some(HookSpecificOutput::PreToolUse(pre)) = sync.hook_specific_output else {
+            panic!("a PreToolUse verdict is answered as a PreToolUse output");
+        };
+        (pre.permission_decision, pre.permission_decision_reason)
+    }
+
+    /// A consent question becomes the CLI ASKING a human — never `allow` (a silent open) and
+    /// never `continue` (the CLI's own policy, which allows WebSearch by default) — and the
+    /// subject travels with it, because the CLI's permission request carries none.
+    #[tokio::test]
+    async fn a_consent_question_becomes_the_cli_asking_and_carries_its_subject() {
+        let core = core();
+        let (decision, reason) = pre_tool_reply(&core).await;
+        assert_eq!(
+            decision.as_deref(),
+            Some("ask"),
+            "a human decides; the façade never opens the network itself"
+        );
+        assert!(
+            reason
+                .unwrap_or_default()
+                .starts_with("tool_origin_not_allowed:"),
+            "the model and the card read the same reason"
+        );
+        let state = core.lock();
+        assert_eq!(
+            state.consent_asks.len(),
+            1,
+            "the ask waits for the CLI's request"
+        );
+        assert_eq!(state.consent_asks[0].subject, ORIGIN);
+        assert_eq!(state.consent_asks[0].tool, "WebSearch");
+    }
+
+    /// A `session` answer for one origin stops the question for THAT origin, and for no other:
+    /// two origins are two consents.
+    #[tokio::test]
+    async fn a_session_answer_covers_its_origin_and_never_the_next_one() {
+        let approved = core();
+        approved
+            .lock()
+            .approved
+            .insert(consent_key("WebSearch", ORIGIN));
+        let (decision, reason) = pre_tool_reply(&approved).await;
+        assert_eq!(decision.as_deref(), Some("allow"));
+        assert_eq!(reason, None, "nothing left to explain");
+        assert!(
+            approved.lock().consent_asks.is_empty(),
+            "no question raised, so nothing to remember for an answer"
+        );
+
+        // Another origin of the same tool is another question.
+        let other = core();
+        other
+            .lock()
+            .approved
+            .insert(consent_key("WebSearch", "https://example.com"));
+        let (decision, _) = pre_tool_reply(&other).await;
+        assert_eq!(
+            decision.as_deref(),
+            Some("ask"),
+            "a consent for example.com says nothing about duckduckgo"
+        );
+    }
+
+    /// A session where nobody can be asked REFUSES: a token session, a delegation, a runner.
+    #[tokio::test]
+    async fn nobody_to_ask_means_a_refusal_and_never_a_silent_allow() {
+        let mut capabilities = ClaudeCodeConfig::default().capabilities(None);
+        capabilities.interactive_permissions = false;
+        let core = Arc::new(Core::new(capabilities, CostBasis::Reported));
+        let (decision, reason) = pre_tool_reply(&core).await;
+        assert_eq!(decision.as_deref(), Some("deny"), "fail closed");
+        assert!(reason.is_some(), "the model reads why");
+        assert!(
+            core.lock().consent_asks.is_empty(),
+            "nobody was asked, so no answer is coming"
+        );
+    }
+
+    fn pending(subject: Option<String>) -> PendingPermission {
+        PendingPermission {
+            input: json!({ "query": "cve-2026-43499" }),
+            suggestions: None,
+            tool: "WebSearch".to_owned(),
+            subject,
+        }
+    }
+
+    fn allowing(scope: PermissionScope) -> PermissionDecision {
+        PermissionDecision::Allow {
+            scope,
+            updated_input: None,
+        }
+    }
+
+    /// An answer about an origin never becomes a rule on the WHOLE tool in the CLI's settings:
+    /// the call runs once, and a `session` answer is kept by the façade, against that origin.
+    #[test]
+    fn an_answer_about_an_origin_never_becomes_a_rule_on_the_whole_tool() {
+        let session = allowing(PermissionScope::Session);
+        let (line, interrupt) = answer_line("r1", &pending(Some(ORIGIN.to_owned())), &session)
+            .expect("a subject is answered without any CLI suggestion");
+        assert!(!interrupt);
+        assert!(line.contains(r#""behavior":"allow""#), "{line}");
+        assert!(
+            !line.contains("updatedPermissions"),
+            "no `WebSearch` rule is written into the CLI's settings: {line}"
+        );
+        assert_eq!(
+            session_consent(&pending(Some(ORIGIN.to_owned())), &session),
+            Some(consent_key("WebSearch", ORIGIN)),
+            "the scope the person chose is remembered for that tool and that origin"
+        );
+        assert_eq!(
+            session_consent(
+                &pending(Some(ORIGIN.to_owned())),
+                &allowing(PermissionScope::Once)
+            ),
+            None,
+            "once remembers nothing"
+        );
+        assert_eq!(
+            session_consent(&pending(None), &session),
+            None,
+            "an ordinary approval keeps its own path"
+        );
+    }
+
+    /// Where the CLI gave no suggestion, a scope it cannot carry is a typed refusal, not a silent
+    /// downgrade to a plain allow.
+    #[test]
+    fn a_scope_the_cli_cannot_carry_is_refused_rather_than_downgraded() {
+        assert!(matches!(
+            answer_line("r1", &pending(None), &allowing(PermissionScope::Session)),
+            Err(ProviderError::Unsupported { .. })
+        ));
+        assert!(matches!(
+            answer_line("r1", &pending(None), &allowing(PermissionScope::Always)),
+            Err(ProviderError::Unsupported { .. })
+        ));
+        assert!(
+            answer_line("r1", &pending(None), &allowing(PermissionScope::Once)).is_ok(),
+            "once needs no suggestion"
+        );
     }
 }

@@ -23,6 +23,7 @@ use futures::{Stream, StreamExt};
 use serde::{Deserialize, Serialize};
 
 pub mod capabilities;
+pub(crate) mod consent;
 pub mod credentials;
 pub mod error;
 pub mod event;
