@@ -506,6 +506,27 @@ async fn nobody_logged_in_is_auth_required_with_the_command_to_run_and_nothing_i
     assert!(!codex_home.exists());
 }
 
+/// No `auth.json` in the home, but `codex login status` says logged in (a login
+/// kept elsewhere, or a token the file test cannot judge): the login counts.
+#[tokio::test]
+async fn a_login_reported_by_codex_login_status_counts_without_an_auth_json() {
+    let home = tempfile::tempdir().unwrap();
+    let mut config = config(home.path());
+    config
+        .env_set
+        .insert("FAKE_CODEX_VERSION".to_owned(), "0.162.1".to_owned());
+    config
+        .env_set
+        .insert("FAKE_CODEX_LOGGED_IN".to_owned(), "1".to_owned());
+    config.env_set.insert(
+        "FAKE_CODEX_TRANSCRIPT".to_owned(),
+        transcript("health_probe").display().to_string(),
+    );
+    assert!(!home.path().join("auth.json").exists());
+    let health = CodexProvider::new(config).health().await;
+    assert_eq!(health.status, HealthStatus::Ok, "{health:?}");
+}
+
 // ---------------------------------------------------------------------------
 // CODEX_HOME
 // ---------------------------------------------------------------------------

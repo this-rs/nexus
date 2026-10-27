@@ -12,6 +12,9 @@
 //!
 //! * `fake_codex --version` prints `codex-cli <version>`; the version is
 //!   `FAKE_CODEX_VERSION`, else the first line of `<exe>.version`, else `0.130.0`.
+//! * `fake_codex login status` exits 0 (`Logged in using ChatGPT`) when
+//!   `FAKE_CODEX_LOGGED_IN` is set or `<CODEX_HOME>/auth.json` exists, else 1
+//!   (`Not logged in`), like the real CLI.
 //! * `fake_codex [-c key=value]… app-server` plays the transcript. Without
 //!   `app-server` in its arguments it fails like an old `codex` (exit 2).
 //!
@@ -22,6 +25,7 @@
 //! | `FAKE_CODEX_TRANSCRIPT` | path of the transcript to play (required for `app-server`) |
 //! | `FAKE_CODEX_RECORD` | path of the recording (JSON lines), written as things happen |
 //! | `FAKE_CODEX_CANARY` | a secret the test knows: the fake never writes it, it records whether it **saw** it (argv, stdin line, an environment value other than `CODEX_API_KEY`) |
+//! | `FAKE_CODEX_LOGGED_IN` | when set, `login status` answers "logged in" even without an `auth.json` |
 //! | `FAKE_CODEX_WAIT_MS` | default timeout of the waiting directives (default 10000) |
 //! | `FAKE_CODEX_MAX_RUNTIME_MS` | watchdog: kill the children and exit 98 after this long (default 30000) |
 //!
@@ -457,6 +461,17 @@ fn main() {
     if args.iter().any(|arg| arg == "--version") {
         println!("codex-cli {}", version());
         return;
+    }
+    if args.first().map(String::as_str) == Some("login") {
+        let auth_file = std::env::var_os("CODEX_HOME")
+            .map(|home| std::path::PathBuf::from(home).join("auth.json"))
+            .is_some_and(|path| path.is_file());
+        if std::env::var_os("FAKE_CODEX_LOGGED_IN").is_some() || auth_file {
+            println!("Logged in using ChatGPT");
+            return;
+        }
+        println!("Not logged in");
+        std::process::exit(1);
     }
     if !args.iter().any(|arg| arg == "app-server") {
         eprintln!("error: unrecognized subcommand (this codex has no `app-server`)");
