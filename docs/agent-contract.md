@@ -605,7 +605,8 @@ jetable, sans connexion ni appel de modèle : `tests/codex_real.rs`, ignoré, `N
 `PROVENANCE.md`). Cela a trouvé un bug que le faux exécutable cachait : `sandbox` de `thread/start` est en
 **kebab-case** (`workspace-write`), le serveur refusait `workspaceWrite` (`-32600`) ; `turn/start` garde son
 objet `sandboxPolicy` en camelCase. **Aucun tour réel, aucun appel d'outil réel, aucune approbation réelle** :
-cela exige une connexion dans le `CODEX_HOME` propre à l'instance, qu'un humain fait (A27) ; le reste est joué
+cela exige une connexion, qu'un humain fait (A27) — depuis le 27/10/2026 celle de la machine (`$CODEX_HOME`,
+sinon `~/.codex`), partagée par toutes les instances, donc aucun `CODEX_HOME` d'instance à remplir ; le reste est joué
 contre `fake_codex` et des transcriptions écrites depuis le README de `codex-rs/app-server` au tag
 `rust-v0.130.0` (`tests/transcripts/codex/0.130.0/schema/PROVENANCE.md` liste ce qui n'est PAS établi) :
 
@@ -644,7 +645,9 @@ contre `fake_codex` et des transcriptions écrites depuis le README de `codex-rs
   sur 0.162.1) par session — jamais le daemon partagé (`codex app-server daemon`, paquet 0.163.0) ni `codex
   app-server proxy --sock …`, dont le protocole est NON VÉRIFIÉ (une ligne `initialize` par le proxy n'obtient
   aucune réponse) —, lancé par `isolated_command` (liste blanche d'environnement,
-  `CODEX_HOME` et `CODEX_API_KEY` posés explicitement) ; `CODEX_HOME` persistant **par instance** (créé `0700`) ;
+  `CODEX_HOME` et `CODEX_API_KEY` posés explicitement) ; `CODEX_HOME` persistant, par défaut celui de la
+  **machine** (`$CODEX_HOME`, sinon `~/.codex`) — le `codex login` d'un terminal vaut alors pour toutes les
+  instances ; un home propre à l'instance reste possible (extension `codex_home`), créé `0700` ;
   serveurs MCP de la session par `-c mcp_servers.<nom>.…` (jamais de secret sur argv : `env_vars`,
   `bearer_token_env_var`, `env_http_headers` par nom de variable) ; `close` tue le processus **et ses
   descendants** (groupe de processus et table des processus).
@@ -655,12 +658,12 @@ contre `fake_codex` et des transcriptions écrites depuis le README de `codex-rs
   `Unsupported { app_server }`, avant toute résolution de clé ou tout lancement du serveur.
 - **`health()`** : `codex --version`, puis la connexion, puis (CODEX-163) un `codex app-server` jetable qui doit
   répondre à `initialize` (tué aussitôt ; ni `initialized`, ni thread, ni appel de modèle, ni clé dans son
-  environnement ; il crée le `CODEX_HOME` de l'instance s'il manque, le vrai serveur refusant un `CODEX_HOME`
+  environnement ; il crée le `CODEX_HOME` (de l'instance, ou celui de la machine) s'il manque, le vrai serveur refusant un `CODEX_HOME`
   absent) ; sans réponse → `Unavailable` typé (`process_exited`, `timeout`, `protocol`) avec la version et
   la raison, au lieu d'un « sain » qu'ouvrir une session démentirait ; version < `MIN_APP_SERVER_VERSION` (0.130.0) → `Unavailable`,
-  `error: Unsupported { app_server }` ; binaire absent → `cli_not_found` ; ni clé configurée ni
-  `<CODEX_HOME>/auth.json` → `auth_required` avec `login_hint` = `CODEX_HOME=<dir> codex login` (jamais exécutée,
-  A27).
+  `error: Unsupported { app_server }` ; binaire absent → `cli_not_found` ; ni clé configurée, ni
+  `<CODEX_HOME>/auth.json`, ni `codex login status` sorti 0 → `auth_required` avec `login_hint` = `codex login`
+  (home de la machine) ou `CODEX_HOME=<dir> codex login` (home propre), jamais exécutée (A27).
 - **Non vérifié** : un tour réel (connexion humaine requise, A27) ; la forme de `thread/tokenUsage/updated`, `_meta` de l'élicitation MCP et
   la réponse d'une approbation persistante, `-c` avant `app-server`, `CODEX_API_KEY` lue par `app-server`.
 
@@ -885,7 +888,9 @@ interdit dans `providers/`** (test de garde par recherche textuelle) :
   `EnvSpec.inherit` ; puis `EnvSpec.set`.
 - `HOME` dédié par instance pour tout provider hors Claude Code (Claude garde le `HOME` réel : son
   authentification y vit). Natif : un répertoire temporaire par serveur MCP. **Codex** :
-  `<CODEX_HOME>/home`, créé `0700` à l'ouverture. **ACP** : `AcpConfig::home` (défaut
+  `<CODEX_HOME>/home` quand l'instance a son propre home, sinon
+  `<données>/nexus/codex/<instance>/home` — jamais un répertoire dans le `~/.codex` de l'utilisateur —, créé
+  `0700` à l'ouverture. **ACP** : `AcpConfig::home` (défaut
   `<répertoire de données>/nexus/acp/<instance>/home`, extension de registre `acp_home`), créé `0700`
   avant le lancement ; un humain s'y connecte avec `HOME=<ce répertoire> <agent> login`. Avant le
   05/10/2026, Codex et ACP tournaient avec le `HOME` réel : écart relevé par la suite de sécurité

@@ -49,14 +49,26 @@
 //! - that `-c key=value` placed before the `app-server` subcommand is honoured;
 //! - that the server accepts `CODEX_API_KEY` from its environment;
 //! - that the events of a sub-agent thread reach this client (`collabToolCall`);
-//! - that `<CODEX_HOME>/auth.json` is where the login lives (used by `health`; what
-//!   is verified on 0.162.1 is only that the server STARTS with one present);
-//! - a real turn, tool call or approval: they need a login in the instance's home,
-//!   which a human does (A27).
+//! - a real turn, tool call or approval: they need a login, which a human does (A27).
 //!
-//! `health()` = `codex --version` ≥ [`MIN_APP_SERVER_VERSION`], a login, then a
-//! throwaway `app-server` that must answer `initialize` (killed right after; no
-//! thread, no model call, no credential handed to it).
+//! **VERIFIED on codex-cli 0.162.1** (27/10/2026): the login lives in
+//! `<CODEX_HOME>/auth.json` (`codex login status` says so), and `initialize` is
+//! answered without one.
+//!
+//! # Login: the machine's, shared
+//!
+//! By default `codex_home` is the machine's own Codex home ([`shared_codex_home`]:
+//! `$CODEX_HOME`, else `~/.codex`), so a `codex login` done in a terminal is the
+//! login of every instance. A per-instance home would hold its own copy of a
+//! rotating OAuth refresh token, and two copies invalidate each other. The
+//! instance's dedicated `HOME` (A33) stays under [`default_codex_home`] in that
+//! case: nothing of nexus is written inside the user's `~/.codex`. An operator may
+//! still set `codex_home` to a directory of their own (`codex_home` extension).
+//!
+//! `health()` = `codex --version` ≥ [`MIN_APP_SERVER_VERSION`], a login
+//! (`auth.json` present, else `codex login status` exits 0), then a throwaway
+//! `app-server` that must answer `initialize` (killed right after; no thread, no
+//! model call, no credential handed to it).
 //!
 //! # Capabilities (per model, contract §5)
 //!
@@ -165,7 +177,8 @@ pub struct CodexConfig {
     /// The `codex` program: a name looked up on `PATH`, or a path.
     pub program: PathBuf,
     /// `CODEX_HOME` of the instance: login, history and rollouts live there, so it
-    /// is persistent and **per instance**, never per session. Created `0700`.
+    /// is persistent, never per session. By default the machine's own
+    /// ([`shared_codex_home`]); a directory of nexus's own is created `0700`.
     pub codex_home: PathBuf,
     /// Model of a session that names none (`None`: Codex's own configured one).
     pub default_model: Option<String>,
@@ -209,12 +222,13 @@ impl std::fmt::Debug for CodexConfig {
 }
 
 impl CodexConfig {
-    /// A configuration with the defaults: `codex` on `PATH`, a home under the
-    /// user's data directory named after the instance, cost unknown.
+    /// A configuration with the defaults: `codex` on `PATH`, the machine's Codex
+    /// home (else one under the user's data directory named after the instance),
+    /// cost unknown.
     pub fn new(instance_id: impl Into<String>) -> Self {
         let instance_id = instance_id.into();
         Self {
-            codex_home: default_codex_home(&instance_id),
+            codex_home: shared_codex_home().unwrap_or_else(|| default_codex_home(&instance_id)),
             instance_id,
             program: PathBuf::from("codex"),
             default_model: None,
@@ -250,6 +264,16 @@ pub fn default_codex_home(instance_id: &str) -> PathBuf {
         .join("nexus")
         .join("codex")
         .join(instance_id)
+}
+
+/// The machine's own Codex home: `$CODEX_HOME` when set, else `~/.codex`. One login
+/// for the machine, so a Codex already connected there is connected for every
+/// instance (a per-instance home would hold its own copy of a rotating OAuth token).
+pub fn shared_codex_home() -> Option<PathBuf> {
+    if let Some(path) = std::env::var_os(CODEX_HOME_ENV).filter(|p| !p.is_empty()) {
+        return Some(PathBuf::from(path));
+    }
+    dirs::home_dir().map(|home| home.join(".codex"))
 }
 
 /// A numeric `major.minor.patch`, pre-release suffix ignored.
@@ -315,7 +339,12 @@ impl CodexProvider {
         &self.config
     }
 
+    /// What a human runs to log in: plain `codex login` when the instance shares the
+    /// machine's home, else the same with `CODEX_HOME` pointed at the instance's.
     fn login_command(&self) -> String {
+        if self.shares_machine_home() {
+            return "codex login".to_owned();
+        }
         format!(
             "{}={} codex login",
             CODEX_HOME_ENV,
@@ -327,7 +356,16 @@ impl CodexProvider {
     /// `CODEX_HOME`, and nothing else of the host user's dotfiles or credentials is
     /// reachable through `HOME`.
     fn instance_home(&self) -> std::path::PathBuf {
+        if self.shares_machine_home() {
+            // Never a directory inside the user's own `~/.codex`.
+            return default_codex_home(&self.config.instance_id).join("home");
+        }
         self.config.codex_home.join("home")
+    }
+
+    /// Whether `codex_home` is the machine's own Codex home (shared login).
+    fn shares_machine_home(&self) -> bool {
+        shared_codex_home().is_some_and(|shared| shared == self.config.codex_home)
     }
 
     fn base_policy(&self, extra: &[String]) -> EnvPolicy {
@@ -359,7 +397,13 @@ impl CodexProvider {
     /// Creates the instance's `CODEX_HOME` `0700` (and tightens an existing one).
     fn ensure_home(&self) -> Result<(), ProviderError> {
         let home = &self.config.codex_home;
-        create_private_dir(home).map_err(|error| {
+        // The user's own home keeps its mode: only create it when missing.
+        let made = if self.shares_machine_home() {
+            std::fs::create_dir_all(home)
+        } else {
+            create_private_dir(home)
+        };
+        made.map_err(|error| {
             ProviderError::protocol(format!(
                 "CODEX_HOME could not be created: {:?}",
                 error.kind()
@@ -418,8 +462,9 @@ impl CodexProvider {
         Ok(format!("{}.{}.{}", found.0, found.1, found.2))
     }
 
-    /// Whether somebody is logged in: a configured credential that resolves, or an
-    /// `auth.json` in the instance's home (NOT VERIFIED as the login's location).
+    /// Whether somebody is logged in: a configured credential that resolves, an
+    /// `auth.json` in `CODEX_HOME` (verified on 0.162.1 as the login's location), or
+    /// `codex login status` saying so.
     async fn logged_in(&self) -> Result<bool, ProviderError> {
         match self
             .resolver
@@ -431,7 +476,33 @@ impl CodexProvider {
             Err(ProviderError::CredentialsLocked) => return Err(ProviderError::CredentialsLocked),
             Err(_) => {},
         }
-        Ok(self.config.codex_home.join("auth.json").is_file())
+        if self.config.codex_home.join("auth.json").is_file() {
+            return Ok(true);
+        }
+        // No file: ask Codex itself (`codex login status`, exit 0 = logged in).
+        Ok(self.login_status().await)
+    }
+
+    /// `codex login status` against the instance's `CODEX_HOME`; any failure reads
+    /// as "not logged in".
+    async fn login_status(&self) -> bool {
+        let launch = Launch {
+            program: self.config.program.clone(),
+            args: vec!["login".to_owned(), "status".to_owned()],
+            env_policy: self.base_policy(&[]),
+            env: self.instance_env(),
+            cwd: std::env::current_dir().unwrap_or_else(|_| std::env::temp_dir()),
+        };
+        let mut command = transport::command(&launch);
+        command
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true);
+        matches!(
+            tokio::time::timeout(VERSION_TIMEOUT, command.status()).await,
+            Ok(Ok(status)) if status.success()
+        )
     }
 
     /// Starts `codex app-server` (stdio, the default `--listen stdio://`) the way
@@ -1043,6 +1114,32 @@ mod tests {
             home,
             Some(std::ffi::OsStr::new("/srv/nexus/codex-state/home"))
         );
+    }
+
+    /// Sharing the machine's `~/.codex` never puts nexus's `HOME` inside it.
+    #[test]
+    fn a_shared_codex_home_keeps_the_instance_home_out_of_the_users_dotfiles() {
+        let Some(shared) = shared_codex_home() else {
+            return;
+        };
+        let mut config = CodexConfig::new("shared-home");
+        config.codex_home = shared.clone();
+        let provider = CodexProvider::new(config);
+        assert!(provider.shares_machine_home());
+        let home = provider.instance_home();
+        assert!(!home.starts_with(&shared), "{home:?} is inside {shared:?}");
+        assert_eq!(home, default_codex_home("shared-home").join("home"));
+        assert_eq!(provider.login_command(), "codex login");
+
+        let mut own = CodexConfig::new("own-home");
+        own.codex_home = std::path::PathBuf::from("/srv/nexus/codex-state");
+        let provider = CodexProvider::new(own);
+        assert!(!provider.shares_machine_home());
+        assert_eq!(
+            provider.instance_home(),
+            std::path::PathBuf::from("/srv/nexus/codex-state/home")
+        );
+        assert!(provider.login_command().starts_with("CODEX_HOME="));
     }
 
     #[test]
