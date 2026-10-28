@@ -833,11 +833,15 @@ impl Core {
         }
         self.wake.notify_waiters();
         if question {
-            // §15.6: the tool is unblocked at once; the user's answer comes as
-            // a regular turn.
-            let line = control::permission_allow(&request.request_id, &request.input);
+            // §15.6: the question is posed and the turn ends on it; the user's answer
+            // comes as the next turn. Not an `allow`: that would let the model go on
+            // as if the user had not answered.
+            let line = control::permission_deny(
+                &request.request_id,
+                Some(control::QUESTION_POSED_MESSAGE),
+            );
             if let Err(error) = self.write(line).await {
-                warn!(%error, "AskUserQuestion could not be unblocked");
+                warn!(%error, "AskUserQuestion could not be closed");
             }
         }
     }

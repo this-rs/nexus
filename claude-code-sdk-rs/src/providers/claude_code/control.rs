@@ -30,11 +30,16 @@ fn control_response(request_id: &str, response: Value) -> String {
     .to_string()
 }
 
+/// Denial message for an `AskUserQuestion` request (§15.6). The question is posed to
+/// the user and the tool ends here: their answer comes as the next turn (`reply: turn`).
+///
+/// An `allow` without answers would be read by the CLI as "the user did not answer";
+/// the model then goes on without the answer (measured on Claude Code 2.1.310, Haiku 5.5).
+/// A denial with this message ends the turn, as the native engine does.
+pub const QUESTION_POSED_MESSAGE: &str = "The question was posed to the user. Their answer will arrive in their next message; do not guess it.";
+
 /// §15.1 — allows a `can_use_tool` request. `updated_input` is the input the tool
 /// runs with: the caller's replacement, or the original input replayed.
-///
-/// Also the form of §15.6 (automatic answer to `AskUserQuestion`), with the
-/// question's own input.
 pub fn permission_allow(request_id: &str, updated_input: &Value) -> String {
     control_response(
         request_id,
@@ -350,6 +355,21 @@ mod tests {
             parse_inbound(&message),
             InboundControl::CanUseTool(_)
         ));
+    }
+
+    #[test]
+    fn a_question_is_closed_by_a_denial_that_ends_the_turn_never_by_an_allow() {
+        // §15.6: an `allow` without answers reads as "the user did not answer" to the
+        // CLI, and the model goes on. The closing line is a denial carrying the message.
+        let line: Value =
+            serde_json::from_str(&permission_deny("r-q", Some(QUESTION_POSED_MESSAGE))).unwrap();
+        assert_eq!(line["response"]["request_id"], "r-q");
+        assert_eq!(line["response"]["response"]["behavior"], "deny");
+        assert_eq!(
+            line["response"]["response"]["message"],
+            QUESTION_POSED_MESSAGE
+        );
+        assert!(line["response"]["response"].get("updatedInput").is_none());
     }
 
     #[test]
