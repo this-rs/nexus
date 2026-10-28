@@ -1122,9 +1122,11 @@ async fn ask_user_question_is_unblocked_by_the_adapter_byte_for_byte() {
         "a question is not a permission"
     );
     assert_eq!(stop_reason(&events), Some(StopReason::Completed));
+    // The question is closed by a denial that ends the turn, never by an `allow`
+    // (an `allow` without answers reads as "the user did not answer").
     assert_eq!(
         fake.stdin_lines()[1],
-        r#"{"response":{"request_id":"req-question","response":{"behavior":"allow","updatedInput":{"questions":[{"header":"Choice","multiSelect":true,"options":[{"description":"first","label":"A"},{"label":"B"}],"question":"Which one?"}]}},"subtype":"success"},"type":"control_response"}"#
+        r#"{"response":{"request_id":"req-question","response":{"behavior":"deny","message":"The question was posed to the user. Their answer will arrive in their next message; do not guess it."},"subtype":"success"},"type":"control_response"}"#
     );
     // The answer is a regular turn; `answer_question` and an answer to the
     // request as a permission are both refused.
