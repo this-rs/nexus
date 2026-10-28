@@ -59,12 +59,47 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Maps a neutral policy mode to the two Codex axes (contract §6): `ask` and
 /// `auto_edits` → `on-request` + `workspace-write`; `plan_only` → `on-request` +
-/// `read-only`; `trust` → `never` + `workspace-write` (never `danger-full-access`).
+/// `read-only`; `trust` → `on-request` + `workspace-write` (never `danger-full-access`).
+///
+/// `trust` is NOT `never`: under `never` Codex refuses an MCP tool call that needs
+/// an approval with "MCP tool call requires approval, but approval policy is never"
+/// and never asks the client, so the user cannot answer it. Under `on-request` Codex
+/// asks, and the session's policy answers at once: `trust` allows everything (see
+/// `ToolPolicy::decide`), so nothing reaches the user.
 pub fn policy_axes(mode: PolicyMode) -> (ApprovalPolicy, SandboxMode) {
     match mode {
         PolicyMode::PlanOnly => (ApprovalPolicy::OnRequest, SandboxMode::ReadOnly),
-        PolicyMode::Trust => (ApprovalPolicy::Never, SandboxMode::WorkspaceWrite),
-        _ => (ApprovalPolicy::OnRequest, SandboxMode::WorkspaceWrite),
+        PolicyMode::Trust | PolicyMode::Ask | PolicyMode::AutoEdits => {
+            (ApprovalPolicy::OnRequest, SandboxMode::WorkspaceWrite)
+        },
+    }
+}
+
+#[cfg(test)]
+mod policy_axes_tests {
+    use super::*;
+
+    #[test]
+    fn no_mode_sends_approval_never() {
+        for mode in [
+            PolicyMode::PlanOnly,
+            PolicyMode::Ask,
+            PolicyMode::AutoEdits,
+            PolicyMode::Trust,
+        ] {
+            let (approval, _) = policy_axes(mode);
+            assert_ne!(
+                approval,
+                ApprovalPolicy::Never,
+                "{mode:?} must let Codex ask the client"
+            );
+        }
+    }
+
+    #[test]
+    fn trust_never_gets_danger_full_access() {
+        let (_, sandbox) = policy_axes(PolicyMode::Trust);
+        assert_eq!(sandbox, SandboxMode::WorkspaceWrite);
     }
 }
 

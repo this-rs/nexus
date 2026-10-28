@@ -1126,9 +1126,11 @@ async fn the_policy_modes_map_to_the_two_codex_axes_and_never_to_full_access() {
             "workspaceWrite",
         ),
         (PolicyMode::PlanOnly, "on-request", "read-only", "readOnly"),
+        // Trust asks nobody: `on-request` lets Codex ask the client, and the session's
+        // policy answers allow. `never` would make Codex refuse MCP calls that need approval.
         (
             PolicyMode::Trust,
-            "never",
+            "on-request",
             "workspace-write",
             "workspaceWrite",
         ),
