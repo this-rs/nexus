@@ -289,12 +289,12 @@ async fn interrupt_is_acknowledged_over_the_legacy_control_channel() {
     let first: Value = serde_json::from_str(&lines[0]).expect("JSON");
     assert_eq!(first["type"], "control_request");
     assert_eq!(
-        first["request"]["type"], "interrupt",
-        "the legacy envelope nests the kind under `request.type`"
+        first["request"]["subtype"], "interrupt",
+        "the discriminator the CLI reads is `request.subtype`"
     );
-    assert_eq!(first["request"]["request_id"], "interrupt_1");
+    assert_eq!(first["request_id"], "interrupt_1");
     let second: Value = serde_json::from_str(&lines[1]).expect("JSON");
-    assert_eq!(second["request"]["request_id"], "interrupt_2");
+    assert_eq!(second["request_id"], "interrupt_2");
 
     client.disconnect().await.expect("disconnect");
 }

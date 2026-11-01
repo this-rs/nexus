@@ -9,9 +9,9 @@
   "lines_sent_to_cli": [
     {
       "request": {
-        "request_id": "<REQ1>",
-        "type": "interrupt"
+        "subtype": "interrupt"
       },
+      "request_id": "<REQ1>",
       "type": "control_request"
     }
   ],

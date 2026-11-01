@@ -714,12 +714,12 @@ impl InteractiveSessionManager {
         let sessions = self.sessions.read();
         if let Some(session) = sessions.get(conversation_id) {
             // Build the interrupt control_request JSON
+            // The shape the CLI reads (see `InteractiveClient::build_interrupt_json`): the
+            // discriminator is `subtype`, the `request_id` top-level.
             let interrupt_json = serde_json::json!({
                 "type": "control_request",
-                "request": {
-                    "type": "interrupt",
-                    "request_id": Uuid::new_v4().to_string()
-                }
+                "request_id": Uuid::new_v4().to_string(),
+                "request": { "subtype": "interrupt" }
             })
             .to_string();
 

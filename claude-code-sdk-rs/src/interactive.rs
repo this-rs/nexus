@@ -949,7 +949,7 @@ impl InteractiveClient {
     /// [`SubprocessTransport::send_control_request`] for the `Interrupt` variant:
     ///
     /// ```json
-    /// {"type":"control_request","request":{"type":"interrupt","request_id":"<uuid>"}}
+    /// {"type":"control_request","request_id":"<uuid>","request":{"subtype":"interrupt"}}
     /// ```
     ///
     /// **Use case**: The PO Backend can send interrupts via a cloned `stdin_tx`
@@ -966,12 +966,16 @@ impl InteractiveClient {
     /// // Send directly via stdin_tx.try_send(json) — no client lock needed
     /// ```
     pub fn build_interrupt_json() -> String {
+        // The wire shape the SDK sends (`SDKControlRequest`, `send_control_request`): the
+        // `request_id` sits at the top level and the CLI reads the discriminator as `subtype`.
+        // A `type` discriminator inside `request` is not a control request the CLI knows: it
+        // ignores it, and the turn runs on to its end (measured on Claude Code 2.1.314).
         let request_id = uuid::Uuid::new_v4().to_string();
         serde_json::to_string(&serde_json::json!({
             "type": "control_request",
+            "request_id": request_id,
             "request": {
-                "type": "interrupt",
-                "request_id": request_id
+                "subtype": "interrupt"
             }
         }))
         .expect("interrupt JSON serialization cannot fail")
@@ -1522,11 +1526,11 @@ mod tests {
         let request = parsed.get("request").expect("should have 'request' field");
         assert!(request.is_object(), "'request' should be an object");
 
-        // request.type must be "interrupt"
-        assert_eq!(request["type"], "interrupt");
+        // request.subtype must be "interrupt" (the discriminator the CLI reads)
+        assert_eq!(request["subtype"], "interrupt");
 
-        // request.request_id must be a non-empty string (UUID)
-        let request_id = request["request_id"]
+        // request_id must be a non-empty string (UUID), at the top level
+        let request_id = parsed["request_id"]
             .as_str()
             .expect("request_id should be a string");
         assert!(!request_id.is_empty(), "request_id should not be empty");
@@ -1544,25 +1548,23 @@ mod tests {
         // The transport builds:
         // {
         //   "type": "control_request",
-        //   "request": {
-        //     "type": "interrupt",
-        //     "request_id": "<uuid>"
-        //   }
+        //   "request_id": "<uuid>",
+        //   "request": { "subtype": "interrupt" }
         // }
         let json_str = InteractiveClient::build_interrupt_json();
         let parsed: serde_json::Value = serde_json::from_str(&json_str).unwrap();
 
-        // Verify exact key set at top level: only "type" and "request"
+        // Verify exact key set at top level: "type", "request" and "request_id"
         let obj = parsed.as_object().unwrap();
-        assert_eq!(obj.len(), 2, "top-level should have exactly 2 keys");
+        assert_eq!(obj.len(), 3, "top-level should have exactly 3 keys");
         assert!(obj.contains_key("type"));
         assert!(obj.contains_key("request"));
+        assert!(obj.contains_key("request_id"));
 
-        // Verify exact key set in request: only "type" and "request_id"
+        // Verify exact key set in request: only "subtype"
         let request = parsed["request"].as_object().unwrap();
-        assert_eq!(request.len(), 2, "request should have exactly 2 keys");
-        assert!(request.contains_key("type"));
-        assert!(request.contains_key("request_id"));
+        assert_eq!(request.len(), 1, "request should have exactly 1 key");
+        assert!(request.contains_key("subtype"));
     }
 
     #[test]
@@ -1573,8 +1575,8 @@ mod tests {
         let parsed1: serde_json::Value = serde_json::from_str(&json1).unwrap();
         let parsed2: serde_json::Value = serde_json::from_str(&json2).unwrap();
 
-        let id1 = parsed1["request"]["request_id"].as_str().unwrap();
-        let id2 = parsed2["request"]["request_id"].as_str().unwrap();
+        let id1 = parsed1["request_id"].as_str().unwrap();
+        let id2 = parsed2["request_id"].as_str().unwrap();
 
         assert_ne!(id1, id2, "Each call should produce a unique request_id");
     }

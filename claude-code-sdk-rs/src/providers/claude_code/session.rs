@@ -842,6 +842,16 @@ impl Core {
             );
             if let Err(error) = self.write(line).await {
                 warn!(%error, "AskUserQuestion could not be closed");
+                return;
+            }
+            // The turn ends on the question, as the native engine ends it (A45). A refusal alone
+            // does not end it: the CLI calls the model again with the refusal, and the model goes
+            // on for a while. The interrupt ends the turn; the tools of the step are not signalled
+            // (`turn_only`), and the CLI's `result` closes the turn as an interruption.
+            self.lock().map.set_interrupt_requested(true);
+            if let Err(error) = self.write(control::interrupt()).await {
+                self.lock().map.set_interrupt_requested(false);
+                warn!(%error, "the turn could not be ended on the question");
             }
         }
     }

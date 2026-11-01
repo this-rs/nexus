@@ -595,11 +595,11 @@ async fn interrupt_is_acknowledged_through_the_legacy_control_channel() {
         },
     }
 
-    // The fake matched on `request.type`, so the SDK really sent the nested shape.
+    // The wire shape the CLI reads: `request_id` top-level, the discriminator as `subtype`.
     let sent: serde_json::Value = serde_json::from_str(&fake.stdin_lines()[0]).unwrap();
     assert_eq!(sent["type"], "control_request");
-    assert_eq!(sent["request"]["type"], "interrupt");
-    assert_eq!(sent["request"]["request_id"], "int-1");
+    assert_eq!(sent["request"]["subtype"], "interrupt");
+    assert_eq!(sent["request_id"], "int-1");
 
     transport.disconnect().await.unwrap();
 }

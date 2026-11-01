@@ -16,12 +16,14 @@ fn test_build_interrupt_json_wire_format() {
     let v: serde_json::Value = serde_json::from_str(&json_str).unwrap();
 
     assert_eq!(v["type"], "control_request");
-    assert_eq!(v["request"]["type"], "interrupt");
-    assert!(v["request"]["request_id"].is_string());
-    // Ensure request_id is inside "request", not at top level
+    // The CLI reads the discriminator as `subtype`, and the id at the top level: a `type`
+    // inside `request` is ignored by the CLI (measured: the turn ran on to its end).
+    assert_eq!(v["request"]["subtype"], "interrupt");
+    assert!(v.get("request").unwrap().get("type").is_none());
+    assert!(v["request_id"].is_string());
     assert!(
-        v.get("request_id").is_none(),
-        "request_id must NOT be at top level"
+        v["request"].get("request_id").is_none(),
+        "request_id must be at the top level, not inside request"
     );
 }
 
@@ -51,15 +53,18 @@ async fn test_build_interrupt_json_matches_client_interrupt() {
 
     // Compare structure (not request_id — those will differ)
     assert_eq!(via_client["type"], via_helper["type"]);
-    assert_eq!(via_client["request"]["type"], via_helper["request"]["type"]);
+    assert_eq!(
+        via_client["request"]["subtype"],
+        via_helper["request"]["subtype"]
+    );
 
-    // Both should have request_id as UUID strings
-    let id_client = via_client["request"]["request_id"]
+    // Both should have request_id as UUID strings, at the top level
+    let id_client = via_client["request_id"]
         .as_str()
-        .expect("client interrupt should have request_id in request");
-    let id_helper = via_helper["request"]["request_id"]
+        .expect("client interrupt should have request_id at the top level");
+    let id_helper = via_helper["request_id"]
         .as_str()
-        .expect("helper should have request_id in request");
+        .expect("helper should have request_id at the top level");
 
     uuid::Uuid::parse_str(id_client).expect("client request_id should be valid UUID");
     uuid::Uuid::parse_str(id_helper).expect("helper request_id should be valid UUID");
