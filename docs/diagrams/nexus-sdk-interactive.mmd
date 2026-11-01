@@ -76,7 +76,7 @@ flowchart TD
         spm_ko["✅ mode hors liste → Err InvalidState citant les modes valides<br/><i>vérifié : tests/interactive_set_permission_mode.rs</i>"]
         spm_ok["✅ control_request { subtype: set_permission_mode, mode }<br/>request_id = uuid v4 ; aucune attente de réponse<br/><i>vérifié : MockTransport, forme du JSON</i>"]
         intr["✅ interrupt()<br/>ControlRequest::Interrupt { request_id: uuid }<br/><i>vérifié : tests/e2e_interrupt.rs</i>"]
-        bij["✅ build_interrupt_json()<br/>même format que le transport, mais sans lock : pour un stdin_tx cloné<br/><i>vérifié : jeu de clés exact comparé au transport</i>"]
+        bij["✅ build_interrupt_json()<br/>même format que le transport (request_id au niveau supérieur, request.subtype: interrupt ; mesuré sur le CLI 2.1.314), mais sans lock : pour un stdin_tx cloné<br/><i>vérifié : jeu de clés exact comparé au transport</i>"]
         scr["✅ send_control_response(payload)<br/>le transport enveloppe dans { type: control_response, response }<br/><i>vérifié : MockTransport, allow/deny + reason</i>"]
         pass["✅ take_sdk_control_receiver / clone_stdin_sender / child_pid / subscribe_messages<br/>délégations nues : None tant que le sous-processus n'existe pas<br/>hook_callbacks() rend le registre même que lit le dispatch<br/><i>vérifié : fake CLI, avant / pendant / après connect() ; hook_callbacks_hands_out_the_very_registry_dispatch_reads</i>"]
     end

@@ -361,7 +361,8 @@ impl Transport for ReplayTransport {
         // The wire format of `SubprocessTransport::send_control_request`.
         let line = serde_json::json!({
             "type": "control_request",
-            "request": { "type": "interrupt", "request_id": request_id }
+            "request_id": request_id,
+            "request": { "subtype": "interrupt" }
         });
         self.write(line.to_string()).await
     }

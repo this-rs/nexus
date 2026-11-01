@@ -137,10 +137,8 @@ impl Transport for MockTransport {
         let json = match request {
             ControlRequest::Interrupt { request_id } => serde_json::json!({
                 "type": "control_request",
-                "request": {
-                    "type": "interrupt",
-                    "request_id": request_id
-                }
+                "request_id": request_id,
+                "request": { "subtype": "interrupt" }
             }),
         };
         let _ = self.outbound_control_request_tx.send(json).await;

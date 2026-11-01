@@ -714,12 +714,12 @@ impl InteractiveSessionManager {
         let sessions = self.sessions.read();
         if let Some(session) = sessions.get(conversation_id) {
             // Build the interrupt control_request JSON
+            // The shape the CLI reads (see `InteractiveClient::build_interrupt_json`): the
+            // discriminator is `subtype`, the `request_id` top-level.
             let interrupt_json = serde_json::json!({
                 "type": "control_request",
-                "request": {
-                    "type": "interrupt",
-                    "request_id": Uuid::new_v4().to_string()
-                }
+                "request_id": Uuid::new_v4().to_string(),
+                "request": { "subtype": "interrupt" }
             })
             .to_string();
 
@@ -2664,9 +2664,10 @@ mod tests {
         let sent = stdin_rx.recv().await.expect("something on stdin");
         let parsed: serde_json::Value = serde_json::from_str(&sent).expect("valid JSON");
         assert_eq!(parsed["type"], json!("control_request"));
-        assert_eq!(parsed["request"]["type"], json!("interrupt"));
+        // The shape the CLI reads: the discriminator is `request.subtype`, the id top-level.
+        assert_eq!(parsed["request"]["subtype"], json!("interrupt"));
         assert!(
-            Uuid::parse_str(parsed["request"]["request_id"].as_str().unwrap()).is_ok(),
+            Uuid::parse_str(parsed["request_id"].as_str().unwrap()).is_ok(),
             "the interrupt must carry a fresh request_id: {parsed}"
         );
     }

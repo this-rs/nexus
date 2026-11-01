@@ -131,7 +131,7 @@ fn interrupted_result() -> Value {
     msg::result("error_during_execution", "", true)
 }
 
-const INTERRUPT_MARK: &str = r#""type":"interrupt""#;
+const INTERRUPT_MARK: &str = r#""subtype":"interrupt""#;
 
 /// The transcript that stages a scenario as its documentation says.
 fn transcript_for(scenario: Scenario) -> Transcript {
@@ -1062,7 +1062,7 @@ async fn an_interruption_is_written_byte_for_byte_and_ends_the_turn_interrupted(
     assert_eq!(lines.len(), 2, "the prompt and one interrupt: {lines:#?}");
     assert_eq!(
         mask_uuid(&lines[1]),
-        r#"{"request":{"request_id":"<uuid>","type":"interrupt"},"type":"control_request"}"#
+        r#"{"request":{"subtype":"interrupt"},"request_id":"<uuid>","type":"control_request"}"#
     );
     session.close().await.unwrap();
 }
@@ -1085,6 +1085,9 @@ async fn ask_user_question_is_unblocked_by_the_adapter_byte_for_byte() {
                 Some("toolu_q"),
             ))
             .await_stdin_containing("req-question")
+            // The turn is ended on the question: the interrupt follows the refusal, and
+            // the CLI answers it (the scripted result is then the interruption's).
+            .await_stdin_containing("\"subtype\":\"interrupt\"")
             .json(tool_result("toolu_q", "asked", false))
             .result_ok("asked"),
     ));
@@ -1122,11 +1125,17 @@ async fn ask_user_question_is_unblocked_by_the_adapter_byte_for_byte() {
         "a question is not a permission"
     );
     assert_eq!(stop_reason(&events), Some(StopReason::Completed));
-    // The question is closed by a denial that ends the turn, never by an `allow`
-    // (an `allow` without answers reads as "the user did not answer").
+    // The question is closed by a denial, never by an `allow` (an `allow` without answers
+    // reads as "the user did not answer"), and the turn is then interrupted: the refusal
+    // alone let the model go on.
+    let lines = fake.stdin_lines();
     assert_eq!(
-        fake.stdin_lines()[1],
+        lines[1],
         r#"{"response":{"request_id":"req-question","response":{"behavior":"deny","message":"The question was posed to the user. Their answer will arrive in their next message; do not guess it."},"subtype":"success"},"type":"control_response"}"#
+    );
+    assert_eq!(
+        mask_uuid(&lines[2]),
+        r#"{"request":{"subtype":"interrupt"},"request_id":"<uuid>","type":"control_request"}"#
     );
     // The answer is a regular turn; `answer_question` and an answer to the
     // request as a permission are both refused.

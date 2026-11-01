@@ -1313,11 +1313,13 @@ impl Transport for SubprocessTransport {
         self.request_counter += 1;
         let control_msg = match request {
             ControlRequest::Interrupt { request_id } => {
+                // The shape the CLI reads: `request_id` top-level, the discriminator as
+                // `subtype` (a `type` inside `request` is ignored, the turn runs on).
                 serde_json::json!({
                     "type": "control_request",
+                    "request_id": request_id,
                     "request": {
-                        "type": "interrupt",
-                        "request_id": request_id
+                        "subtype": "interrupt"
                     }
                 })
             },

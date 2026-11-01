@@ -290,7 +290,7 @@ mod tests {
     fn interrupt_is_byte_for_byte_the_documented_shape() {
         assert_eq!(
             mask_uuid(&interrupt()),
-            r#"{"request":{"request_id":"<uuid>","type":"interrupt"},"type":"control_request"}"#
+            r#"{"request":{"subtype":"interrupt"},"request_id":"<uuid>","type":"control_request"}"#
         );
         assert_ne!(interrupt(), interrupt(), "each interrupt has its own id");
     }

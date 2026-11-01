@@ -1331,7 +1331,7 @@ de `serde_json` sans `preserve_order` (alphabétique).
 | 15.3 | `set_permission_mode(mode)` | `{"request":{"mode":M,"subtype":"set_permission_mode"},"request_id":U,"type":"control_request"}` |
 | 15.4 | `set_model(model)` | `{"request":{"model":M,"subtype":"set_model"},"request_id":U,"type":"control_request"}` |
 | 15.5 | `interrupt()` | `{"request":{"request_id":U,"type":"interrupt"},"type":"control_request"}` (forme de `InteractiveClient::build_interrupt_json`, réutilisée telle quelle) |
-| 15.6 | clôture `AskUserQuestion` | forme 15.2 (`deny`) avec `message` = `QUESTION_POSED_MESSAGE`. Mesuré sur Claude Code 2.1.310 (Haiku 5.5) : un `allow` sans `answers` donne « The user did not answer the questions » et le modèle abandonne ; le `deny` termine le tour proprement |
+| 15.6 | clôture `AskUserQuestion` | forme 15.2 (`deny`) avec `message` = `QUESTION_POSED_MESSAGE`, puis `interrupt` (15.5, `turn_only`) qui termine le tour. Un `allow` sans `answers` donne « The user did not answer the questions » et le modèle abandonne ; le refus seul laisse le CLI rappeler le modèle, qui continue un moment (ce que l'utilisateur observe) : d'où l'interruption |
 | 15.7 | réponse de hook | `build_hook_response_json(request_id, result)` (existant, déplacé sans changement) |
 
 Non reproduit : la forme du relais NATS `{"type":"control_response","response":{"allow":<bool>}}`

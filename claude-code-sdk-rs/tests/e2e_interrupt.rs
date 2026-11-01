@@ -41,11 +41,11 @@ async fn test_interrupt_sends_signal_immediately() {
 
     // The MockTransport records ControlRequest::Interrupt as JSON
     assert_eq!(sent["type"], "control_request");
-    assert_eq!(sent["request"]["type"], "interrupt");
-    // request_id should be a UUID string inside "request"
+    assert_eq!(sent["request"]["subtype"], "interrupt");
+    // request_id should be a UUID string at the top level (where the CLI reads it)
     assert!(
-        sent["request"]["request_id"].is_string(),
-        "request_id should be a string inside 'request'"
+        sent["request_id"].is_string(),
+        "request_id should be a string at the top level"
     );
 
     client.disconnect().await.unwrap();
@@ -136,7 +136,7 @@ async fn test_interrupt_during_pending_permission() {
     .await
     .expect("timeout")
     .expect("channel open");
-    assert_eq!(sent["request"]["type"], "interrupt");
+    assert_eq!(sent["request"]["subtype"], "interrupt");
 
     client.disconnect().await.unwrap();
 }
@@ -168,7 +168,7 @@ async fn test_double_interrupt_is_idempotent() {
     .await
     .expect("timeout")
     .expect("channel open");
-    assert_eq!(sent1["request"]["type"], "interrupt");
+    assert_eq!(sent1["request"]["subtype"], "interrupt");
 
     let sent2 = timeout(
         Duration::from_millis(100),
@@ -177,7 +177,7 @@ async fn test_double_interrupt_is_idempotent() {
     .await
     .expect("timeout")
     .expect("channel open");
-    assert_eq!(sent2["request"]["type"], "interrupt");
+    assert_eq!(sent2["request"]["subtype"], "interrupt");
 
     client.disconnect().await.unwrap();
 }
