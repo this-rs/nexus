@@ -2664,9 +2664,10 @@ mod tests {
         let sent = stdin_rx.recv().await.expect("something on stdin");
         let parsed: serde_json::Value = serde_json::from_str(&sent).expect("valid JSON");
         assert_eq!(parsed["type"], json!("control_request"));
-        assert_eq!(parsed["request"]["type"], json!("interrupt"));
+        // The shape the CLI reads: the discriminator is `request.subtype`, the id top-level.
+        assert_eq!(parsed["request"]["subtype"], json!("interrupt"));
         assert!(
-            Uuid::parse_str(parsed["request"]["request_id"].as_str().unwrap()).is_ok(),
+            Uuid::parse_str(parsed["request_id"].as_str().unwrap()).is_ok(),
             "the interrupt must carry a fresh request_id: {parsed}"
         );
     }

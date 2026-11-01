@@ -204,7 +204,7 @@ flowchart TD
         SEND["✅ send_message, send_control_request,<br/>send_sdk_control_request, send_sdk_control_response<br/><i>vérifié : les quatre chemins appelés</i>"]
         NOTCONN["✅ InvalidState « Not connected »<br/>la paire SDK applique la même garde depuis le correctif<br/><i>vérifié : test rejoué sans le correctif</i>"]
         CLOSEDIN["✅ InvalidState qui NOMME end_input<br/>le message disait « Stdin channel not available »,<br/>ce qui ne disait pas pourquoi<br/><i>vérifié : message du refus comparé après end_input</i>"]
-        WIRE["✅ une ligne JSON sur le stdin de l’enfant<br/>send_control_request : enveloppe interrupt imbriquée ;<br/>send_sdk_control_request : verbatim ;<br/>send_sdk_control_response : enveloppé en control_response<br/><i>vérifié : les trois formes relues sur le stdin du faux CLI</i>"]
+        WIRE["✅ une ligne JSON sur le stdin de l’enfant<br/>send_control_request : control_request { request_id au niveau supérieur, request: { subtype: interrupt } } (le CLI ignore un type imbriqué) ;<br/>send_sdk_control_request : verbatim ;<br/>send_sdk_control_response : enveloppé en control_response<br/><i>vérifié : les trois formes relues sur le stdin du faux CLI</i>"]
         RECV["✅ receive_messages et subscribe_messages<br/>passent par message_stream sur un resubscribe<br/><i>vérifié : les deux appelés, dont via un objet-trait</i>"]
         EMPTY["✅ pas connecté : flux vide immédiat, aucune attente<br/><i>vérifié : flux demandé avant connect</i>"]
         LAG["✅ abonné en retard : Lagged, un warn, saut des messages<br/>écrasés, le flux survit<br/><i>vérifié : tampon de 2 contre 40 messages</i>"]

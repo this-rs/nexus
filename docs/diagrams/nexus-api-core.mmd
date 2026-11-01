@@ -88,7 +88,7 @@ flowchart TD
         cleanup -->|"try_wait = Some"| cl_dead["✅ process_died diffusé puis retrait<br/><i>vérifié : abonné reçoit l'événement</i>"]
         cleanup -->|"inactif > timeout"| cl_idle["🔴 tué sans aucun événement :<br/>un abonné reste suspendu<br/><i>vérifié : try_recv vide</i>"]
         cleanup --> cl_kill["✅ kill du groupe de process via libc sur Unix<br/>puis child.kill()<br/>fait hors du verrou de la map"]
-        interrupt{"✅ interrupt_session()<br/>control_request/interrupt sur stdin,<br/>sans prendre interaction_lock"}
+        interrupt{"✅ interrupt_session()<br/>control_request { request_id, request.subtype: interrupt } sur stdin,<br/>sans prendre interaction_lock"}
         interrupt -->|"session absente"| int_none["✅ Ok(false), pas une erreur"]
         interrupt -->|"canal plein"| int_full["✅ Ok(true) quand même :<br/>interruption simplement retardée"]
         interrupt -->|"canal fermé"| int_closed["✅ Err stdin channel is closed"]
