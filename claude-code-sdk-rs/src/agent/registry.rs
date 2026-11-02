@@ -48,7 +48,10 @@
 //! `cli_path` (string, claude_code: path of the CLI), `compaction_keep_recent`
 //! (unsigned integer, native), `compaction_keep_tool_rounds`, `compaction_stub_ratio`
 //! and `compaction_stub_block` (unsigned integer / number / unsigned integer, native:
-//! the cheap tier that stubs old tool results before a summary), `codex_home` (string,
+//! the cheap tier that stubs old tool results before a summary), `retry_max_attempts`
+//! (unsigned integer, native: retries of a round trip after a failure that passes, 0 turns the
+//! backoff off) and `retry_wait_for_unlock` (bool, native: wait for a locked vault instead of
+//! failing the turn, `true` by default), `codex_home` (string,
 //! codex: the instance's persistent
 //! `CODEX_HOME`), `env` (object of strings, acp), `thinking` (bool, acp), `login_hint`
 //! (string, acp), `acp_home` (string, acp: the instance's dedicated `HOME`, created `0700`),
@@ -463,6 +466,8 @@ impl ProviderInstanceConfig {
                 "allow_private_network" => value.is_boolean(),
                 "cli_path" => value.as_str().is_some_and(|path| !path.is_empty()),
                 "compaction_keep_recent" => value.is_u64(),
+                "retry_max_attempts" => value.is_u64(),
+                "retry_wait_for_unlock" => value.is_boolean(),
                 "compaction_keep_tool_rounds" => value.is_u64(),
                 "compaction_stub_block" => value.is_u64(),
                 "compaction_stub_ratio" => value
@@ -1179,6 +1184,7 @@ impl ProviderRegistry {
         native.prices = price_table_of(config);
         native.cost_basis = config.cost_source;
         apply_compaction_extensions(&mut native, config);
+        apply_retry_extensions(&mut native, config);
         native.default_tools = default_tools_of(config)?;
         native.browser = browser_of(config)?;
         let mut provider = NativeProvider::new(native, endpoint);
@@ -1276,6 +1282,29 @@ fn apply_compaction_extensions(
     }
     if let Some(block) = count("compaction_stub_block") {
         native.compaction.stub_block = block;
+    }
+}
+
+/// The recovery knobs a native instance sets through its `extensions`
+/// (`retry_max_attempts`, `retry_wait_for_unlock`); absent keys keep [`RetryPolicy::default`].
+#[cfg(feature = "provider-native")]
+fn apply_retry_extensions(
+    native: &mut crate::providers::native::NativeConfig,
+    config: &ProviderInstanceConfig,
+) {
+    if let Some(attempts) = config
+        .extensions
+        .get("retry_max_attempts")
+        .and_then(Value::as_u64)
+    {
+        native.retry.max_attempts = u32::try_from(attempts).unwrap_or(u32::MAX);
+    }
+    if let Some(wait) = config
+        .extensions
+        .get("retry_wait_for_unlock")
+        .and_then(Value::as_bool)
+    {
+        native.retry.wait_for_unlock = wait;
     }
 }
 

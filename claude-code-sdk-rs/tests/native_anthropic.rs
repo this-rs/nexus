@@ -69,6 +69,9 @@ fn price() -> ModelPrice {
 fn config(scenario: Option<Scenario>) -> NativeConfig {
     let mut config = NativeConfig::new("native-test");
     config.default_model = Some("m".to_owned());
+    // The conformance scenario `erreur_retryable` asserts the TYPED, retryable failure the
+    // harness reports: the in-turn recovery (its own tests in `native_harness.rs`) is off here.
+    config.retry = nexus_claude::providers::native::RetryPolicy::none();
     config.prices = PriceTable::new().with("m", price());
     if scenario == Some(Scenario::Compaction) {
         config.context_window = Some(12_000);
@@ -253,7 +256,10 @@ fn registry_instance(scenario: Option<Scenario>, url: String) -> ProviderInstanc
         .with_extension("anthropic_auth", json!("api_key"))
         .with_credential(CredentialRef::Vault("anthropic-test".into()))
         .with_default_model("m")
-        .with_price("m", price());
+        .with_price("m", price())
+        // `erreur_retryable` asserts the typed failure; the in-turn recovery is off here.
+        .with_extension("retry_max_attempts", json!(0))
+        .with_extension("retry_wait_for_unlock", json!(false));
     if scenario == Some(Scenario::Compaction) {
         instance = instance
             .with_context_window(12_000)
