@@ -1121,7 +1121,13 @@ async fn model_step(
         },
     };
     let mut stream = opened?;
+    // Une requête ÉMISE compte, qu'elle aboutisse ou non : un tour qui a retenté trois fois
+    // a fait trois appels au modèle. Compter seulement les tentatives qui vont au bout
+    // faisait rapporter « 1 » pour six appels — et rendait le retry gratuit dans les
+    // métriques, donc invisible, donc impossible à voir dériver.
+    acc.requests += 1;
     let mut usage: Option<Usage> = None;
+    let mut failure: Option<ProviderError> = None;
     loop {
         let next = tokio::select! {
             next = stream.next() => next,
@@ -1132,7 +1138,17 @@ async fn model_step(
         };
         let Some(chunk) = next else { break };
         first_chunk.get_or_insert_with(|| started.elapsed());
-        match chunk? {
+        let chunk = match chunk {
+            Ok(chunk) => chunk,
+            Err(e) => {
+                // On garde l'erreur pour pouvoir compter le temps AVANT de remonter : une
+                // tentative ratée a coûté du temps réel, et l'effacer revient à mentir sur
+                // ce que le tour a payé.
+                failure = Some(e);
+                break;
+            },
+        };
+        match chunk {
             CompletionChunk::Text(text) => {
                 if core.deltas {
                     core.emit(AgentEvent::Delta {
@@ -1167,7 +1183,16 @@ async fn model_step(
     }
     drop(stream);
     acc.api += started.elapsed();
-    acc.requests += 1;
+    if let Some(e) = failure {
+        tracing::debug!(
+            model,
+            request = acc.requests,
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            error = %e,
+            "the attempt failed; its time is still counted"
+        );
+        return Err(e);
+    }
     log_request(
         core,
         model,

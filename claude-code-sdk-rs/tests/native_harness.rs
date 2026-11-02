@@ -4948,6 +4948,13 @@ async fn a_stream_that_drops_mid_answer_is_asked_again_and_the_turn_completes() 
     assert_eq!(stop_reason(&events), StopReason::Completed);
     assert_eq!(result_text(&events), "the whole answer");
     assert_eq!(endpoint.calls(), 3);
+    // Trois requêtes ont été ÉMISES, donc trois sont comptées. Avant, un tour qui retentait
+    // deux fois rapportait `num_turns: 1` : le retry était gratuit dans les métriques, donc
+    // invisible — et un provider qui flanche restait indiscernable d'un provider sain.
+    let AgentEvent::Done { num_turns, .. } = done(&events) else {
+        unreachable!()
+    };
+    assert_eq!(*num_turns, 3, "a retry is a request, and it is counted");
     let retries = notices(&events, "model_retry");
     assert_eq!(retries.len(), 2, "{events:?}");
     assert_eq!(retries[0]["code"], "endpoint_unreachable");
