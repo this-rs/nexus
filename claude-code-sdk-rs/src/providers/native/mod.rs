@@ -14,6 +14,7 @@
 //! | `transcript.rs` | [`TranscriptStore`] (memory, `0600` files, byte-faithful resume, value-only masking: CTX6), reasoning kept (A39) |
 //! | `compaction.rs` | summary of the old history by the same endpoint, recent messages intact; the cheap tier before it: tool results older than the kept rounds become a stub (CTX3) |
 //! | `cancel.rs` | the cancellation token |
+//! | `resilience.rs` | what a turn does when the endpoint fails for a reason that passes: backoff, rate-limit delay, wait for a locked vault |
 //! | `tasks.rs` | the background tasks `nexus-tools` runs for a session, read from its structured results and notifications |
 //!
 //! # Capabilities (per model, contract §5)
@@ -74,6 +75,7 @@ pub mod compaction;
 pub mod r#loop;
 pub mod mcp;
 pub(crate) mod policy_args;
+pub mod resilience;
 pub mod session;
 pub(crate) mod tasks;
 pub mod tools;
@@ -83,6 +85,7 @@ pub use browser::{BROWSER_SERVER, BrowserTools};
 pub use cancel::CancelToken;
 pub use compaction::CompactionConfig;
 pub use mcp::{McpClient, McpConfig, McpError, McpLaunch, McpTool};
+pub use resilience::RetryPolicy;
 pub use session::NativeSession;
 pub use tools::{
     NEXUS_TOOLS_CATALOG, NEXUS_TOOLS_SERVER, ToolEntry, ToolRegistry, exposed_name,
@@ -215,6 +218,9 @@ pub struct NativeConfig {
     /// it emits and sends the user's answer as the next turn. Off by default: a host that
     /// cannot show a question must not let the model wait for an answer.
     pub ask_user_question: bool,
+    /// Recovery from an endpoint failure that passes (see [`resilience`]): backoff on a
+    /// dropped connection, `503` or rate limit, and a wait for the unlock of a locked vault.
+    pub retry: RetryPolicy,
 }
 
 impl NativeConfig {
@@ -245,6 +251,7 @@ impl NativeConfig {
             browser: None,
             hook_timeout: Self::DEFAULT_HOOK_TIMEOUT,
             ask_user_question: false,
+            retry: RetryPolicy::default(),
         }
     }
 }

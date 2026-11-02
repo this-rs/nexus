@@ -47,6 +47,9 @@ const TOOL_MARKER: &str = "\"role\":\"tool\"";
 fn config(scenario: Option<Scenario>) -> NativeConfig {
     let mut config = NativeConfig::new("native-test");
     config.default_model = Some("m".to_owned());
+    // The conformance scenario `erreur_retryable` asserts the TYPED, retryable failure the
+    // harness reports: the in-turn recovery (its own tests in `native_harness.rs`) is off here.
+    config.retry = nexus_claude::providers::native::RetryPolicy::none();
     config.prices = PriceTable::new().with(
         "m",
         ModelPrice {
@@ -254,6 +257,9 @@ struct NativeTarget {
 fn registry_instance(scenario: Option<Scenario>, url: String) -> ProviderInstanceConfig {
     let mut instance = ProviderInstanceConfig::native("native-test", url)
         .with_preset("deepseek")
+        // `erreur_retryable` asserts the typed failure; the in-turn recovery is off here.
+        .with_extension("retry_max_attempts", json!(0))
+        .with_extension("retry_wait_for_unlock", json!(false))
         .with_default_model("m")
         .with_price(
             "m",

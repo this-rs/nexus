@@ -2158,14 +2158,17 @@ async fn an_unreachable_mcp_server_is_a_typed_error_at_opening() {
 
 #[tokio::test]
 async fn an_endpoint_failure_is_a_classified_done_and_leaves_the_transcript_untouched() {
-    let h = Harness::new(vec![
-        status_reply(
-            Some("SECRET-TRANSCRIPT-TEXT"),
-            503,
-            json!({"error": {"message": "overloaded"}}),
-        ),
-        text_reply(Some("retry"), "fine", None, None),
-    ])
+    let h = Harness::with(
+        vec![
+            status_reply(
+                Some("SECRET-TRANSCRIPT-TEXT"),
+                503,
+                json!({"error": {"message": "overloaded"}}),
+            ),
+            text_reply(Some("retry"), "fine", None, None),
+        ],
+        |config| config.retry = nexus_claude::providers::native::RetryPolicy::none(),
+    )
     .await;
     let session = h.open(h.spec()).await;
     let events = turn(&*session, "SECRET-TRANSCRIPT-TEXT").await;
@@ -4827,4 +4830,199 @@ async fn without_a_host_that_runs_them_in_the_background_the_flag_is_neither_off
     let schema = agent_schema(&h.chat()[0]);
     assert!(schema["properties"].get("run_in_background").is_none());
     assert!(schema["properties"].get("subagent_type").is_some());
+}
+
+// ---------------------------------------------------------------------------
+// Resilience: a failure that passes (dropped stream, 503, locked vault) does not
+// end the turn. The round trip is asked again; a locked vault is waited for.
+// ---------------------------------------------------------------------------
+
+/// What one `complete` call does.
+#[derive(Clone)]
+enum Attempt {
+    /// The stream opens, says a word, then the connection drops (`error decoding response body`).
+    DropsMidStream,
+    /// The request is refused before any stream (the vault is locked).
+    Refused(ProviderError),
+    /// A whole answer.
+    Answers(&'static str),
+}
+
+/// An endpoint that plays `script` in order (the last entry repeats) and counts its calls.
+struct ScriptedEndpoint {
+    script: Vec<Attempt>,
+    calls: std::sync::atomic::AtomicUsize,
+}
+
+impl ScriptedEndpoint {
+    fn new(script: Vec<Attempt>) -> Arc<Self> {
+        Arc::new(Self {
+            script,
+            calls: 0.into(),
+        })
+    }
+
+    fn calls(&self) -> usize {
+        self.calls.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+#[async_trait::async_trait]
+impl ModelEndpoint for ScriptedEndpoint {
+    fn id(&self) -> &str {
+        "scripted"
+    }
+
+    async fn health(&self) -> ProviderHealth {
+        ProviderHealth::ok(None)
+    }
+
+    async fn models(&self) -> Result<Vec<ModelInfo>, ProviderError> {
+        Ok(Vec::new())
+    }
+
+    async fn complete(
+        &self,
+        _request: CompletionRequest,
+    ) -> Result<CompletionStream, ProviderError> {
+        let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        match self.script[n.min(self.script.len() - 1)].clone() {
+            Attempt::Refused(error) => Err(error),
+            Attempt::DropsMidStream => Ok(Box::pin(async_stream::stream! {
+                yield Ok(CompletionChunk::Text("par".to_owned()));
+                yield Err(ProviderError::EndpointUnreachable {
+                    detail: "error decoding response body".to_owned(),
+                });
+            })),
+            Attempt::Answers(text) => Ok(Box::pin(async_stream::stream! {
+                yield Ok(CompletionChunk::Text(text.to_owned()));
+                yield Ok(CompletionChunk::Finish(FinishReason::Stop));
+            })),
+        }
+    }
+
+    async fn probe(&self, _model: &str) -> Result<EndpointProbe, ProviderError> {
+        Ok(EndpointProbe {
+            tools: false,
+            parallel_tools: None,
+            reasoning_field: None,
+            context_window: Some(128_000),
+            images: None,
+            checked_at_ms: 0,
+        })
+    }
+}
+
+async fn scripted_session(
+    endpoint: Arc<ScriptedEndpoint>,
+    tweak: impl FnOnce(&mut NativeConfig),
+) -> (Arc<dyn AgentSession>, tempfile::TempDir) {
+    let mut config = NativeConfig::new("scripted");
+    tweak(&mut config);
+    let provider = NativeProvider::new(config, endpoint);
+    let cwd = tempfile::tempdir().unwrap();
+    let mut spec = SessionSpec::new(cwd.path());
+    spec.model = Some("m".to_owned());
+    (provider.open(spec).await.expect("open"), cwd)
+}
+
+fn notices<'a>(events: &'a [AgentEvent], kind: &str) -> Vec<&'a Value> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::ProviderNotice { kind: k, data } if k == kind => Some(data),
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_stream_that_drops_mid_answer_is_asked_again_and_the_turn_completes() {
+    let endpoint = ScriptedEndpoint::new(vec![
+        Attempt::DropsMidStream,
+        Attempt::DropsMidStream,
+        Attempt::Answers("the whole answer"),
+    ]);
+    let (session, _cwd) = scripted_session(endpoint.clone(), |_| {}).await;
+    let events = whole_turn(&*session, "go").await;
+    assert_eq!(stop_reason(&events), StopReason::Completed);
+    assert_eq!(result_text(&events), "the whole answer");
+    assert_eq!(endpoint.calls(), 3);
+    let retries = notices(&events, "model_retry");
+    assert_eq!(retries.len(), 2, "{events:?}");
+    assert_eq!(retries[0]["code"], "endpoint_unreachable");
+    assert_eq!(retries[1]["attempt"], 2);
+    assert_eq!(notices(&events, "model_recovered").len(), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_failure_that_does_not_pass_gives_up_after_its_attempts_with_the_typed_error() {
+    let endpoint = ScriptedEndpoint::new(vec![Attempt::DropsMidStream]);
+    let (session, _cwd) = scripted_session(endpoint.clone(), |config| {
+        config.retry.max_attempts = 2;
+    })
+    .await;
+    let events = whole_turn(&*session, "go").await;
+    match done(&events) {
+        AgentEvent::Done {
+            is_error: true,
+            error: Some(ProviderError::EndpointUnreachable { .. }),
+            ..
+        } => {},
+        other => panic!("expected the typed failure, got {other:?}"),
+    }
+    assert_eq!(endpoint.calls(), 3, "the first request and two retries");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_locked_vault_is_waited_for_and_the_turn_resumes_when_it_unlocks() {
+    // Far more refusals than the attempt cap: the wait for an unlock is not counted.
+    let mut script = vec![Attempt::Refused(ProviderError::CredentialsLocked); 50];
+    script.push(Attempt::Answers("back after the unlock"));
+    let endpoint = ScriptedEndpoint::new(script);
+    let (session, _cwd) = scripted_session(endpoint.clone(), |_| {}).await;
+    let started = tokio::time::Instant::now();
+    let events = whole_turn(&*session, "go").await;
+    assert_eq!(stop_reason(&events), StopReason::Completed);
+    assert_eq!(result_text(&events), "back after the unlock");
+    assert_eq!(endpoint.calls(), 51);
+    assert!(started.elapsed() >= Duration::from_secs(5 * 50));
+    assert_eq!(
+        notices(&events, "credentials_locked").len(),
+        1,
+        "said once, not at every look"
+    );
+    assert_eq!(notices(&events, "model_recovered").len(), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_interrupt_ends_the_wait_for_a_locked_vault() {
+    let endpoint = ScriptedEndpoint::new(vec![Attempt::Refused(ProviderError::CredentialsLocked)]);
+    let (session, _cwd) = scripted_session(endpoint.clone(), |_| {}).await;
+    let stream = session.send_turn(TurnInput::text("go")).await.unwrap();
+    tokio::time::sleep(Duration::from_secs(12)).await;
+    session
+        .interrupt(InterruptScope::TurnAndTools)
+        .await
+        .unwrap();
+    let events: Vec<_> = stream.collect().await;
+    assert_eq!(stop_reason(&events), StopReason::Interrupted);
+}
+
+#[tokio::test(start_paused = true)]
+async fn with_the_retry_off_the_first_failure_ends_the_turn_as_before() {
+    let endpoint = ScriptedEndpoint::new(vec![Attempt::Refused(ProviderError::CredentialsLocked)]);
+    let (session, _cwd) = scripted_session(endpoint.clone(), |config| {
+        config.retry = nexus_claude::providers::native::RetryPolicy::none();
+    })
+    .await;
+    let events = whole_turn(&*session, "go").await;
+    assert!(matches!(
+        done(&events),
+        AgentEvent::Done {
+            error: Some(ProviderError::CredentialsLocked),
+            ..
+        }
+    ));
+    assert_eq!(endpoint.calls(), 1);
 }

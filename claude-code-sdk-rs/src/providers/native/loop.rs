@@ -41,6 +41,7 @@ use super::compaction::{
     should_stub, split_point, summarise, summary_request,
 };
 use super::mcp::{IMAGE_NOT_SHOWN, McpError};
+use super::resilience::{Recovery, recovery};
 use super::session::{ConsentRoute, Core, PendingAsk, StopCause, TurnSignal};
 use super::tools::{ToolEntry, ToolRegistry};
 use crate::agent::{
@@ -660,7 +661,7 @@ async fn iterate(
             return Outcome::Interrupted;
         }
         let request = build_request(core, model, messages);
-        let mut step = match model_step(core, signal, model, request, acc).await {
+        let mut step = match resilient_step(core, signal, model, request, acc).await {
             Ok(step) => step,
             Err(error) => return Outcome::Failed(error),
         };
@@ -1023,6 +1024,81 @@ fn log_request(
         extends_previous = shape.history.as_ref().and_then(|history| history.extends_previous),
         "native model request"
     );
+}
+
+/// One round trip to the model that survives the failures that pass.
+///
+/// A failed round trip commits nothing (`model_step` fills a local [`Step`]; the history and
+/// the transcript are written only by a turn that ends well), so asking again is safe. The
+/// host is told with `provider_notice { model_retry }` (the typed `code`, the attempt, the
+/// delay) and, for a locked vault, `provider_notice { credentials_locked }` once, then
+/// `model_recovered` when the request goes through. A stop (interrupt, time limit, close)
+/// ends the wait at once.
+async fn resilient_step(
+    core: &Core,
+    signal: &TurnSignal,
+    model: &str,
+    request: CompletionRequest,
+    acc: &mut Acc,
+) -> Result<Step, ProviderError> {
+    let policy = core.settings.retry;
+    let mut attempt = 0u32;
+    let mut waited_for_unlock = false;
+    loop {
+        match model_step(core, signal, model, request.clone(), acc).await {
+            Ok(step) => {
+                if waited_for_unlock || attempt > 0 {
+                    core.emit(AgentEvent::ProviderNotice {
+                        kind: "model_recovered".to_owned(),
+                        data: json!({ "provider": "native", "attempts": attempt }),
+                    });
+                }
+                return Ok(step);
+            },
+            Err(error) => {
+                let delay = match recovery(&policy, &error, attempt) {
+                    Recovery::GiveUp => return Err(error),
+                    Recovery::AwaitUnlock(delay) => {
+                        if !waited_for_unlock {
+                            waited_for_unlock = true;
+                            core.emit(AgentEvent::ProviderNotice {
+                                kind: "credentials_locked".to_owned(),
+                                data: json!({
+                                    "provider": "native",
+                                    "code": error.kind(),
+                                    "message": "the credential vault is locked: the turn resumes when it is unlocked",
+                                }),
+                            });
+                        }
+                        delay
+                    },
+                    Recovery::Retry(delay) => {
+                        attempt += 1;
+                        core.emit(AgentEvent::ProviderNotice {
+                            kind: "model_retry".to_owned(),
+                            data: json!({
+                                "provider": "native",
+                                "code": error.kind(),
+                                "attempt": attempt,
+                                "max_attempts": policy.max_attempts,
+                                "delay_ms": delay.as_millis() as u64,
+                            }),
+                        });
+                        delay
+                    },
+                };
+                tokio::select! {
+                    () = tokio::time::sleep(delay) => {},
+                    () = signal.token.cancelled() => {
+                        return Ok(Step {
+                            interrupted: true,
+                            ..Step::default()
+                        });
+                    },
+                }
+            },
+        }
+    }
 }
 
 async fn model_step(
