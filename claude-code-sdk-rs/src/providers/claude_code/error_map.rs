@@ -35,6 +35,12 @@ impl From<SdkError> for ProviderError {
 ///
 /// - overloaded (`overloaded_error`, HTTP 529) → [`ProviderError::Overloaded`] ;
 /// - rate limit (`rate_limit_error`, HTTP 429) → [`ProviderError::RateLimited`] ;
+/// - a REFUSAL — the CLI's "you have nothing left" answers, including the ones
+///   that never say "rate limit" ("You've reached your Fable limit.", "You're out
+///   of usage credits.", "You have reached your specified usage limits.") → read by
+///   [`classify_refusal`](super::refusal::classify_refusal), which quotes the CLI's
+///   own builder; a context-credit refusal is a [`ProviderError::ContextTooSmall`],
+///   the others a [`ProviderError::RateLimited`] ;
 /// - "prompt is too long" → [`ProviderError::ContextTooSmall`] ;
 /// - HTTP 401 / `authentication_error` / invalid API key → [`ProviderError::Unauthorized`] ;
 /// - the CLI itself is not logged in ("not logged in", "please log in", "login
@@ -56,11 +62,13 @@ pub fn classify_result_error(text: &str) -> Option<ProviderError> {
     if has("overloaded") || has("api error: 529") {
         return Some(ProviderError::Overloaded);
     }
-    if has("rate limit") || has("rate_limit") || has("api error: 429") {
-        return Some(ProviderError::RateLimited {
-            retry_after_ms: None,
-            resets_at_ms: None,
-        });
+    // The two wordings the five `contains` of the old rule missed are exactly the
+    // ones production hit: a model limit ("your Fable limit") and the 429's generic
+    // sentence ("your specified usage limits"). `refusal` quotes the CLI's own
+    // builder, and its `error()` keeps the SCOPE: a named model becomes
+    // `ModelLimitReached` (switching model helps), the rest stays `RateLimited`.
+    if let Some(refusal) = super::refusal::classify_refusal(text) {
+        return Some(refusal.error());
     }
     if has("authentication_error")
         || has("authentication failed")

@@ -30,10 +30,12 @@ pub mod input;
 pub mod map_events;
 pub mod options;
 pub mod policy_map;
+pub mod refusal;
 pub mod session;
 pub mod tasks;
 
 pub use error_map::classify_result_error;
+pub use refusal::{Refusal, RefusalScope, classify_refusal};
 pub use map_events::{MapState, map_message, permission_event};
 pub use options::{ClaudeCodeConfig, build_options};
 pub use session::{ClaudeCodeProvider, ClientFactory};

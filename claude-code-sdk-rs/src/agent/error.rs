@@ -67,6 +67,24 @@ pub enum ProviderError {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         resets_at_ms: Option<u64>,
     },
+    /// One MODEL has nothing left, while the account may still serve another one.
+    ///
+    /// This is the refusal measured on 2026-11-04: "You've reached your Fable
+    /// limit. Switch to another model…". It is deliberately NOT
+    /// [`Self::RateLimited`]: a rate limit is answered by waiting (or by going
+    /// elsewhere), this one by CHANGING MODEL inside the same provider — the CLI
+    /// itself says so. A host that reads only `kind` still sees a 429-shaped
+    /// refusal, so nothing regresses; a host that reads the variant can switch.
+    #[error("model limit reached")]
+    ModelLimitReached {
+        /// The model the provider named in its refusal, as it wrote it ("Fable").
+        /// The host knows which model it actually asked for.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
+        /// When the limit lifts (epoch ms), when the provider says so.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        resets_at_ms: Option<u64>,
+    },
     /// The provider is temporarily overloaded.
     #[error("provider overloaded")]
     Overloaded,
@@ -161,6 +179,11 @@ impl ProviderError {
     }
 
     /// Whether trying again later, unchanged, can succeed.
+    ///
+    /// [`Self::ModelLimitReached`] is NOT in this list, on purpose: the remedy is
+    /// another MODEL, and re-sending the same request to the same model only
+    /// reproduces the refusal (measured: 443 ms, same sentence). A host that
+    /// retries blindly would keep the person waiting for nothing.
     pub fn retryable(&self) -> bool {
         matches!(
             self,
@@ -169,6 +192,17 @@ impl ProviderError {
                 | Self::Overloaded
                 | Self::Timeout { .. }
         )
+    }
+
+    /// Whether the refusal is scoped to ONE model, so that switching model inside
+    /// the same provider is the remedy (as opposed to an account that is out).
+    pub fn is_model_limit(&self) -> bool {
+        matches!(self, Self::ModelLimitReached { .. })
+    }
+
+    /// Whether the account is out of everything, so no model of it will answer.
+    pub fn is_quota_refusal(&self) -> bool {
+        matches!(self, Self::RateLimited { .. } | Self::ModelLimitReached { .. })
     }
 
     /// The serialised `kind` tag, usable as a stable error code.
@@ -182,6 +216,7 @@ impl ProviderError {
             Self::ModelNoTools { .. } => "model_no_tools",
             Self::ContextTooSmall { .. } => "context_too_small",
             Self::RateLimited { .. } => "rate_limited",
+            Self::ModelLimitReached { .. } => "model_limit_reached",
             Self::Overloaded => "overloaded",
             Self::Timeout { .. } => "timeout",
             Self::ProcessExited { .. } => "process_exited",
@@ -206,7 +241,7 @@ impl ProviderError {
             Self::ModelNoTools { .. }
             | Self::ContextTooSmall { .. }
             | Self::ModelProtocolMismatch { .. } => 422,
-            Self::RateLimited { .. } => 429,
+            Self::RateLimited { .. } | Self::ModelLimitReached { .. } => 429,
             Self::Timeout { .. } => 504,
             Self::Unsupported { .. } => 501,
             Self::TurnInProgress => 409,

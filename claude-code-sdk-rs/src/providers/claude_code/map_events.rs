@@ -36,6 +36,9 @@ pub struct MapState {
     exhausted_until_ms: Option<u64>,
     /// The last `rate_limit_event` refused the account (whether or not it said when it resets).
     exhausted: bool,
+    /// The model that last `rate_limit_event` refused, when the refused window was a
+    /// model's own (`seven_day_opus`): the account still serves its neighbours.
+    exhausted_model: Option<String>,
 }
 
 impl Default for MapState {
@@ -61,6 +64,7 @@ impl MapState {
             open_tool_blocks: HashMap::new(),
             exhausted_until_ms: None,
             exhausted: false,
+            exhausted_model: None,
         }
     }
 
@@ -156,6 +160,16 @@ pub fn map_message(message: &Message, state: &mut MapState) -> Vec<AgentEvent> {
             let quota = quota_from_rate_limit_info(data);
             state.exhausted_until_ms = quota.exhausted_until_ms();
             state.exhausted = quota.is_exhausted();
+            // `seven_day_opus`, `seven_day_sonnet`… are windows of ONE model: the
+            // account still serves its neighbours, so the refusal is model-scoped.
+            // `five_hour`/`seven_day` are the account's own windows.
+            state.exhausted_model = state
+                .exhausted
+                .then(|| data.get("rateLimitType"))
+                .flatten()
+                .and_then(Value::as_str)
+                .and_then(model_of_window)
+                .map(str::to_owned);
             vec![AgentEvent::Quota { quota }]
         },
         Message::System { subtype, data } => vec![map_system(subtype, data)],
@@ -183,6 +197,7 @@ pub fn map_message(message: &Message, state: &mut MapState) -> Vec<AgentEvent> {
             // A refusal belongs to the turn it was reported in.
             let exhausted = std::mem::take(&mut state.exhausted);
             let exhausted_until = state.exhausted_until_ms.take();
+            let exhausted_model = state.exhausted_model.take();
             vec![AgentEvent::Done {
                 stop_reason,
                 subtype: Some(subtype.clone()),
@@ -201,16 +216,30 @@ pub fn map_message(message: &Message, state: &mut MapState) -> Vec<AgentEvent> {
                 structured_output: structured_output.clone(),
                 // §7: an Anthropic API failure reported in the result text is
                 // classified here, on the `done` that keeps usage and cost.
-                error: (*is_error && (stop_reason == StopReason::Error || exhausted))
+                //
+                // The CLI's own error flag decides, NOT the subtype it also writes
+                // (measured 2026-11-04: a 429 and a model limit both arrive as
+                // `subtype: "success"` with `is_error: true`). Requiring
+                // `stop_reason == Error` here dropped that error on the floor and
+                // made the refusal look like an answer.
+                error: (*is_error && stop_reason != StopReason::Interrupted)
                     .then(|| {
                         result
                             .as_deref()
                             .and_then(classify_result_error)
                             // A refused account explains the failed turn even when the text does
-                            // not say "rate limit" (the CLI words it as a plain message).
-                            .or(exhausted.then_some(ProviderError::RateLimited {
-                                retry_after_ms: None,
-                                resets_at_ms: None,
+                            // not say "rate limit" (the CLI words it as a plain message). When the
+                            // refused window belonged to ONE model (`seven_day_opus`), the error
+                            // keeps that scope: switching model is the remedy, waiting is not.
+                            .or(exhausted.then(|| match &exhausted_model {
+                                Some(model) => ProviderError::ModelLimitReached {
+                                    model: Some(model.clone()),
+                                    resets_at_ms: None,
+                                },
+                                None => ProviderError::RateLimited {
+                                    retry_after_ms: None,
+                                    resets_at_ms: None,
+                                },
                             }))
                     })
                     .flatten()
@@ -221,6 +250,12 @@ pub fn map_message(message: &Message, state: &mut MapState) -> Vec<AgentEvent> {
                         } => ProviderError::RateLimited {
                             retry_after_ms,
                             resets_at_ms: exhausted_until,
+                        },
+                        ProviderError::ModelLimitReached { model, .. } => {
+                            ProviderError::ModelLimitReached {
+                                model,
+                                resets_at_ms: exhausted_until,
+                            }
                         },
                         other => other,
                     }),
@@ -280,12 +315,50 @@ fn quota_from_rate_limit_info(info: &Value) -> QuotaSnapshot {
             status: window_status(kind),
         });
     }
+    // A refused claim on ONE model's window (`seven_day_opus`) has no entry of its
+    // own in `unifiedWindows`, which only lists the account's windows: without this,
+    // such a refusal would be reported as "nothing exhausted" — the account is fine,
+    // ONE model is not, and a host must be able to see which.
+    if refused
+        && let Some(claim) = limit_type
+        && model_of_window(claim).is_some()
+        && !windows.iter().any(|w| w.kind == claim)
+    {
+        windows.push(QuotaWindow {
+            kind: claim.to_owned(),
+            utilization: info.get("utilization").and_then(Value::as_f64),
+            resets_at_ms: u64_at(info, &["resetsAt"]).map(to_ms),
+            status: QuotaStatus::Exhausted,
+        });
+    }
     QuotaSnapshot::live(windows)
 }
 
+/// The model a rate-limit WINDOW belongs to, when it belongs to one.
+///
+/// The CLI names its windows `five_hour`, `seven_day`, and — for a single model —
+/// `seven_day_opus`, `seven_day_sonnet`. The suffix is the family, and the family is
+/// what a host can move away from; anything else (`seven_day_overage_included`,
+/// `five_hour`, `requests`) is the account's own window, where a switch would not help.
+fn model_of_window(kind: &str) -> Option<&'static str> {
+    const FAMILIES: &[&str] = &["opus", "sonnet", "haiku", "fable", "mythos"];
+    let family = kind.rsplit('_').next()?;
+    FAMILIES
+        .iter()
+        .find(|known| family.eq_ignore_ascii_case(known))
+        .copied()
+}
+
 /// `subtype` → `stop_reason` (rule under the table of §14.1).
+///
+/// CORRECTED 2026-11-04 (measured): `is_error` beats `subtype: "success"`. When the
+/// API refuses a request — a 429, a limit reached — the CLI closes the turn with
+/// `subtype: "success"` AND `is_error: true`. Reading the subtype first made every
+/// refusal a completed turn, which is how "You've reached your Fable limit" reached
+/// a person as the assistant's answer, twice.
 fn stop_reason(subtype: &str, is_error: bool, interrupt_requested: bool) -> StopReason {
     match subtype {
+        "success" if is_error => StopReason::Error,
         "success" => StopReason::Completed,
         "error_max_turns" => StopReason::MaxTurns,
         "error_during_execution" if interrupt_requested => StopReason::Interrupted,
@@ -1568,7 +1641,11 @@ mod tests {
 
     #[test]
     fn a_result_subtype_decides_the_stop_reason_before_the_error_flag_does() {
-        assert_eq!(stop_reason("success", true, false), StopReason::Completed);
+        // CORRECTED 2026-11-04: `success` used to win over `is_error`. The CLI reports
+        // an API refusal as `subtype: "success"` + `is_error: true` (measured against
+        // a real 429 and against the "Fable limit" case), so the error flag must win —
+        // otherwise the refusal is a completed turn.
+        assert_eq!(stop_reason("success", true, false), StopReason::Error);
         assert_eq!(stop_reason("success", false, false), StopReason::Completed);
         assert_eq!(
             stop_reason("error_max_turns", false, false),
@@ -1591,6 +1668,104 @@ mod tests {
         assert_eq!(
             stop_reason("something_new", false, false),
             StopReason::Completed
+        );
+    }
+
+    /// The wire line of a real refusal, captured on 2026-11-04 by pointing the CLI at
+    /// a local endpoint answering 429 with `anthropic-ratelimit-unified-status:
+    /// rejected`. Note what the CLI says and what it does NOT say: `is_error: true`
+    /// with `subtype: "success"`, `terminal_reason: "api_error"`, and no
+    /// `rate_limit_event` at all — the structured quota path is silent on this case.
+    const CAPTURED_429_RESULT: &str = r#"{"duration_api_ms":0,"stop_reason":"stop_sequence",
+"session_id":"9b598992","total_cost_usd":0,"is_error":true,"num_turns":1,
+"subtype":"success","api_error_status":429,
+"result":"API Error: Request rejected (429) \u00b7 You have reached your specified usage limits.",
+"type":"result","duration_ms":35,"terminal_reason":"api_error"}"#;
+
+    #[test]
+    fn the_captured_429_result_ends_the_turn_on_a_rate_limit_error_not_on_success() {
+        let message: Message = serde_json::from_str(&CAPTURED_429_RESULT.replace('\n', ""))
+            .expect("the captured line parses");
+        let mut state = MapState::new();
+        let AgentEvent::Done {
+            error,
+            is_error,
+            stop_reason,
+            result_text,
+            ..
+        } = one(&message, &mut state)
+        else {
+            panic!("a result maps to one done");
+        };
+        assert!(is_error, "the CLI's own error flag");
+        assert_eq!(stop_reason, StopReason::Error, "a refusal is not a completion");
+        assert_eq!(
+            error,
+            Some(ProviderError::RateLimited {
+                retry_after_ms: None,
+                resets_at_ms: None,
+            }),
+            "the host must have something to react to"
+        );
+        assert!(
+            result_text.unwrap_or_default().contains("usage limits"),
+            "the sentence is kept on the done for the record"
+        );
+    }
+
+    #[test]
+    fn a_fable_limit_result_is_a_model_limit_so_the_host_may_switch() {
+        // The exact sentence of the screenshot (2026-11-04, `claude-fable-5-1`).
+        let result = message(json!({
+            "type": "result", "subtype": "success", "duration_ms": 466, "duration_api_ms": 400,
+            "is_error": true, "num_turns": 0, "session_id": "s", "api_error_status": 429,
+            "terminal_reason": "api_error",
+            "result": "You've reached your Fable limit. Switch to another model, or manage \
+usage credits at https://claude.ai/settings/usage?from=cc_cli_limit_message, to continue.",
+        }));
+        let AgentEvent::Done {
+            error, stop_reason, ..
+        } = one(&result, &mut MapState::new())
+        else {
+            panic!("a result maps to one done");
+        };
+        assert_eq!(stop_reason, StopReason::Error);
+        assert_eq!(
+            error,
+            Some(ProviderError::ModelLimitReached {
+                model: Some("Fable".into()),
+                resets_at_ms: None,
+            }),
+            "a named model limit must be distinguishable from a dead account"
+        );
+    }
+
+    #[test]
+    fn a_model_scoped_rate_limit_window_marks_the_model_not_the_account() {
+        // `seven_day_opus` is one model's window: the account still serves the rest,
+        // so the refusal must not become an account-wide `rate_limited`.
+        let mut value: Value = serde_json::from_str(RECORDED_RATE_LIMIT_EVENT.trim()).unwrap();
+        value["rate_limit_info"]["status"] = json!("rejected");
+        value["rate_limit_info"]["rateLimitType"] = json!("seven_day_opus");
+        let mut state = MapState::new();
+        assert!(matches!(
+            one(&message(value), &mut state),
+            AgentEvent::Quota { .. }
+        ));
+        let done = message(json!({
+            "type": "result", "subtype": "success", "duration_ms": 1, "duration_api_ms": 1,
+            "is_error": true, "num_turns": 1, "session_id": "s",
+            "result": "",
+        }));
+        let AgentEvent::Done { error, .. } = one(&done, &mut state) else {
+            panic!("done");
+        };
+        assert_eq!(
+            error,
+            Some(ProviderError::ModelLimitReached {
+                model: Some("opus".into()),
+                resets_at_ms: Some(1_792_828_800_000),
+            })
         );
     }
 
