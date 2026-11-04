@@ -384,11 +384,26 @@ fn map_block(
             seq,
             parent,
         }),
-        ContentBlock::Text(text) => Some(AgentEvent::Text {
-            text: text.text.clone(),
-            seq,
-            parent,
-        }),
+        ContentBlock::Text(text) => {
+            // A REFUSAL is not the assistant's answer. The CLI writes it as a text
+            // block (measured 2026-11-04: `model: "<synthetic>"`, `is_api_error_message:
+            // true`, and the sentence as the whole content), and a host that maps it to
+            // `Text` shows it to the person as if the model had said it — which is
+            // exactly how "You've reached your Fable limit" became a reply. It travels
+            // as a notice instead: the terminal `done` carries the typed error, and the
+            // interface has something true to say about it.
+            if super::refusal::classify_refusal(&text.text).is_some() {
+                return Some(AgentEvent::ProviderNotice {
+                    kind: "model_refusal".into(),
+                    data: json!({"text": text.text.clone()}),
+                });
+            }
+            Some(AgentEvent::Text {
+                text: text.text.clone(),
+                seq,
+                parent,
+            })
+        },
         ContentBlock::Thinking(_) | ContentBlock::ToolUse(_) if from_user => None,
         ContentBlock::Thinking(thinking) => Some(AgentEvent::Thinking {
             text: thinking.thinking.clone(),
@@ -807,13 +822,44 @@ mod tests {
     // ----- Assistant ---------------------------------------------------------
 
     #[test]
+    fn a_refusal_written_as_assistant_text_is_a_notice_and_never_an_answer() {
+        // Measured 2026-11-04: the CLI writes the refusal as an assistant text block
+        // (`model: "<synthetic>"`, `is_api_error_message: true`). Mapping it to `Text`
+        // is what showed it to the person as the assistant's answer.
+        let mut state = MapState::new();
+        let event = one(
+            &assistant(
+                json!([{
+                    "type": "text",
+                    "text": "You've reached your Fable limit. Switch to another model, or \
+manage usage credits at https://claude.ai/settings/usage?from=cc_cli_limit_message, to continue."
+                }]),
+                None,
+            ),
+            &mut state,
+        );
+        match event {
+            AgentEvent::ProviderNotice { kind, data } => {
+                assert_eq!(kind, "model_refusal");
+                assert!(
+                    data["text"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .contains("Fable limit"),
+                    "the sentence is kept for the record"
+                );
+            },
+            other => panic!("a refusal must not become an answer: {other:?}"),
+        }
+    }
+
+    #[test]
     fn assistant_text_maps_to_text_with_seq_and_parent() {
         let mut state = MapState::new();
         let event = one(
             &assistant(json!([{"type": "text", "text": "bonjour"}]), None),
             &mut state,
-        );
-        assert_eq!(
+        );        assert_eq!(
             event,
             AgentEvent::Text {
                 text: "bonjour".into(),
