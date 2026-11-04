@@ -153,9 +153,9 @@ const CONTEXT_CREDITS: &[&str] = &["1m context", "long context"];
 
 /// A limit the CLI names without placing it.
 const PLAIN_LIMITS: &[&str] = &[
-    "rate limit",       // the CLI's own `serviceErrorMessage`
+    "rate limit", // the CLI's own `serviceErrorMessage`
     "rate_limit",
-    "api error: 429",   // the API's own wording, when the CLI passes it through
+    "api error: 429", // the API's own wording, when the CLI passes it through
     "request rejected (429)",
     "too many requests",
 ];
@@ -280,7 +280,16 @@ fn named(raw: &str) -> Option<String> {
     // A model name has no verb and no trailing clause; these words mean the text
     // is a sentence, so the scope is not "one model".
     const PROSE: &[&str] = &[
-        "specified", "usage", "your", "the", "a", "an", "rate", "reached", "and", "or",
+        "specified",
+        "usage",
+        "your",
+        "the",
+        "a",
+        "an",
+        "rate",
+        "reached",
+        "and",
+        "or",
     ];
     let first = name.split_whitespace().next()?.to_ascii_lowercase();
     if PROSE.contains(&first.as_str()) {

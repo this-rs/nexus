@@ -217,7 +217,10 @@ impl ProviderError {
 
     /// Whether the account is out of everything, so no model of it will answer.
     pub fn is_quota_refusal(&self) -> bool {
-        matches!(self, Self::RateLimited { .. } | Self::ModelLimitReached { .. })
+        matches!(
+            self,
+            Self::RateLimited { .. } | Self::ModelLimitReached { .. }
+        )
     }
 
     /// The serialised `kind` tag, usable as a stable error code.

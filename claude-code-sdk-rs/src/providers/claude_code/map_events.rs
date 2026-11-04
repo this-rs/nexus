@@ -832,7 +832,7 @@ mod tests {
                 json!([{
                     "type": "text",
                     "text": "You've reached your Fable limit. Switch to another model, or \
-manage usage credits at https://claude.ai/settings/usage?from=cc_cli_limit_message, to continue."
+                manage usage credits at https://claude.ai/settings/usage?from=cc_cli_limit_message, to continue."
                 }]),
                 None,
             ),
@@ -859,7 +859,8 @@ manage usage credits at https://claude.ai/settings/usage?from=cc_cli_limit_messa
         let event = one(
             &assistant(json!([{"type": "text", "text": "bonjour"}]), None),
             &mut state,
-        );        assert_eq!(
+        );
+        assert_eq!(
             event,
             AgentEvent::Text {
                 text: "bonjour".into(),
@@ -1744,7 +1745,11 @@ manage usage credits at https://claude.ai/settings/usage?from=cc_cli_limit_messa
             panic!("a result maps to one done");
         };
         assert!(is_error, "the CLI's own error flag");
-        assert_eq!(stop_reason, StopReason::Error, "a refusal is not a completion");
+        assert_eq!(
+            stop_reason,
+            StopReason::Error,
+            "a refusal is not a completion"
+        );
         assert_eq!(
             error,
             Some(ProviderError::RateLimited {
@@ -1767,7 +1772,7 @@ manage usage credits at https://claude.ai/settings/usage?from=cc_cli_limit_messa
             "is_error": true, "num_turns": 0, "session_id": "s", "api_error_status": 429,
             "terminal_reason": "api_error",
             "result": "You've reached your Fable limit. Switch to another model, or manage \
-usage credits at https://claude.ai/settings/usage?from=cc_cli_limit_message, to continue.",
+        usage credits at https://claude.ai/settings/usage?from=cc_cli_limit_message, to continue.",
         }));
         let AgentEvent::Done {
             error, stop_reason, ..
