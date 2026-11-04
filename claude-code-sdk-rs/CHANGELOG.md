@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `ProviderError::ProcessExited { code }` porte enfin le code de sortie du CLI Claude Code (il valait toujours `None`) : le code, ou 128 + N pour un processus tué par le signal N. `Transport::exit_code()` (None par défaut), `InteractiveClient::exit_probe()` et `agent::describe_exit_code` (« killed by signal 15 (SIGTERM) »). Un arrêt venu d'une autre session ne se lit plus comme un plantage.
 - Le prompt système et le prompt ajouté d'un lancement local passent par un fichier privé (`0600`, supprimé à la fin de la session) avec `--system-prompt-file` / `--append-system-prompt-file`, et non plus en texte sur la ligne de commande. Un prompt de plusieurs dizaines de Ko qui cite des commandes faisait correspondre le CLI à n'importe quel `pkill -f 'cargo test'` lancé par une autre session : le 04/11/2026, une session Claude Code a été tuée (sortie 137) de cette façon. Le texte n'est plus lisible avec `ps` non plus. Un prompt vide garde `--system-prompt ""` ; un lancement distant (SSH) garde le texte, faute de fichier sur la machine distante.
 
 ### Removed
