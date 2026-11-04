@@ -205,11 +205,13 @@ async fn query_print_mode(
     // Remote first: it refuses an MCP configuration before any secret file is written.
     let remote = crate::transport::subprocess::remote_launch(&options)?;
     let mcp_file = crate::transport::subprocess::mcp_secret_file(&options)?;
+    let prompt_files = crate::transport::subprocess::prompt_files(&options)?;
     let mut cmd = crate::transport::subprocess::build_cli_command(
         &cli_path,
         &options,
         crate::transport::subprocess::CommandMode::Print { prompt: &prompt },
         mcp_file.as_ref().map(|f| f.path()),
+        &prompt_files,
         remote.as_ref(),
     );
 
@@ -268,6 +270,7 @@ async fn query_print_mode(
         // The private MCP config file lives exactly as long as the child's
         // stdout does: it is deleted when this task ends.
         let _mcp_file = mcp_file;
+        let _prompt_files = prompt_files;
         let reader = BufReader::new(stdout);
         let mut lines = reader.lines();
 

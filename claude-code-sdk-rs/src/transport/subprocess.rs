@@ -279,6 +279,77 @@ pub(crate) fn mcp_secret_file(
         .map_err(SdkError::ProcessError)
 }
 
+/// The system prompt and the appended prompt the options ask for, as the CLI
+/// receives them. `Some("")` is the empty `--system-prompt` Python passes when
+/// nothing is configured; `None` means no flag at all.
+///
+/// `system_prompt_v2` replaces the deprecated pair outright, and a preset only
+/// contributes its `append` (no selector flag reaches the CLI).
+fn prompt_texts(options: &ClaudeCodeOptions) -> (Option<&str>, Option<&str>) {
+    match &options.system_prompt_v2 {
+        Some(crate::types::SystemPrompt::String(s)) => (Some(s.as_str()), None),
+        Some(crate::types::SystemPrompt::Preset { append, .. }) => (None, append.as_deref()),
+        #[allow(deprecated)]
+        None => (
+            Some(options.system_prompt.as_deref().unwrap_or("")),
+            options.append_system_prompt.as_deref(),
+        ),
+    }
+}
+
+/// The owner-only files holding the prompts of a local launch. Both must outlive
+/// the child; dropping this deletes them.
+#[derive(Default)]
+pub(crate) struct PromptFiles {
+    system: Option<super::spawn::SecretFile>,
+    append: Option<super::spawn::SecretFile>,
+}
+
+impl PromptFiles {
+    pub(crate) fn system_path(&self) -> Option<&Path> {
+        self.system.as_ref().map(|f| f.path())
+    }
+
+    pub(crate) fn append_path(&self) -> Option<&Path> {
+        self.append.as_ref().map(|f| f.path())
+    }
+}
+
+/// Write every non-empty prompt to an owner-only file, passed with
+/// `--system-prompt-file` / `--append-system-prompt-file` instead of its text.
+///
+/// Why off `argv`: an orchestrator's system prompt is tens of kilobytes of prose
+/// that quotes commands (`cargo test`, `npm run`, ...). On the command line it
+/// makes the CLI process MATCH any `pkill -f '<command>'` run by another session
+/// on the machine. Measured on 04/11/2026: a `pkill -f 'cargo test'` from an
+/// unrelated session killed a live Claude Code session (exit 137) because its
+/// 76 KB prompt contained those words. The text is also readable by every local
+/// user through `ps`, like the MCP secrets [`mcp_secret_file`] keeps off it.
+///
+/// A remote launch keeps the text: the file would exist on this machine, not on
+/// the one that runs the CLI. A write failure is an error, never a silent return
+/// to `argv`.
+pub(crate) fn prompt_files(options: &ClaudeCodeOptions) -> Result<PromptFiles> {
+    if options.remote.is_some() {
+        return Ok(PromptFiles::default());
+    }
+    let write = |name: &str, text: Option<&str>| -> Result<Option<super::spawn::SecretFile>> {
+        match text {
+            Some(text) if !text.is_empty() => {
+                super::spawn::SecretFile::create(name, text.as_bytes())
+                    .map(Some)
+                    .map_err(SdkError::ProcessError)
+            },
+            _ => Ok(None),
+        }
+    };
+    let (system, append) = prompt_texts(options);
+    Ok(PromptFiles {
+        system: write("system-prompt.txt", system)?,
+        append: write("append-system-prompt.txt", append)?,
+    })
+}
+
 /// The one place a `claude` command line is built: arguments, working directory
 /// and environment, through the single launcher of `spawn.rs`. Stdio, process
 /// group and the SDK markers stay with the caller because they differ per entry
@@ -307,9 +378,10 @@ pub(crate) fn build_cli_command(
     options: &ClaudeCodeOptions,
     mode: CommandMode<'_>,
     mcp_config_file: Option<&Path>,
+    prompt_files: &PromptFiles,
     remote: Option<&super::remote::RemoteLaunch>,
 ) -> Command {
-    let local = local_cli_command(cli_path, options, mode, mcp_config_file);
+    let local = local_cli_command(cli_path, options, mode, mcp_config_file, prompt_files);
     match (&options.remote, remote) {
         (None, _) => local,
         (Some(host), Some(launch)) => super::remote::wrap_ssh(local.as_std(), host, launch),
@@ -324,6 +396,7 @@ fn local_cli_command(
     options: &ClaudeCodeOptions,
     mode: CommandMode<'_>,
     mcp_config_file: Option<&Path>,
+    prompt_files: &PromptFiles,
 ) -> Command {
     // The single launcher: with an allowlist policy the child starts from an
     // EMPTY environment. This must stay the first thing done to the command —
@@ -382,34 +455,26 @@ fn local_cli_command(
     // System prompts (match Python SDK behavior)
     //
     // Python always passes `--system-prompt ""` when `system_prompt` is None.
-    if let Some(ref prompt_v2) = options.system_prompt_v2 {
-        match prompt_v2 {
-            crate::types::SystemPrompt::String(s) => {
-                cmd.arg("--system-prompt").arg(s);
-            },
-            crate::types::SystemPrompt::Preset { append, .. } => {
-                // Python only uses preset prompts to optionally append to the default preset.
-                // It does not pass a preset selector flag to the CLI.
-                if let Some(append_text) = append {
-                    cmd.arg("--append-system-prompt").arg(append_text);
-                }
-            },
-        }
-    } else {
-        // Fallback to deprecated fields for backward compatibility
-        #[allow(deprecated)]
-        match options.system_prompt.as_deref() {
-            Some(prompt) => {
-                cmd.arg("--system-prompt").arg(prompt);
-            },
-            None => {
-                cmd.arg("--system-prompt").arg("");
-            },
-        }
-        #[allow(deprecated)]
-        if let Some(ref prompt) = options.append_system_prompt {
-            cmd.arg("--append-system-prompt").arg(prompt);
-        }
+    // A non-empty prompt goes by file when `prompt_files` holds one: see
+    // [`prompt_files`] for why the text must stay off `argv`.
+    let (system, append) = prompt_texts(options);
+    match (system, prompt_files.system_path()) {
+        (Some(_), Some(path)) => {
+            cmd.arg("--system-prompt-file").arg(path);
+        },
+        (Some(text), None) => {
+            cmd.arg("--system-prompt").arg(text);
+        },
+        (None, _) => {},
+    }
+    match (append, prompt_files.append_path()) {
+        (Some(_), Some(path)) => {
+            cmd.arg("--append-system-prompt-file").arg(path);
+        },
+        (Some(text), None) => {
+            cmd.arg("--append-system-prompt").arg(text);
+        },
+        (None, _) => {},
     }
 
     // Tool configuration
@@ -687,6 +752,9 @@ pub struct SubprocessTransport {
     /// `ClaudeCodeOptions::mcp_config_via_file` is set. Lives as long as the child;
     /// dropped (and deleted) on disconnect.
     mcp_config_file: Option<super::spawn::SecretFile>,
+    /// Owner-only files holding the prompts (see [`prompt_files`]). Live as long as
+    /// the child; dropped (and deleted) on disconnect.
+    prompt_files: PromptFiles,
     /// What a remote launch needs to outlive the child (the pinned `known_hosts` file).
     remote_launch: Option<super::remote::RemoteLaunch>,
 }
@@ -717,6 +785,7 @@ impl SubprocessTransport {
             close_stdin_after_prompt: false,
             mcp_config_file: None,
             remote_launch: None,
+            prompt_files: PromptFiles::default(),
         })
     }
 
@@ -756,6 +825,7 @@ impl SubprocessTransport {
             close_stdin_after_prompt: false,
             mcp_config_file: None,
             remote_launch: None,
+            prompt_files: PromptFiles::default(),
         })
     }
 
@@ -799,6 +869,7 @@ impl SubprocessTransport {
             close_stdin_after_prompt: false,
             mcp_config_file: None,
             remote_launch: None,
+            prompt_files: PromptFiles::default(),
         }
     }
 
@@ -844,6 +915,7 @@ impl SubprocessTransport {
             close_stdin_after_prompt: true,
             mcp_config_file: None,
             remote_launch: None,
+            prompt_files: PromptFiles::default(),
         })
     }
 
@@ -854,6 +926,7 @@ impl SubprocessTransport {
             &self.options,
             CommandMode::Stream,
             self.mcp_config_file.as_ref().map(|f| f.path()),
+            &self.prompt_files,
             self.remote_launch.as_ref(),
         );
 
@@ -936,6 +1009,7 @@ impl SubprocessTransport {
         // Remote first: it refuses an MCP configuration before any secret file is written.
         self.remote_launch = remote_launch(&self.options)?;
         self.mcp_config_file = mcp_secret_file(&self.options)?;
+        self.prompt_files = prompt_files(&self.options)?;
 
         let mut cmd = self.build_command();
         // Never `{:?}` the Command itself: its Debug prints every env value and
@@ -1426,6 +1500,8 @@ impl Transport for SubprocessTransport {
         // The CLI read its MCP configuration at start-up: delete the secret file now
         // rather than at the end of the shutdown escalation below.
         self.mcp_config_file.take();
+        // Same for the prompt files: the text was read when the CLI started.
+        self.prompt_files = PromptFiles::default();
 
         // Close stdin channel — signals EOF to the CLI process
         self.stdin_tx.take();
@@ -2287,6 +2363,87 @@ mod tests {
             value_after(&args, "--append-system-prompt"),
             Some("and polite")
         );
+    }
+
+    /// A local launch passes every non-empty prompt by owner-only file, with the
+    /// text in the file and not on the command line; the files go when dropped.
+    #[test]
+    fn prompt_files_keep_the_text_off_argv_and_vanish_with_the_session() {
+        let options = ClaudeCodeOptions::builder()
+            .system_prompt("Lance cargo test.")
+            .append_system_prompt("Puis npm run lint.")
+            .build();
+        let files = prompt_files(&options).expect("prompt files");
+        let system = files.system_path().expect("system file").to_path_buf();
+        let append = files.append_path().expect("append file").to_path_buf();
+        assert_eq!(
+            std::fs::read_to_string(&system).unwrap(),
+            "Lance cargo test."
+        );
+        assert_eq!(
+            std::fs::read_to_string(&append).unwrap(),
+            "Puis npm run lint."
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&system).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "the prompt file is owner-only");
+        }
+
+        let cmd = build_cli_command(
+            Path::new("/opt/claude"),
+            &options,
+            CommandMode::Stream,
+            None,
+            &files,
+            None,
+        );
+        let args: Vec<String> = cmd
+            .as_std()
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(value_after(&args, "--system-prompt-file"), system.to_str());
+        assert_eq!(
+            value_after(&args, "--append-system-prompt-file"),
+            append.to_str()
+        );
+        assert!(
+            !args
+                .iter()
+                .any(|a| a.contains("cargo test") || a.contains("npm run")),
+            "prompt text on argv: {args:?}"
+        );
+        assert_eq!(occurrences(&args, "--system-prompt"), 0);
+        assert_eq!(occurrences(&args, "--append-system-prompt"), 0);
+
+        drop(files);
+        assert!(
+            !system.exists() && !append.exists(),
+            "dropped files are deleted"
+        );
+    }
+
+    /// No file for an empty prompt (Python's `--system-prompt ""` stays), and none
+    /// for a remote launch: the file would sit on this machine, not the remote one.
+    #[test]
+    fn prompt_files_skip_the_empty_prompt_and_remote_launches() {
+        let files = prompt_files(&ClaudeCodeOptions::default()).unwrap();
+        assert!(files.system_path().is_none() && files.append_path().is_none());
+        let args = args_for(ClaudeCodeOptions::default());
+        assert_eq!(value_after(&args, "--system-prompt"), Some(""));
+
+        let remote = ClaudeCodeOptions {
+            system_prompt_v2: Some(crate::types::SystemPrompt::String("be terse".into())),
+            remote: Some(super::super::remote::RemoteHost::new(
+                "build-1.example.net",
+                "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl",
+            )),
+            ..Default::default()
+        };
+        let files = prompt_files(&remote).unwrap();
+        assert!(files.system_path().is_none());
     }
 
     #[test]

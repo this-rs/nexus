@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Le prompt système et le prompt ajouté d'un lancement local passent par un fichier privé (`0600`, supprimé à la fin de la session) avec `--system-prompt-file` / `--append-system-prompt-file`, et non plus en texte sur la ligne de commande. Un prompt de plusieurs dizaines de Ko qui cite des commandes faisait correspondre le CLI à n'importe quel `pkill -f 'cargo test'` lancé par une autre session : le 04/11/2026, une session Claude Code a été tuée (sortie 137) de cette façon. Le texte n'est plus lisible avec `ps` non plus. Un prompt vide garde `--system-prompt ""` ; un lancement distant (SSH) garde le texte, faute de fichier sur la machine distante.
+
 ### Removed
 
 - Code mort retiré (N13) : `ClaudeSDKClientWorking` (`client_working.rs`), `OptimizedClient` et `ClientMode` (`optimized_client.rs`), `MessageBatcher`, `PerformanceMetrics` et `RetryConfig` (`perf_utils.rs`), `ModelRecommendation` et ses helpers `latest_sonnet()` / `cheapest_model()` (module public `model_recommendation`), avec leurs exemples et tests.

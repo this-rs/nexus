@@ -242,7 +242,25 @@ fn record_invocation(argv: &[String]) {
     }
     names.sort();
 
+    // The real CLI reads its prompt files at start-up and the SDK deletes them
+    // when the session closes, so a test can only see their text through what
+    // the fake read here, while they still exist.
+    let mut flag_files: BTreeMap<String, String> = BTreeMap::new();
+    for flag in ["--system-prompt-file", "--append-system-prompt-file"] {
+        if let Some(file) = argv
+            .iter()
+            .position(|a| a == flag)
+            .and_then(|i| argv.get(i + 1))
+        {
+            flag_files.insert(
+                flag.to_string(),
+                std::fs::read_to_string(file).unwrap_or_else(|e| format!("<unreadable: {e}>")),
+            );
+        }
+    }
+
     let record = json!({
+        "flag_files": flag_files,
         "program": std::env::args().next().unwrap_or_default(),
         "argv": argv,
         "cwd": std::env::current_dir().map(|d| d.display().to_string()).unwrap_or_default(),
