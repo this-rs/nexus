@@ -16,7 +16,7 @@ flowchart TD
     subgraph contrat["Contrat — transport/mod.rs"]
         direction TB
         TRAIT["✅ trait Transport<br/>as_any_mut, connect, send_message, receive_messages,<br/>send_control_request, receive_control_response,<br/>send_sdk_control_request, send_sdk_control_response,<br/>is_connected, disconnect, end_input<br/><i>vérifié : appelé via un objet-trait dyn Transport</i>"]
-        DEFAULTS["✅ méthodes par défaut du trait<br/>subscribe_messages, take_sdk_control_receiver,<br/>clone_stdin_sender, child_pid renvoient None ;<br/>end_input ne fait rien<br/><i>vérifié : MockTransport n’en redéfinit que deux</i>"]
+        DEFAULTS["✅ méthodes par défaut du trait<br/>subscribe_messages, take_sdk_control_receiver,<br/>clone_stdin_sender, child_pid, exit_code renvoient None ;<br/>end_input ne fait rien ;<br/>SubprocessTransport::exit_code = try_wait de l’enfant : le code, ou 128 + N s’il a été tué par le signal N (exit_code_of ; vérifié : a_process_killed_by_sigterm_reads_143_and_an_exit_reads_its_code)<br/><i>vérifié : MockTransport n’en redéfinit que deux</i>"]
         STATE["🔴 enum TransportState<br/>Disconnected, Connecting, Connected,<br/>Disconnecting, Error<br/>aucune variante n’exprime « ouvert en lecture,<br/>fermé en écriture » → end_input ne peut pas dire vrai"]
         INPUTMSG["✅ InputMessage::user, InputMessage::user_blocks et InputMessage::tool_result<br/>user_blocks : contenu en tableau de UserContentBlock (texte, image)<br/><i>vérifié : ligne relue sur le stdin du faux CLI ; blocs : test_send_message_blocks_writes_an_array_content</i>"]
         TRAIT --- DEFAULTS
