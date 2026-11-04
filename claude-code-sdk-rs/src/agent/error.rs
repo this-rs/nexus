@@ -79,7 +79,9 @@ pub enum ProviderError {
     /// The provider process ended.
     #[error("provider process exited")]
     ProcessExited {
-        /// Exit code, when known.
+        /// Exit code, when known. A process killed by signal N reads 128 + N
+        /// (the shell's convention: 137 = SIGKILL, 143 = SIGTERM), see
+        /// [`describe_exit_code`].
         #[serde(default, skip_serializing_if = "Option::is_none")]
         code: Option<i32>,
     },
@@ -212,6 +214,82 @@ impl ProviderError {
             Self::TurnInProgress => 409,
             Self::InvalidRequest { .. } => 400,
             Self::Closed => 410,
+        }
+    }
+}
+
+/// What an exit code of a provider process says, in words: `killed by signal
+/// 15 (SIGTERM)` for 128 + N, `exit code 1` otherwise, `exit status unknown`
+/// when it was not observed.
+///
+/// Why: on 04/11/2026 a CLI was killed by another session's `pkill -f`, and
+/// all the person read was « the provider process exited unexpectedly ». With
+/// « killed by signal 15 (SIGTERM) » the cause is outside the session, at once.
+pub fn describe_exit_code(code: Option<i32>) -> String {
+    match code {
+        None => "exit status unknown".to_string(),
+        Some(c) if (129..=128 + 64).contains(&c) => {
+            let signal = c - 128;
+            match signal_name(signal) {
+                Some(name) => format!("killed by signal {signal} ({name})"),
+                None => format!("killed by signal {signal}"),
+            }
+        },
+        Some(c) => format!("exit code {c}"),
+    }
+}
+
+fn signal_name(signal: i32) -> Option<&'static str> {
+    Some(match signal {
+        1 => "SIGHUP",
+        2 => "SIGINT",
+        3 => "SIGQUIT",
+        6 => "SIGABRT",
+        9 => "SIGKILL",
+        11 => "SIGSEGV",
+        13 => "SIGPIPE",
+        15 => "SIGTERM",
+        _ => return None,
+    })
+}
+
+#[cfg(test)]
+mod exit_code_tests {
+    use super::describe_exit_code;
+
+    #[test]
+    fn a_signal_is_named_a_code_is_a_code() {
+        assert_eq!(
+            describe_exit_code(Some(143)),
+            "killed by signal 15 (SIGTERM)"
+        );
+        assert_eq!(
+            describe_exit_code(Some(137)),
+            "killed by signal 9 (SIGKILL)"
+        );
+        assert_eq!(describe_exit_code(Some(128 + 30)), "killed by signal 30");
+        assert_eq!(describe_exit_code(Some(1)), "exit code 1");
+        assert_eq!(describe_exit_code(Some(0)), "exit code 0");
+        assert_eq!(describe_exit_code(Some(128)), "exit code 128");
+        assert_eq!(describe_exit_code(None), "exit status unknown");
+    }
+
+    #[test]
+    fn every_common_signal_has_its_name() {
+        for (signal, name) in [
+            (1, "SIGHUP"),
+            (2, "SIGINT"),
+            (3, "SIGQUIT"),
+            (6, "SIGABRT"),
+            (9, "SIGKILL"),
+            (11, "SIGSEGV"),
+            (13, "SIGPIPE"),
+            (15, "SIGTERM"),
+        ] {
+            assert_eq!(
+                describe_exit_code(Some(128 + signal)),
+                format!("killed by signal {signal} ({name})")
+            );
         }
     }
 }

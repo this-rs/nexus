@@ -29,6 +29,31 @@ fn stream_ended_before_result() -> SdkError {
     )
 }
 
+/// Reads the exit code of the CLI behind a client (see [`InteractiveClient::exit_probe`]).
+#[derive(Clone)]
+pub struct ExitProbe(Arc<Mutex<Box<dyn Transport + Send>>>);
+
+impl ExitProbe {
+    /// The CLI's exit code, waited for up to `within`: its output ends a moment
+    /// before the process is reaped. `None` when it did not end in time or when
+    /// the transport cannot tell (128 + N for a signal N).
+    pub async fn wait_code(&self, within: std::time::Duration) -> Option<i32> {
+        let deadline = tokio::time::Instant::now() + within;
+        loop {
+            // never block behind a close() that holds the transport
+            if let Ok(mut transport) = tokio::time::timeout(within, self.0.lock()).await
+                && let Some(code) = transport.exit_code()
+            {
+                return Some(code);
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return None;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+    }
+}
+
 /// Interactive client for stateful conversations with Claude
 ///
 /// This is the recommended client for interactive use. It provides a clean API
@@ -914,6 +939,12 @@ impl InteractiveClient {
     pub async fn child_pid(&self) -> Option<u32> {
         let transport = self.transport.lock().await;
         transport.child_pid()
+    }
+
+    /// A handle that reads the CLI's exit code once its output has ended (see
+    /// [`ExitProbe::wait_code`]). It holds the transport, not the client.
+    pub fn exit_probe(&self) -> ExitProbe {
+        ExitProbe(Arc::clone(&self.transport))
     }
 
     /// Whether the CLI is still there: connected, and its stdout not at EOF.

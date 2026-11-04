@@ -42,7 +42,7 @@ pub use credentials::{
     CredentialRef, CredentialResolver, EnvCredentialResolver, KnownSecrets, RecordingResolver,
     Secret, redact, redact_with,
 };
-pub use error::{ProtocolMismatch, ProviderError};
+pub use error::{ProtocolMismatch, ProviderError, describe_exit_code};
 pub use event::{
     AgentEvent, BackgroundTask, BackgroundTaskKind, BackgroundTaskStatus, CompactionPhase,
     CompactionTrigger, Cost, DeltaKind, McpServerStatus, ModelUsage, QuestionOption, QuestionReply,

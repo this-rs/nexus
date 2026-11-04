@@ -213,6 +213,13 @@ pub trait Transport: Send + Sync {
         None
     }
 
+    /// The exit code of the process behind this transport, once it has ended:
+    /// `None` while it runs, when there is no process, or when it was never
+    /// observed. A process killed by signal N reads 128 + N.
+    fn exit_code(&mut self) -> Option<i32> {
+        None
+    }
+
     /// Check if the transport is connected
     #[allow(dead_code)]
     fn is_connected(&self) -> bool;
