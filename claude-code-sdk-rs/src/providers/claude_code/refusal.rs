@@ -54,6 +54,11 @@ pub enum RefusalScope {
     Model(String),
     /// The credits the 1M context window needs; neither account nor model is out.
     Context,
+    /// The request itself was refused by the provider's safeguards (the CLI's
+    /// `refusal` stop: "Claude's safeguards flagged this message", "Claude can't
+    /// help with this"). Nothing is out of quota; the wording of the turn is what
+    /// was refused, and the CLI's own advice is to rephrase or change model.
+    Safeguard,
     /// A limit that was read but not placed. Treated as [`Self::Account`] by hosts.
     Unknown,
 }
@@ -61,7 +66,9 @@ pub enum RefusalScope {
 impl RefusalScope {
     /// Whether moving to another model is a sensible reaction to this refusal.
     pub fn switch_model_helps(&self) -> bool {
-        matches!(self, Self::Model(_))
+        // A safeguard refusal is the one case where another model may word the same
+        // intent differently — the CLI says so itself ("try a different model").
+        matches!(self, Self::Model(_) | Self::Safeguard)
     }
 
     /// The model this refusal names, if it names one.
@@ -97,6 +104,7 @@ impl Refusal {
                 model: Some(name.clone()),
                 resets_at_ms: None,
             },
+            RefusalScope::Safeguard => ProviderError::Refused { category: None },
             RefusalScope::Context => ProviderError::ContextTooSmall {
                 needed: None,
                 available: None,
@@ -152,6 +160,17 @@ const PLAIN_LIMITS: &[&str] = &[
     "too many requests",
 ];
 
+/// The CLI's safeguards refusal (its `refusal` stop, built by `a3t` in 2.1.318): the
+/// REQUEST was refused, not a quota. Its own advice is "try rephrasing the request in
+/// a new session or change your model".
+const SAFEGUARDS: &[&str] = &[
+    "safeguards flagged this message",
+    "can't respond to this message with",
+    "can't respond to your last message with",
+    "can't help with this",
+    "cannot help with this",
+];
+
 /// Reads the refusal a `result` carries, when it carries one.
 ///
 /// `None` for any other text: a turn that merely mentions a limit in passing is
@@ -171,6 +190,12 @@ pub fn classify_refusal(text: &str) -> Option<Refusal> {
 
     if ACCOUNT_CEILINGS.iter().any(|n| has(n)) {
         return Some(Refusal::new(RefusalScope::Account));
+    }
+
+    // The request itself was refused by the provider's safeguards. Read BEFORE the
+    // credit wordings: that prose also talks about what the model "can't" do.
+    if SAFEGUARDS.iter().any(|n| has(n)) {
+        return Some(Refusal::new(RefusalScope::Safeguard));
     }
 
     if OUT_OF_CREDITS.iter().any(|n| has(n)) {
@@ -341,6 +366,31 @@ continue.";
             let refusal = classify_refusal(text).unwrap_or_else(|| panic!("no refusal for {text}"));
             assert_eq!(&refusal.scope, expected, "{text}");
         }
+    }
+
+    #[test]
+    fn a_safeguards_refusal_is_neither_a_quota_nor_an_answer() {
+        // The CLI's `refusal` stop (builder `a3t`, 2.1.318), two of its wordings.
+        for text in [
+            "API Error: Claude's safeguards flagged this message (https://www.anthropic.com/legal/aup). This sometimes happens with safe, normal conversations. Double press esc to edit your last message, or try a different model with /model.",
+            "API Error: Claude can't respond to this message with Fable. Try rephrasing the request in a new session or change your model.",
+            "API Error: Claude's safeguards flagged this message. This request cannot be completed. Try a different model.",
+        ] {
+            let refusal = classify_refusal(text).unwrap_or_else(|| panic!("no refusal for {text}"));
+            assert_eq!(refusal.scope, RefusalScope::Safeguard, "{text}");
+            // Nothing is out of quota: no hold may be taken on the account or a model.
+            assert_eq!(refusal.error(), ProviderError::Refused { category: None });
+            // The CLI's own advice is to change model, so a switch is a fair reaction.
+            assert!(refusal.scope.switch_model_helps());
+        }
+    }
+
+    #[test]
+    fn a_whole_account_ceiling_is_never_read_as_a_safeguards_refusal() {
+        // The two families share the word "can't"-style prose in the wild; the
+        // account ceiling must keep winning, or a host would switch models forever.
+        let refusal = classify_refusal(CAPTURED_429).unwrap();
+        assert_eq!(refusal.scope, RefusalScope::Account);
     }
 
     #[test]

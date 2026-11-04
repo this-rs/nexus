@@ -85,6 +85,21 @@ pub enum ProviderError {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         resets_at_ms: Option<u64>,
     },
+    /// The provider refused the REQUEST itself, on policy grounds (its safeguards),
+    /// not on a quota: nothing is exhausted, the wording of the turn is what was
+    /// refused.
+    ///
+    /// This is the CLI's `refusal` stop ("Claude's safeguards flagged this message",
+    /// "Claude can't help with this"), whose own advice is to rephrase or change
+    /// model. Kept apart from every quota error so that a host does not hold an
+    /// account or a model out for it — and apart from [`Self::InvalidRequest`],
+    /// which is a malformed call the client can fix.
+    #[error("request refused by the provider's safeguards")]
+    Refused {
+        /// The category the provider named, when it named one ("cyber"…).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        category: Option<String>,
+    },
     /// The provider is temporarily overloaded.
     #[error("provider overloaded")]
     Overloaded,
@@ -217,6 +232,7 @@ impl ProviderError {
             Self::ContextTooSmall { .. } => "context_too_small",
             Self::RateLimited { .. } => "rate_limited",
             Self::ModelLimitReached { .. } => "model_limit_reached",
+            Self::Refused { .. } => "refused",
             Self::Overloaded => "overloaded",
             Self::Timeout { .. } => "timeout",
             Self::ProcessExited { .. } => "process_exited",
@@ -240,7 +256,8 @@ impl ProviderError {
             | Self::Protocol { .. } => 502,
             Self::ModelNoTools { .. }
             | Self::ContextTooSmall { .. }
-            | Self::ModelProtocolMismatch { .. } => 422,
+            | Self::ModelProtocolMismatch { .. }
+            | Self::Refused { .. } => 422,
             Self::RateLimited { .. } | Self::ModelLimitReached { .. } => 429,
             Self::Timeout { .. } => 504,
             Self::Unsupported { .. } => 501,
