@@ -273,4 +273,23 @@ mod exit_code_tests {
         assert_eq!(describe_exit_code(Some(128)), "exit code 128");
         assert_eq!(describe_exit_code(None), "exit status unknown");
     }
+
+    #[test]
+    fn every_common_signal_has_its_name() {
+        for (signal, name) in [
+            (1, "SIGHUP"),
+            (2, "SIGINT"),
+            (3, "SIGQUIT"),
+            (6, "SIGABRT"),
+            (9, "SIGKILL"),
+            (11, "SIGSEGV"),
+            (13, "SIGPIPE"),
+            (15, "SIGTERM"),
+        ] {
+            assert_eq!(
+                describe_exit_code(Some(128 + signal)),
+                format!("killed by signal {signal} ({name})")
+            );
+        }
+    }
 }
