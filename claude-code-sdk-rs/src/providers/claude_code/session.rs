@@ -181,6 +181,7 @@ impl ClaudeCodeProvider {
             },
         };
         let registry = client.hook_callbacks();
+        let exit = client.exit_probe();
         let pid = client.child_pid().await;
         *core.cli_pid.lock().unwrap_or_else(PoisonError::into_inner) = pid;
         let pump = tokio::spawn(pump(
@@ -189,6 +190,7 @@ impl ClaudeCodeProvider {
             control_rx,
             registry,
             spec.hooks.clone(),
+            exit,
         ));
         Ok(Arc::new(ClaudeCodeSession {
             core,
@@ -381,6 +383,8 @@ struct State {
     closed: bool,
     /// The CLI's message stream ended: the process is gone.
     dead: bool,
+    /// How the CLI ended, once `dead` (a code, or 128 + the signal that killed it).
+    exit_code: Option<i32>,
     /// Sink of the running turn; `Some` exactly while a turn is running.
     turn: Option<mpsc::UnboundedSender<AgentEvent>>,
     out_of_band: VecDeque<AgentEvent>,
@@ -478,6 +482,7 @@ impl Core {
             state: Mutex::new(State {
                 closed: false,
                 dead: false,
+                exit_code: None,
                 turn: None,
                 out_of_band: VecDeque::new(),
                 out_of_band_dropped: 0,
@@ -640,7 +645,9 @@ impl Core {
         if state.closed {
             Err(ProviderError::Closed)
         } else if state.dead {
-            Err(ProviderError::ProcessExited { code: None })
+            Err(ProviderError::ProcessExited {
+                code: state.exit_code,
+            })
         } else {
             Ok(())
         }
@@ -782,14 +789,21 @@ impl Core {
     }
 
     /// The CLI's message stream ended without `close()`: the process is gone.
-    fn on_process_exit(&self) {
+    fn on_process_exit(&self, code: Option<i32>) {
         let mut state = self.lock();
         if state.closed || state.dead {
             return;
         }
+        if code.is_some() {
+            tracing::info!(
+                exit = %crate::agent::error::describe_exit_code(code),
+                "Claude Code CLI ended"
+            );
+        }
         state.route(AgentEvent::Error {
-            error: ProviderError::ProcessExited { code: None },
+            error: ProviderError::ProcessExited { code },
         });
+        state.exit_code = code;
         state.dead = true;
         state.pending.clear();
         state.consent_asks.clear();
@@ -884,6 +898,9 @@ async fn next_control(control: &mut Option<mpsc::Receiver<Value>>) -> Option<Val
     }
 }
 
+/// How long the pump waits for the exit code once the CLI's output has ended.
+const EXIT_CODE_WAIT: std::time::Duration = std::time::Duration::from_millis(500);
+
 /// The one task of a session that reads the CLI.
 async fn pump(
     core: Arc<Core>,
@@ -891,6 +908,7 @@ async fn pump(
     mut control_rx: Option<mpsc::Receiver<Value>>,
     registry: HookRegistry,
     hooks: Option<Arc<dyn SessionHooks>>,
+    exit: crate::interactive::ExitProbe,
 ) {
     loop {
         tokio::select! {
@@ -902,7 +920,11 @@ async fn pump(
                 Some(Ok(message)) => core.on_message(&message),
                 Some(Err(error)) => core.emit(AgentEvent::Error { error: error.into() }),
                 None => {
-                    core.on_process_exit();
+                    // How it ended (a code, or 128 + the signal that killed it):
+                    // « exited unexpectedly » alone made a kill from outside look
+                    // like a crash of the session.
+                    let code = exit.wait_code(EXIT_CODE_WAIT).await;
+                    core.on_process_exit(code);
                     break;
                 },
             },

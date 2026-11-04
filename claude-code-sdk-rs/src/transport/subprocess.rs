@@ -1474,6 +1474,11 @@ impl Transport for SubprocessTransport {
         self.child.as_ref().and_then(|c| c.id())
     }
 
+    fn exit_code(&mut self) -> Option<i32> {
+        let status = self.child.as_mut()?.try_wait().ok()??;
+        Some(exit_code_of(status))
+    }
+
     /// Whether this transport still has a live CLI behind it.
     ///
     /// Not just the declared state: `connect()` only verifies that `spawn()`
@@ -1650,6 +1655,19 @@ impl Drop for SubprocessTransport {
             let _ = child.start_kill();
         }
     }
+}
+
+/// An `ExitStatus` as one number: the code, or 128 + N for a process killed by
+/// signal N (Unix; the shell's convention).
+pub(crate) fn exit_code_of(status: std::process::ExitStatus) -> i32 {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        if let Some(signal) = status.signal() {
+            return 128 + signal;
+        }
+    }
+    status.code().unwrap_or(-1)
 }
 
 /// Find the Claude CLI binary
@@ -1953,6 +1971,33 @@ fn apply_process_user_inner(_cmd: &mut Command, _user: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A process killed by a signal reads 128 + N, the shell convention the
+    /// error text decodes (« killed by signal 15 (SIGTERM) »).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_process_killed_by_sigterm_reads_143_and_an_exit_reads_its_code() {
+        let mut child = tokio::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let pid = child.id().unwrap() as i32;
+        // SAFETY: a plain signal to the child this test just spawned.
+        assert_eq!(unsafe { libc::kill(pid, libc::SIGTERM) }, 0);
+        let status = child.wait().await.unwrap();
+        assert_eq!(exit_code_of(status), 143);
+        assert_eq!(
+            crate::agent::describe_exit_code(Some(exit_code_of(status))),
+            "killed by signal 15 (SIGTERM)"
+        );
+
+        let status = tokio::process::Command::new("sh")
+            .args(["-c", "exit 7"])
+            .status()
+            .await
+            .unwrap();
+        assert_eq!(exit_code_of(status), 7);
+    }
 
     #[test]
     fn test_find_claude_cli_error_message() {

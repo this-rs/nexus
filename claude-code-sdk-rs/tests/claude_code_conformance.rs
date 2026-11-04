@@ -1336,10 +1336,12 @@ async fn a_cli_dying_mid_turn_ends_the_turn_with_process_exited() {
     let session = open(&provider, spec).await;
     let stream = session.send_turn(TurnInput::text("go")).await.unwrap();
     let events = read_turn(stream, |_| async {}).await;
+    // The exit code reaches the error (it used to be None for every death, so a
+    // kill from outside read like a crash of the session).
     assert_eq!(
         events.last(),
         Some(&AgentEvent::Error {
-            error: ProviderError::ProcessExited { code: None }
+            error: ProviderError::ProcessExited { code: Some(3) }
         })
     );
     assert!(
@@ -1348,7 +1350,7 @@ async fn a_cli_dying_mid_turn_ends_the_turn_with_process_exited() {
             .any(|event| matches!(event, AgentEvent::Text { text, .. } if text == "about to die")),
         "what was said before the death is not lost"
     );
-    let dead = ProviderError::ProcessExited { code: None };
+    let dead = ProviderError::ProcessExited { code: Some(3) };
     assert_eq!(
         session.send_turn(TurnInput::text("again")).await.err(),
         Some(dead.clone())
