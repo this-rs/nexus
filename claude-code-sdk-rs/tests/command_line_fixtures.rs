@@ -73,6 +73,21 @@ fn rich_options() -> ClaudeCodeOptions {
     options
 }
 
+/// `argv` with each prompt-file path (a fresh temp dir per run) replaced by the
+/// text the CLI read from it, so the fixture pins the content, not the path.
+fn pinned_args(invocation: &Invocation) -> Vec<String> {
+    let mut args = invocation.args();
+    for flag in ["--system-prompt-file", "--append-system-prompt-file"] {
+        if let Some(i) = args.iter().position(|a| a == flag) {
+            let text = invocation
+                .flag_file(flag)
+                .expect("the fake read the prompt file");
+            args[i + 1] = format!("<file: {text}>");
+        }
+    }
+    args
+}
+
 /// `argv` of a streaming-transport launch.
 async fn stream_argv(options: ClaudeCodeOptions) -> Vec<String> {
     let fake = Transcript::new()
@@ -84,7 +99,7 @@ async fn stream_argv(options: ClaudeCodeOptions) -> Vec<String> {
     transport.connect().await.expect("connect");
     let invocation = fake.wait_for_invocation(WAIT).await;
     transport.disconnect().await.ok();
-    invocation.args()
+    pinned_args(&invocation)
 }
 
 /// `argv` of a `query()` (print mode) launch.
@@ -93,7 +108,7 @@ async fn print_argv(options: ClaudeCodeOptions) -> Vec<String> {
     let options = fake.options_with(options);
     let mut stream = Box::pin(query("the prompt", Some(options)).await.expect("query"));
     let _ = tokio::time::timeout(WAIT, async { while stream.next().await.is_some() {} }).await;
-    fake.wait_for_invocation(WAIT).await.args()
+    pinned_args(&fake.wait_for_invocation(WAIT).await)
 }
 
 #[tokio::test]

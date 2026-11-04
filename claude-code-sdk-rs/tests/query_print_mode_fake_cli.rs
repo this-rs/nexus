@@ -327,7 +327,7 @@ async fn system_prompt_v2_shuts_out_the_deprecated_pair() {
     let inv = argv_for("salut", options).await;
 
     assert_eq!(
-        inv.flag_value("--system-prompt").as_deref(),
+        inv.flag_file("--system-prompt-file").as_deref(),
         Some("nouveau prompt")
     );
     assert!(
@@ -352,10 +352,10 @@ async fn a_preset_system_prompt_only_contributes_its_append() {
     };
     let inv = argv_for("salut", with_append).await;
     assert_eq!(
-        inv.flag_value("--append-system-prompt").as_deref(),
+        inv.flag_file("--append-system-prompt-file").as_deref(),
         Some("et sois bref")
     );
-    assert!(!inv.has_flag("--system-prompt"));
+    assert!(!inv.has_flag("--system-prompt") && !inv.has_flag("--system-prompt-file"));
     assert!(!inv.has_flag("--preset"));
 
     let bare = ClaudeCodeOptions {
@@ -368,7 +368,7 @@ async fn a_preset_system_prompt_only_contributes_its_append() {
     };
     let inv = argv_for("salut", bare).await;
     assert!(
-        !inv.has_flag("--system-prompt") && !inv.has_flag("--append-system-prompt"),
+        !inv.args().iter().any(|a| a.contains("system-prompt")),
         "a preset with no append must add nothing: {:?}",
         inv.args()
     );
@@ -385,12 +385,44 @@ async fn the_deprecated_system_prompt_pair_is_still_honoured() {
     let inv = argv_for("salut", options).await;
 
     assert_eq!(
-        inv.flag_value("--system-prompt").as_deref(),
+        inv.flag_file("--system-prompt-file").as_deref(),
         Some("tu es concis")
     );
     assert_eq!(
-        inv.flag_value("--append-system-prompt").as_deref(),
+        inv.flag_file("--append-system-prompt-file").as_deref(),
         Some("en français")
+    );
+}
+
+/// The prompt text never reaches `argv`. Measured on 04/11/2026: a `pkill -f
+/// 'cargo test'` run by an unrelated session killed a live CLI because its system
+/// prompt, passed with `--system-prompt`, contained those words. Through a file the
+/// process matches nothing, and the text is not readable with `ps` either.
+#[tokio::test]
+async fn the_prompt_text_never_reaches_the_command_line() {
+    let system = "Lance cargo test avant chaque commit.";
+    let append = "Ne lance jamais npm run deploy.";
+    let options = ClaudeCodeOptions::builder()
+        .system_prompt(system)
+        .append_system_prompt(append)
+        .build();
+
+    let inv = argv_for("salut", options).await;
+
+    let leaked: Vec<String> = inv
+        .args()
+        .into_iter()
+        .filter(|a| a.contains("cargo test") || a.contains("npm run"))
+        .collect();
+    assert!(leaked.is_empty(), "prompt text on argv: {leaked:?}");
+    assert!(!inv.has_flag("--system-prompt") && !inv.has_flag("--append-system-prompt"));
+    assert_eq!(
+        inv.flag_file("--system-prompt-file").as_deref(),
+        Some(system)
+    );
+    assert_eq!(
+        inv.flag_file("--append-system-prompt-file").as_deref(),
+        Some(append)
     );
 }
 

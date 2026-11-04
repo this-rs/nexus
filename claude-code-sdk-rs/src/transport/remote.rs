@@ -702,6 +702,7 @@ mod launch_guard {
             &options,
             CommandMode::Stream,
             None,
+            &crate::transport::subprocess::PromptFiles::default(),
             None,
         );
     }
@@ -714,6 +715,7 @@ mod launch_guard {
             &options,
             CommandMode::Stream,
             None,
+            &crate::transport::subprocess::PromptFiles::default(),
             None,
         );
         assert_eq!(cmd.as_std().get_program(), "/opt/claude");

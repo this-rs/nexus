@@ -598,6 +598,16 @@ impl Invocation {
             .collect()
     }
 
+    /// Text of the file passed with a `-file` prompt flag, as the fake read it at
+    /// start-up (`--system-prompt-file`, `--append-system-prompt-file`).
+    pub fn flag_file(&self, flag: &str) -> Option<String> {
+        self.0
+            .get("flag_files")
+            .and_then(|f| f.get(flag))
+            .and_then(Value::as_str)
+            .map(str::to_string)
+    }
+
     /// The working directory the fake was started in.
     pub fn cwd(&self) -> String {
         self.0
