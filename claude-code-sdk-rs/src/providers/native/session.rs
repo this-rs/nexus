@@ -725,6 +725,16 @@ impl AgentSession for NativeSession {
         if model.trim().is_empty() {
             return Err(ProviderError::invalid("empty model name"));
         }
+        // A capped session moves only to a model whose cost is known. The cap is counted
+        // against the price of the model in force, and `open` refuses a cap no price can count
+        // (`unsupported("cost")`, decision A21): a change must not get round that check. Refused
+        // the same way; the model in force stays. The rule reads the price table only, so the
+        // refusal does not probe the endpoint.
+        if self.core.limits.max_cost_usd.is_some()
+            && self.core.facts.cost_basis(model) == CostBasis::Unknown
+        {
+            return Err(ProviderError::unsupported("cost"));
+        }
         self.core.apply_model(model).await;
         Ok(())
     }

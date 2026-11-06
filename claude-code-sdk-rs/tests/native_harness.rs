@@ -941,6 +941,30 @@ async fn a_usd_budget_without_a_price_is_refused_at_opening() {
 }
 
 #[tokio::test]
+async fn a_capped_session_is_not_moved_to_a_model_without_a_price() {
+    // The model in force is priced; the one asked for is not.
+    let h = Harness::with(
+        vec![text_reply(None, "ok", None, Some((100, 10)))],
+        |config| config.prices = PriceTable::new().with("m", price(1000.0)),
+    )
+    .await;
+    let mut capped = h.spec();
+    capped.limits.max_cost_usd = Some(1.0);
+    let session = h.open(capped).await;
+    let refused = session
+        .set_model("unpriced")
+        .await
+        .expect_err("a capped session refuses a model it cannot count");
+    assert_eq!(refused, ProviderError::unsupported("cost"));
+    // The model in force stays: the next turn still runs, and is still counted, on `m`.
+    let events = turn(&*session, "hi").await;
+    let AgentEvent::Done { usage, .. } = done(&events) else {
+        unreachable!()
+    };
+    assert_eq!(usage.by_model[0].model, "m");
+}
+
+#[tokio::test]
 async fn without_a_price_the_cost_of_a_turn_is_unknown_not_zero() {
     let h = Harness::new(vec![text_reply(None, "ok", None, Some((100, 10)))]).await;
     let session = h.open(h.spec()).await;
