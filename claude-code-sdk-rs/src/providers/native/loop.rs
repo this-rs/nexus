@@ -225,7 +225,10 @@ pub(crate) async fn run_turn(core: Arc<Core>, input: TurnInput, signal: Arc<Turn
 /// on. A directive naming another model makes it active (window and cost basis
 /// included) and announces it with `model_changed` before anything else of the
 /// turn. No hook, a hook that says nothing, that times out or that names the
-/// current model: nothing happens.
+/// current model: nothing happens. A directive that would move a CAPPED session
+/// to a model without a price is refused — the rule `open` applies (A21), since
+/// the cap is counted against the price of the model in force — the turn runs on
+/// the model in force, and the host is told with `provider_notice { model_change_refused }`.
 async fn before_turn(core: &Core, signal: &TurnSignal, input_chars: usize) {
     let Some(hooks) = &core.hooks else {
         return;
@@ -246,6 +249,15 @@ async fn before_turn(core: &Core, signal: &TurnSignal, input_chars: usize) {
         return;
     };
     if model.trim().is_empty() {
+        return;
+    }
+    if !core.can_move_to(&model) {
+        // The cap would stop counting the spend: the directive is refused, the model in force
+        // stays, and the host learns why instead of seeing a silent no-op.
+        core.emit(AgentEvent::ProviderNotice {
+            kind: "model_change_refused".to_owned(),
+            data: json!({ "model": model, "reason": "cost" }),
+        });
         return;
     }
     if core.apply_model(&model).await {

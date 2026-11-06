@@ -341,8 +341,22 @@ impl Core {
     /// cost basis and vision that govern compaction, cost and images become its own. The
     /// capabilities snapshot of the session does not move (A4). Answers whether
     /// the model changed.
+    /// Whether `model` may become the active model. A capped session moves only to a model
+    /// whose cost is known: the cap is counted against the price of the model in force, and a
+    /// model without a price would stop the spend being counted (`open` refuses that opening
+    /// the same way, `unsupported("cost")`, decision A21). The rule reads the price table only,
+    /// so the refusal never probes the endpoint.
+    pub(crate) fn can_move_to(&self, model: &str) -> bool {
+        self.limits.max_cost_usd.is_none() || self.facts.cost_basis(model) != CostBasis::Unknown
+    }
+
     pub(crate) async fn apply_model(&self, model: &str) -> bool {
         if self.lock().model == model {
+            return false;
+        }
+        // The single choke point of every model change, the in-protocol directive included:
+        // `false` means nothing moved, so no caller can get round `can_move_to`.
+        if !self.can_move_to(model) {
             return false;
         }
         let facts = self.facts.active(self.endpoint.as_ref(), model).await;
@@ -725,14 +739,9 @@ impl AgentSession for NativeSession {
         if model.trim().is_empty() {
             return Err(ProviderError::invalid("empty model name"));
         }
-        // A capped session moves only to a model whose cost is known. The cap is counted
-        // against the price of the model in force, and `open` refuses a cap no price can count
-        // (`unsupported("cost")`, decision A21): a change must not get round that check. Refused
-        // the same way; the model in force stays. The rule reads the price table only, so the
-        // refusal does not probe the endpoint.
-        if self.core.limits.max_cost_usd.is_some()
-            && self.core.facts.cost_basis(model) == CostBasis::Unknown
-        {
+        // A capped session moves only to a model whose cost is known: `open` refuses a cap no
+        // price can count (`unsupported("cost")`, A21), and a change must not get round it.
+        if !self.core.can_move_to(model) {
             return Err(ProviderError::unsupported("cost"));
         }
         self.core.apply_model(model).await;
