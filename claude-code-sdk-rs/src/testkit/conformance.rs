@@ -42,9 +42,9 @@ use crate::agent::{
     CompactionPhase, CompactionTrigger, CostBasis, DeltaKind, EventStream, HookSupport,
     HookVerdict, InputBlock, InterruptScope, McpServerSpec, ModelInfo, PermissionDecision,
     PermissionScope, PolicyMode, ProviderError, ProviderKind, QuestionAnswer, QuestionAnswerItem,
-    QuestionReply, ResumeToken, SandboxLevel, SessionHooks, SessionSpec, StopReason,
-    SubagentSupport, ToolCallInfo, ToolCategory, ToolPolicy, ToolResultInfo, TurnContext,
-    TurnDirective, TurnInput,
+    QuestionReply, ReasoningEffort, ResumeToken, SandboxLevel, SessionHooks, SessionSpec,
+    StopReason, SubagentSupport, ToolCallInfo, ToolCategory, ToolPolicy, ToolResultInfo,
+    TurnContext, TurnDirective, TurnInput,
 };
 
 /// Longest wait for one step of a scenario: an answer to a call, the next event
@@ -206,7 +206,7 @@ pub enum Scenario {
     /// `Unsupported { set_model_live }` and the session still works.
     ChangementModele,
     /// Stage: a session opened with hooks whose `before_turn` names the other
-    /// model of the catalogue, then one plain turn.
+    /// model of the catalogue and asks a `high` reasoning effort, then one plain turn.
     ///
     /// Checked (`set_model_live` and `hooks: in_protocol`): `before_turn` was
     /// called, the turn opens with `model_changed { model }` before any other
@@ -214,6 +214,9 @@ pub enum Scenario {
     /// (`set_model_live: false`, hooks honoured): no `model_changed`, a
     /// `provider_notice { model_directive_ignored }` in the turn, which completes.
     /// Hooks not honoured: no `model_changed`, the turn completes.
+    /// `reasoning_effort` (v10), hooks honoured: present, the turn carries no
+    /// `reasoning_effort_ignored`; absent, the effort asked is said with
+    /// `provider_notice { reasoning_effort_ignored }` and the turn completes all the same.
     DirectiveModele,
     /// Stage: a session that runs one plain turn after `set_policy_mode`.
     ///
@@ -419,7 +422,7 @@ impl Scenario {
             Self::AnnulationTourPreserve => &["tool_cancel"],
             Self::AnnulationTache => &["background_tasks"],
             Self::ChangementModele => &["set_model_live"],
-            Self::DirectiveModele => &["set_model_live", "hooks"],
+            Self::DirectiveModele => &["set_model_live", "reasoning_effort", "hooks"],
             Self::ChangementPolitique => &["sandbox"],
             Self::Reprise => &["resume"],
             Self::MessageImages => &["images"],
@@ -468,6 +471,7 @@ pub fn capability_present(capabilities: &Capabilities, field: &str) -> bool {
         "tools" => capabilities.tools,
         "context_window" => capabilities.context_window.is_some(),
         "set_model_live" => capabilities.set_model_live,
+        "reasoning_effort" => capabilities.reasoning_effort,
         "native_question" => capabilities.native_question,
         "tool_cancel" => capabilities.tool_cancel,
         "background_tasks" => capabilities.background_tasks,
@@ -1984,7 +1988,7 @@ async fn changement_modele(ctx: &mut Ctx, prepared: &Prepared) {
     finish(ctx, &*session).await;
 }
 
-/// Hooks whose `before_turn` names a model and counts its calls.
+/// Hooks whose `before_turn` names a model, asks a `high` effort, and counts its calls.
 struct DirectiveHooks {
     model: String,
     calls: AtomicU32,
@@ -1994,12 +1998,16 @@ struct DirectiveHooks {
 impl SessionHooks for DirectiveHooks {
     async fn before_turn(&self, _ctx: &TurnContext) -> TurnDirective {
         self.calls.fetch_add(1, Ordering::SeqCst);
-        TurnDirective::model(self.model.clone())
+        TurnDirective::model(self.model.clone()).with_reasoning_effort(ReasoningEffort::High)
     }
 }
 
 fn is_directive_notice(event: &AgentEvent) -> bool {
     matches!(event, AgentEvent::ProviderNotice { kind, .. } if kind == "model_directive_ignored")
+}
+
+fn is_effort_ignored_notice(event: &AgentEvent) -> bool {
+    matches!(event, AgentEvent::ProviderNotice { kind, .. } if kind == "reasoning_effort_ignored")
 }
 
 async fn directive_modele(ctx: &mut Ctx, prepared: &Prepared) {
@@ -2049,6 +2057,23 @@ async fn directive_modele(ctx: &mut Ctx, prepared: &Prepared) {
                 "`set_model_live` is absent and the hooks are honoured: the ignored directive must be said with `provider_notice { model_directive_ignored }`",
             );
         }
+    }
+    // `reasoning_effort` (v10): the same directive asked a `high` effort. Present, the
+    // provider applied it and says nothing of it; absent, it is said ignored and the
+    // turn ran all the same (a plain turn completed above).
+    let effort_ignored = events.iter().any(is_effort_ignored_notice);
+    if honoured && ctx.caps.reasoning_effort && effort_ignored {
+        ctx.fail(
+            "`reasoning_effort` is declared but the effort of the directive was said to be ignored",
+        );
+    }
+    if honoured && !ctx.caps.reasoning_effort && !effort_ignored {
+        ctx.fail(
+            "`reasoning_effort` is absent and the hooks are honoured: the effort asked must be said with `provider_notice { reasoning_effort_ignored }`",
+        );
+    }
+    if !honoured && effort_ignored {
+        ctx.fail("hooks are not honoured: no effort was asked, none can be said ignored");
     }
     finish(ctx, &*session).await;
 }

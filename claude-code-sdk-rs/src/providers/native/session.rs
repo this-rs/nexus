@@ -51,7 +51,7 @@ use crate::agent::{
     AgentEvent, AgentSession, CancelOutcome, CancelScope, Capabilities, CompactOutcome, CostBasis,
     EventStream, InputBlock, InterruptOutcome, InterruptScope, PermissionDecision, PermissionScope,
     PolicyDecision, PolicyMode, ProcessDiagnostic, ProviderError, ProviderKind, QuestionAnswer,
-    ResumeToken, SessionHooks, SessionLimits, TaskPhase, ToolPolicy, TurnInput,
+    ReasoningEffort, ResumeToken, SessionHooks, SessionLimits, TaskPhase, ToolPolicy, TurnInput,
 };
 use crate::model::{ChatMessage, ModelEndpoint};
 
@@ -136,6 +136,11 @@ pub(crate) struct State {
     pub(crate) active_images: bool,
     /// Turns started so far (the index of the next one).
     pub(crate) turn_index: u32,
+    /// How hard the model is asked to think on the turn now running (contract v10): what
+    /// the turn's `before_turn` directive asked, set for every request of that turn and
+    /// reset by the next one. Unlike `model`, never carried over: a directive that says
+    /// nothing sends the endpoint's configured thinking.
+    pub(crate) turn_reasoning_effort: Option<ReasoningEffort>,
     /// The committed conversation.
     pub(crate) messages: Vec<ChatMessage>,
     /// Tokens and USD spent by the session so far (budgets).
@@ -275,6 +280,7 @@ impl Core {
             active_cost: parts.capabilities.cost,
             active_images: parts.capabilities.images,
             turn_index: 0,
+            turn_reasoning_effort: None,
             messages: parts.messages,
             tokens_spent: 0,
             usd_spent: 0.0,

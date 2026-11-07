@@ -149,6 +149,12 @@ pub struct Capabilities {
     pub context_window: Option<ContextWindow>,
     /// The model can be changed on a live session.
     pub set_model_live: bool,
+    /// A `before_turn` directive may ask how hard the model thinks on that turn
+    /// (`TurnDirective::reasoning_effort`, contract v10) and the provider applies it to
+    /// the requests of that turn. Absent: the directive is said with
+    /// `provider_notice { reasoning_effort_ignored }` and the turn runs as it would have.
+    #[serde(default)]
+    pub reasoning_effort: bool,
     /// The provider has its own "ask the user a question" tool.
     pub native_question: bool,
     /// Running tools can be cancelled without ending the turn.
@@ -180,6 +186,7 @@ impl Capabilities {
             tools: false,
             context_window: None,
             set_model_live: false,
+            reasoning_effort: false,
             native_question: false,
             tool_cancel: false,
             background_tasks: false,
@@ -188,9 +195,9 @@ impl Capabilities {
         }
     }
 
-    /// Names of the 20 fields, in declaration order. The conformance suite walks
+    /// Names of the 21 fields, in declaration order. The conformance suite walks
     /// this list so that a capability added without a scenario fails a test.
-    pub const FIELDS: [&'static str; 20] = [
+    pub const FIELDS: [&'static str; 21] = [
         "interactive_permissions",
         "permission_scopes",
         "sandbox",
@@ -206,6 +213,7 @@ impl Capabilities {
         "tools",
         "context_window",
         "set_model_live",
+        "reasoning_effort",
         "native_question",
         "tool_cancel",
         "background_tasks",
@@ -253,5 +261,24 @@ mod tests {
         let back: Capabilities = serde_json::from_str(&json).unwrap();
         assert_eq!(back.context_window, None);
         assert_eq!(back.cost, CostBasis::Unknown);
+    }
+
+    #[test]
+    fn reasoning_effort_is_absent_by_default_and_read_from_a_v9_peer() {
+        assert!(!Capabilities::none().reasoning_effort);
+        assert!(Capabilities::FIELDS.contains(&"reasoning_effort"));
+        // A v9 peer never writes the field: it parses as absent, never as an error.
+        let mut json = serde_json::to_value(Capabilities::none()).unwrap();
+        json.as_object_mut().unwrap().remove("reasoning_effort");
+        let back: Capabilities = serde_json::from_value(json).unwrap();
+        assert!(!back.reasoning_effort);
+        let mut declared = Capabilities::none();
+        declared.reasoning_effort = true;
+        let json = serde_json::to_value(&declared).unwrap();
+        assert_eq!(json["reasoning_effort"], true);
+        assert_eq!(
+            serde_json::from_value::<Capabilities>(json).unwrap(),
+            declared
+        );
     }
 }

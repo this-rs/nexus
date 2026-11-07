@@ -229,7 +229,14 @@ pub(crate) async fn run_turn(core: Arc<Core>, input: TurnInput, signal: Arc<Turn
 /// to a model without a price is refused — the rule `open` applies (A21), since
 /// the cap is counted against the price of the model in force — the turn runs on
 /// the model in force, and the host is told with `provider_notice { model_change_refused }`.
+///
+/// The directive may also ask how hard the model thinks on THIS turn (contract v10):
+/// kept for the requests of the turn alone (`State::turn_reasoning_effort`, reset here
+/// at every turn), unlike the model, which stays active. On an endpoint that cannot
+/// write it (`Capabilities::reasoning_effort` absent) the effort is said with
+/// `provider_notice { reasoning_effort_ignored }` and nothing else changes.
 async fn before_turn(core: &Core, signal: &TurnSignal, input_chars: usize) {
+    core.lock().turn_reasoning_effort = None;
     let Some(hooks) = &core.hooks else {
         return;
     };
@@ -245,6 +252,20 @@ async fn before_turn(core: &Core, signal: &TurnSignal, input_chars: usize) {
         ctx
     };
     let directive = hook_call(core, signal, "before_turn", hooks.before_turn(&ctx)).await;
+    if let Some(effort) = directive.as_ref().and_then(|d| d.reasoning_effort) {
+        if core.capabilities.reasoning_effort {
+            core.lock().turn_reasoning_effort = Some(effort);
+        } else {
+            core.emit(AgentEvent::ProviderNotice {
+                kind: "reasoning_effort_ignored".to_owned(),
+                data: json!({
+                    "provider": "native",
+                    "reasoning_effort": effort,
+                    "capability": "reasoning_effort",
+                }),
+            });
+        }
+    }
     let Some(model) = directive.and_then(|directive| directive.model) else {
         return;
     };
@@ -773,12 +794,13 @@ fn normalise_ids(mut calls: Vec<ToolCallChunk>) -> Vec<ToolCallChunk> {
 }
 
 fn build_request(core: &Core, model: &str, messages: &[ChatMessage]) -> CompletionRequest {
-    let (policy, vision, loaded) = {
+    let (policy, vision, loaded, effort) = {
         let state = core.lock();
         (
             state.policy.clone(),
             state.active_images,
             state.loaded_tools.clone(),
+            state.turn_reasoning_effort,
         )
     };
     let mut wire = Vec::with_capacity(messages.len() + 1);
@@ -805,6 +827,8 @@ fn build_request(core: &Core, model: &str, messages: &[ChatMessage]) -> Completi
             .specs_deferred(&policy, strict, &core.settings.deferred_tools, &loaded)
     };
     request.max_tokens = core.settings.max_tokens;
+    // The effort of the turn (v10), on every request of the turn; `None` otherwise.
+    request.reasoning_effort = effort;
     if !request.tools.is_empty() {
         request.parallel_tool_calls = core.settings.parallel_tool_calls;
     }

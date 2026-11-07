@@ -1258,6 +1258,20 @@ impl AgentSession for ScriptedSession {
             let mut ctx = crate::agent::TurnContext::new(index, current.clone());
             ctx.input_chars = input.joined_text().len();
             let directive = hooks.before_turn(&ctx).await;
+            // A scripted model thinks as hard as its script says: an effort asked is
+            // applied by nothing, and said ignored when the capability is not declared.
+            if let Some(effort) = directive.reasoning_effort
+                && !shared.capabilities.reasoning_effort
+            {
+                opening.push(AgentEvent::ProviderNotice {
+                    kind: "reasoning_effort_ignored".to_owned(),
+                    data: json!({
+                        "provider": "scripted",
+                        "reasoning_effort": effort,
+                        "capability": "reasoning_effort",
+                    }),
+                });
+            }
             if let Some(model) = directive
                 .model
                 .filter(|m| !m.trim().is_empty() && *m != current)

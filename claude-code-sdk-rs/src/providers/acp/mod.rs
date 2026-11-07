@@ -923,6 +923,9 @@ impl AgentProvider for AcpProvider {
         capabilities.thinking =
             self.config.thinking || self.shared.thinking_seen.load(Ordering::SeqCst);
         capabilities.tools = true;
+        // Hooks are `none`: `before_turn` is never asked, and the Agent Client Protocol
+        // has no per-turn effort field in `session/prompt` (contract v10).
+        capabilities.reasoning_effort = false;
         capabilities.resume = self.learned().is_some_and(|learned| learned.load_session);
         capabilities.context_window = self.config.context_window.map(|value| ContextWindow {
             value,

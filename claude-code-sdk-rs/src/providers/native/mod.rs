@@ -767,6 +767,10 @@ impl AgentProvider for NativeProvider {
         capabilities.compaction_manual = true;
         capabilities.compaction_model = true;
         capabilities.set_model_live = true;
+        // The effort of a turn (v10) reaches the wire when the endpoint writes it
+        // (Anthropic: a thinking budget; OpenAI-compatible: `reasoning_effort`, unless
+        // the instance's quirks say the server is not steered by it).
+        capabilities.reasoning_effort = self.endpoint.applies_reasoning_effort();
         capabilities.tool_cancel = true;
         capabilities.resume = true;
         capabilities.hooks = HookSupport::InProtocol;

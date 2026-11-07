@@ -194,6 +194,20 @@ pub struct SessionSpec {
   modèle courant, ou un nom vide, ne fait rien. C'est le point d'entrée du routage cognitif du backend
   (`GraphSessionHooks::before_turn`) : le harnais ne sait pas pourquoi, il obéit. Le changement d'ENDPOINT en
   cours de session n'existe pas (une session = un provider).
+  **Effort de raisonnement (contrat v10)** : la même directive peut porter `reasoning_effort: low | medium |
+  high` (`TurnDirective::with_reasoning_effort`, `ReasoningEffort`, serde `snake_case`) : combien le modèle
+  doit réfléchir sur CE tour. À la différence du modèle, qui reste actif pour les tours suivants, l'effort
+  vaut pour le tour demandé et rien après : une directive qui n'en dit rien envoie la `thinking` configurée de
+  l'instance, octet pour octet comme avant. Honoré seulement si `Capabilities::reasoning_effort` ; sinon dit
+  par `provider_notice { kind: "reasoning_effort_ignored", data: { provider, reasoning_effort, capability:
+  "reasoning_effort" } }` et le tour court tel quel, jamais une erreur. Natif : Messages API →
+  `thinking: { type: "enabled", budget_tokens: 1024 | 4096 | 16000 }` et `max_tokens` relevé à au moins
+  budget + 1024 (l'API exige budget < max_tokens) ; OpenAI-compatible → `reasoning_effort: "low" | "medium"
+  | "high"`, jamais sur un préréglage `deepseek` (`EndpointQuirks::no_reasoning_effort`, la réflexion n'y est
+  pas pilotée par ce champ : capacité absente, notice). Un endpoint qui REFUSE la surcharge (HTTP 400 ;
+  Anthropic : qui nomme `thinking` / `budget_tokens`) est redemandé UNE fois sans elle et s'en souvient pour
+  la vie de l'instance (quirk verrouillé, comme le nom du champ de raisonnement) : le tour n'échoue jamais
+  pour un réglage que l'hôte a seulement demandé.
   **`compaction_directive` (contrat v8, N-C1)** : un hook VOISIN de `before_compaction`, appelé juste
   après lui, avec le même `CompactionInfo` (automatique ou manuelle). Sa directive peut nommer le modèle
   qui ÉCRIT LE RÉSUMÉ — un modèle du **même** provider, pour ce résumé seulement : le modèle de la session
@@ -325,6 +339,7 @@ puis affectation des champs.
 | `tools` | `bool` | `open()` avec `mcp_servers` non vide ou préflight d'outil → `ModelNoTools` |
 | `context_window` | `Option<{ value: u64, source: reported \| catalog \| configured \| probed \| assumed }>` | `None` : budget en tokens impossible → run budgété refusé (A21) ; jamais de 200000 implicite |
 | `set_model_live` | `bool` | `set_model` → `Unsupported { capability: "set_model_live" }` ; une directive `before_turn` → `provider_notice { model_directive_ignored }` ; modèle verrouillé dans l'UI. Présent : le modèle ACTIF (après `set_model` ou directive) gouverne la fenêtre de compaction et la base de coût du tour ; `capabilities()` reste l'instantané d'ouverture (A4) |
+| `reasoning_effort` | `bool` | v10 : un `TurnDirective::reasoning_effort` est dit par `provider_notice { reasoning_effort_ignored }` et le tour court comme il l'aurait fait, sans erreur (Claude Code : l'effort du CLI est un réglage de lancement, aucune requête de contrôle ne le déplace ; Codex : hooks `command`, `before_turn` jamais appelé ; ACP : hooks `none`). Présent : l'effort est appliqué aux requêtes de CE tour (natif : budget `thinking` Anthropic, `reasoning_effort` OpenAI-compatible), jamais au suivant ; un endpoint qui le refuse est redemandé une fois sans et s'en souvient |
 | `native_question` | `bool` | Aucun `question` natif ; le backend synthétise `ask_user_question` et répond par un tour utilisateur (A45) ; `answer_question` → `Unsupported` |
 | `tool_cancel` | `bool` | `cancel_tools` → `Unsupported { capability: "tool_cancel" }` ; seul `interrupt` reste |
 | `background_tasks` | `bool` | Aucun `background_tasks` / `task_update` ; `cancel_tools(task)` → `Unsupported` |
@@ -375,6 +390,7 @@ sur un provider, aucune forme sérialisée ne bouge : `CONTRACT_VERSION` reste 5
 | tools | oui | selon modèle (sonde) | oui | oui |
 | context_window | reported | configured / probed | configured | None |
 | set_model_live | oui (`set_model` de contrôle ; `before_turn` → `set_model` écrit avant l'entrée du tour) | oui (entre deux tours ; `before_turn` appliqué au tour qui commence, fenêtre et coût du modèle actif) | oui (par tour ; hooks `none` : `before_turn` jamais appelé) | non (directive → `model_directive_ignored` si les hooks étaient honorés ; ils ne le sont pas) |
+| reasoning_effort | non (réglage de lancement du CLI : directive → `reasoning_effort_ignored`) | oui si l'endpoint l'écrit (`ModelEndpoint::applies_reasoning_effort` : Anthropic oui, OpenAI-compatible oui sauf `no_reasoning_effort` — préréglage `deepseek` : non, notice) ; pour ce tour seulement | non (hooks `command` : `before_turn` jamais appelé) | non (hooks `none`) |
 | native_question | oui (`AskUserQuestion`) | oui si `NativeConfig::ask_user_question` et modèle à outils (`AskUserQuestion` du harnais, `reply: turn`) | non (expérimental) | non |
 | tool_cancel | oui (par PID, dans l'adaptateur ; Unix et local seulement : par SSH ou hors Unix, non, et `cancel_tools` → `Unsupported { tool_cancel }`) | oui (jeton d'annulation) | non | non |
 | background_tasks | oui | oui quand la session a le `Bash` de son serveur `nexus` (`nexus-tools` ; `capabilities(modèle)` : `default_tools` configuré et modèle à outils) | non | non |
@@ -1384,7 +1400,15 @@ jeton, `add_dirs` ← `extra_dirs`, `env` ← `EnvSpec.set`, `cli_path` ← exte
   méthode à défaut `SessionHooks::compaction_directive(&CompactionInfo) -> CompactionDirective`, le type
   `CompactionDirective { model }` et le champ `Capabilities::compaction_model` (`#[serde(default)]`, `false` :
   un pair v7 qui l'ignore reste correct ; natif oui, Claude Code / Codex / ACP non), scénario `compaction`
-  étendu à ce champ (20 champs), notices `compaction_model` / `compaction_model_ignored` (N-C1). Le fichier
+  étendu à ce champ (20 champs), notices `compaction_model` / `compaction_model_ignored` (N-C1) ; **v9** = v8 +
+  événement `quota` (QUOTA) et `rate_limited.resets_at_ms` ; **v10** = v9 + le type `ReasoningEffort { low,
+  medium, high }`, le champ `TurnDirective::reasoning_effort` (`TurnDirective` sérialisable, `#[serde(default)]` :
+  un hôte v9 n'écrit rien et rien ne change pour lui), le champ `Capabilities::reasoning_effort`
+  (`#[serde(default)]`, `false` : un pair v9 qui l'ignore reste correct ; natif oui quand l'endpoint l'écrit,
+  Claude Code / Codex / ACP non), la méthode à défaut `ModelEndpoint::applies_reasoning_effort() -> bool`
+  (`false`), le champ `CompletionRequest::reasoning_effort` et le quirk `EndpointQuirks::no_reasoning_effort`
+  (préréglage `deepseek`), scénario `directive_modele` étendu à ce champ (21 champs), notice
+  `reasoning_effort_ignored` ; l'instantané v10 ne diffère de v9 que par la version et ce champ. Le fichier
   `tests/snapshots/agent_contract_v2.json` est conservé : le backend et le frontend, tant qu'ils sont en
   v2, le copient comme fixture.
   L'instantané v2 porte aussi `provider_instance_config` (natif avec préréglage, prix et extension ; ACP ; Claude Code) : une entrée d'instantané ajoutée pour une

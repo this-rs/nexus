@@ -1461,6 +1461,18 @@ impl ClaudeCodeSession {
                 return Ok(());
             },
         };
+        // The CLI's effort is set when it is spawned; no control request moves it between
+        // two turns (contract v10): an effort asked is said ignored, never applied in silence.
+        if let Some(effort) = directive.reasoning_effort {
+            self.core.emit(AgentEvent::ProviderNotice {
+                kind: "reasoning_effort_ignored".to_owned(),
+                data: json!({
+                    "provider": "claude_code",
+                    "reasoning_effort": effort,
+                    "capability": "reasoning_effort",
+                }),
+            });
+        }
         let Some(model) = directive.model else {
             return Ok(());
         };
