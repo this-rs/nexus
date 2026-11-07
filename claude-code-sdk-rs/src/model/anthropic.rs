@@ -23,6 +23,7 @@
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -147,6 +148,11 @@ pub struct AnthropicEndpoint {
     guard: EndpointGuard,
     client: Mutex<Option<(String, Vec<SocketAddr>, Client)>>,
     probes: Mutex<HashMap<String, (Instant, EndpointProbe)>>,
+    /// The API refused the thinking override of an effort (contract v10: a 400 naming
+    /// `thinking` / `budget_tokens`, a model or an account without extended thinking): a
+    /// locked quirk, learned once for the life of the instance, so that no later turn
+    /// pays a refused request for it.
+    effort_refused: AtomicBool,
 }
 
 impl std::fmt::Debug for AnthropicEndpoint {
@@ -167,6 +173,7 @@ impl AnthropicEndpoint {
             guard,
             client: Mutex::new(None),
             probes: Mutex::new(HashMap::new()),
+            effort_refused: AtomicBool::new(false),
         }
     }
 
@@ -179,6 +186,31 @@ impl AnthropicEndpoint {
     /// The configuration.
     pub fn config(&self) -> &AnthropicEndpointConfig {
         &self.config
+    }
+
+    /// Whether the API refused the thinking override of an effort once (contract v10):
+    /// from then on an effort is dropped before sending and the configured `thinking` goes.
+    pub fn reasoning_effort_refused(&self) -> bool {
+        self.effort_refused.load(Ordering::SeqCst)
+    }
+
+    /// One `POST /v1/messages`, the stream opened.
+    async fn start_once(
+        &self,
+        request: &CompletionRequest,
+    ) -> Result<CompletionStream, ProviderError> {
+        let (checked, client) = self.prepare().await?;
+        let body = anthropic_wire::build_request(request, &self.config.wire_options());
+        let payload = serde_json::to_vec(&body)
+            .map_err(|_| ProviderError::invalid("request is not serialisable"))?;
+        let builder = client
+            .post(Self::url(&checked, "messages"))
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .header(reqwest::header::ACCEPT, "text/event-stream")
+            .body(payload);
+        let (builder, secret) = self.authorise(builder).await?;
+        let response = self.send(builder, secret.as_ref()).await?;
+        Ok(chunk_stream(response, secret, self.config.idle_timeout))
     }
 
     async fn prepare(&self) -> Result<(CheckedEndpoint, Client), ProviderError> {
@@ -360,22 +392,36 @@ impl ModelEndpoint for AnthropicEndpoint {
             .collect())
     }
 
+    fn applies_reasoning_effort(&self) -> bool {
+        true
+    }
+
+    /// A request that asks an effort the API refuses (a 400 naming `thinking` or
+    /// `budget_tokens`) is sent ONCE more with the configured `thinking` instead — the
+    /// turn never fails for a knob the host only asked for — and the instance remembers.
     async fn complete(
         &self,
-        request: CompletionRequest,
+        mut request: CompletionRequest,
     ) -> Result<CompletionStream, ProviderError> {
-        let (checked, client) = self.prepare().await?;
-        let body = anthropic_wire::build_request(&request, &self.config.wire_options());
-        let payload = serde_json::to_vec(&body)
-            .map_err(|_| ProviderError::invalid("request is not serialisable"))?;
-        let builder = client
-            .post(Self::url(&checked, "messages"))
-            .header(reqwest::header::CONTENT_TYPE, "application/json")
-            .header(reqwest::header::ACCEPT, "text/event-stream")
-            .body(payload);
-        let (builder, secret) = self.authorise(builder).await?;
-        let response = self.send(builder, secret.as_ref()).await?;
-        Ok(chunk_stream(response, secret, self.config.idle_timeout))
+        if self.reasoning_effort_refused() {
+            request.reasoning_effort = None;
+        }
+        match self.start_once(&request).await {
+            Err(ProviderError::InvalidRequest { detail })
+                if request.reasoning_effort.is_some()
+                    && anthropic_wire::refuses_thinking(&detail) =>
+            {
+                tracing::warn!(
+                    instance = %self.config.instance_id,
+                    detail = %detail,
+                    "the API refused the thinking override: retried once with the configured thinking"
+                );
+                self.effort_refused.store(true, Ordering::SeqCst);
+                request.reasoning_effort = None;
+                self.start_once(&request).await
+            },
+            other => other,
+        }
     }
 
     async fn probe(&self, model: &str) -> Result<EndpointProbe, ProviderError> {

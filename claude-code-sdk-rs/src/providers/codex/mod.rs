@@ -851,6 +851,10 @@ impl AgentProvider for CodexProvider {
         capabilities.thinking = true;
         capabilities.tools = true;
         capabilities.set_model_live = true;
+        // Hooks are `command`: `before_turn` is never asked, so no per-turn effort
+        // directive ever reaches a Codex session; the app-server's reasoning effort is a
+        // thread-level configuration, not a knob this session moves (contract v10).
+        capabilities.reasoning_effort = false;
         capabilities.resume = true;
         capabilities.context_window = self.config.context_window.map(|value| ContextWindow {
             value,

@@ -124,6 +124,10 @@ impl ClaudeCodeConfig {
             .and_then(|info| info.context_window)
             .or(self.context_window);
         capabilities.set_model_live = true;
+        // The CLI's effort is a spawn-time knob (its settings and environment), with no
+        // control request to move it between two turns: a `before_turn` effort directive
+        // is said with `reasoning_effort_ignored` (contract v10), never applied.
+        capabilities.reasoning_effort = false;
         capabilities.native_question = true;
         // Cancelling signals the CLI's descendants by PID: over SSH those are on the
         // other machine, out of reach; off Unix there is neither a process table nor a

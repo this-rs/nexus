@@ -19,8 +19,8 @@ use std::sync::Arc;
 use fake_openai::FakeOpenAi;
 use native::*;
 use nexus_claude::agent::{
-    AgentEvent, AgentProvider, AgentSession, SessionSpec, StopReason, SystemPromptMode,
-    SystemPromptSpec, TurnInput,
+    AgentEvent, AgentProvider, AgentSession, ReasoningEffort, SessionHooks, SessionSpec,
+    StopReason, SystemPromptMode, SystemPromptSpec, TurnContext, TurnDirective, TurnInput,
 };
 use nexus_claude::model::EndpointQuirks;
 use nexus_claude::providers::native::{MemoryTranscriptStore, NativeConfig, NativeProvider};
@@ -29,6 +29,14 @@ use serde_json::{Value, json};
 /// Runs "look" → tool call (no text at all) → tool result → final text, and returns
 /// the body of the request that carries the tool result back to the model.
 async fn wire_of_the_tool_round(quirks: EndpointQuirks) -> Value {
+    wire_of_the_tool_round_with(quirks, None).await
+}
+
+/// The same round, the session opened with `hooks`.
+async fn wire_of_the_tool_round_with(
+    quirks: EndpointQuirks,
+    hooks: Option<Arc<dyn SessionHooks>>,
+) -> Value {
     let server = FakeOpenAi::start(json!([
         probe_route(false),
         models_route(128_000),
@@ -52,6 +60,7 @@ async fn wire_of_the_tool_round(quirks: EndpointQuirks) -> Value {
         text: "be brief".to_owned(),
         mode: SystemPromptMode::Replace,
     });
+    spec.hooks = hooks;
     let session: Arc<dyn AgentSession> = provider.open(spec).await.expect("open");
     let events = collect(
         session
@@ -233,5 +242,46 @@ async fn every_accepted_dialect_keeps_its_shape_on_the_same_tool_round() {
             _ => {},
         }
         assert_openai_strict(&body);
+    }
+}
+
+/// Hooks whose `before_turn` asks the effort given, or nothing.
+struct EffortHooks(Option<ReasoningEffort>);
+
+#[async_trait::async_trait]
+impl SessionHooks for EffortHooks {
+    async fn before_turn(&self, _ctx: &TurnContext) -> TurnDirective {
+        match self.0 {
+            Some(effort) => TurnDirective::reasoning_effort(effort),
+            None => TurnDirective::none(),
+        }
+    }
+}
+
+/// Contract v10: a turn whose hook asks no effort puts EXACTLY the body of today on the
+/// wire, byte for byte, under every dialect; one that asks an effort adds the one key
+/// `reasoning_effort` and nothing else (DeepSeek: nothing at all).
+#[tokio::test]
+async fn a_turn_without_an_effort_is_byte_identical_and_one_with_adds_the_single_key() {
+    for name in EndpointQuirks::PRESETS {
+        let quirks = EndpointQuirks::preset(name).unwrap();
+        let today = wire_of_the_tool_round(quirks.clone()).await;
+        let silent =
+            wire_of_the_tool_round_with(quirks.clone(), Some(Arc::new(EffortHooks(None)))).await;
+        assert_eq!(silent.to_string(), today.to_string(), "{name}");
+        let asked = wire_of_the_tool_round_with(
+            quirks.clone(),
+            Some(Arc::new(EffortHooks(Some(ReasoningEffort::Medium)))),
+        )
+        .await;
+        if name == "deepseek" {
+            assert_eq!(asked.to_string(), today.to_string(), "{name}");
+            continue;
+        }
+        assert_eq!(asked["reasoning_effort"], "medium", "{name}");
+        let mut stripped = asked.clone();
+        stripped.as_object_mut().unwrap().remove("reasoning_effort");
+        assert_eq!(stripped.to_string(), today.to_string(), "{name}");
+        assert_openai_strict(&asked);
     }
 }

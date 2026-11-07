@@ -77,6 +77,23 @@ async fn b_the_suite_passes_on_a_scripted_target_with_no_capability() {
     assert_eq!(fallbacks, 17, "{}", report.summary());
 }
 
+/// Contract v10: a target that honours its hooks but cannot apply a reasoning effort
+/// must say so (`reasoning_effort_ignored`) on the directive scenario; the scripted
+/// provider does, and the suite reads it as the fallback of that one field.
+#[tokio::test]
+async fn b_a_target_without_reasoning_effort_says_the_directive_ignored_and_passes() {
+    let mut capabilities = full_capabilities();
+    capabilities.reasoning_effort = false;
+    let report = run_all(&scripted_target(capabilities)).await;
+    report.assert_conformant();
+    assert_eq!(
+        report.outcome(Scenario::DirectiveModele),
+        Some(&ScenarioOutcome::Passed),
+        "{}",
+        report.summary()
+    );
+}
+
 #[tokio::test]
 async fn b_the_suite_passes_on_a_partial_set_of_capabilities() {
     // What a third-party CLI looks like: permissions with one scope, sub-agents

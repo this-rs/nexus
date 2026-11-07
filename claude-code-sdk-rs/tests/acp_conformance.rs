@@ -1896,6 +1896,7 @@ const FAKE_ACP_FALLBACK: &[&str] = &[
     "compaction_model",
     "images",
     "set_model_live",
+    "reasoning_effort",
     "native_question",
     "tool_cancel",
     "background_tasks",

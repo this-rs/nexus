@@ -340,6 +340,7 @@ impl ProviderInstanceConfig {
             tool_args_as_object: base.tool_args_as_object || over.tool_args_as_object,
             thinking_ignores_temperature: base.thinking_ignores_temperature
                 || over.thinking_ignores_temperature,
+            no_reasoning_effort: base.no_reasoning_effort || over.no_reasoning_effort,
             vision_probe: base.vision_probe || over.vision_probe,
             vision: over.vision.or(base.vision),
         })

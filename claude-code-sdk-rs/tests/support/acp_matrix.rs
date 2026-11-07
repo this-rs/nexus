@@ -79,6 +79,7 @@ pub const ACP_BEHAVIOURS: &[&str] = &[
     "tool_cancel_fallback",
     "native_question_fallback",
     "set_model_live_fallback",
+    "reasoning_effort_fallback",
     "sandbox_fallback",
     "mcp_servers_refused_retry",
     "system_prompt_as_prompt_prefix",
