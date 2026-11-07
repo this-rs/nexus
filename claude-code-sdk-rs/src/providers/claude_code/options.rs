@@ -358,6 +358,10 @@ mod tests {
                 "images": true,
                 "tools": true,
                 "set_model_live": true,
+                // v10: the CLI's effort is a launch setting — no control request moves it, so a
+                // directive is answered with `provider_notice { reasoning_effort_ignored }` and
+                // the turn runs as it would have (docs/agent-contract.md, claude-code column).
+                "reasoning_effort": false,
                 "native_question": true,
                 "tool_cancel": cfg!(unix),
                 "background_tasks": true,
