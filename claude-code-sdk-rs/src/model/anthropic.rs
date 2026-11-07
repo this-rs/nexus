@@ -396,9 +396,16 @@ impl ModelEndpoint for AnthropicEndpoint {
         true
     }
 
-    /// A request that asks an effort the API refuses (a 400 naming `thinking` or
-    /// `budget_tokens`) is sent ONCE more with the configured `thinking` instead — the
-    /// turn never fails for a knob the host only asked for — and the instance remembers.
+    /// A request that asks an effort is never allowed to fail the turn for it: ANY `400`
+    /// is sent ONCE more with the configured `thinking` and without the effort, and the
+    /// instance remembers when that second request is the one that works.
+    ///
+    /// Why any and not only the ones that name `thinking` / `budget_tokens`: the effort
+    /// writes a `thinking` budget AND raises `max_tokens` above it, and a model with a
+    /// smaller output cap answers on `max_tokens` — a refusal that never names the knob
+    /// the host asked for. A thinking override is also refused for `temperature` or a
+    /// forced `tool_choice`. The rule of the contract ("an effort never fails a turn")
+    /// holds only if the fallback does not depend on how the API words its refusal.
     async fn complete(
         &self,
         mut request: CompletionRequest,
@@ -407,18 +414,21 @@ impl ModelEndpoint for AnthropicEndpoint {
             request.reasoning_effort = None;
         }
         match self.start_once(&request).await {
-            Err(ProviderError::InvalidRequest { detail })
-                if request.reasoning_effort.is_some()
-                    && anthropic_wire::refuses_thinking(&detail) =>
-            {
+            Err(ProviderError::InvalidRequest { detail }) if request.reasoning_effort.is_some() => {
                 tracing::warn!(
                     instance = %self.config.instance_id,
                     detail = %detail,
-                    "the API refused the thinking override: retried once with the configured thinking"
+                    "the API refused a request that carried an effort: retried once with the configured thinking"
                 );
-                self.effort_refused.store(true, Ordering::SeqCst);
                 request.reasoning_effort = None;
-                self.start_once(&request).await
+                let retried = self.start_once(&request).await;
+                // The retry differs from the refused request by the effort alone: its
+                // success is the evidence, whatever the message said. A refusal that
+                // names the override teaches the instance even when the retry fails too.
+                if retried.is_ok() || anthropic_wire::refuses_thinking(&detail) {
+                    self.effort_refused.store(true, Ordering::SeqCst);
+                }
+                retried
             },
             other => other,
         }

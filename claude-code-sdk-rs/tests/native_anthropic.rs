@@ -1013,4 +1013,41 @@ mod reasoning_effort {
         };
         assert_eq!(num_turns, 1);
     }
+
+    /// The fallback does not depend on how the API words its refusal. An effort writes a
+    /// `thinking` budget AND raises `max_tokens` above it, so a model with a smaller output
+    /// cap answers on `max_tokens` — a name the host never asked for. The turn must still go
+    /// on, once, with the configured thinking (red before: the retry was reserved to
+    /// refusals naming `thinking` / `budget_tokens`, so this turn FAILED).
+    #[tokio::test]
+    async fn an_effort_refused_on_max_tokens_does_not_fail_the_turn() {
+        let server = FakeOpenAi::start(json!([
+            models_route(128_000, false),
+            status_reply(
+                Some("budget_tokens"),
+                400,
+                "invalid_request_error",
+                "max_tokens: 5120 is greater than the maximum allowed number of output \
+                 tokens for this model (4096)"
+            ),
+            text_reply(Some("alpha"), "ok", None, Some((100, 10))),
+        ]));
+        let endpoint = thinking_endpoint(&server);
+        let hooks = Arc::new(EffortHooks::default());
+        let session = session_on(endpoint.clone(), hooks.clone()).await;
+        *hooks.effort.lock().unwrap() = Some(ReasoningEffort::Medium);
+        // The turn completes: refused on a name of its own, answered without the effort.
+        completed(&collect(session.send_turn(TurnInput::text("alpha")).await.unwrap()).await);
+        // The retry differs from the refused request by the effort alone: its success is the
+        // evidence, whatever the message named.
+        assert!(endpoint.reasoning_effort_refused());
+        let bodies = message_bodies(&server.requests());
+        assert_eq!(bodies.len(), 2, "{bodies:?}");
+        assert_eq!(
+            bodies[0]["thinking"],
+            json!({"type": "enabled", "budget_tokens": 4096})
+        );
+        assert_eq!(bodies[1]["thinking"], json!({"type": "adaptive"}));
+        assert_eq!(bodies[1]["max_tokens"], 2000);
+    }
 }
