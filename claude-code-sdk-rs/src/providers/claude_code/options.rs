@@ -124,6 +124,10 @@ impl ClaudeCodeConfig {
             .and_then(|info| info.context_window)
             .or(self.context_window);
         capabilities.set_model_live = true;
+        // The CLI's effort is a spawn-time knob (its settings and environment), with no
+        // control request to move it between two turns: a `before_turn` effort directive
+        // is said with `reasoning_effort_ignored` (contract v10), never applied.
+        capabilities.reasoning_effort = false;
         capabilities.native_question = true;
         // Cancelling signals the CLI's descendants by PID: over SSH those are on the
         // other machine, out of reach; off Unix there is neither a process table nor a
@@ -354,6 +358,10 @@ mod tests {
                 "images": true,
                 "tools": true,
                 "set_model_live": true,
+                // v10: the CLI's effort is a launch setting — no control request moves it, so a
+                // directive is answered with `provider_notice { reasoning_effort_ignored }` and
+                // the turn runs as it would have (docs/agent-contract.md, claude-code column).
+                "reasoning_effort": false,
                 "native_question": true,
                 "tool_cancel": cfg!(unix),
                 "background_tasks": true,

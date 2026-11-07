@@ -26,7 +26,7 @@ use async_trait::async_trait;
 use futures::Stream;
 use serde::{Deserialize, Serialize};
 
-use crate::agent::{ModelInfo, ProviderError, ProviderHealth, Usage};
+use crate::agent::{ModelInfo, ProviderError, ProviderHealth, ReasoningEffort, Usage};
 
 #[cfg(feature = "provider-native")]
 pub mod anthropic;
@@ -313,6 +313,11 @@ pub struct CompletionRequest {
     /// instance quirks (and then to the server).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parallel_tool_calls: Option<bool>,
+    /// How hard the model should think on this request (contract v10), when the turn
+    /// asked; `None` sends what the instance is configured to send, as always. Each
+    /// endpoint writes it in its own dialect (see [`ModelEndpoint::applies_reasoning_effort`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<ReasoningEffort>,
     /// Ask for a stream. `complete` always streams on the wire; `false` is
     /// reserved and currently treated like `true`.
     #[serde(default = "default_true")]
@@ -333,6 +338,7 @@ impl CompletionRequest {
             max_tokens: None,
             temperature: None,
             parallel_tool_calls: None,
+            reasoning_effort: None,
             stream: true,
         }
     }
@@ -427,6 +433,14 @@ pub trait ModelEndpoint: Send + Sync {
     /// failed: a model without tools may still have vision. `None` by default.
     async fn probe_images(&self, _model: &str) -> Option<bool> {
         None
+    }
+
+    /// Whether a [`CompletionRequest::reasoning_effort`] reaches the wire (contract v10):
+    /// what `Capabilities::reasoning_effort` says of a native session on this endpoint.
+    /// `false` by default: an endpoint that never heard of it sends nothing, and the
+    /// harness says so to the host instead of asking in silence.
+    fn applies_reasoning_effort(&self) -> bool {
+        false
     }
 
     /// The messages of `request` exactly as this endpoint puts them on the wire (its

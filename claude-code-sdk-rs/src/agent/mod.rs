@@ -61,8 +61,8 @@ pub use spec::{
     CancelOutcome, CancelScope, CompactOutcome, CompactionDirective, CompactionInfo, EnvSpec,
     HookReply, HookVerdict, InputBlock, InterruptOutcome, InterruptScope, Lineage, McpServerSpec,
     NotificationInfo, PermissionDecision, ProcessDiagnostic, PromptInfo, QuestionAnswer,
-    QuestionAnswerItem, STOP_HOOK_BLOCK_CAP, SessionHooks, SessionLimits, SessionSpec,
-    SessionStartInfo, StopInfo, SubagentRequest, SubagentStopInfo, SystemPromptMode,
+    QuestionAnswerItem, ReasoningEffort, STOP_HOOK_BLOCK_CAP, SessionHooks, SessionLimits,
+    SessionSpec, SessionStartInfo, StopInfo, SubagentRequest, SubagentStopInfo, SystemPromptMode,
     SystemPromptSpec, ToolCallInfo, ToolResultInfo, TurnContext, TurnDirective, TurnInput,
     prompt_blocked_text, stop_hook_feedback,
 };
@@ -72,7 +72,7 @@ pub use spec::{
 /// [`ResumeToken`]) or a trait signature changes. The JSON snapshots in
 /// `tests/agent_contract_snapshots.rs` carry it: changing a shape without
 /// changing the version fails that test.
-pub const CONTRACT_VERSION: u32 = 9;
+pub const CONTRACT_VERSION: u32 = 10;
 
 /// Events of a turn, or of the out-of-band channel.
 pub type EventStream = Pin<Box<dyn Stream<Item = AgentEvent> + Send>>;

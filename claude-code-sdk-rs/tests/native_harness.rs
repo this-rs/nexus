@@ -5102,3 +5102,129 @@ async fn with_the_retry_off_the_first_failure_ends_the_turn_as_before() {
     ));
     assert_eq!(endpoint.calls(), 1);
 }
+
+// ---------------------------------------------------------------------------
+// The effort of a turn (contract v10) on an OpenAI-compatible endpoint: `reasoning_effort`
+// on the requests of THAT turn, the next one sends none; an instance whose server is not
+// steered by it says so and sends nothing.
+// ---------------------------------------------------------------------------
+mod reasoning_effort {
+    use super::*;
+    use nexus_claude::agent::{ReasoningEffort, SessionHooks, TurnContext, TurnDirective};
+    use std::sync::Mutex;
+
+    /// Hooks whose `before_turn` asks the effort set for the turn, nothing when `None`.
+    #[derive(Default)]
+    struct EffortHooks {
+        effort: Mutex<Option<ReasoningEffort>>,
+    }
+
+    #[async_trait::async_trait]
+    impl SessionHooks for EffortHooks {
+        async fn before_turn(&self, _ctx: &TurnContext) -> TurnDirective {
+            match *self.effort.lock().unwrap() {
+                Some(effort) => TurnDirective::reasoning_effort(effort),
+                None => TurnDirective::none(),
+            }
+        }
+    }
+
+    fn effort_notices(events: &[AgentEvent]) -> Vec<Value> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                AgentEvent::ProviderNotice { kind, data } if kind == "reasoning_effort_ignored" => {
+                    Some(data.clone())
+                },
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A provider on the fake, under `quirks`, and the session opened with `hooks`.
+    async fn session_under(
+        quirks: EndpointQuirks,
+        hooks: Arc<EffortHooks>,
+    ) -> (FakeOpenAi, Arc<dyn AgentSession>, bool) {
+        let server = FakeOpenAi::start(json!([
+            probe_route(false),
+            models_route(128_000),
+            text_reply(Some("alpha"), "ok", None, Some((100, 10))),
+            text_reply(Some("beta"), "ok", None, Some((100, 10))),
+            text_reply(Some("gamma"), "ok", None, Some((100, 10))),
+        ]));
+        let mut config = NativeConfig::new("native-test");
+        config.default_model = Some("m".to_owned());
+        let provider = NativeProvider::new(config, endpoint(server.base_url(), quirks));
+        let cwd = std::env::temp_dir();
+        let mut spec = SessionSpec::new(&cwd);
+        spec.model = Some("m".to_owned());
+        spec.hooks = Some(hooks);
+        let session = provider.open(spec).await.expect("open");
+        let declared = session.capabilities().reasoning_effort;
+        (server, session, declared)
+    }
+
+    fn efforts_on_the_wire(server: &FakeOpenAi) -> Vec<Option<String>> {
+        server
+            .requests_to("POST", "/v1/chat/completions")
+            .into_iter()
+            .map(|r| r["body"].clone())
+            .filter(|body| !body.to_string().contains("Call the ping tool now"))
+            .map(|body| {
+                body.get("reasoning_effort")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn an_effort_is_sent_on_that_turn_only_and_the_next_turn_sends_none() {
+        let hooks = Arc::new(EffortHooks::default());
+        let (server, session, declared) =
+            session_under(EndpointQuirks::generic(), hooks.clone()).await;
+        assert!(
+            declared,
+            "a generic OpenAI-compatible instance takes the effort"
+        );
+        *hooks.effort.lock().unwrap() = Some(ReasoningEffort::Low);
+        let first = turn(&*session, "alpha").await;
+        *hooks.effort.lock().unwrap() = None;
+        let second = turn(&*session, "beta").await;
+        *hooks.effort.lock().unwrap() = Some(ReasoningEffort::High);
+        let third = turn(&*session, "gamma").await;
+        for events in [&first, &second, &third] {
+            assert_eq!(stop_reason(events), StopReason::Completed, "{events:?}");
+            assert!(effort_notices(events).is_empty(), "{events:?}");
+        }
+        assert_eq!(
+            efforts_on_the_wire(&server),
+            [Some("low".to_owned()), None, Some("high".to_owned())]
+        );
+    }
+
+    #[tokio::test]
+    async fn an_instance_not_steered_by_the_effort_says_it_ignored_and_sends_nothing() {
+        let hooks = Arc::new(EffortHooks::default());
+        let (server, session, declared) =
+            session_under(EndpointQuirks::deepseek(), hooks.clone()).await;
+        assert!(!declared, "DeepSeek is not steered by `reasoning_effort`");
+        *hooks.effort.lock().unwrap() = Some(ReasoningEffort::High);
+        let events = turn(&*session, "alpha").await;
+        assert_eq!(stop_reason(&events), StopReason::Completed, "{events:?}");
+        assert_eq!(
+            effort_notices(&events),
+            [json!({
+                "provider": "native",
+                "reasoning_effort": "high",
+                "capability": "reasoning_effort",
+            })]
+        );
+        // Asked nothing: nothing to say.
+        *hooks.effort.lock().unwrap() = None;
+        let events = turn(&*session, "beta").await;
+        assert!(effort_notices(&events).is_empty(), "{events:?}");
+        assert_eq!(efforts_on_the_wire(&server), [None, None]);
+    }
+}

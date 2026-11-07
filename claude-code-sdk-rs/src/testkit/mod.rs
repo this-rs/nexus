@@ -77,6 +77,7 @@ pub fn full_capabilities() -> Capabilities {
         source: ContextWindowSource::Configured,
     });
     capabilities.set_model_live = true;
+    capabilities.reasoning_effort = true;
     capabilities.native_question = true;
     capabilities.tool_cancel = true;
     capabilities.background_tasks = true;

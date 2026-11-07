@@ -33,13 +33,35 @@ use serde_json::{Map, Value, json};
 use super::{
     ChatMessage, CompletionChunk, CompletionRequest, FinishReason, Role, ToolCallChunk, WireEcho,
 };
-use crate::agent::{ProviderError, Usage};
+use crate::agent::{ProviderError, ReasoningEffort, Usage};
 
 /// The protocol name an Anthropic [`WireEcho`] carries.
 pub(crate) const ECHO_PROTOCOL: &str = "anthropic_messages";
 
 /// `max_tokens` when the request names none: the API requires one.
 pub(crate) const DEFAULT_MAX_TOKENS: u32 = 32_000;
+
+/// What the answer keeps for itself above the thinking budget: the API requires
+/// `budget_tokens < max_tokens`, and a turn that thought to its budget still has to
+/// write something.
+pub(crate) const ANSWER_ROOM_ABOVE_BUDGET: u32 = 1024;
+
+/// The thinking budget each effort asks of the Messages API (contract v10):
+/// `{"type": "enabled", "budget_tokens": N}`. The lowest the API accepts is 1024.
+pub(crate) fn budget_tokens(effort: ReasoningEffort) -> u32 {
+    match effort {
+        ReasoningEffort::Low => 1024,
+        ReasoningEffort::Medium => 4096,
+        ReasoningEffort::High => 16_000,
+    }
+}
+
+/// Whether a request refusal is about the thinking override (`thinking`,
+/// `budget_tokens`): what makes the endpoint retry without it and remember.
+pub(crate) fn refuses_thinking(detail: &str) -> bool {
+    let lower = detail.to_ascii_lowercase();
+    lower.contains("thinking") || lower.contains("budget_tokens")
+}
 
 /// How a request is written, beyond what the [`CompletionRequest`] says.
 #[derive(Debug, Clone, PartialEq)]
@@ -249,10 +271,15 @@ pub(crate) fn build_request(request: &CompletionRequest, options: &WireOptions) 
     }
     let mut body = Map::new();
     body.insert("model".into(), json!(request.model));
-    body.insert(
-        "max_tokens".into(),
-        json!(request.max_tokens.unwrap_or(options.default_max_tokens)),
-    );
+    // The effort of the turn (contract v10) is a thinking budget, and `max_tokens` is
+    // raised to leave the answer room above it (the API requires budget < max_tokens).
+    // Without an effort, `max_tokens` and `thinking` are what the instance configured.
+    let budget = request.reasoning_effort.map(budget_tokens);
+    let mut max_tokens = request.max_tokens.unwrap_or(options.default_max_tokens);
+    if let Some(budget) = budget {
+        max_tokens = max_tokens.max(budget.saturating_add(ANSWER_ROOM_ABOVE_BUDGET));
+    }
+    body.insert("max_tokens".into(), json!(max_tokens));
     if let Some(system) = system {
         let mut block = text_block(&system);
         if options.prompt_cache {
@@ -292,7 +319,12 @@ pub(crate) fn build_request(request: &CompletionRequest, options: &WireOptions) 
     if let Some(temperature) = request.temperature {
         body.insert("temperature".into(), json!(temperature));
     }
-    if let Some(thinking) = &options.thinking {
+    if let Some(budget) = budget {
+        body.insert(
+            "thinking".into(),
+            json!({"type": "enabled", "budget_tokens": budget}),
+        );
+    } else if let Some(thinking) = &options.thinking {
         body.insert("thinking".into(), thinking.clone());
     }
     body.insert("stream".into(), json!(true));
@@ -800,6 +832,68 @@ mod tests {
         );
         assert_eq!(body["max_tokens"], 100);
         assert_eq!(body["temperature"], 0.0);
+    }
+
+    #[test]
+    fn the_effort_of_the_turn_is_a_thinking_budget_under_a_max_tokens_that_leaves_room() {
+        let options = WireOptions {
+            thinking: Some(json!({"type": "adaptive"})),
+            ..WireOptions::default()
+        };
+        let today = build_request(&request(vec![ChatMessage::user("hi")]), &options);
+        assert_eq!(today["thinking"], json!({"type": "adaptive"}));
+        assert_eq!(today["max_tokens"], DEFAULT_MAX_TOKENS);
+        for (effort, budget) in [
+            (ReasoningEffort::Low, 1024),
+            (ReasoningEffort::Medium, 4096),
+            (ReasoningEffort::High, 16_000),
+        ] {
+            // A small `max_tokens` is raised to budget + room; a large one is kept.
+            let mut small = request(vec![ChatMessage::user("hi")]);
+            small.max_tokens = Some(100);
+            small.reasoning_effort = Some(effort);
+            let body = build_request(&small, &options);
+            assert_eq!(
+                body["thinking"],
+                json!({"type": "enabled", "budget_tokens": budget}),
+                "{effort}"
+            );
+            assert_eq!(
+                body["max_tokens"],
+                budget + ANSWER_ROOM_ABOVE_BUDGET,
+                "{effort}"
+            );
+            let mut large = small.clone();
+            large.max_tokens = Some(64_000);
+            assert_eq!(build_request(&large, &options)["max_tokens"], 64_000);
+            // Without a `max_tokens`, the instance default holds (it is above every budget).
+            let mut defaulted = small.clone();
+            defaulted.max_tokens = None;
+            assert_eq!(
+                build_request(&defaulted, &options)["max_tokens"],
+                DEFAULT_MAX_TOKENS
+            );
+            // The override is the ONLY difference with the body of today.
+            let mut without = build_request(&defaulted, &options);
+            without["thinking"] = today["thinking"].clone();
+            assert_eq!(without.to_string(), today.to_string());
+        }
+        // No effort: the configured `thinking` is sent exactly as today, none when none.
+        let mut none = request(vec![ChatMessage::user("hi")]);
+        none.reasoning_effort = None;
+        assert_eq!(
+            build_request(&none, &options).to_string(),
+            today.to_string()
+        );
+        let plain = build_request(&none, &WireOptions::default());
+        assert!(plain.get("thinking").is_none());
+        assert!(refuses_thinking(
+            "thinking.budget_tokens: Input should be >= 1024"
+        ));
+        assert!(refuses_thinking(
+            "Extended Thinking is not supported by this model"
+        ));
+        assert!(!refuses_thinking("max_tokens: Input should be <= 8192"));
     }
 
     fn run(events: &[Value]) -> Result<Vec<CompletionChunk>, ProviderError> {

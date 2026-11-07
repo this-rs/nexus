@@ -1516,3 +1516,138 @@ fn the_fake_logs_every_concurrent_request_on_its_own_line() {
     ids.sort_unstable();
     assert_eq!(ids, (0..n).collect::<Vec<i64>>());
 }
+
+// ---------------------------------------------------------------------------
+// The effort of a turn (contract v10): `reasoning_effort` on the wire, and a server
+// that refuses it is asked once more without it, then never again.
+// ---------------------------------------------------------------------------
+
+/// Reads a stream to its end and returns its text.
+async fn text_of(
+    endpoint: &OpenAiEndpoint,
+    request: CompletionRequest,
+) -> Result<String, ProviderError> {
+    let mut stream = endpoint.complete(request).await?;
+    let mut text = String::new();
+    while let Some(item) = stream.next().await {
+        if let CompletionChunk::Text(piece) = item? {
+            text.push_str(&piece);
+        }
+    }
+    Ok(text)
+}
+
+fn ok_reply(body_contains: Option<&str>, text: &str) -> Value {
+    let mut route = json!({"method": "POST", "path": "/v1/chat/completions", "status": 200,
+        "sse": [delta(json!({"content": text})), finish("stop"), "[DONE]"]});
+    if let Some(needle) = body_contains {
+        route["body_contains"] = json!(needle);
+    }
+    route
+}
+
+fn effort_request(effort: Option<nexus_claude::agent::ReasoningEffort>) -> CompletionRequest {
+    let mut request = CompletionRequest::new("m", vec![ChatMessage::user("think")]);
+    request.reasoning_effort = effort;
+    request
+}
+
+#[tokio::test]
+async fn a_server_that_refuses_reasoning_effort_is_asked_once_more_without_it_and_remembered() {
+    use nexus_claude::agent::ReasoningEffort;
+    let server = FakeOpenAi::start(json!([
+        {"method": "POST", "path": "/v1/chat/completions", "body_contains": "\"reasoning_effort\"",
+            "status": 400, "body": {"error": {"message": "Unrecognized request argument supplied: reasoning_effort", "type": "invalid_request_error"}}},
+        ok_reply(None, "fine"),
+    ]));
+    let endpoint = endpoint(&server, EndpointQuirks::generic());
+    assert!(endpoint.applies_reasoning_effort());
+    assert!(!endpoint.reasoning_effort_refused());
+    // First request: refused, retried without the field, the turn gets its answer.
+    let text = text_of(&endpoint, effort_request(Some(ReasoningEffort::High)))
+        .await
+        .expect("the retry without the field answers");
+    assert_eq!(text, "fine");
+    let posts = server.requests_to("POST", "/v1/chat/completions");
+    assert_eq!(posts.len(), 2, "{posts:?}");
+    assert_eq!(posts[0]["body"]["reasoning_effort"], "high");
+    assert!(
+        posts[1]["body"].get("reasoning_effort").is_none(),
+        "{}",
+        posts[1]
+    );
+    assert!(endpoint.reasoning_effort_refused());
+    // Second request with an effort: the instance remembers, one request, no field.
+    let text = text_of(&endpoint, effort_request(Some(ReasoningEffort::Low)))
+        .await
+        .expect("sent plain");
+    assert_eq!(text, "fine");
+    let posts = server.requests_to("POST", "/v1/chat/completions");
+    assert_eq!(posts.len(), 3, "{posts:?}");
+    assert!(
+        posts[2]["body"].get("reasoning_effort").is_none(),
+        "{}",
+        posts[2]
+    );
+}
+
+#[tokio::test]
+async fn a_server_that_takes_reasoning_effort_gets_it_on_every_request_that_asks() {
+    use nexus_claude::agent::ReasoningEffort;
+    let server = FakeOpenAi::start(json!([ok_reply(None, "ok")]));
+    let endpoint = endpoint(&server, EndpointQuirks::generic());
+    for (effort, expected) in [
+        (Some(ReasoningEffort::Medium), Some("medium")),
+        (None, None),
+        (Some(ReasoningEffort::High), Some("high")),
+    ] {
+        text_of(&endpoint, effort_request(effort))
+            .await
+            .expect("ok");
+        let last = server
+            .requests_to("POST", "/v1/chat/completions")
+            .pop()
+            .unwrap();
+        assert_eq!(
+            last["body"].get("reasoning_effort").and_then(Value::as_str),
+            expected
+        );
+    }
+    assert_eq!(server.requests_to("POST", "/v1/chat/completions").len(), 3);
+    assert!(!endpoint.reasoning_effort_refused());
+}
+
+#[tokio::test]
+async fn a_refusal_that_is_not_about_the_effort_is_retried_once_and_not_remembered() {
+    use nexus_claude::agent::ReasoningEffort;
+    // Every request is refused for another reason: the retry fails too, the error is the
+    // retry's, and the field is not blamed (the next request still carries it).
+    let server = FakeOpenAi::start(json!([
+        {"method": "POST", "path": "/v1/chat/completions", "status": 400,
+            "body": {"error": {"message": "model `m` is not available", "type": "invalid_request_error"}}},
+    ]));
+    let endpoint = endpoint(&server, EndpointQuirks::generic());
+    let error = text_of(&endpoint, effort_request(Some(ReasoningEffort::Low)))
+        .await
+        .expect_err("refused twice");
+    assert!(
+        matches!(error, ProviderError::InvalidRequest { .. }),
+        "{error:?}"
+    );
+    assert_eq!(server.requests_to("POST", "/v1/chat/completions").len(), 2);
+    assert!(!endpoint.reasoning_effort_refused());
+    // A DeepSeek instance never sends it and never asks twice: one request, no field.
+    let server = FakeOpenAi::start(json!([ok_reply(None, "ok")]));
+    let deepseek = self::endpoint(&server, EndpointQuirks::deepseek());
+    assert!(!deepseek.applies_reasoning_effort());
+    text_of(&deepseek, effort_request(Some(ReasoningEffort::High)))
+        .await
+        .expect("ok");
+    let posts = server.requests_to("POST", "/v1/chat/completions");
+    assert_eq!(posts.len(), 1);
+    assert!(
+        posts[0]["body"].get("reasoning_effort").is_none(),
+        "{}",
+        posts[0]
+    );
+}

@@ -71,6 +71,11 @@ pub struct EndpointQuirks {
     /// the prefix cache. The motive is this flag: a dropped `temperature` is a
     /// declared quirk of the instance, not a silent loss.
     pub thinking_ignores_temperature: bool,
+    /// Never send `reasoning_effort` (contract v10): the endpoint's thinking is not
+    /// steered by that field (DeepSeek thinks by default and the field is not part of
+    /// its request). A turn that asks an effort is told `reasoning_effort_ignored`, and
+    /// a native session on the instance declares `Capabilities::reasoning_effort = false`.
+    pub no_reasoning_effort: bool,
     /// When the catalogue says nothing about a model's vision, ask the model: one
     /// tiny request with a one-pixel PNG. A completion means vision; a request
     /// refusal (HTTP 400) that names images means none; anything else (another
@@ -100,12 +105,14 @@ impl EndpointQuirks {
     }
 
     /// DeepSeek: reasoning must come back with tool calls, and thinking mode
-    /// (the default) refuses a forced `tool_choice` and pins the temperature.
+    /// (the default) refuses a forced `tool_choice`, pins the temperature and takes
+    /// no `reasoning_effort`.
     pub fn deepseek() -> Self {
         Self {
             echo_reasoning_with_tools: true,
             no_forced_tool_choice: true,
             thinking_ignores_temperature: true,
+            no_reasoning_effort: true,
             ..Self::default()
         }
     }
@@ -180,8 +187,17 @@ mod tests {
         assert!(EndpointQuirks::deepseek().echo_reasoning_with_tools);
         assert!(EndpointQuirks::deepseek().no_forced_tool_choice);
         assert!(EndpointQuirks::deepseek().thinking_ignores_temperature);
+        assert!(EndpointQuirks::deepseek().no_reasoning_effort);
         assert!(!EndpointQuirks::generic().no_forced_tool_choice);
         assert!(!EndpointQuirks::generic().thinking_ignores_temperature);
+        assert!(!EndpointQuirks::generic().no_reasoning_effort);
+        for name in EndpointQuirks::PRESETS {
+            assert_eq!(
+                EndpointQuirks::preset(name).unwrap().no_reasoning_effort,
+                name == "deepseek",
+                "{name}"
+            );
+        }
         assert!(EndpointQuirks::ollama().omit_tool_choice);
         assert_eq!(
             EndpointQuirks::vllm().reasoning_field,

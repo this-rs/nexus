@@ -18,6 +18,7 @@
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -133,6 +134,11 @@ pub struct OpenAiEndpoint {
     probes: Mutex<HashMap<String, (Instant, EndpointProbe)>>,
     /// What is known of each model's vision, with the same TTL as the probes.
     vision: Mutex<HashMap<String, (Instant, Option<bool>)>>,
+    /// The server refused a request for its `reasoning_effort` (contract v10): a locked
+    /// quirk, learned once for the life of the instance, so that no later turn pays a
+    /// refused request for it. Learned the same way as the reasoning field name: from
+    /// what the server answered, never configured.
+    effort_refused: AtomicBool,
 }
 
 impl std::fmt::Debug for OpenAiEndpoint {
@@ -155,6 +161,7 @@ impl OpenAiEndpoint {
             client: Mutex::new(None),
             probes: Mutex::new(HashMap::new()),
             vision: Mutex::new(HashMap::new()),
+            effort_refused: AtomicBool::new(false),
         }
     }
 
@@ -167,6 +174,12 @@ impl OpenAiEndpoint {
     /// The configuration.
     pub fn config(&self) -> &OpenAiEndpointConfig {
         &self.config
+    }
+
+    /// Whether the server refused `reasoning_effort` once (contract v10): from then on
+    /// the field is dropped from every request of this instance.
+    pub fn reasoning_effort_refused(&self) -> bool {
+        self.effort_refused.load(Ordering::SeqCst)
     }
 
     async fn prepare(&self) -> Result<(CheckedEndpoint, Client), ProviderError> {
@@ -219,7 +232,41 @@ impl OpenAiEndpoint {
         send_request(builder, secret, self.config.response_timeout).await
     }
 
+    /// Starts a completion. A request that asks a `reasoning_effort` the server refuses
+    /// (`InvalidRequest`) is sent ONCE more without it — the turn never fails for a knob
+    /// the host only asked for — and when the plain request goes through, or the refusal
+    /// names the field, the instance remembers: later requests drop it before sending.
     async fn start(
+        &self,
+        mut request: CompletionRequest,
+        forced_tool: Option<&str>,
+    ) -> Result<(CompletionStream, SharedField), ProviderError> {
+        if self.reasoning_effort_refused() {
+            request.reasoning_effort = None;
+        }
+        let asked = request
+            .reasoning_effort
+            .filter(|_| !self.config.quirks.no_reasoning_effort);
+        match self.start_once(request.clone(), forced_tool).await {
+            Err(ProviderError::InvalidRequest { detail }) if asked.is_some() => {
+                tracing::warn!(
+                    instance = %self.config.instance_id,
+                    reasoning_effort = %asked.unwrap_or(crate::agent::ReasoningEffort::Medium),
+                    detail = %detail,
+                    "the endpoint refused the request: retried once without `reasoning_effort`"
+                );
+                request.reasoning_effort = None;
+                let retried = self.start_once(request, forced_tool).await;
+                if retried.is_ok() || names_reasoning_effort(&detail) {
+                    self.effort_refused.store(true, Ordering::SeqCst);
+                }
+                retried
+            },
+            other => other,
+        }
+    }
+
+    async fn start_once(
         &self,
         request: CompletionRequest,
         forced_tool: Option<&str>,
@@ -454,6 +501,10 @@ impl ModelEndpoint for OpenAiEndpoint {
         &self.config.instance_id
     }
 
+    fn applies_reasoning_effort(&self) -> bool {
+        !self.config.quirks.no_reasoning_effort
+    }
+
     fn wire_messages(&self, request: &CompletionRequest) -> Option<Vec<Value>> {
         match wire::build_request(request, &self.config.quirks, None) {
             Value::Object(mut body) => match body.remove("messages") {
@@ -569,6 +620,17 @@ impl ModelEndpoint for OpenAiEndpoint {
         });
         self.vision(model, from_catalogue).await
     }
+}
+
+/// The refusal names `reasoning_effort` (`reasoning_effort`, `reasoningEffort`,
+/// "reasoning effort"): the field was the cause, whatever the retry says.
+fn names_reasoning_effort(detail: &str) -> bool {
+    let squashed: String = detail
+        .chars()
+        .filter(char::is_ascii_alphanumeric)
+        .map(|c| c.to_ascii_lowercase())
+        .collect();
+    squashed.contains("reasoningeffort")
 }
 
 /// The refusal is about a PARAMETER that concerns tools, not about tools, however it

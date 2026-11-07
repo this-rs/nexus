@@ -858,3 +858,196 @@ async fn cache_writes_count_in_the_prompt_size_and_in_the_tokens_spent_but_cache
         "100 + 50 written + 10 output"
     );
 }
+
+// ---------------------------------------------------------------------------
+// The effort of a turn (contract v10) on the Messages API: a thinking budget under a
+// `max_tokens` that leaves room, for THAT turn only; a refused override is sent once
+// more with the configured thinking and remembered for the life of the endpoint.
+// ---------------------------------------------------------------------------
+mod reasoning_effort {
+    use super::*;
+    use nexus_claude::agent::{ReasoningEffort, SessionHooks, TurnContext, TurnDirective};
+    use nexus_claude::model::{AnthropicAuth, AnthropicEndpoint, AnthropicEndpointConfig};
+
+    /// Hooks whose `before_turn` asks the effort set for the turn, nothing when `None`.
+    #[derive(Default)]
+    struct EffortHooks {
+        effort: std::sync::Mutex<Option<ReasoningEffort>>,
+    }
+
+    #[async_trait]
+    impl SessionHooks for EffortHooks {
+        async fn before_turn(&self, _ctx: &TurnContext) -> TurnDirective {
+            match *self.effort.lock().unwrap() {
+                Some(effort) => TurnDirective::reasoning_effort(effort),
+                None => TurnDirective::none(),
+            }
+        }
+    }
+
+    /// An endpoint on the fake with a configured `thinking` (what a turn without an
+    /// effort must send exactly as today) and a small instance `max_tokens`.
+    fn thinking_endpoint(server: &FakeOpenAi) -> Arc<AnthropicEndpoint> {
+        let mut config = AnthropicEndpointConfig::gateway("native-test", server.base_url());
+        config.auth = AnthropicAuth::ApiKey;
+        config.credential = CredentialRef::Env("UNUSED".into());
+        config.thinking = Some(json!({"type": "adaptive"}));
+        config.response_timeout = std::time::Duration::from_secs(15);
+        config.idle_timeout = std::time::Duration::from_secs(15);
+        Arc::new(AnthropicEndpoint::new(config, Arc::new(FixedKey)))
+    }
+
+    async fn session_on(
+        endpoint: Arc<AnthropicEndpoint>,
+        hooks: Arc<EffortHooks>,
+    ) -> Arc<dyn AgentSession> {
+        let mut config = config(None);
+        config.max_tokens = Some(2000);
+        let provider = Arc::new(NativeProvider::new(config, endpoint));
+        provider.refresh_capabilities("m").await.expect("probe");
+        assert!(provider.capabilities(Some("m")).reasoning_effort);
+        let mut spec = SessionSpec::new(std::env::temp_dir());
+        spec.model = Some("m".to_owned());
+        spec.hooks = Some(hooks);
+        provider.open(spec).await.expect("open")
+    }
+
+    fn completed(events: &[AgentEvent]) {
+        assert!(
+            matches!(
+                terminal(events),
+                AgentEvent::Done {
+                    stop_reason: StopReason::Completed,
+                    ..
+                }
+            ),
+            "{events:?}"
+        );
+        assert!(
+            !events.iter().any(|event| matches!(
+                event,
+                AgentEvent::ProviderNotice { kind, .. } if kind == "reasoning_effort_ignored"
+            )),
+            "the endpoint applies the effort: nothing is said ignored, got {events:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn an_effort_is_a_thinking_budget_on_that_turn_and_the_next_turn_sends_the_configured_thinking()
+     {
+        let server = FakeOpenAi::start(json!([
+            models_route(128_000, false),
+            text_reply(Some("alpha"), "ok", None, Some((100, 10))),
+            text_reply(Some("beta"), "ok", None, Some((100, 10))),
+            text_reply(Some("gamma"), "ok", None, Some((100, 10))),
+        ]));
+        let endpoint = thinking_endpoint(&server);
+        let hooks = Arc::new(EffortHooks::default());
+        let session = session_on(endpoint.clone(), hooks.clone()).await;
+        *hooks.effort.lock().unwrap() = Some(ReasoningEffort::High);
+        completed(&collect(session.send_turn(TurnInput::text("alpha")).await.unwrap()).await);
+        *hooks.effort.lock().unwrap() = None;
+        completed(&collect(session.send_turn(TurnInput::text("beta")).await.unwrap()).await);
+        *hooks.effort.lock().unwrap() = Some(ReasoningEffort::Low);
+        completed(&collect(session.send_turn(TurnInput::text("gamma")).await.unwrap()).await);
+        let bodies = message_bodies(&server.requests());
+        assert_eq!(bodies.len(), 3, "{bodies:?}");
+        // `high`: 16000 of thinking under a max_tokens raised above the instance's 2000.
+        assert_eq!(
+            bodies[0]["thinking"],
+            json!({"type": "enabled", "budget_tokens": 16_000})
+        );
+        assert_eq!(bodies[0]["max_tokens"], 16_000 + 1024);
+        // The turn after, asked nothing: the configured thinking, the instance's max_tokens.
+        assert_eq!(bodies[1]["thinking"], json!({"type": "adaptive"}));
+        assert_eq!(bodies[1]["max_tokens"], 2000);
+        // `low`: the smallest budget the API takes, and 2000 already leaves room above it.
+        assert_eq!(
+            bodies[2]["thinking"],
+            json!({"type": "enabled", "budget_tokens": 1024})
+        );
+        assert_eq!(bodies[2]["max_tokens"], 2048);
+        assert!(!endpoint.reasoning_effort_refused());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_refused_thinking_override_is_retried_once_with_the_configured_thinking_and_remembered()
+     {
+        let server = FakeOpenAi::start(json!([
+            models_route(128_000, false),
+            status_reply(
+                Some("budget_tokens"),
+                400,
+                "invalid_request_error",
+                "thinking: Extended thinking is not supported by this model"
+            ),
+            text_reply(Some("alpha"), "ok", None, Some((100, 10))),
+            text_reply(Some("beta"), "ok", None, Some((100, 10))),
+        ]));
+        let endpoint = thinking_endpoint(&server);
+        let hooks = Arc::new(EffortHooks::default());
+        let session = session_on(endpoint.clone(), hooks.clone()).await;
+        *hooks.effort.lock().unwrap() = Some(ReasoningEffort::Medium);
+        // The turn never fails: refused with the budget, answered without it.
+        completed(&collect(session.send_turn(TurnInput::text("alpha")).await.unwrap()).await);
+        assert!(endpoint.reasoning_effort_refused());
+        // The next turn asks again: the endpoint remembers, one request, no override.
+        completed(&collect(session.send_turn(TurnInput::text("beta")).await.unwrap()).await);
+        let bodies = message_bodies(&server.requests());
+        assert_eq!(bodies.len(), 3, "{bodies:?}");
+        assert_eq!(
+            bodies[0]["thinking"],
+            json!({"type": "enabled", "budget_tokens": 4096})
+        );
+        assert_eq!(bodies[0]["max_tokens"], 4096 + 1024);
+        for body in &bodies[1..] {
+            assert_eq!(body["thinking"], json!({"type": "adaptive"}), "{body}");
+            assert_eq!(body["max_tokens"], 2000, "{body}");
+        }
+        // Every turn counted exactly the requests it made: the refused one included.
+        let AgentEvent::Done { num_turns, .. } =
+            terminal(&collect(session.send_turn(TurnInput::text("beta")).await.unwrap()).await)
+                .clone()
+        else {
+            unreachable!()
+        };
+        assert_eq!(num_turns, 1);
+    }
+
+    /// The fallback does not depend on how the API words its refusal. An effort writes a
+    /// `thinking` budget AND raises `max_tokens` above it, so a model with a smaller output
+    /// cap answers on `max_tokens` — a name the host never asked for. The turn must still go
+    /// on, once, with the configured thinking (red before: the retry was reserved to
+    /// refusals naming `thinking` / `budget_tokens`, so this turn FAILED).
+    #[tokio::test]
+    async fn an_effort_refused_on_max_tokens_does_not_fail_the_turn() {
+        let server = FakeOpenAi::start(json!([
+            models_route(128_000, false),
+            status_reply(
+                Some("budget_tokens"),
+                400,
+                "invalid_request_error",
+                "max_tokens: 5120 is greater than the maximum allowed number of output \
+                 tokens for this model (4096)"
+            ),
+            text_reply(Some("alpha"), "ok", None, Some((100, 10))),
+        ]));
+        let endpoint = thinking_endpoint(&server);
+        let hooks = Arc::new(EffortHooks::default());
+        let session = session_on(endpoint.clone(), hooks.clone()).await;
+        *hooks.effort.lock().unwrap() = Some(ReasoningEffort::Medium);
+        // The turn completes: refused on a name of its own, answered without the effort.
+        completed(&collect(session.send_turn(TurnInput::text("alpha")).await.unwrap()).await);
+        // The retry differs from the refused request by the effort alone: its success is the
+        // evidence, whatever the message named.
+        assert!(endpoint.reasoning_effort_refused());
+        let bodies = message_bodies(&server.requests());
+        assert_eq!(bodies.len(), 2, "{bodies:?}");
+        assert_eq!(
+            bodies[0]["thinking"],
+            json!({"type": "enabled", "budget_tokens": 4096})
+        );
+        assert_eq!(bodies[1]["thinking"], json!({"type": "adaptive"}));
+        assert_eq!(bodies[1]["max_tokens"], 2000);
+    }
+}

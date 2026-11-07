@@ -2165,3 +2165,81 @@ async fn a_background_process_forked_before_the_first_reading_is_claimed_and_sto
     eventually("the background process is gone after the stop", || !alive()).await;
     session.close().await.unwrap();
 }
+
+/// Hooks whose `before_turn` asks a reasoning effort and no model.
+struct EffortDirectiveHooks;
+
+#[async_trait::async_trait]
+impl nexus_claude::agent::SessionHooks for EffortDirectiveHooks {
+    async fn before_turn(
+        &self,
+        _ctx: &nexus_claude::agent::TurnContext,
+    ) -> nexus_claude::agent::TurnDirective {
+        nexus_claude::agent::TurnDirective::reasoning_effort(
+            nexus_claude::agent::ReasoningEffort::High,
+        )
+    }
+}
+
+/// The façade does not declare `reasoning_effort` (contract v10): the CLI's effort is set
+/// when it is spawned, no control request moves it. An effort asked is said ignored, the
+/// turn runs as it would have, and nothing is written to the CLI for it.
+#[tokio::test]
+async fn an_effort_directive_is_said_ignored_by_the_facade_and_the_turn_goes_on() {
+    let (fake, provider, mut spec) = stage(until_closed(
+        Transcript::new()
+            .await_stdin_containing("bonjour")
+            .init("fake-session")
+            .result_ok("ok"),
+    ));
+    spec.hooks = Some(Arc::new(EffortDirectiveHooks));
+    let session = open(&provider, spec).await;
+    assert!(!session.capabilities().reasoning_effort);
+    let events = read_turn(
+        session.send_turn(TurnInput::text("bonjour")).await.unwrap(),
+        |_| async {},
+    )
+    .await;
+    let ignored: Vec<&Value> = events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::ProviderNotice { kind, data } if kind == "reasoning_effort_ignored" => {
+                Some(data)
+            },
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        ignored,
+        [&json!({
+            "provider": "claude_code",
+            "reasoning_effort": "high",
+            "capability": "reasoning_effort",
+        })],
+        "{events:?}"
+    );
+    assert!(
+        matches!(
+            events.last(),
+            Some(AgentEvent::Done {
+                stop_reason: StopReason::Completed,
+                ..
+            })
+        ),
+        "{events:?}"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::ModelChanged { .. })),
+        "{events:?}"
+    );
+    // Line 0 registers the hooks (`initialize`); the input follows at once: no control
+    // request for the effort.
+    let lines = fake.wait_for_stdin_lines(2, WAIT).await;
+    assert!(
+        lines[1].contains("bonjour") && !lines[1].contains("control_request"),
+        "{lines:?}"
+    );
+    session.close().await.unwrap();
+}

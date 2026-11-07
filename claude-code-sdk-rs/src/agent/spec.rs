@@ -651,12 +651,54 @@ impl TurnContext {
     }
 }
 
+/// How hard the model is asked to think on one turn (contract v10): what the host's
+/// cognitive router asks of a turn, applied by the providers that have a per-turn knob
+/// (`Capabilities::reasoning_effort`) and said ignored by the others, never an error.
+///
+/// What each level becomes on the wire is the provider's business: a thinking budget on
+/// the Anthropic Messages API, `reasoning_effort` on an OpenAI-compatible server.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum ReasoningEffort {
+    /// A short think: routine work.
+    Low,
+    /// The provider's middle ground.
+    Medium,
+    /// As long as the provider allows: hard problems.
+    High,
+}
+
+impl ReasoningEffort {
+    /// The level as the wire spells it (`low`, `medium`, `high`).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+        }
+    }
+}
+
+impl fmt::Display for ReasoningEffort {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// What a `before_turn` hook asks of the turn about to start.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 #[non_exhaustive]
 pub struct TurnDirective {
     /// Model to run the turn on (same provider), when the hook wants another one.
     pub model: Option<String>,
+    /// How hard the model should think on THIS turn, when the hook wants to say
+    /// (contract v10). Unlike `model`, which makes a model active for the turns that
+    /// follow, the effort covers the turn it is asked for and nothing after it: a
+    /// directive that says nothing sends the endpoint's configured thinking, as always.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<ReasoningEffort>,
 }
 
 impl TurnDirective {
@@ -669,7 +711,19 @@ impl TurnDirective {
     pub fn model(model: impl Into<String>) -> Self {
         Self {
             model: Some(model.into()),
+            reasoning_effort: None,
         }
+    }
+
+    /// A directive that asks `effort` of the turn, on the current model.
+    pub fn reasoning_effort(effort: ReasoningEffort) -> Self {
+        Self::none().with_reasoning_effort(effort)
+    }
+
+    /// The same directive, asking `effort` of the turn.
+    pub fn with_reasoning_effort(mut self, effort: ReasoningEffort) -> Self {
+        self.reasoning_effort = Some(effort);
+        self
     }
 }
 
@@ -1070,5 +1124,46 @@ mod tests {
         });
         assert!(input.has_images());
         assert_eq!(input.joined_text(), "hello\n\nworld");
+    }
+
+    #[test]
+    fn a_turn_directive_round_trips_with_its_effort_and_without() {
+        let directive = TurnDirective::model("m").with_reasoning_effort(ReasoningEffort::High);
+        let json = serde_json::to_value(&directive).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({"model": "m", "reasoning_effort": "high"})
+        );
+        let back: TurnDirective = serde_json::from_value(json).unwrap();
+        assert_eq!(back, directive);
+        // `model(..)` alone asks no effort, and the wire spelling is snake_case.
+        assert_eq!(TurnDirective::model("m").reasoning_effort, None);
+        assert_eq!(
+            TurnDirective::reasoning_effort(ReasoningEffort::Low),
+            TurnDirective {
+                model: None,
+                reasoning_effort: Some(ReasoningEffort::Low),
+            }
+        );
+        assert_eq!(
+            serde_json::to_value(TurnDirective::none()).unwrap(),
+            serde_json::json!({"model": null})
+        );
+        // A v9 peer that never heard of the effort still parses.
+        let old: TurnDirective = serde_json::from_str(r#"{"model":"x"}"#).unwrap();
+        assert_eq!(old, TurnDirective::model("x"));
+        for (effort, text) in [
+            (ReasoningEffort::Low, "low"),
+            (ReasoningEffort::Medium, "medium"),
+            (ReasoningEffort::High, "high"),
+        ] {
+            assert_eq!(effort.to_string(), text);
+            assert_eq!(serde_json::to_value(effort).unwrap(), text);
+            assert_eq!(
+                serde_json::from_value::<ReasoningEffort>(serde_json::json!(text)).unwrap(),
+                effort
+            );
+        }
+        assert!(serde_json::from_str::<ReasoningEffort>(r#""max""#).is_err());
     }
 }

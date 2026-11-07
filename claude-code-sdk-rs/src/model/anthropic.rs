@@ -23,6 +23,7 @@
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -147,6 +148,11 @@ pub struct AnthropicEndpoint {
     guard: EndpointGuard,
     client: Mutex<Option<(String, Vec<SocketAddr>, Client)>>,
     probes: Mutex<HashMap<String, (Instant, EndpointProbe)>>,
+    /// The API refused the thinking override of an effort (contract v10: a 400 naming
+    /// `thinking` / `budget_tokens`, a model or an account without extended thinking): a
+    /// locked quirk, learned once for the life of the instance, so that no later turn
+    /// pays a refused request for it.
+    effort_refused: AtomicBool,
 }
 
 impl std::fmt::Debug for AnthropicEndpoint {
@@ -167,6 +173,7 @@ impl AnthropicEndpoint {
             guard,
             client: Mutex::new(None),
             probes: Mutex::new(HashMap::new()),
+            effort_refused: AtomicBool::new(false),
         }
     }
 
@@ -179,6 +186,31 @@ impl AnthropicEndpoint {
     /// The configuration.
     pub fn config(&self) -> &AnthropicEndpointConfig {
         &self.config
+    }
+
+    /// Whether the API refused the thinking override of an effort once (contract v10):
+    /// from then on an effort is dropped before sending and the configured `thinking` goes.
+    pub fn reasoning_effort_refused(&self) -> bool {
+        self.effort_refused.load(Ordering::SeqCst)
+    }
+
+    /// One `POST /v1/messages`, the stream opened.
+    async fn start_once(
+        &self,
+        request: &CompletionRequest,
+    ) -> Result<CompletionStream, ProviderError> {
+        let (checked, client) = self.prepare().await?;
+        let body = anthropic_wire::build_request(request, &self.config.wire_options());
+        let payload = serde_json::to_vec(&body)
+            .map_err(|_| ProviderError::invalid("request is not serialisable"))?;
+        let builder = client
+            .post(Self::url(&checked, "messages"))
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .header(reqwest::header::ACCEPT, "text/event-stream")
+            .body(payload);
+        let (builder, secret) = self.authorise(builder).await?;
+        let response = self.send(builder, secret.as_ref()).await?;
+        Ok(chunk_stream(response, secret, self.config.idle_timeout))
     }
 
     async fn prepare(&self) -> Result<(CheckedEndpoint, Client), ProviderError> {
@@ -360,22 +392,46 @@ impl ModelEndpoint for AnthropicEndpoint {
             .collect())
     }
 
+    fn applies_reasoning_effort(&self) -> bool {
+        true
+    }
+
+    /// A request that asks an effort is never allowed to fail the turn for it: ANY `400`
+    /// is sent ONCE more with the configured `thinking` and without the effort, and the
+    /// instance remembers when that second request is the one that works.
+    ///
+    /// Why any and not only the ones that name `thinking` / `budget_tokens`: the effort
+    /// writes a `thinking` budget AND raises `max_tokens` above it, and a model with a
+    /// smaller output cap answers on `max_tokens` — a refusal that never names the knob
+    /// the host asked for. A thinking override is also refused for `temperature` or a
+    /// forced `tool_choice`. The rule of the contract ("an effort never fails a turn")
+    /// holds only if the fallback does not depend on how the API words its refusal.
     async fn complete(
         &self,
-        request: CompletionRequest,
+        mut request: CompletionRequest,
     ) -> Result<CompletionStream, ProviderError> {
-        let (checked, client) = self.prepare().await?;
-        let body = anthropic_wire::build_request(&request, &self.config.wire_options());
-        let payload = serde_json::to_vec(&body)
-            .map_err(|_| ProviderError::invalid("request is not serialisable"))?;
-        let builder = client
-            .post(Self::url(&checked, "messages"))
-            .header(reqwest::header::CONTENT_TYPE, "application/json")
-            .header(reqwest::header::ACCEPT, "text/event-stream")
-            .body(payload);
-        let (builder, secret) = self.authorise(builder).await?;
-        let response = self.send(builder, secret.as_ref()).await?;
-        Ok(chunk_stream(response, secret, self.config.idle_timeout))
+        if self.reasoning_effort_refused() {
+            request.reasoning_effort = None;
+        }
+        match self.start_once(&request).await {
+            Err(ProviderError::InvalidRequest { detail }) if request.reasoning_effort.is_some() => {
+                tracing::warn!(
+                    instance = %self.config.instance_id,
+                    detail = %detail,
+                    "the API refused a request that carried an effort: retried once with the configured thinking"
+                );
+                request.reasoning_effort = None;
+                let retried = self.start_once(&request).await;
+                // The retry differs from the refused request by the effort alone: its
+                // success is the evidence, whatever the message said. A refusal that
+                // names the override teaches the instance even when the retry fails too.
+                if retried.is_ok() || anthropic_wire::refuses_thinking(&detail) {
+                    self.effort_refused.store(true, Ordering::SeqCst);
+                }
+                retried
+            },
+            other => other,
+        }
     }
 
     async fn probe(&self, model: &str) -> Result<EndpointProbe, ProviderError> {

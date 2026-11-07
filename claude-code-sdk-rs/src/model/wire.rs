@@ -232,6 +232,15 @@ pub(crate) fn build_request(
     {
         body.insert("temperature".into(), json!(temperature));
     }
+    // The effort of the turn (contract v10), as OpenAI spells it; never on an instance
+    // whose thinking is not steered by it (`no_reasoning_effort`). Without one the body
+    // is what it always was, byte for byte.
+    if let Some(effort) = request
+        .reasoning_effort
+        .filter(|_| !quirks.no_reasoning_effort)
+    {
+        body.insert("reasoning_effort".into(), json!(effort.as_str()));
+    }
     if with_tools {
         let tools: Vec<Value> = request
             .tools
@@ -605,6 +614,42 @@ mod tests {
         );
         assert!(assistant.get("reasoning_content").is_none());
         assert_eq!(body["messages"][3]["tool_call_id"], "c1");
+    }
+
+    #[test]
+    fn the_effort_of_the_turn_is_reasoning_effort_and_without_one_the_body_is_unchanged() {
+        use crate::agent::ReasoningEffort;
+        let today = build_request(&request(vec![tool()]), &EndpointQuirks::generic(), None);
+        assert!(today.get("reasoning_effort").is_none());
+        for (effort, text) in [
+            (ReasoningEffort::Low, "low"),
+            (ReasoningEffort::Medium, "medium"),
+            (ReasoningEffort::High, "high"),
+        ] {
+            let mut asked = request(vec![tool()]);
+            asked.reasoning_effort = Some(effort);
+            let body = build_request(&asked, &EndpointQuirks::generic(), None);
+            assert_eq!(body["reasoning_effort"], text);
+            // The field is the ONLY difference with the body of today.
+            let mut without = body.clone();
+            without.as_object_mut().unwrap().remove("reasoning_effort");
+            assert_eq!(without.to_string(), today.to_string());
+            // DeepSeek is not steered by it: nothing is sent, the body is today's.
+            let deepseek = build_request(&asked, &EndpointQuirks::deepseek(), None);
+            assert!(deepseek.get("reasoning_effort").is_none(), "{deepseek}");
+            assert_eq!(
+                deepseek.to_string(),
+                build_request(&request(vec![tool()]), &EndpointQuirks::deepseek(), None)
+                    .to_string()
+            );
+        }
+        // A request that asks nothing is serialised as before the field existed.
+        let mut none = request(vec![tool()]);
+        none.reasoning_effort = None;
+        assert_eq!(
+            build_request(&none, &EndpointQuirks::generic(), None).to_string(),
+            today.to_string()
+        );
     }
 
     #[test]
