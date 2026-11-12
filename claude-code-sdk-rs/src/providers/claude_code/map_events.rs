@@ -39,6 +39,11 @@ pub struct MapState {
     /// The model that last `rate_limit_event` refused, when the refused window was a
     /// model's own (`seven_day_opus`): the account still serves its neighbours.
     exhausted_model: Option<String>,
+    /// Prompt size of the last top-level API call of the running turn (input + cache reads +
+    /// cache writes). `result.usage` sums the calls of a turn, so it cannot stand for the prompt.
+    turn_prefix: Option<u64>,
+    /// The same, after the last turn that reported one: what the next `before_turn` is told.
+    context_tokens: Option<u64>,
 }
 
 impl Default for MapState {
@@ -65,7 +70,20 @@ impl MapState {
             exhausted_until_ms: None,
             exhausted: false,
             exhausted_model: None,
+            turn_prefix: None,
+            context_tokens: None,
         }
+    }
+
+    /// Tokens in context after the last turn that reported them (`TurnContext::context_tokens`).
+    pub fn context_tokens(&self) -> Option<u64> {
+        self.context_tokens
+    }
+
+    /// A turn starts: the calls of an earlier turn that never reached its `result` (interrupted,
+    /// failed, process gone) are not its prompt, and must not be served as the next one's.
+    pub fn begin_turn(&mut self) {
+        self.turn_prefix = None;
     }
 
     /// Number of the last message mapped (0 before the first one).
@@ -124,6 +142,12 @@ pub fn map_message(message: &Message, state: &mut MapState) -> Vec<AgentEvent> {
             parent_tool_use_id,
         } => {
             state.last_parent.clone_from(parent_tool_use_id);
+            // The main thread's prompt: a subagent's calls run on their own context.
+            if parent_tool_use_id.is_none()
+                && let Some(prefix) = message.usage.as_ref().and_then(prompt_tokens_of_call)
+            {
+                state.turn_prefix = Some(prefix);
+            }
             message
                 .content
                 .iter()
@@ -172,7 +196,15 @@ pub fn map_message(message: &Message, state: &mut MapState) -> Vec<AgentEvent> {
                 .map(str::to_owned);
             vec![AgentEvent::Quota { quota }]
         },
-        Message::System { subtype, data } => vec![map_system(subtype, data)],
+        Message::System { subtype, data } => {
+            // A compaction rewrote the history: the prompt before it is no longer the
+            // context (the native loop forgets its last prompt here too).
+            if subtype == "compact_boundary" {
+                state.turn_prefix = None;
+                state.context_tokens = None;
+            }
+            vec![map_system(subtype, data)]
+        },
         Message::Result {
             subtype,
             duration_ms,
@@ -198,12 +230,20 @@ pub fn map_message(message: &Message, state: &mut MapState) -> Vec<AgentEvent> {
             let exhausted = std::mem::take(&mut state.exhausted);
             let exhausted_until = state.exhausted_until_ms.take();
             let exhausted_model = state.exhausted_model.take();
+            // The prompt of the turn's last call: what the next turn starts from. A turn that
+            // reported no call keeps the size of the one before.
+            let prefix = state.turn_prefix.take();
+            if prefix.is_some() {
+                state.context_tokens = prefix;
+            }
+            let mut turn_usage = usage.as_ref().map(map_usage).unwrap_or_default();
+            turn_usage.context_tokens = prefix;
             vec![AgentEvent::Done {
                 stop_reason,
                 subtype: Some(subtype.clone()),
                 is_error: *is_error,
                 result_text: result.clone(),
-                usage: usage.as_ref().map(map_usage).unwrap_or_default(),
+                usage: turn_usage,
                 cost: Cost {
                     usd,
                     basis: state.cost_basis,
@@ -621,6 +661,17 @@ fn background_task(task: &Value) -> Option<BackgroundTask> {
         parent: owned_at(task, &["parent_tool_use_id"]),
         pid: u64_at(task, &["pid"]).and_then(|pid| u32::try_from(pid).ok()),
     })
+}
+
+/// Prompt size of one API call, counted as the native loop counts it: the input, the cache reads
+/// and the cache writes. `None` when the call gives no `input_tokens`.
+/// An empty prompt is no call (a synthetic message's zero usage): `None` too.
+fn prompt_tokens_of_call(usage: &Value) -> Option<u64> {
+    let input = u64_at(usage, &["input_tokens"])?;
+    let prompt = input
+        + u64_at(usage, &["cache_read_input_tokens"]).unwrap_or(0)
+        + u64_at(usage, &["cache_creation_input_tokens"]).unwrap_or(0);
+    (prompt > 0).then_some(prompt)
 }
 
 /// `result.usage` → [`Usage`]. A counter the CLI did not give stays `None`.
@@ -1471,6 +1522,178 @@ mod tests {
                 error: None,
             }
         );
+    }
+
+    /// One top-level assistant message of the CLI, with the usage of its API call.
+    fn call(cache_read: u64, cache_creation: u64) -> Message {
+        message(json!({
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "text", "text": "pas"}],
+                "usage": {
+                    "input_tokens": 1,
+                    "cache_read_input_tokens": cache_read,
+                    "cache_creation_input_tokens": cache_creation,
+                    "output_tokens": 9
+                }
+            },
+        }))
+    }
+
+    /// The turn's `result` (its `usage` is the SUM of the turn's calls, as the CLI writes it).
+    fn turn_result(input: u64, cache_read: u64, cache_creation: u64) -> Message {
+        message(json!({
+            "type": "result", "subtype": "success", "duration_ms": 1, "duration_api_ms": 1,
+            "is_error": false, "num_turns": 3, "session_id": "s", "result": "fini",
+            "usage": {
+                "input_tokens": input,
+                "cache_read_input_tokens": cache_read,
+                "cache_creation_input_tokens": cache_creation,
+                "output_tokens": 27
+            },
+        }))
+    }
+
+    #[test]
+    fn a_turn_of_three_calls_reports_the_prompt_of_its_last_call_not_the_sum() {
+        let mut state = MapState::new();
+        // Three calls: the prompt grows, and each call re-reads the whole of it from the cache.
+        map_message(&call(10_000, 0), &mut state);
+        map_message(&call(10_500, 200), &mut state);
+        map_message(&call(11_000, 50), &mut state);
+        let AgentEvent::Done { usage, .. } = one(&turn_result(3, 31_500, 250), &mut state) else {
+            panic!("a result maps to done");
+        };
+        // The billing counters keep the sum of the turn, as the CLI reports it.
+        assert_eq!(usage.cache_read_tokens, Some(31_500));
+        assert_eq!(usage.input_tokens, Some(3));
+        // The prompt the next turn starts from: the last call's (1 + 11_000 + 50), not the sum.
+        assert_eq!(usage.context_tokens, Some(11_051));
+        assert_eq!(state.context_tokens(), Some(11_051));
+    }
+
+    #[test]
+    fn a_turn_without_a_call_keeps_the_prompt_of_the_turn_before() {
+        let mut state = MapState::new();
+        map_message(&call(10_000, 0), &mut state);
+        map_message(&turn_result(1, 10_000, 0), &mut state);
+        assert_eq!(state.context_tokens(), Some(10_001));
+        let AgentEvent::Done { usage, .. } = one(&turn_result(1, 0, 0), &mut state) else {
+            panic!("a result maps to done");
+        };
+        assert_eq!(usage.context_tokens, None, "this turn made no call");
+        assert_eq!(
+            state.context_tokens(),
+            Some(10_001),
+            "the next turn still starts from it"
+        );
+    }
+
+    #[test]
+    fn a_synthetic_refusal_after_the_calls_does_not_overwrite_their_prompt() {
+        let mut state = MapState::new();
+        map_message(&call(10_000, 0), &mut state);
+        map_message(&call(10_500, 200), &mut state);
+        map_message(&call(11_000, 50), &mut state);
+        // The CLI's own refusal: `model: "<synthetic>"`, zero usage, no API call.
+        map_message(
+            &message(json!({
+                "type": "assistant",
+                "message": {
+                    "role": "assistant",
+                    "model": "<synthetic>",
+                    "content": [{"type": "text", "text": "limite atteinte"}],
+                    "usage": {"input_tokens": 0, "output_tokens": 0,
+                              "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0}
+                },
+                "is_api_error_message": true,
+            })),
+            &mut state,
+        );
+        let AgentEvent::Done { usage, .. } = one(&turn_result(3, 31_500, 250), &mut state) else {
+            panic!("a result maps to done");
+        };
+        assert_eq!(
+            usage.context_tokens,
+            Some(11_051),
+            "the last REAL call, not the refusal"
+        );
+        assert_eq!(state.context_tokens(), Some(11_051));
+    }
+
+    #[test]
+    fn a_call_with_an_empty_prompt_is_not_a_prompt() {
+        let mut state = MapState::new();
+        map_message(&call(10_000, 0), &mut state);
+        // A call that reports no prompt at all (no input, no cache): not a prompt.
+        map_message(
+            &message(json!({
+                "type": "assistant",
+                "message": {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "vide"}],
+                    "usage": {"input_tokens": 0, "output_tokens": 0}
+                },
+            })),
+            &mut state,
+        );
+        let AgentEvent::Done { usage, .. } = one(&turn_result(1, 0, 0), &mut state) else {
+            panic!("a result maps to done");
+        };
+        assert_eq!(usage.context_tokens, Some(10_001));
+    }
+
+    #[test]
+    fn an_interrupted_turn_leaves_no_prefix_for_the_next_one() {
+        let mut state = MapState::new();
+        map_message(&call(10_000, 0), &mut state);
+        map_message(&turn_result(1, 10_000, 0), &mut state);
+        assert_eq!(state.context_tokens(), Some(10_001));
+        // Turn 2 makes a call, then ends without a `result`: interrupted or process gone.
+        map_message(&call(20_000, 0), &mut state);
+        state.begin_turn();
+        // Turn 3 makes no call of its own: it must not be told turn 2's prompt.
+        let AgentEvent::Done { usage, .. } = one(&turn_result(1, 0, 0), &mut state) else {
+            panic!("a result maps to done");
+        };
+        assert_eq!(usage.context_tokens, None);
+        assert_eq!(state.context_tokens(), Some(10_001));
+    }
+
+    #[test]
+    fn a_compaction_forgets_the_prompt_before_it() {
+        let mut state = MapState::new();
+        map_message(&call(100_000, 0), &mut state);
+        map_message(&system("compact_boundary", json!({})), &mut state);
+        let AgentEvent::Done { usage, .. } = one(&turn_result(1, 0, 0), &mut state) else {
+            panic!("a result maps to done");
+        };
+        assert_eq!(
+            usage.context_tokens, None,
+            "the calls before the compaction are not the context"
+        );
+        assert_eq!(state.context_tokens(), None);
+    }
+
+    #[test]
+    fn a_subagent_call_does_not_stand_for_the_main_prompt() {
+        let mut state = MapState::new();
+        map_message(&call(10_000, 0), &mut state);
+        let sidechain = message(json!({
+            "type": "assistant",
+            "parent_tool_use_id": "toolu_sub",
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "text", "text": "sous-agent"}],
+                "usage": {"input_tokens": 1, "cache_read_input_tokens": 500, "output_tokens": 2}
+            },
+        }));
+        map_message(&sidechain, &mut state);
+        let AgentEvent::Done { usage, .. } = one(&turn_result(1, 10_000, 0), &mut state) else {
+            panic!("a result maps to done");
+        };
+        assert_eq!(usage.context_tokens, Some(10_001));
     }
 
     #[test]

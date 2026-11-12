@@ -1241,6 +1241,7 @@ mod tests {
     fn assistant(text: &str) -> Message {
         Message::Assistant {
             message: crate::types::AssistantMessage {
+                usage: None,
                 content: vec![ContentBlock::Text(crate::types::TextContent {
                     text: text.to_string(),
                 })],
@@ -2355,6 +2356,7 @@ mod tests {
             .inbound
             .send(Ok(Message::Assistant {
                 message: crate::types::AssistantMessage {
+                    usage: None,
                     content: vec![
                         // A non-text block must be skipped, not concatenated.
                         ContentBlock::Thinking(crate::types::ThinkingContent {

@@ -1939,6 +1939,10 @@ pub struct UserMessage {
 pub struct AssistantMessage {
     /// Content blocks
     pub content: Vec<ContentBlock>,
+    /// Usage of the one API call that produced this message (`message.usage` in the CLI
+    /// stream), as the CLI wrote it. Absent when the CLI gave none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<serde_json::Value>,
 }
 
 /// Result message (re-export for convenience)  
@@ -3681,7 +3685,10 @@ mod tests {
     #[test]
     fn test_message_assistant_top_level() {
         let msg = Message::Assistant {
-            message: AssistantMessage { content: vec![] },
+            message: AssistantMessage {
+                usage: None,
+                content: vec![],
+            },
             parent_tool_use_id: None,
         };
         assert!(msg.is_top_level());
@@ -3691,7 +3698,10 @@ mod tests {
     #[test]
     fn test_message_assistant_sidechain() {
         let msg = Message::Assistant {
-            message: AssistantMessage { content: vec![] },
+            message: AssistantMessage {
+                usage: None,
+                content: vec![],
+            },
             parent_tool_use_id: Some("tool_456".into()),
         };
         assert!(msg.is_sidechain());
