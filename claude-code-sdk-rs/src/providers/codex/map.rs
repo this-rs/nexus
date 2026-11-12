@@ -18,7 +18,7 @@
 //! | `item/started`, `item/completed` `contextCompaction` | `compaction` `started` / `completed`, trigger `auto` |
 //! | `thread/tokenUsage/updated` | nothing now: folded into the next `done.usage` |
 //! | `account/rateLimits/updated` | `quota { windows }` (primary and secondary window; contract v9) |
-//! | `turn/completed` `completed` / `interrupted` | `done { completed | interrupted }` |
+//! | `turn/completed` `completed` / `interrupted` | `done { completed / interrupted }` |
 //! | `turn/completed` `failed` | `done { error, is_error, error: <classified> }` (contract v2) |
 //! | `error` (mid-turn) | nothing now: its classification is used if `turn/completed` carries none |
 //! | `model/rerouted` | `model_changed` |
