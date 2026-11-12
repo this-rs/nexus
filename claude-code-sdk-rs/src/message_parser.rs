@@ -121,6 +121,7 @@ fn parse_assistant_message(json: Value) -> Result<Option<Message>> {
     Ok(Some(Message::Assistant {
         message: AssistantMessage {
             content: content_blocks,
+            usage: message.get("usage").cloned(),
         },
         parent_tool_use_id,
     }))
@@ -735,6 +736,7 @@ mod tests {
         // Top-level message (no parent_tool_use_id)
         let top_level = Message::Assistant {
             message: AssistantMessage {
+                usage: None,
                 content: vec![ContentBlock::Text(TextContent {
                     text: "Hello".to_string(),
                 })],
@@ -748,6 +750,7 @@ mod tests {
         // Sidechain message (has parent_tool_use_id)
         let sidechain = Message::Assistant {
             message: AssistantMessage {
+                usage: None,
                 content: vec![ContentBlock::Text(TextContent {
                     text: "Subagent response".to_string(),
                 })],

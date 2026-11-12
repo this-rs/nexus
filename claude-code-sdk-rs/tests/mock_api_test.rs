@@ -21,6 +21,7 @@ impl MockResponseGenerator {
     /// Add a mock response
     async fn add_response(&self, content: &str) {
         let assistant_msg = AssistantMessage {
+            usage: None,
             content: vec![ContentBlock::Text(TextContent {
                 text: content.to_string(),
             })],
@@ -58,6 +59,7 @@ impl MockResponseGenerator {
 #[test]
 fn test_message_serialization() {
     let assistant_msg = AssistantMessage {
+        usage: None,
         content: vec![ContentBlock::Text(TextContent {
             text: "Hello, world!".to_string(),
         })],

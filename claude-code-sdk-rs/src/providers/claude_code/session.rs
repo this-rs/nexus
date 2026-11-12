@@ -1451,6 +1451,8 @@ impl ClaudeCodeSession {
             .clone();
         let mut ctx = crate::agent::TurnContext::new(index, current.clone().unwrap_or_default());
         ctx.input_chars = input_chars;
+        // The prompt of the previous turn's last API call (not the turn's summed usage).
+        ctx.context_tokens = self.core.lock().map.context_tokens();
         let directive = match tokio::time::timeout(HOOK_TIMEOUT, hooks.before_turn(&ctx)).await {
             Ok(directive) => directive,
             Err(_) => {
@@ -2016,6 +2018,7 @@ mod tests {
     fn tool_use(id: &str, name: &str, input: Value) -> Message {
         Message::Assistant {
             message: crate::types::AssistantMessage {
+                usage: None,
                 content: vec![crate::types::ContentBlock::ToolUse(
                     crate::types::ToolUseContent {
                         id: id.to_owned(),
@@ -2189,6 +2192,7 @@ mod tests {
         core.on_permission_request(request("r1")).await;
         core.on_message(&Message::Assistant {
             message: crate::types::AssistantMessage {
+                usage: None,
                 content: vec![crate::types::ContentBlock::ToolUse(
                     crate::types::ToolUseContent {
                         id: "toolu_1".to_owned(),

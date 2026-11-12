@@ -58,7 +58,10 @@ async fn test_streaming_flow() {
         // Send an assistant message
         let _ = tx
             .send(Ok(Message::Assistant {
-                message: nexus_claude::AssistantMessage { content: vec![] },
+                message: nexus_claude::AssistantMessage {
+                    usage: None,
+                    content: vec![],
+                },
                 parent_tool_use_id: None,
             }))
             .await;
@@ -115,6 +118,7 @@ async fn test_receive_response_stops_after_result() {
 
         yield Ok::<Message, nexus_claude::SdkError>(Message::Assistant {
             message: nexus_claude::AssistantMessage {
+                usage: None,
                 content: vec![],
             },
             parent_tool_use_id: None,
