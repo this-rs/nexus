@@ -41,7 +41,7 @@
 //! | `images` | no (A12), whatever `promptCapabilities.image` says |
 //! | `thinking` | `AcpConfig::thinking` (ACP has no flag for it), or a thought chunk already seen by this provider |
 //! | `tools` | yes (the agent's own) |
-//! | `per_session_mcp` | `AcpConfig::per_session_mcp` (default yes) unless the agent refused them once: `mcpServers` of `session/new` / `session/load`; an HTTP / SSE server needs `mcpCapabilities.http` / `.sse` (else `Unsupported { mcp_http | mcp_sse }`). A refusal (`openclaw acp`) is retried once without the servers, announced by `provider_notice { mcp_servers_refused }`, and learned. A session's own `per_session_mcp` is what ITS handshake did (servers kept or dropped), never flipped by a concurrent refusal |
+//! | `per_session_mcp` | `AcpConfig::per_session_mcp` (default yes) unless the agent refused them once: `mcpServers` of `session/new` / `session/load`; an HTTP / SSE server needs `mcpCapabilities.http` / `.sse` (else `Unsupported { mcp_http \| mcp_sse }`). A refusal (`openclaw acp`) is retried once without the servers, announced by `provider_notice { mcp_servers_refused }`, and learned. A session's own `per_session_mcp` is what ITS handshake did (servers kept or dropped), never flipped by a concurrent refusal |
 //! | `interactive_permissions` | yes; scopes `once`, `always`; a request offers those it has an `allow_once` / `allow_always` option for |
 //! | `hooks`, `subagents`, `compaction_signal`, `background_tasks`, `tool_cancel`, `native_question` | none: ACP carries none of them |
 //! | `sandbox` | `none`: information for the user, not a gate: `trust` opens, and is applied live when the agent publishes a matching mode |
