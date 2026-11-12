@@ -118,10 +118,15 @@ fn parse_assistant_message(json: Value) -> Result<Option<Message>> {
         .and_then(|v| v.as_str())
         .map(String::from);
 
+    // A synthetic message (the CLI's own refusal or API-error text, `model: "<synthetic>"`) made
+    // no API call: its zero usage must not stand for a prompt.
+    let synthetic = message.get("model").and_then(Value::as_str) == Some("<synthetic>")
+        || json.get("is_api_error_message").and_then(Value::as_bool) == Some(true)
+        || message.get("is_api_error_message").and_then(Value::as_bool) == Some(true);
     Ok(Some(Message::Assistant {
         message: AssistantMessage {
             content: content_blocks,
-            usage: message.get("usage").cloned(),
+            usage: message.get("usage").cloned().filter(|_| !synthetic),
         },
         parent_tool_use_id,
     }))

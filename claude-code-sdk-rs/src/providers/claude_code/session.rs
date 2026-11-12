@@ -1440,6 +1440,8 @@ impl ClaudeCodeSession {
     /// `model_changed` opens the turn. Nothing to ask, nothing said, the current
     /// model, or a hook that does not answer in time: nothing happens.
     async fn before_turn(&self, input_chars: usize) -> Result<(), ProviderError> {
+        // Whatever an earlier turn left without a `result` is not this turn's prompt.
+        self.core.lock().map.begin_turn();
         let Some(hooks) = &self.hooks else {
             return Ok(());
         };
