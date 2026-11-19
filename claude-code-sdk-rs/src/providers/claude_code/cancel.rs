@@ -171,6 +171,58 @@ pub async fn process_table() -> Vec<ProcessRow> {
     Vec::new()
 }
 
+/// Reads the process table once, from a synchronous context (a drop with no
+/// runtime to await in). Same `ps` and same timeout as [`process_table`], run on a
+/// thread so the caller never waits past [`PS_TIMEOUT`]; `PATH` is the only
+/// variable passed on. Empty when `ps` is missing, fails or times out.
+#[cfg(unix)]
+pub fn process_table_blocking() -> Vec<ProcessRow> {
+    let mut command = std::process::Command::new("ps");
+    command
+        .args(["-A", "-o", "pid=,ppid=,etime="])
+        .env_clear()
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    if let Some(path) = std::env::var_os("PATH") {
+        command.env("PATH", path);
+    }
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = sender.send(command.output());
+    });
+    match receiver.recv_timeout(PS_TIMEOUT) {
+        Ok(Ok(output)) => parse_process_table(&String::from_utf8_lossy(&output.stdout)),
+        Ok(Err(error)) => {
+            tracing::warn!(%error, "the process table could not be read");
+            Vec::new()
+        },
+        Err(_) => {
+            tracing::warn!("the process table took too long to come back");
+            Vec::new()
+        },
+    }
+}
+
+/// Reads the process table once, synchronously. Always empty off Unix.
+#[cfg(not(unix))]
+pub fn process_table_blocking() -> Vec<ProcessRow> {
+    Vec::new()
+}
+
+/// [`signal_descendants`] from a synchronous context: the same two readings and the
+/// same recycled-pid guard, nothing awaited. Returns the pids that took the signal.
+pub fn signal_descendants_blocking(root: u32, signal: i32) -> Vec<u32> {
+    let seen = descendants_in(&process_table_blocking(), root);
+    if seen.is_empty() {
+        return Vec::new();
+    }
+    let fresh = process_table_blocking();
+    still_the_same(&seen, &fresh, root, false)
+        .into_iter()
+        .filter(|pid| signal_pid(*pid, signal))
+        .collect()
+}
+
 /// The descendants of `root`, with their age.
 pub async fn descendant_rows(root: u32) -> Vec<ProcessRow> {
     descendants_in(&process_table().await, root)

@@ -303,6 +303,36 @@ impl Process {
     }
 }
 
+impl Process {
+    /// [`Process::shutdown`] for a caller with no runtime to await in (a drop that
+    /// may run outside one): the same tree, read and signalled without `await`.
+    /// Descendants come from the process table (a child that left the group is
+    /// still its parent's descendant), then the group of the pid taken at spawn,
+    /// then the child itself. Idempotent.
+    pub(crate) fn kill_tree_now(&self) {
+        self.closing.store(true, Ordering::SeqCst);
+        if let Some(pid) = self.pid {
+            #[cfg(unix)]
+            cancel::signal_descendants_blocking(pid, libc::SIGKILL);
+            #[cfg(unix)]
+            if self.death().is_none()
+                && let Ok(group) = i32::try_from(pid)
+                && group > 1
+            {
+                // SAFETY: as in `shutdown`: `group` is the pid of our own child, the
+                // leader of the group made by `process_group(0)`, and it is not
+                // reaped (`death` is `None`), so the pid still names that group.
+                unsafe {
+                    libc::killpg(group, libc::SIGKILL);
+                }
+            }
+        }
+        if let Ok(mut child) = self.child.try_lock() {
+            let _ = child.start_kill();
+        }
+    }
+}
+
 async fn read_loop(
     process: Arc<Process>,
     stdout: ChildStdout,

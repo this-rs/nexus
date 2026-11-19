@@ -803,10 +803,14 @@ impl Drop for ListingGuard {
             return;
         };
         // `shutdown` reads the process table asynchronously: it runs as a task of the
-        // runtime that was driving the listing. With no runtime left, the reader task
-        // is gone too, and the `Child`'s kill-on-drop applies.
-        if let Ok(handle) = tokio::runtime::Handle::try_current() {
-            handle.spawn(async move { process.shutdown().await });
+        // runtime that was driving the listing. With no runtime here (the listing was
+        // dropped outside one), the same tree is killed synchronously: the reader task
+        // may hold the `Process` for good, so `Child`'s kill-on-drop cannot be relied on.
+        match tokio::runtime::Handle::try_current() {
+            Ok(handle) => {
+                handle.spawn(async move { process.shutdown().await });
+            },
+            Err(_) => process.kill_tree_now(),
         }
     }
 }

@@ -25,6 +25,15 @@ const HANGING_LISTING: &str = r#"
 {"op":"wait_eof"}
 "#;
 
+/// As `HANGING_LISTING`, but the `sleep` child is in its own process group: only
+/// the descendant walk of the process table reaches it.
+const HANGING_LISTING_OWN_GROUP: &str = r#"
+{"op":"expect","method":"initialize","reply":{"userAgent":"fake_codex/0.130.0","codexHome":"/fake","platformFamily":"unix","platformOs":"linux"}}
+{"op":"expect_notification","method":"initialized"}
+{"op":"spawn_child","own_group":true}
+{"op":"wait_eof"}
+"#;
+
 /// Handshake answered, `model/list` answered with one visible and one hidden model.
 const ANSWERED_LISTING: &str = r#"
 {"op":"expect","method":"initialize","reply":{"userAgent":"fake_codex/0.130.0","codexHome":"/fake","platformFamily":"unix","platformOs":"linux"}}
@@ -111,6 +120,44 @@ async fn an_abandoned_listing_kills_the_app_server_and_its_children() {
     for pid in server.iter().chain(children.iter()).copied() {
         if !wait_until_gone(pid).await {
             // Do not leave the leak behind the failing test.
+            // SAFETY: the pid was recorded by our own fake and is still alive.
+            unsafe {
+                libc::kill(pid, libc::SIGKILL);
+            }
+            leaked.push(pid);
+        }
+    }
+    assert!(
+        leaked.is_empty(),
+        "processes outlived the abandoned listing: {leaked:?}"
+    );
+}
+
+#[test]
+fn an_abandoned_listing_outside_any_runtime_kills_a_child_in_its_own_group() {
+    let dir = tempfile::tempdir().unwrap();
+    let (provider, record) = provider(dir.path(), HANGING_LISTING_OWN_GROUP, "0.130.0");
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+
+    // The caller gives up while `model/list` is pending, and the listing is dropped
+    // outside any runtime: no `Handle` is current when the listing's guard runs.
+    let mut listing = Box::pin(provider.catalog());
+    runtime.block_on(async {
+        let outcome = tokio::time::timeout(Duration::from_secs(1), listing.as_mut()).await;
+        assert!(outcome.is_err(), "the listing should still be pending");
+        wait_for_pid(&record, "child").await;
+    });
+    drop(listing);
+
+    let (server, children) = runtime.block_on(async {
+        (
+            wait_for_pid(&record, "start").await,
+            wait_for_pid(&record, "child").await,
+        )
+    });
+    let mut leaked = Vec::new();
+    for pid in server.iter().chain(children.iter()).copied() {
+        if !runtime.block_on(wait_until_gone(pid)) {
             // SAFETY: the pid was recorded by our own fake and is still alive.
             unsafe {
                 libc::kill(pid, libc::SIGKILL);
