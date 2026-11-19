@@ -539,6 +539,38 @@ impl CodexProvider {
             .map_err(|_| ProviderError::protocol("malformed `initialize` result"))
     }
 
+    /// Asks a short-lived `codex app-server` for its models (`model/list`). One page:
+    /// the list is a picker, not an inventory. No thread, no model call.
+    async fn live_models(&self) -> Result<Vec<String>, ProviderError> {
+        self.ensure_home()?;
+        let launch = Launch {
+            program: self.config.program.clone(),
+            args: vec!["app-server".to_owned()],
+            env_policy: self.base_policy(&[]),
+            env: self.instance_env(),
+            cwd: self.config.codex_home.clone(),
+        };
+        let (process, _inbound) = Process::spawn(&launch)?;
+        let listed = async {
+            let init = process
+                .request(
+                    "initialize",
+                    to_value(&InitializeParams::for_adapter()),
+                    PROBE_TIMEOUT,
+                )
+                .await?;
+            serde_json::from_value::<InitializeResult>(init)
+                .map_err(|_| ProviderError::protocol("malformed `initialize` result"))?;
+            process.notify("initialized", json!({})).await?;
+            process
+                .request("model/list", json!({}), PROBE_TIMEOUT)
+                .await
+        }
+        .await;
+        process.shutdown().await;
+        Ok(parse_model_list(&listed?))
+    }
+
     async fn build(
         &self,
         spec: SessionSpec,
@@ -806,13 +838,17 @@ impl AgentProvider for CodexProvider {
     }
 
     async fn catalog(&self) -> Result<Vec<ModelInfo>, ProviderError> {
-        // The models the configuration names; `model/list` needs a process and a
-        // login, and returns no context window anyway.
+        // The models the configuration names, plus the ones Codex itself lists
+        // (`model/list`, which needs a process and a login and returns no context
+        // window). A listing that fails (no binary, no login) leaves the configured
+        // names alone: the catalogue never errors because of it.
+        let live = self.live_models().await.unwrap_or_default();
         let mut ids: Vec<&String> = self
             .config
             .default_model
             .iter()
             .chain(self.config.models.iter())
+            .chain(live.iter())
             .collect();
         ids.sort();
         ids.dedup();
@@ -1287,5 +1323,37 @@ mod tests {
     fn toml_strings_escape_what_breaks_a_value() {
         assert_eq!(toml_string(r#"a"b\c"#), r#""a\"b\\c""#);
         assert_eq!(toml_string("l1\nl2"), r#""l1\nl2""#);
+    }
+}
+
+/// The model ids of a `model/list` result: `data` (or `models`), each entry's `model`
+/// or `id`. Hidden entries are left out. Anything else yields nothing.
+fn parse_model_list(result: &Value) -> Vec<String> {
+    let entries = result
+        .get("data")
+        .or_else(|| result.get("models"))
+        .and_then(Value::as_array);
+    entries
+        .into_iter()
+        .flatten()
+        .filter(|e| e.get("hidden").and_then(Value::as_bool) != Some(true))
+        .filter_map(|e| {
+            e.get("model")
+                .or_else(|| e.get("id"))
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod model_list_tests {
+    use super::*;
+
+    #[test]
+    fn reads_model_then_id_and_skips_hidden() {
+        let v = json!({"data":[{"model":"a"},{"id":"b"},{"model":"c","hidden":true},{"x":1}]});
+        assert_eq!(parse_model_list(&v), vec!["a", "b"]);
+        assert!(parse_model_list(&json!({"nope":1})).is_empty());
     }
 }
