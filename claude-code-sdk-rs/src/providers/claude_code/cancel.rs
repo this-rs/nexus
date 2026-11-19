@@ -573,4 +573,28 @@ mod tests {
         );
         let _ = child.kill().await;
     }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_table_read_past_its_deadline_comes_back_empty_at_once() {
+        // A deadline already spent: the caller stops waiting on `ps` at once, and the
+        // thread kills and reaps it. Nothing is returned from a table not read in time.
+        let started = std::time::Instant::now();
+        let table = process_table_blocking(started);
+        assert!(
+            table.is_empty(),
+            "no table is returned past the deadline: {table:?}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "it did not wait for ps"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_root_without_descendants_signals_nothing() {
+        // No process has this pid, so nothing descends from it and nothing is signalled.
+        assert!(signal_descendants_blocking(u32::MAX - 1, libc::SIGKILL).is_empty());
+    }
 }

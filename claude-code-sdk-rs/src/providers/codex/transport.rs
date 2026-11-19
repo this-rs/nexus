@@ -419,4 +419,29 @@ mod tests {
         }
         process.shutdown().await;
     }
+
+    #[tokio::test]
+    async fn kill_tree_now_on_a_child_already_reaped_only_marks_the_process_closing() {
+        let launch = Launch {
+            program: PathBuf::from("sh"),
+            args: vec!["-c".to_owned(), "exit 0".to_owned()],
+            env_policy: EnvPolicy::allowlist(),
+            env: Vec::new(),
+            cwd: std::env::temp_dir(),
+        };
+        let (process, _inbound) = Process::spawn(&launch).unwrap();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+        while process.death().is_none() {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the child did not exit"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        // The pid is no longer a live child, so no group is signalled; the call is
+        // still idempotent and marks the process closing.
+        process.kill_tree_now();
+        process.kill_tree_now();
+        assert!(process.closing.load(Ordering::SeqCst));
+    }
 }
