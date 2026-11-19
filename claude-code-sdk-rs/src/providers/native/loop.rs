@@ -98,7 +98,8 @@ struct Acc {
     api: Duration,
     requests: u32,
     prompt_tokens: Option<u64>,
-    /// Time spent waiting for a locked vault, over the whole turn.
+    /// Time spent waiting for a locked vault, over the whole turn (all its round trips; the
+    /// cap `unlock_wait_max` is read against this total).
     unlock_waited: Duration,
 }
 
@@ -1098,7 +1099,6 @@ async fn resilient_step(
     let policy = core.settings.retry;
     let mut attempt = 0u32;
     let mut waited_for_unlock = false;
-    let mut unlock_waited = Duration::ZERO;
     loop {
         match model_step(core, signal, model, request.clone(), acc).await {
             Ok(step) => {
@@ -1111,12 +1111,11 @@ async fn resilient_step(
                 return Ok(step);
             },
             Err(error) => {
-                let delay = match recovery(&policy, &error, attempt, unlock_waited) {
-                    Recovery::GiveUp => {
-                        acc.unlock_waited += unlock_waited;
-                        return Err(error);
-                    },
+                let mut is_unlock_wait = false;
+                let delay = match recovery(&policy, &error, attempt, acc.unlock_waited) {
+                    Recovery::GiveUp => return Err(error),
                     Recovery::AwaitUnlock(delay) => {
+                        is_unlock_wait = true;
                         if !waited_for_unlock {
                             waited_for_unlock = true;
                             core.emit(AgentEvent::ProviderNotice {
@@ -1129,7 +1128,6 @@ async fn resilient_step(
                                 }),
                             });
                         }
-                        unlock_waited += delay;
                         delay
                     },
                     Recovery::Retry(delay) => {
@@ -1147,6 +1145,10 @@ async fn resilient_step(
                         delay
                     },
                 };
+                // The cap is per TURN: the time really spent waiting for the vault (the clock,
+                // not the sum of the intervals) goes into `acc`, which every round trip of the
+                // turn shares, so `recovery` and the final message read the turn's total.
+                let slept = tokio::time::Instant::now();
                 tokio::select! {
                     () = tokio::time::sleep(delay) => {},
                     () = signal.token.cancelled() => {
@@ -1155,6 +1157,9 @@ async fn resilient_step(
                             ..Step::default()
                         });
                     },
+                }
+                if is_unlock_wait {
+                    acc.unlock_waited += slept.elapsed();
                 }
             },
         }

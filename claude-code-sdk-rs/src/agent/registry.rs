@@ -52,8 +52,8 @@
 //! (unsigned integer, native: retries of a round trip after a failure that passes, 0 turns the
 //! backoff off) and `retry_wait_for_unlock` (bool, native: wait for a locked vault instead of
 //! failing the turn, `true` by default), `retry_wait_unlock_max_secs` (positive integer,
-//! native: the longest total wait for the unlock, 1800 by default; past it the turn ends with
-//! `credentials_locked`), `codex_home` (string,
+//! native: the longest total wait for the unlock over a whole turn, all its round trips
+//! together, 1800 by default; past it the turn ends with `credentials_locked`), `codex_home` (string,
 //! codex: the instance's persistent
 //! `CODEX_HOME`), `env` (object of strings, acp), `thinking` (bool, acp), `login_hint`
 //! (string, acp), `acp_home` (string, acp: the instance's dedicated `HOME`, created `0700`),

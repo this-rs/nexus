@@ -8,7 +8,7 @@
 //!
 //! | Error | Recovery |
 //! |---|---|
-//! | `CredentialsLocked` | **wait for the unlock**: the credential is resolved for each request, so the next request after the unlock succeeds. Polled with a bounded interval, capped by `unlock_wait_max` (default 30 min, `retry_wait_unlock_max_secs`): past it the turn ends with `credentials_locked`, naming the time waited; the user's interrupt, the turn time limit and the session closing end the wait sooner |
+//! | `CredentialsLocked` | **wait for the unlock**: the credential is resolved for each request, so the next request after the unlock succeeds. Polled with a bounded interval, capped by `unlock_wait_max` for the whole turn (all its round trips together, default 30 min, `retry_wait_unlock_max_secs`): past it the turn ends with `credentials_locked`, naming the time waited; the user's interrupt, the turn time limit and the session closing end the wait sooner |
 //! | `EndpointUnreachable`, `Timeout`, `Overloaded` | exponential backoff, `max_attempts` times |
 //! | `RateLimited` | the delay the endpoint asked for (capped), else the same backoff |
 //! | anything else | not retried: the same request would fail the same way |
@@ -31,9 +31,10 @@ pub struct RetryPolicy {
     pub max_delay: Duration,
     /// Wait for a locked credential vault to be unlocked instead of failing the turn.
     pub wait_for_unlock: bool,
-    /// Interval between two looks at a locked vault.
+    /// Interval between two looks at a locked vault (never below [`MIN_UNLOCK_POLL`]).
     pub unlock_poll: Duration,
-    /// Longest total wait for the unlock in one round trip. Long enough for a human round trip
+    /// Longest total wait for the unlock in one TURN (every round trip of the turn counts, measured
+    /// on the clock). Long enough for a human round trip
     /// to the vault page (type the code, send again), short enough that a forgotten session
     /// does not spin for hours; past it the turn ends with `credentials_locked`.
     pub unlock_wait_max: Duration,
@@ -66,12 +67,16 @@ impl RetryPolicy {
     }
 }
 
+/// Floor of the interval between two looks at a locked vault: a zero `unlock_poll` would spin
+/// without ever letting the clock reach the cap.
+pub(crate) const MIN_UNLOCK_POLL: Duration = Duration::from_millis(250);
+
 /// What to do about one failure.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Recovery {
     /// Ask again after the delay.
     Retry(Duration),
-    /// The vault is locked: look again after the delay (until `unlock_wait_max` is spent).
+    /// The vault is locked: look again after the delay (until the turn's `unlock_wait_max` is spent).
     AwaitUnlock(Duration),
     /// Not recoverable here (or out of attempts): the turn ends with this error.
     GiveUp,
@@ -83,7 +88,7 @@ pub(crate) fn recovery(
     policy: &RetryPolicy,
     error: &ProviderError,
     attempt: u32,
-    unlock_waited: Duration,
+    unlock_waited: Duration, // already waited for the unlock by this TURN
 ) -> Recovery {
     match error {
         // `unlock_waited` counts only the wait for the unlock: a plain `attempt` cap would
@@ -92,7 +97,7 @@ pub(crate) fn recovery(
             Recovery::GiveUp
         },
         ProviderError::CredentialsLocked if policy.wait_for_unlock => {
-            Recovery::AwaitUnlock(policy.unlock_poll)
+            Recovery::AwaitUnlock(policy.unlock_poll.max(MIN_UNLOCK_POLL))
         },
         _ if attempt >= policy.max_attempts => Recovery::GiveUp,
         ProviderError::EndpointUnreachable { .. }
@@ -180,6 +185,23 @@ mod tests {
                 Recovery::GiveUp
             );
         }
+    }
+
+    #[test]
+    fn a_zero_poll_interval_is_raised_to_the_floor() {
+        let policy = RetryPolicy {
+            unlock_poll: Duration::ZERO,
+            ..RetryPolicy::default()
+        };
+        assert_eq!(
+            recovery(
+                &policy,
+                &ProviderError::CredentialsLocked,
+                0,
+                Duration::ZERO
+            ),
+            Recovery::AwaitUnlock(MIN_UNLOCK_POLL)
+        );
     }
 
     #[test]

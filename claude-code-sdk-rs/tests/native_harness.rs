@@ -4915,6 +4915,8 @@ enum Attempt {
     Refused(ProviderError),
     /// A whole answer.
     Answers(&'static str),
+    /// An answer that calls a tool (the harness answers it, then asks the model again).
+    CallsTool,
 }
 
 /// An endpoint that plays `script` in order (the last entry repeats) and counts its calls.
@@ -4962,6 +4964,14 @@ impl ModelEndpoint for ScriptedEndpoint {
                 yield Err(ProviderError::EndpointUnreachable {
                     detail: "error decoding response body".to_owned(),
                 });
+            })),
+            Attempt::CallsTool => Ok(Box::pin(async_stream::stream! {
+                yield Ok(CompletionChunk::ToolCall(nexus_claude::model::ToolCallChunk {
+                    id: "call_1".to_owned(),
+                    name: "nope".to_owned(),
+                    arguments: "{}".to_owned(),
+                }));
+                yield Ok(CompletionChunk::Finish(FinishReason::ToolCalls));
             })),
             Attempt::Answers(text) => Ok(Box::pin(async_stream::stream! {
                 yield Ok(CompletionChunk::Text(text.to_owned()));
@@ -5069,6 +5079,59 @@ async fn a_locked_vault_is_waited_for_and_the_turn_resumes_when_it_unlocks() {
         "said once, not at every look"
     );
     assert_eq!(notices(&events, "model_recovered").len(), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_unlock_wait_cap_is_the_turns_not_each_round_trips() {
+    // Round trip 1 waits 20 min (240 looks at 5 s), is unlocked, calls a tool; round trip 2
+    // is refused again, for good. Each wait is under the 30 min cap, the turn's total is not:
+    // the turn must end at the cap, naming the TOTAL, instead of waiting 30 min more.
+    let mut script = vec![Attempt::Refused(ProviderError::CredentialsLocked); 240];
+    script.push(Attempt::CallsTool);
+    script.push(Attempt::Refused(ProviderError::CredentialsLocked));
+    let endpoint = ScriptedEndpoint::new(script);
+    let (session, _cwd) = scripted_session(endpoint.clone(), |_| {}).await;
+    let started = tokio::time::Instant::now();
+    let events = whole_turn(&*session, "go").await;
+    match done(&events) {
+        AgentEvent::Done {
+            is_error: true,
+            subtype,
+            result_text,
+            error: Some(ProviderError::CredentialsLocked),
+            ..
+        } => {
+            assert_eq!(subtype.as_deref(), Some("error_credentials_locked"));
+            let text = result_text.clone().unwrap_or_default();
+            assert!(text.contains("30 min"), "the total of the turn: {text}");
+        },
+        other => panic!("expected credentials_locked, got {other:?}"),
+    }
+    let spent = started.elapsed();
+    assert!(
+        spent >= Duration::from_secs(30 * 60) && spent < Duration::from_secs(31 * 60),
+        "the turn waits 30 min in all, not 20 + 30: {spent:?}"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_zero_poll_interval_still_reaches_the_cap_without_spinning() {
+    let endpoint = ScriptedEndpoint::new(vec![Attempt::Refused(ProviderError::CredentialsLocked)]);
+    let (session, _cwd) = scripted_session(endpoint.clone(), |config| {
+        config.retry.unlock_poll = Duration::ZERO;
+        config.retry.unlock_wait_max = Duration::from_secs(10);
+    })
+    .await;
+    let events = whole_turn(&*session, "go").await;
+    assert!(matches!(
+        done(&events),
+        AgentEvent::Done {
+            is_error: true,
+            error: Some(ProviderError::CredentialsLocked),
+            ..
+        }
+    ));
+    assert!(endpoint.calls() <= 60, "{} looks in 10 s", endpoint.calls());
 }
 
 #[tokio::test(start_paused = true)]
