@@ -303,6 +303,36 @@ impl Process {
     }
 }
 
+impl Process {
+    /// [`Process::shutdown`] for a caller with no runtime to await in (a drop that
+    /// may run outside one): the same tree, read and signalled without `await`.
+    /// Descendants come from the process table (a child that left the group is
+    /// still its parent's descendant), then the group of the pid taken at spawn,
+    /// then the child itself. Idempotent.
+    pub(crate) fn kill_tree_now(&self) {
+        self.closing.store(true, Ordering::SeqCst);
+        if let Some(pid) = self.pid {
+            #[cfg(unix)]
+            cancel::signal_descendants_blocking(pid, libc::SIGKILL);
+            #[cfg(unix)]
+            if self.death().is_none()
+                && let Ok(group) = i32::try_from(pid)
+                && group > 1
+            {
+                // SAFETY: as in `shutdown`: `group` is the pid of our own child, the
+                // leader of the group made by `process_group(0)`, and it is not
+                // reaped (`death` is `None`), so the pid still names that group.
+                unsafe {
+                    libc::killpg(group, libc::SIGKILL);
+                }
+            }
+        }
+        if let Ok(mut child) = self.child.try_lock() {
+            let _ = child.start_kill();
+        }
+    }
+}
+
 async fn read_loop(
     process: Arc<Process>,
     stdout: ChildStdout,
@@ -388,5 +418,30 @@ mod tests {
             other => panic!("expected the next line to be read, got {other:?}"),
         }
         process.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn kill_tree_now_on_a_child_already_reaped_only_marks_the_process_closing() {
+        let launch = Launch {
+            program: PathBuf::from("sh"),
+            args: vec!["-c".to_owned(), "exit 0".to_owned()],
+            env_policy: EnvPolicy::allowlist(),
+            env: Vec::new(),
+            cwd: std::env::temp_dir(),
+        };
+        let (process, _inbound) = Process::spawn(&launch).unwrap();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+        while process.death().is_none() {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the child did not exit"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        // The pid is no longer a live child, so no group is signalled; the call is
+        // still idempotent and marks the process closing.
+        process.kill_tree_now();
+        process.kill_tree_now();
+        assert!(process.closing.load(Ordering::SeqCst));
     }
 }

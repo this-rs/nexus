@@ -169,6 +169,12 @@ const VERSION_TIMEOUT: Duration = Duration::from_secs(10);
 /// second; the margin is for a cold start on a loaded machine.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(15);
 
+/// Budget of the whole model listing (`codex --version`, spawn, `initialize`,
+/// `model/list`). The caller of `catalog()` (the Auto routing) gives up after 2 s;
+/// a listing that runs past that loses the configured names with it, so the budget
+/// stays under it and the fallback to the configured names answers first.
+const LISTING_BUDGET: Duration = Duration::from_millis(1500);
+
 /// Configuration of one Codex instance.
 #[derive(Clone)]
 pub struct CodexConfig {
@@ -539,6 +545,52 @@ impl CodexProvider {
             .map_err(|_| ProviderError::protocol("malformed `initialize` result"))
     }
 
+    /// Asks a short-lived `codex app-server` for its models (`model/list`). One page:
+    /// the list is a picker, not an inventory. No thread, no model call. The whole
+    /// listing runs under [`LISTING_BUDGET`]; past it, it fails and `catalog()` keeps
+    /// the configured names.
+    async fn live_models(&self) -> Result<Vec<String>, ProviderError> {
+        tokio::time::timeout(LISTING_BUDGET, self.list_models())
+            .await
+            .map_err(|_| ProviderError::Timeout {
+                after_ms: u64::try_from(LISTING_BUDGET.as_millis()).unwrap_or(u64::MAX),
+            })?
+    }
+
+    async fn list_models(&self) -> Result<Vec<String>, ProviderError> {
+        // Before any process: a codex too old for `app-server` would start its TUI.
+        self.checked_version().await?;
+        self.ensure_home()?;
+        let launch = Launch {
+            program: self.config.program.clone(),
+            args: vec!["app-server".to_owned()],
+            env_policy: self.base_policy(&[]),
+            env: self.instance_env(),
+            cwd: self.config.codex_home.clone(),
+        };
+        let (process, _inbound) = Process::spawn(&launch)?;
+        let mut guard = ListingGuard::new(Arc::clone(&process));
+        let listed = async {
+            let init = process
+                .request(
+                    "initialize",
+                    to_value(&InitializeParams::for_adapter()),
+                    PROBE_TIMEOUT,
+                )
+                .await?;
+            serde_json::from_value::<InitializeResult>(init)
+                .map_err(|_| ProviderError::protocol("malformed `initialize` result"))?;
+            process.notify("initialized", json!({})).await?;
+            process
+                .request("model/list", json!({}), PROBE_TIMEOUT)
+                .await
+        }
+        .await;
+        process.shutdown().await;
+        guard.disarm();
+        Ok(parse_model_list(&listed?))
+    }
+
     async fn build(
         &self,
         spec: SessionSpec,
@@ -729,6 +781,40 @@ impl CodexProvider {
     }
 }
 
+/// Kills the `app-server` of a model listing (and its descendants) when the listing is
+/// dropped before its nominal end: the caller's timeout, or the budget. A `Process`
+/// is not dropped by its owner alone (its reader task holds it), so the kill cannot
+/// wait for `Child`'s own kill-on-drop. Disarmed once `shutdown` has run.
+struct ListingGuard(Option<Arc<Process>>);
+
+impl ListingGuard {
+    fn new(process: Arc<Process>) -> Self {
+        Self(Some(process))
+    }
+
+    fn disarm(&mut self) {
+        self.0 = None;
+    }
+}
+
+impl Drop for ListingGuard {
+    fn drop(&mut self) {
+        let Some(process) = self.0.take() else {
+            return;
+        };
+        // `shutdown` reads the process table asynchronously: it runs as a task of the
+        // runtime that was driving the listing. With no runtime here (the listing was
+        // dropped outside one), the same tree is killed synchronously: the reader task
+        // may hold the `Process` for good, so `Child`'s kill-on-drop cannot be relied on.
+        match tokio::runtime::Handle::try_current() {
+            Ok(handle) => {
+                handle.spawn(async move { process.shutdown().await });
+            },
+            Err(_) => process.kill_tree_now(),
+        }
+    }
+}
+
 #[cfg(unix)]
 fn create_private_dir(dir: &Path) -> std::io::Result<()> {
     use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
@@ -806,13 +892,17 @@ impl AgentProvider for CodexProvider {
     }
 
     async fn catalog(&self) -> Result<Vec<ModelInfo>, ProviderError> {
-        // The models the configuration names; `model/list` needs a process and a
-        // login, and returns no context window anyway.
+        // The models the configuration names, plus the ones Codex itself lists
+        // (`model/list`, which needs a process and a login and returns no context
+        // window). A listing that fails (no binary, no login) leaves the configured
+        // names alone: the catalogue never errors because of it.
+        let live = self.live_models().await.unwrap_or_default();
         let mut ids: Vec<&String> = self
             .config
             .default_model
             .iter()
             .chain(self.config.models.iter())
+            .chain(live.iter())
             .collect();
         ids.sort();
         ids.dedup();
@@ -1287,5 +1377,37 @@ mod tests {
     fn toml_strings_escape_what_breaks_a_value() {
         assert_eq!(toml_string(r#"a"b\c"#), r#""a\"b\\c""#);
         assert_eq!(toml_string("l1\nl2"), r#""l1\nl2""#);
+    }
+}
+
+/// The model ids of a `model/list` result: `data` (or `models`), each entry's `model`
+/// or `id`. Hidden entries are left out. Anything else yields nothing.
+fn parse_model_list(result: &Value) -> Vec<String> {
+    let entries = result
+        .get("data")
+        .or_else(|| result.get("models"))
+        .and_then(Value::as_array);
+    entries
+        .into_iter()
+        .flatten()
+        .filter(|e| e.get("hidden").and_then(Value::as_bool) != Some(true))
+        .filter_map(|e| {
+            e.get("model")
+                .or_else(|| e.get("id"))
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod model_list_tests {
+    use super::*;
+
+    #[test]
+    fn reads_model_then_id_and_skips_hidden() {
+        let v = json!({"data":[{"model":"a"},{"id":"b"},{"model":"c","hidden":true},{"x":1}]});
+        assert_eq!(parse_model_list(&v), vec!["a", "b"]);
+        assert!(parse_model_list(&json!({"nope":1})).is_empty());
     }
 }
