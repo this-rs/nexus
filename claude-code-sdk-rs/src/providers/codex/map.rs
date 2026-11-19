@@ -949,32 +949,36 @@ pub fn classify(payload: &ErrorPayload, login_hint: Option<&str>) -> ProviderErr
     let Some(CodexErrorInfo { kind, http_status }) = &payload.info else {
         return classify_http_body(&message, login_hint);
     };
-    match kind.as_str() {
-        "contextWindowExceeded" => ProviderError::ContextTooSmall {
+    // Compared WITHOUT CASE on purpose. The real server (0.162.1) sends camelCase, but the
+    // frozen 0.130.0 transcripts — and, very likely, older servers whose enum still used
+    // serde's default spelling — carry PascalCase. A casing difference must not decide
+    // between `rate_limited` and an opaque `protocol`.
+    match kind.to_ascii_lowercase().as_str() {
+        "contextwindowexceeded" => ProviderError::ContextTooSmall {
             needed: None,
             available: None,
         },
-        "usageLimitExceeded" | "sessionBudgetExceeded" | "rateLimitExceeded" => {
+        "usagelimitexceeded" | "sessionbudgetexceeded" | "ratelimitexceeded" => {
             ProviderError::RateLimited {
                 retry_after_ms: None,
                 resets_at_ms: None,
             }
         },
-        "serverOverloaded" | "flexUnavailable" => ProviderError::Overloaded,
-        "httpConnectionFailed"
-        | "responseStreamDisconnected"
-        | "responseStreamConnectionFailed"
-        | "responseTooManyFailedAttempts" => ProviderError::unreachable(match http_status {
+        "serveroverloaded" | "flexunavailable" => ProviderError::Overloaded,
+        "httpconnectionfailed"
+        | "responsestreamdisconnected"
+        | "responsestreamconnectionfailed"
+        | "responsetoomanyfailedattempts" => ProviderError::unreachable(match http_status {
             Some(status) => format!("{kind} (HTTP {status}): {message}"),
             None => format!("{kind}: {message}"),
         }),
         "unauthorized" => unauthorized(&message, login_hint),
-        "badRequest" => ProviderError::invalid(message),
-        "cyberPolicy" => ProviderError::Refused {
+        "badrequest" => ProviderError::invalid(message),
+        "cyberpolicy" => ProviderError::Refused {
             category: Some("cyber".to_owned()),
         },
-        "misalignmentPolicyViolation" => ProviderError::Refused { category: None },
-        "sandboxError" | "internalServerError" | "tooManyDenials" | "threadRollbackFailed" => {
+        "misalignmentpolicyviolation" => ProviderError::Refused { category: None },
+        "sandboxerror" | "internalservererror" | "toomanydenials" | "threadrollbackfailed" => {
             ProviderError::protocol(message)
         },
         // `other` and anything new: the message is sometimes the provider's raw HTTP body.
@@ -1002,15 +1006,31 @@ fn unauthorized(message: &str, login_hint: Option<&str>) -> ProviderError {
     }
 }
 
+/// The provider's raw HTTP body, when the message carries one.
+///
+/// `classify` receives `"{message} ({additionalDetails})"` when details are present, so the
+/// body is not always the whole text: it is the span from its first `{` to its last `}`.
+///
+/// Guarded on purpose: an object counts as a body only when it has a numeric `status` AND
+/// an `error` or `type` member, so an ordinary message that happens to end with a JSON
+/// object is not mistaken for a provider refusal.
+fn provider_body(message: &str) -> Option<Value> {
+    let (start, end) = (message.find('{')?, message.rfind('}')?);
+    if end < start {
+        return None;
+    }
+    let body: Value = serde_json::from_str(&message[start..=end]).ok()?;
+    let is_body = body.get("status").and_then(Value::as_u64).is_some()
+        && (body.get("error").is_some() || body.get("type").is_some());
+    is_body.then_some(body)
+}
+
 /// When `message` carries a raw provider HTTP body (`{"type":"error","status":400,…}`,
 /// measured with an unsupported model), the body's `status` decides. The raw text is
 /// kept as the detail: the provider's sentence is what the user must read. Without a
 /// body, or without a status, it stays `protocol`.
 fn classify_http_body(message: &str, login_hint: Option<&str>) -> ProviderError {
-    let status = message.find('{').and_then(|start| {
-        let body: Value = serde_json::from_str(&message[start..]).ok()?;
-        body.get("status").and_then(Value::as_u64)
-    });
+    let status = provider_body(message).and_then(|body| body.get("status").and_then(Value::as_u64));
     match status {
         Some(400) => ProviderError::invalid(message),
         Some(401 | 403) => unauthorized(message, login_hint),
@@ -1132,9 +1152,15 @@ mod tests {
         // Absent info, body only: same decision.
         assert_eq!(replay(json!({"message": body})).kind(), "invalid_request");
         // The status picks the class.
+        // A body carries a type and an error, not a bare status: `provider_body` refuses the
+        // latter on purpose, so a message that merely ends with JSON is not mistaken for a
+        // provider refusal.
         let status = |code: u16| {
-            replay(json!({"message": format!("{{\"status\":{code}}}"), "codexErrorInfo": "other"}))
-                .kind()
+            replay(json!({
+                "message": format!("{{\"type\":\"error\",\"status\":{code},\"error\":{{}}}}"),
+                "codexErrorInfo": "other",
+            }))
+            .kind()
         };
         assert_eq!(status(401), "unauthorized");
         assert_eq!(status(403), "unauthorized");
@@ -1154,6 +1180,34 @@ mod tests {
         assert_eq!(
             replay(json!({"message": "x", "codexErrorInfo": "usageLimitExceeded"})).kind(),
             "rate_limited"
+        );
+        // The frozen 0.130.0 transcripts (and, very likely, older servers whose enum still
+        // used serde's default spelling) carry PascalCase: a casing difference must not turn
+        // a rate limit into an opaque protocol error.
+        for name in [
+            "UsageLimitExceeded",
+            "ContextWindowExceeded",
+            "Unauthorized",
+            "BadRequest",
+        ] {
+            assert_ne!(
+                replay(json!({"message": "x", "codexErrorInfo": name})).kind(),
+                "protocol",
+                "{name} fell through the table"
+            );
+        }
+        // A provider body sitting behind `additionalDetails` is still read, and a plain JSON
+        // object that is NOT an HTTP body is not mistaken for one.
+        let with_details: ErrorPayload = serde_json::from_value(json!({
+            "message": "boom",
+            "codexErrorInfo": "other",
+            "additionalDetails": "{\"type\":\"error\",\"status\":429,\"error\":{}}",
+        }))
+        .unwrap();
+        assert_eq!(classify(&with_details, None).kind(), "rate_limited");
+        assert_eq!(
+            replay(json!({"message": "{\"a\":1}", "codexErrorInfo": "other"})).kind(),
+            "protocol"
         );
         assert_eq!(
             replay(json!({"message": "x", "codexErrorInfo": "unauthorized"})).kind(),

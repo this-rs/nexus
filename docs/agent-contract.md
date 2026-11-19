@@ -651,115 +651,19 @@ contre `fake_codex` et des transcriptions écrites depuis le README de `codex-rs
   motifs (`provider_notice { policy_patterns_partial }`).
 - **Limites** : `limits.turn_timeout_ms` tenu (`done { error: timeout }`) ; `max_turns`, `max_tokens`,
   `max_cost_usd`, `max_tool_iterations` → `Unsupported { limits }` à l'ouverture.
-- **Fin de tour** : `turn/completed { failed }` → `done { is_error, error }` (`codexErrorInfo`, noms RÉELS du schéma 0.162.1, en camelCase :
-  `contextWindowExceeded` → `context_too_small` ; `usageLimitExceeded` / `sessionBudgetExceeded` /
-  `rateLimitExceeded` → `rate_limited` ; `serverOverloaded` / `flexUnavailable` → `overloaded` ;
-  `httpConnectionFailed` / `responseStreamConnectionFailed` / `responseStreamDisconnected` /
-  `responseTooManyFailedAttempts` (objets portant `httpStatusCode`) → `endpoint_unreachable` ;
-  `unauthorized` → `unauthorized` ou `auth_required` ; `badRequest` → `invalid_request` ; `cyberPolicy` /
+- **Fin de tour** : `turn/completed { failed }` → `done { is_error, error }` (`codexErrorInfo`, noms RÉELS du
+  schéma 0.162.1 — `codex app-server generate-json-schema`, définition `CodexErrorInfo` — comparés SANS CASSE
+  pour accepter aussi les rejeux PascalCase : `contextWindowExceeded` → `context_too_small` ; `usageLimitExceeded` /
+  `sessionBudgetExceeded` / `rateLimitExceeded` → `rate_limited` ; `serverOverloaded` / `flexUnavailable` →
+  `overloaded` ; `httpConnectionFailed` / `responseStreamConnectionFailed` / `responseStreamDisconnected` /
+  `responseTooManyFailedAttempts` (objets portant `httpStatusCode`) → `endpoint_unreachable` ; `unauthorized` →
+  `unauthorized` ou `auth_required` ; `badRequest` → `invalid_request` ; `cyberPolicy` /
   `misalignmentPolicyViolation` → `refused` ; `sandboxError` / `internalServerError` / `tooManyDenials` /
-  `threadRollbackFailed` → `protocol`. `other`, inconnu ou absent : si la `message` EST un corps HTTP JSON du
-  fournisseur (`{"status":400,…}`), son `status` décide — 400 → `invalid_request` (corps brut gardé),
-  401/403 → `unauthorized`, 429 → `rate_limited`, 503/529 → `overloaded`, autre 5xx → `endpoint_unreachable` ;
-  sinon `protocol`) ; `error { process_exited }` terminal
-  seulement quand un serveur MCP stdio meurt (la session est alors morte : `send_turn` rend la même
-  erreur) ; un délai de tour (`turn_timeout_ms`, **seulement s'il est posé** : aucun par défaut) émet
-  `provider_notice { kind: "turn_time_limit", data: { limit_ms, elapsed_ms, next_turn_note } }` puis `done {
-  subtype: error_timeout, error: timeout { after_ms } }` ; le travail du tour est **gardé** (comme une
-  interruption) et le message utilisateur du tour suivant commence par la ligne `[system] Your previous turn was
-  stopped after N by the configured turn time limit (L)…` (dans le message, jamais dans le prompt système : le
-  préfixe en cache ne change pas). Le délai d'inactivité du flux du modèle (`OpenAiEndpointConfig::idle_timeout`,
-  120 s) borne toujours un modèle muet.
-  `done.provider_session_id` = identifiant du transcript. Les `tool_result` sont émis à leur fin ; le
-  modèle les reçoit dans l'ordre des appels.
-- **Transcript** : `ResumeToken { transcript_id }` ; stockage mémoire par défaut, fichiers JSON `0600`
-  (répertoire `0700`) en option ; le fichier est expurgé (`agent::redact` par tronçons) : un identifiant
-  collé dans un message n'est pas persisté, donc le texte rechargé peut différer du texte envoyé. Le
-  raisonnement est conservé (A39), y compris par la compaction (les derniers messages gardés sont
-  intacts). Pas de compaction manuelle (le contrat n'en prévoit pas pour le natif).
-- **Palier bon marché avant le résumé (CTX3)** : dès que le prompt atteint `stub_ratio` de la fenêtre
-  (défaut 0,5), les résultats d'outils **plus vieux que les `keep_tool_rounds` derniers tours** (défaut 6 ;
-  un tour = un message assistant porteur d'appels et les résultats qui y répondent) sont remplacés par
-  `compaction::STUB_MARKER` (« tool result stubbed to save context — call the tool again if you still need
-  it »). Le message reste (même rôle, même `tool_call_id`, même raisonnement) : **seul son texte part**.
-  Le passage est **par blocs** (`stub_block`, défaut 4) — un résultat isolé n'achète pas une rupture de
-  cache — et **une seule fois par résultat** (un stub est reconnu et jamais retouché). Il est dit au
-  conducteur : `provider_notice { kind: "tool_results_stubbed", data: { count, kept_rounds, chars_freed,
-  stub } }` ; rien n'est effacé en silence. Ce palier **ne remplace pas** la compaction : sous pression
-  réelle, le résumé reste la réponse (une fenêtre que les stubs ne peuvent pas soulager compacte quand
-  même), et `before_compaction` reste appelé pour elle. Effet sur le cache : un passage réécrit l'historique
-  sous le préfixe, donc `extends_previous=false` **une fois par bloc** — c'est la rupture déclarée, mesurée
-  par `tests/native_context.rs` (40 tours d'outils, aucun résumé, ruptures bornées à une par bloc). Les
-  images rendues par un outil ne sont pas stubbées ici (elles vivent dans le message utilisateur qui suit les
-  résultats) : une session qui en porte beaucoup atteint le résumé, qui les résume en `[image <type>]`.
-  Réglage : `compaction_keep_tool_rounds` (0 éteint le palier), `compaction_stub_ratio`,
-  `compaction_stub_block` dans les `extensions` de l'instance ; `CompactionConfig.enabled = false` éteint
-  les deux paliers.
-- **Hors tour** : le natif émet `session_started` sur `out_of_band()`
-  dès l'ouverture ; un flux de tour lâché envoie le reste du tour (permissions comprises) hors tour.
-  La conformité de `permission_hors_tour` est montée ainsi (`DetachedTurn` dans
-  `tests/native_conformance.rs`).
-- **Serveurs MCP stdio** : une ligne de plus de 8 Mio (`MAX_LINE_BYTES`) n'est jamais accumulée au-delà de la
-  borne : la lecture s'arrête au dépassement, jette le reste de la ligne et répond aux requêtes en attente par une
-  erreur `protocol` (même lecteur borné pour Codex et ACP, où la ligne est signalée `malformed`).
-- **Un résultat d'outil MCP trop gros est persisté, jamais tronqué en silence** (GROS-1) : au-delà de
-  `INLINE_OUTPUT_LIMIT` (30 000 octets, **le seuil de `Bash`**, la même constante que `nexus-tools`), le texte
-  entier est écrit `0600` dans le répertoire de sortie de la session (`mcp::session_output_dir`, ajouté au
-  périmètre du serveur `nexus` lancé par le harnais, donc relisible par `Read`) et le modèle ne reçoit que les
-  2 000 premiers octets, dans la forme `<persisted-output>` de `Bash` ; il relit le fichier par `Read`. Sans
-  répertoire (un client monté hors session), la coupe reste au même seuil et se dit. Il n'y a donc qu'UN seuil :
-  `nexus-tools/tests/mcp_output_policy.rs` échoue si les deux divergent.
-- **Serveurs MCP HTTP** : connexion épinglée sur les adresses validées (`resolve_to_addrs`, résolveur
-  injectable `McpConfig::dns_resolver`), nom re-vérifié à chaque requête (`an_http_server_connection_is_pinned_…`,
-  `an_http_server_name_that_rebinds_…`, rouges sans épinglage).
-- **Non prouvé** : aucun https réel ; `Mcp-Session-Id`
-  expiré (404) n'est pas rejoué ; un serveur MCP qui renvoie des requêtes (`sampling`, `roots`) reçoit
-  `method not found`.
-
-Écarts constatés à l'implémentation de Codex (`claude-code-sdk-rs/src/providers/codex/`, feature
-`provider-codex`, `CodexProvider` / `CodexConfig`) ; **vérifié sur de vrais `codex-cli` 0.160.0 (05/10/2026) et 0.162.1 (18/10/2026, CODEX-163) jusqu’à la
-création d’un thread** (poignée de main `initialize`, `initialized` et `thread/start`, dans un `CODEX_HOME`
-jetable, sans connexion ni appel de modèle : `tests/codex_real.rs`, ignoré, `NEXUS_REAL_CODEX` ;
-`tests/codex_real_schema.rs`, hors ligne ; fichiers réels sous `tests/transcripts/codex/0.160.0/` et `0.162.1/`, dont
-`PROVENANCE.md`). Cela a trouvé un bug que le faux exécutable cachait : `sandbox` de `thread/start` est en
-**kebab-case** (`workspace-write`), le serveur refusait `workspaceWrite` (`-32600`) ; `turn/start` garde son
-objet `sandboxPolicy` en camelCase. **Aucun tour réel, aucun appel d'outil réel, aucune approbation réelle** :
-cela exige une connexion, qu'un humain fait (A27) — depuis le 27/10/2026 celle de la machine (`$CODEX_HOME`,
-sinon `~/.codex`), partagée par toutes les instances, donc aucun `CODEX_HOME` d'instance à remplir ; le reste est joué
-contre `fake_codex` et des transcriptions écrites depuis le README de `codex-rs/app-server` au tag
-`rust-v0.130.0` (`tests/transcripts/codex/0.130.0/schema/PROVENANCE.md` liste ce qui n'est PAS établi) :
-
-- **`hooks` = `none`**, pas `command` comme la table de référence : pas d'exécutable relais en v1 (A40) ;
-  `SessionHooks` ignoré, `provider_notice { hooks_not_supported }` en tête d'`out_of_band()`.
-- **`permission_scopes` = `once`, `session`, `always`** (la table disait `once`, `session`) : chaque
-  `permission_ask` n'offre que les portées que le serveur annonce (approbation de commande ou de fichier :
-  `once` + `session` ; élicitation MCP : selon `_meta.persist`) ; une portée non offerte répond
-  `Unsupported { permission_scope }`. Codex ne réécrit pas l'entrée d'un appel approuvé : `Allow` avec
-  `updated_input` répond `Unsupported { permission_updated_input }`.
-- **`native_question` = `false`** : aucun `question` n'est émis (repli §5 : le backend synthétise la question,
-  réponse par un tour) ; `item/tool/requestUserInput` est expérimental et jamais activé.
-- **`subagents` = `separate_thread`** : `parent` = identifiant du fil enfant (`collabToolCall`) ; la livraison à
-  ce client des événements du fil enfant n'est PAS vérifiée.
-- **`context_window`** : celle de la configuration (`configured`), sinon `None` ; la fenêtre rapportée par le
-  serveur n'entre pas dans les capacités figées.
-- **`cost`** : `unknown` par défaut, `free` ou `priced` selon la configuration, jamais `reported` (jetons
-  seuls, A40). `done.usage` = différence du cumul `total` de `thread/tokenUsage/updated` entre le début et la
-  fin du tour (l'usage rejoué après `thread/resume`, avant `turn/started`, n'est pas celui du tour) ;
-  `input_tokens` exclut les jetons en cache (`cache_read_tokens`), comme pour Claude Code.
-- **Politique** (§6) : `ask` et `auto_edits` → `on-request` + `workspaceWrite` ; `plan_only` → `on-request` +
-  `readOnly` ; `trust` → `never` + `workspaceWrite`, jamais `dangerFullAccess`. `set_policy_mode` et `set_model`
-  agissent au tour suivant (surcharges collantes de `turn/start`). La politique neutre s'applique d'abord
-  localement aux demandes d'approbation (un `deny`, `plan_only` pour un non-lecture : refus sans demander ;
-  un `allow`, `auto_edits` pour une édition : accord) ; ce qu'un outil fait sans demander n'est pas vu par les
-  motifs (`provider_notice { policy_patterns_partial }`).
-- **Limites** : `limits.turn_timeout_ms` tenu (`done { error: timeout }`) ; `max_turns`, `max_tokens`,
-  `max_cost_usd`, `max_tool_iterations` → `Unsupported { limits }` à l'ouverture.
-- **Fin de tour** : `turn/completed { failed }` → `done { is_error, error }` (`codexErrorInfo` :
-  `ContextWindowExceeded` → `context_too_small`, `UsageLimitExceeded` → `rate_limited`, `HttpConnectionFailed` /
-  `ResponseStreamDisconnected` / `ResponseStreamConnectionFailed` / `ResponseTooManyFailedAttempts` →
-  `endpoint_unreachable`, `Unauthorized` → `unauthorized` ou `auth_required`, `BadRequest` → `invalid_request`,
-  `SandboxError` / `InternalServerError` / `Other` → `protocol`) ; `error { process_exited }` terminal
-  seulement quand le processus meurt (la session est alors morte).
+  `threadRollbackFailed` → `protocol`). `other`, un nom inconnu ou absent : si la `message` porte le corps HTTP
+  brut du fournisseur (`{"type":"error","status":400,…}`), son `status` décide (400 → `invalid_request` avec le
+  corps conservé, 401/403 → `unauthorized`, 429 → `rate_limited`, 503/529 → `overloaded`, autre 5xx →
+  `endpoint_unreachable`), sinon `protocol`. `error { process_exited }` terminal seulement quand le processus
+  meurt (la session est alors morte).
 - **Processus** : un `codex app-server` (sans sous-commande : transport stdio par défaut, `--listen stdio://`, mesuré
   sur 0.162.1) par session — jamais le daemon partagé (`codex app-server daemon`, paquet 0.163.0) ni `codex
   app-server proxy --sock …`, dont le protocole est NON VÉRIFIÉ (une ligne `initialize` par le proxy n'obtient

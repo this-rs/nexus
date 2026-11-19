@@ -1439,6 +1439,10 @@ fn parse_model_list(result: &Value) -> Vec<String> {
             e.get("model")
                 .or_else(|| e.get("id"))
                 .and_then(Value::as_str)
+                // An empty or blank id is not a model: letting one through would make
+                // `merge_catalog` take a live list that names nothing, and the whole
+                // catalogue would collapse to that blank entry.
+                .filter(|id| !id.trim().is_empty())
                 .map(str::to_owned)
         })
         .collect()
