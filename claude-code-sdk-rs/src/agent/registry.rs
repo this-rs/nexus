@@ -51,7 +51,9 @@
 //! the cheap tier that stubs old tool results before a summary), `retry_max_attempts`
 //! (unsigned integer, native: retries of a round trip after a failure that passes, 0 turns the
 //! backoff off) and `retry_wait_for_unlock` (bool, native: wait for a locked vault instead of
-//! failing the turn, `true` by default), `codex_home` (string,
+//! failing the turn, `true` by default), `retry_wait_unlock_max_secs` (positive integer,
+//! native: the longest total wait for the unlock, 1800 by default; past it the turn ends with
+//! `credentials_locked`), `codex_home` (string,
 //! codex: the instance's persistent
 //! `CODEX_HOME`), `env` (object of strings, acp), `thinking` (bool, acp), `login_hint`
 //! (string, acp), `acp_home` (string, acp: the instance's dedicated `HOME`, created `0700`),
@@ -469,6 +471,7 @@ impl ProviderInstanceConfig {
                 "compaction_keep_recent" => value.is_u64(),
                 "retry_max_attempts" => value.is_u64(),
                 "retry_wait_for_unlock" => value.is_boolean(),
+                "retry_wait_unlock_max_secs" => value.as_u64().is_some_and(|secs| secs > 0),
                 "compaction_keep_tool_rounds" => value.is_u64(),
                 "compaction_stub_block" => value.is_u64(),
                 "compaction_stub_ratio" => value
@@ -1287,7 +1290,8 @@ fn apply_compaction_extensions(
 }
 
 /// The recovery knobs a native instance sets through its `extensions`
-/// (`retry_max_attempts`, `retry_wait_for_unlock`); absent keys keep [`RetryPolicy::default`].
+/// (`retry_max_attempts`, `retry_wait_for_unlock`, `retry_wait_unlock_max_secs`); absent keys
+/// keep [`RetryPolicy::default`].
 #[cfg(feature = "provider-native")]
 fn apply_retry_extensions(
     native: &mut crate::providers::native::NativeConfig,
@@ -1306,6 +1310,13 @@ fn apply_retry_extensions(
         .and_then(Value::as_bool)
     {
         native.retry.wait_for_unlock = wait;
+    }
+    if let Some(secs) = config
+        .extensions
+        .get("retry_wait_unlock_max_secs")
+        .and_then(Value::as_u64)
+    {
+        native.retry.unlock_wait_max = std::time::Duration::from_secs(secs);
     }
 }
 
@@ -1978,6 +1989,14 @@ mod tests {
                 "mistyped known extension",
                 native("n").with_extension("allow_private_network", json!("yes")),
             ),
+            (
+                "zero unlock wait cap",
+                native("n").with_extension("retry_wait_unlock_max_secs", json!(0)),
+            ),
+            (
+                "mistyped unlock wait cap",
+                native("n").with_extension("retry_wait_unlock_max_secs", json!("30m")),
+            ),
             ("bad env name", native("n").with_env_inherit(["A=B"])),
         ];
         for (name, config) in cases {
@@ -2455,6 +2474,37 @@ mod tests {
             assert!(
                 format!("{error}").contains("extension"),
                 "{key} accepted a string: {error}"
+            );
+        }
+    }
+
+    /// The recovery knobs are configured by `extensions` only, one key per knob: what an
+    /// instance says is what the harness gets. `retry_wait_unlock_max_secs` is a positive
+    /// integer of seconds; 0 and a string are refused.
+    #[cfg(feature = "provider-native")]
+    #[test]
+    fn the_native_instance_reads_its_retry_extensions() {
+        let config = ProviderInstanceConfig::native("native-test", "http://127.0.0.1:1/v1")
+            .with_extension("retry_max_attempts", json!(3))
+            .with_extension("retry_wait_for_unlock", json!(false))
+            .with_extension("retry_wait_unlock_max_secs", json!(90));
+        config.validate().unwrap();
+        let mut native = crate::providers::native::NativeConfig::new("native-test");
+        apply_retry_extensions(&mut native, &config);
+        assert_eq!(native.retry.max_attempts, 3);
+        assert!(!native.retry.wait_for_unlock);
+        assert_eq!(
+            native.retry.unlock_wait_max,
+            std::time::Duration::from_secs(90)
+        );
+
+        for bad in [json!(0), json!("30m")] {
+            let config = ProviderInstanceConfig::native("native-test", "http://127.0.0.1:1/v1")
+                .with_extension("retry_wait_unlock_max_secs", bad.clone());
+            let error = config.validate().expect_err("refused");
+            assert!(
+                format!("{error}").contains("extension"),
+                "retry_wait_unlock_max_secs accepted {bad}: {error}"
             );
         }
     }

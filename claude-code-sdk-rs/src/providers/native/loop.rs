@@ -98,6 +98,8 @@ struct Acc {
     api: Duration,
     requests: u32,
     prompt_tokens: Option<u64>,
+    /// Time spent waiting for a locked vault, over the whole turn.
+    unlock_waited: Duration,
 }
 
 impl Acc {
@@ -122,6 +124,7 @@ pub(crate) async fn run_turn(core: Arc<Core>, input: TurnInput, signal: Arc<Turn
         api: Duration::ZERO,
         requests: 0,
         prompt_tokens: None,
+        unlock_waited: Duration::ZERO,
     };
     let timer = core.limits.turn_timeout_ms.map(|ms| {
         let signal = Arc::clone(&signal);
@@ -367,6 +370,13 @@ fn terminal_event(
             ),
             _ => done(StopReason::Interrupted, "interrupted", false, None, None),
         },
+        Outcome::Failed(ProviderError::CredentialsLocked) if !acc.unlock_waited.is_zero() => done(
+            StopReason::Error,
+            "error_credentials_locked",
+            true,
+            Some(locked_vault_message(acc.unlock_waited)),
+            Some(ProviderError::CredentialsLocked),
+        ),
         Outcome::Failed(error) => done(
             StopReason::Error,
             "error_during_execution",
@@ -387,6 +397,14 @@ fn human_duration(ms: u64) -> String {
         (m, 0) => format!("{m} min"),
         (m, s) => format!("{m} min {s} s"),
     }
+}
+
+/// What the turn says when the vault stayed locked for the whole wait.
+fn locked_vault_message(waited: Duration) -> String {
+    format!(
+        "the credential vault stayed locked for {}: unlock it on the Vault page, then send the message again",
+        human_duration(waited.as_millis() as u64)
+    )
 }
 
 /// The line the model reads at the start of the turn after one its time limit stopped.
@@ -1080,6 +1098,7 @@ async fn resilient_step(
     let policy = core.settings.retry;
     let mut attempt = 0u32;
     let mut waited_for_unlock = false;
+    let mut unlock_waited = Duration::ZERO;
     loop {
         match model_step(core, signal, model, request.clone(), acc).await {
             Ok(step) => {
@@ -1092,8 +1111,11 @@ async fn resilient_step(
                 return Ok(step);
             },
             Err(error) => {
-                let delay = match recovery(&policy, &error, attempt) {
-                    Recovery::GiveUp => return Err(error),
+                let delay = match recovery(&policy, &error, attempt, unlock_waited) {
+                    Recovery::GiveUp => {
+                        acc.unlock_waited += unlock_waited;
+                        return Err(error);
+                    },
                     Recovery::AwaitUnlock(delay) => {
                         if !waited_for_unlock {
                             waited_for_unlock = true;
@@ -1103,9 +1125,11 @@ async fn resilient_step(
                                     "provider": "native",
                                     "code": error.kind(),
                                     "message": "the credential vault is locked: the turn resumes when it is unlocked",
+                                    "max_wait_ms": policy.unlock_wait_max.as_millis() as u64,
                                 }),
                             });
                         }
+                        unlock_waited += delay;
                         delay
                     },
                     Recovery::Retry(delay) => {
@@ -2420,5 +2444,19 @@ mod consent_tests {
             "{:?}",
             state.out_of_band
         );
+    }
+}
+
+#[cfg(test)]
+mod unlock_cap_tests {
+    use super::*;
+
+    #[test]
+    fn the_message_of_a_capped_wait_names_the_time_really_waited() {
+        let text = locked_vault_message(Duration::from_secs(30 * 60));
+        assert!(text.contains("30 min"), "{text}");
+        assert!(text.contains("Vault page"), "{text}");
+        let short = locked_vault_message(Duration::from_secs(45));
+        assert!(short.contains("45 s"), "{short}");
     }
 }
