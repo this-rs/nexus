@@ -31,7 +31,7 @@ pub struct RetryPolicy {
     pub max_delay: Duration,
     /// Wait for a locked credential vault to be unlocked instead of failing the turn.
     pub wait_for_unlock: bool,
-    /// Interval between two looks at a locked vault (never below [`MIN_UNLOCK_POLL`]).
+    /// Interval between two looks at a locked vault (never below `MIN_UNLOCK_POLL`).
     pub unlock_poll: Duration,
     /// Longest total wait for the unlock in one TURN (every round trip of the turn counts, measured
     /// on the clock). Long enough for a human round trip
