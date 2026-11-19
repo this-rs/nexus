@@ -261,7 +261,7 @@ pub fn process_table_blocking(_deadline: std::time::Instant) -> Vec<ProcessRow> 
 /// same recycled-pid guard, nothing awaited. Returns the pids that took the signal.
 ///
 /// One budget for the whole call: both readings share a single deadline of
-/// [`PS_TIMEOUT`] from the entry, so the caller waits at most [`PS_TIMEOUT`] in
+/// `PS_TIMEOUT` from the entry, so the caller waits at most `PS_TIMEOUT` in
 /// total (plus the few microseconds of the signals), not once per reading. A
 /// reading that runs out of budget comes back empty, and nothing is signalled
 /// from an empty one.
