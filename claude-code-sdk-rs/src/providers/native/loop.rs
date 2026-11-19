@@ -98,6 +98,9 @@ struct Acc {
     api: Duration,
     requests: u32,
     prompt_tokens: Option<u64>,
+    /// Time spent waiting for a locked vault, over the whole turn (all its round trips; the
+    /// cap `unlock_wait_max` is read against this total).
+    unlock_waited: Duration,
 }
 
 impl Acc {
@@ -122,6 +125,7 @@ pub(crate) async fn run_turn(core: Arc<Core>, input: TurnInput, signal: Arc<Turn
         api: Duration::ZERO,
         requests: 0,
         prompt_tokens: None,
+        unlock_waited: Duration::ZERO,
     };
     let timer = core.limits.turn_timeout_ms.map(|ms| {
         let signal = Arc::clone(&signal);
@@ -367,6 +371,13 @@ fn terminal_event(
             ),
             _ => done(StopReason::Interrupted, "interrupted", false, None, None),
         },
+        Outcome::Failed(ProviderError::CredentialsLocked) if !acc.unlock_waited.is_zero() => done(
+            StopReason::Error,
+            "error_credentials_locked",
+            true,
+            Some(locked_vault_message(acc.unlock_waited)),
+            Some(ProviderError::CredentialsLocked),
+        ),
         Outcome::Failed(error) => done(
             StopReason::Error,
             "error_during_execution",
@@ -387,6 +398,14 @@ fn human_duration(ms: u64) -> String {
         (m, 0) => format!("{m} min"),
         (m, s) => format!("{m} min {s} s"),
     }
+}
+
+/// What the turn says when the vault stayed locked for the whole wait.
+fn locked_vault_message(waited: Duration) -> String {
+    format!(
+        "the credential vault stayed locked for {}: unlock it on the Vault page, then send the message again",
+        human_duration(waited.as_millis() as u64)
+    )
 }
 
 /// The line the model reads at the start of the turn after one its time limit stopped.
@@ -1092,9 +1111,11 @@ async fn resilient_step(
                 return Ok(step);
             },
             Err(error) => {
-                let delay = match recovery(&policy, &error, attempt) {
+                let mut is_unlock_wait = false;
+                let delay = match recovery(&policy, &error, attempt, acc.unlock_waited) {
                     Recovery::GiveUp => return Err(error),
                     Recovery::AwaitUnlock(delay) => {
+                        is_unlock_wait = true;
                         if !waited_for_unlock {
                             waited_for_unlock = true;
                             core.emit(AgentEvent::ProviderNotice {
@@ -1103,6 +1124,7 @@ async fn resilient_step(
                                     "provider": "native",
                                     "code": error.kind(),
                                     "message": "the credential vault is locked: the turn resumes when it is unlocked",
+                                    "max_wait_ms": policy.unlock_wait_max.as_millis() as u64,
                                 }),
                             });
                         }
@@ -1123,6 +1145,10 @@ async fn resilient_step(
                         delay
                     },
                 };
+                // The cap is per TURN: the time really spent waiting for the vault (the clock,
+                // not the sum of the intervals) goes into `acc`, which every round trip of the
+                // turn shares, so `recovery` and the final message read the turn's total.
+                let slept = tokio::time::Instant::now();
                 tokio::select! {
                     () = tokio::time::sleep(delay) => {},
                     () = signal.token.cancelled() => {
@@ -1131,6 +1157,9 @@ async fn resilient_step(
                             ..Step::default()
                         });
                     },
+                }
+                if is_unlock_wait {
+                    acc.unlock_waited += slept.elapsed();
                 }
             },
         }
@@ -2420,5 +2449,19 @@ mod consent_tests {
             "{:?}",
             state.out_of_band
         );
+    }
+}
+
+#[cfg(test)]
+mod unlock_cap_tests {
+    use super::*;
+
+    #[test]
+    fn the_message_of_a_capped_wait_names_the_time_really_waited() {
+        let text = locked_vault_message(Duration::from_secs(30 * 60));
+        assert!(text.contains("30 min"), "{text}");
+        assert!(text.contains("Vault page"), "{text}");
+        let short = locked_vault_message(Duration::from_secs(45));
+        assert!(short.contains("45 s"), "{short}");
     }
 }
