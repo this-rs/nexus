@@ -190,3 +190,7 @@ required-features = ["testkit", "provider-codex"]
 [[test]]
 name = "acp_parity"
 required-features = ["testkit", "provider-acp"]
+
+[[test]]
+name = "codex_model_list"
+required-features = ["provider-codex"]

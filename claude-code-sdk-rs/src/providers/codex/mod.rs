@@ -169,6 +169,12 @@ const VERSION_TIMEOUT: Duration = Duration::from_secs(10);
 /// second; the margin is for a cold start on a loaded machine.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(15);
 
+/// Budget of the whole model listing (`codex --version`, spawn, `initialize`,
+/// `model/list`). The caller of `catalog()` (the Auto routing) gives up after 2 s;
+/// a listing that runs past that loses the configured names with it, so the budget
+/// stays under it and the fallback to the configured names answers first.
+const LISTING_BUDGET: Duration = Duration::from_millis(1500);
+
 /// Configuration of one Codex instance.
 #[derive(Clone)]
 pub struct CodexConfig {
@@ -540,8 +546,20 @@ impl CodexProvider {
     }
 
     /// Asks a short-lived `codex app-server` for its models (`model/list`). One page:
-    /// the list is a picker, not an inventory. No thread, no model call.
+    /// the list is a picker, not an inventory. No thread, no model call. The whole
+    /// listing runs under [`LISTING_BUDGET`]; past it, it fails and `catalog()` keeps
+    /// the configured names.
     async fn live_models(&self) -> Result<Vec<String>, ProviderError> {
+        tokio::time::timeout(LISTING_BUDGET, self.list_models())
+            .await
+            .map_err(|_| ProviderError::Timeout {
+                after_ms: u64::try_from(LISTING_BUDGET.as_millis()).unwrap_or(u64::MAX),
+            })?
+    }
+
+    async fn list_models(&self) -> Result<Vec<String>, ProviderError> {
+        // Before any process: a codex too old for `app-server` would start its TUI.
+        self.checked_version().await?;
         self.ensure_home()?;
         let launch = Launch {
             program: self.config.program.clone(),
@@ -551,6 +569,7 @@ impl CodexProvider {
             cwd: self.config.codex_home.clone(),
         };
         let (process, _inbound) = Process::spawn(&launch)?;
+        let mut guard = ListingGuard::new(Arc::clone(&process));
         let listed = async {
             let init = process
                 .request(
@@ -568,6 +587,7 @@ impl CodexProvider {
         }
         .await;
         process.shutdown().await;
+        guard.disarm();
         Ok(parse_model_list(&listed?))
     }
 
@@ -758,6 +778,36 @@ impl CodexProvider {
         let result = process.request(method, params, HANDSHAKE_TIMEOUT).await?;
         serde_json::from_value::<ThreadResult>(result)
             .map_err(|_| ProviderError::protocol(format!("malformed `{method}` result")))
+    }
+}
+
+/// Kills the `app-server` of a model listing (and its descendants) when the listing is
+/// dropped before its nominal end: the caller's timeout, or the budget. A `Process`
+/// is not dropped by its owner alone (its reader task holds it), so the kill cannot
+/// wait for `Child`'s own kill-on-drop. Disarmed once `shutdown` has run.
+struct ListingGuard(Option<Arc<Process>>);
+
+impl ListingGuard {
+    fn new(process: Arc<Process>) -> Self {
+        Self(Some(process))
+    }
+
+    fn disarm(&mut self) {
+        self.0 = None;
+    }
+}
+
+impl Drop for ListingGuard {
+    fn drop(&mut self) {
+        let Some(process) = self.0.take() else {
+            return;
+        };
+        // `shutdown` reads the process table asynchronously: it runs as a task of the
+        // runtime that was driving the listing. With no runtime left, the reader task
+        // is gone too, and the `Child`'s kill-on-drop applies.
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move { process.shutdown().await });
+        }
     }
 }
 
