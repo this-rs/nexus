@@ -926,58 +926,100 @@ fn quota_from_rate_limits(snapshot: &RateLimitSnapshot) -> QuotaSnapshot {
 
 /// `codexErrorInfo` → [`ProviderError`] (contract §7).
 ///
+/// The names are the ones of the real enum (codex-cli 0.162.1,
+/// `codex app-server generate-json-schema`): **camelCase**. A first version compared
+/// PascalCase names that no server ever sent, so no branch matched.
+///
 /// | `codexErrorInfo` | error |
 /// |---|---|
-/// | `ContextWindowExceeded` | `context_too_small` |
-/// | `UsageLimitExceeded` | `rate_limited` |
-/// | `HttpConnectionFailed`, `ResponseStreamDisconnected`, `ResponseStreamConnectionFailed`, `ResponseTooManyFailedAttempts` | `endpoint_unreachable` |
-/// | `Unauthorized` | `unauthorized`, or `auth_required` when the message says nobody is logged in |
-/// | `BadRequest` | `invalid_request` |
-/// | `SandboxError`, `InternalServerError`, `Other`, unknown, none | `protocol` |
+/// | `contextWindowExceeded` | `context_too_small` |
+/// | `usageLimitExceeded`, `sessionBudgetExceeded`, `rateLimitExceeded` | `rate_limited` |
+/// | `serverOverloaded`, `flexUnavailable` | `overloaded` |
+/// | `httpConnectionFailed`, `responseStreamConnectionFailed`, `responseStreamDisconnected`, `responseTooManyFailedAttempts` | `endpoint_unreachable` |
+/// | `unauthorized` | `unauthorized`, or `auth_required` when the message says nobody is logged in |
+/// | `badRequest` | `invalid_request` |
+/// | `cyberPolicy`, `misalignmentPolicyViolation` | `refused` |
+/// | `sandboxError`, `internalServerError`, `tooManyDenials`, `threadRollbackFailed` | `protocol` |
+/// | `other`, unknown, none | the HTTP body in the message decides (`status`), else `protocol` |
 pub fn classify(payload: &ErrorPayload, login_hint: Option<&str>) -> ProviderError {
     let message = match &payload.additional_details {
         Some(details) if !details.is_empty() => format!("{} ({details})", payload.message),
         _ => payload.message.clone(),
     };
     let Some(CodexErrorInfo { kind, http_status }) = &payload.info else {
-        return ProviderError::protocol(message);
+        return classify_http_body(&message, login_hint);
     };
     match kind.as_str() {
-        "ContextWindowExceeded" => ProviderError::ContextTooSmall {
+        "contextWindowExceeded" => ProviderError::ContextTooSmall {
             needed: None,
             available: None,
         },
-        "UsageLimitExceeded" => ProviderError::RateLimited {
-            retry_after_ms: None,
-            resets_at_ms: None,
+        "usageLimitExceeded" | "sessionBudgetExceeded" | "rateLimitExceeded" => {
+            ProviderError::RateLimited {
+                retry_after_ms: None,
+                resets_at_ms: None,
+            }
         },
-        "HttpConnectionFailed"
-        | "ResponseStreamDisconnected"
-        | "ResponseStreamConnectionFailed"
-        | "ResponseTooManyFailedAttempts" => ProviderError::unreachable(match http_status {
+        "serverOverloaded" | "flexUnavailable" => ProviderError::Overloaded,
+        "httpConnectionFailed"
+        | "responseStreamDisconnected"
+        | "responseStreamConnectionFailed"
+        | "responseTooManyFailedAttempts" => ProviderError::unreachable(match http_status {
             Some(status) => format!("{kind} (HTTP {status}): {message}"),
             None => format!("{kind}: {message}"),
         }),
-        "Unauthorized" => {
-            let lower = message.to_ascii_lowercase();
-            let logged_out = [
-                "log in",
-                "login",
-                "sign in",
-                "not logged",
-                "not authenticated",
-            ]
-            .iter()
-            .any(|needle| lower.contains(needle));
-            if logged_out {
-                ProviderError::AuthRequired {
-                    login_hint: login_hint.map(str::to_owned),
-                }
-            } else {
-                ProviderError::Unauthorized
-            }
+        "unauthorized" => unauthorized(&message, login_hint),
+        "badRequest" => ProviderError::invalid(message),
+        "cyberPolicy" => ProviderError::Refused {
+            category: Some("cyber".to_owned()),
         },
-        "BadRequest" => ProviderError::invalid(message),
+        "misalignmentPolicyViolation" => ProviderError::Refused { category: None },
+        "sandboxError" | "internalServerError" | "tooManyDenials" | "threadRollbackFailed" => {
+            ProviderError::protocol(message)
+        },
+        // `other` and anything new: the message is sometimes the provider's raw HTTP body.
+        _ => classify_http_body(&message, login_hint),
+    }
+}
+
+fn unauthorized(message: &str, login_hint: Option<&str>) -> ProviderError {
+    let lower = message.to_ascii_lowercase();
+    let logged_out = [
+        "log in",
+        "login",
+        "sign in",
+        "not logged",
+        "not authenticated",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle));
+    if logged_out {
+        ProviderError::AuthRequired {
+            login_hint: login_hint.map(str::to_owned),
+        }
+    } else {
+        ProviderError::Unauthorized
+    }
+}
+
+/// When `message` carries a raw provider HTTP body (`{"type":"error","status":400,…}`,
+/// measured with an unsupported model), the body's `status` decides. The raw text is
+/// kept as the detail: the provider's sentence is what the user must read. Without a
+/// body, or without a status, it stays `protocol`.
+fn classify_http_body(message: &str, login_hint: Option<&str>) -> ProviderError {
+    let status = message.find('{').and_then(|start| {
+        let body: Value = serde_json::from_str(&message[start..]).ok()?;
+        body.get("status").and_then(Value::as_u64)
+    });
+    match status {
+        Some(400) => ProviderError::invalid(message),
+        Some(401 | 403) => unauthorized(message, login_hint),
+        Some(429) => ProviderError::RateLimited {
+            retry_after_ms: None,
+            resets_at_ms: None,
+        },
+        Some(503 | 529) => ProviderError::Overloaded,
+        Some(500..=599) => ProviderError::unreachable(message),
         _ => ProviderError::protocol(message),
     }
 }
@@ -1002,33 +1044,59 @@ mod tests {
         serde_json::from_value(json!({"message": "boom", "codexErrorInfo": info})).unwrap()
     }
 
+    /// LESSON: the first fixtures here were PascalCase names forged from the code's own
+    /// hypothesis, so the tests passed while no real error was ever classified. These
+    /// names are the ones of the schema (`codex app-server generate-json-schema`,
+    /// codex-cli 0.162.1, `CodexErrorInfo`), not the ones we guessed.
     #[test]
     fn error_info_table_is_the_documented_one() {
         let kind = |info: Value| classify(&payload(info), Some("codex login")).kind();
-        assert_eq!(kind(json!("ContextWindowExceeded")), "context_too_small");
-        assert_eq!(kind(json!("UsageLimitExceeded")), "rate_limited");
+        assert_eq!(kind(json!("contextWindowExceeded")), "context_too_small");
+        for limit in [
+            "usageLimitExceeded",
+            "sessionBudgetExceeded",
+            "rateLimitExceeded",
+        ] {
+            assert_eq!(kind(json!(limit)), "rate_limited", "{limit}");
+        }
+        for busy in ["serverOverloaded", "flexUnavailable"] {
+            assert_eq!(kind(json!(busy)), "overloaded", "{busy}");
+        }
+        for name in [
+            "httpConnectionFailed",
+            "responseStreamConnectionFailed",
+            "responseStreamDisconnected",
+            "responseTooManyFailedAttempts",
+        ] {
+            assert_eq!(
+                kind(json!({name: {"httpStatusCode": 502}})),
+                "endpoint_unreachable",
+                "{name} (object)"
+            );
+        }
         assert_eq!(
-            kind(json!({"HttpConnectionFailed": {"httpStatusCode": 502}})),
+            kind(json!("responseStreamDisconnected")),
             "endpoint_unreachable"
         );
-        assert_eq!(
-            kind(json!("ResponseStreamDisconnected")),
-            "endpoint_unreachable"
-        );
-        assert_eq!(kind(json!("Unauthorized")), "unauthorized");
-        assert_eq!(kind(json!("BadRequest")), "invalid_request");
+        assert_eq!(kind(json!("unauthorized")), "unauthorized");
+        assert_eq!(kind(json!("badRequest")), "invalid_request");
+        for refused in ["cyberPolicy", "misalignmentPolicyViolation"] {
+            assert_eq!(kind(json!(refused)), "refused", "{refused}");
+        }
         for other in [
-            "SandboxError",
-            "InternalServerError",
-            "Other",
-            "SomethingNew",
+            "sandboxError",
+            "internalServerError",
+            "tooManyDenials",
+            "threadRollbackFailed",
+            "other",
+            "somethingNew",
         ] {
             assert_eq!(kind(json!(other)), "protocol", "{other}");
         }
         let no_info: ErrorPayload = serde_json::from_value(json!({"message": "x"})).unwrap();
         assert_eq!(classify(&no_info, None).kind(), "protocol");
         let logged_out: ErrorPayload = serde_json::from_value(
-            json!({"message": "Please log in again", "codexErrorInfo": "Unauthorized"}),
+            json!({"message": "Please log in again", "codexErrorInfo": "unauthorized"}),
         )
         .unwrap();
         assert!(matches!(
@@ -1039,10 +1107,58 @@ mod tests {
 
     #[test]
     fn retryable_classes_are_the_retryable_errors() {
-        assert!(classify(&payload(json!("UsageLimitExceeded")), None).retryable());
-        assert!(classify(&payload(json!("ResponseStreamDisconnected")), None).retryable());
-        assert!(!classify(&payload(json!("ContextWindowExceeded")), None).retryable());
-        assert!(!classify(&payload(json!("InternalServerError")), None).retryable());
+        assert!(classify(&payload(json!("usageLimitExceeded")), None).retryable());
+        assert!(classify(&payload(json!("responseStreamDisconnected")), None).retryable());
+        assert!(!classify(&payload(json!("contextWindowExceeded")), None).retryable());
+        assert!(!classify(&payload(json!("internalServerError")), None).retryable());
+    }
+
+    /// Replays of measured frames (`params.error` of the `error` notification).
+    #[test]
+    fn replayed_codex_errors_are_classified() {
+        let replay = |frame: Value| {
+            let payload: ErrorPayload = serde_json::from_value(frame).unwrap();
+            classify(&payload, Some("codex login"))
+        };
+        // Measured: unsupported model, the message IS the provider's HTTP body.
+        let body = "{\"type\":\"error\",\"status\":400,\"error\":{\"type\":\"invalid_request_error\",\"message\":\"The 'gpt-6.2-astra' model is not supported when using Codex with a ChatGPT account.\",\"code\":\"model_not_found\"}}";
+        match replay(json!({"message": body, "codexErrorInfo": "other"})) {
+            ProviderError::InvalidRequest { detail } => {
+                assert!(detail.contains("gpt-6.2-astra"), "{detail}");
+                assert!(detail.contains("model_not_found"), "{detail}");
+            },
+            other => panic!("expected invalid_request, got {other:?}"),
+        }
+        // Absent info, body only: same decision.
+        assert_eq!(replay(json!({"message": body})).kind(), "invalid_request");
+        // The status picks the class.
+        let status = |code: u16| {
+            replay(json!({"message": format!("{{\"status\":{code}}}"), "codexErrorInfo": "other"}))
+                .kind()
+        };
+        assert_eq!(status(401), "unauthorized");
+        assert_eq!(status(403), "unauthorized");
+        assert_eq!(status(429), "rate_limited");
+        assert_eq!(status(503), "overloaded");
+        assert_eq!(status(500), "endpoint_unreachable");
+        assert_eq!(status(404), "protocol");
+        // Not a body: stays protocol, text kept.
+        assert_eq!(
+            replay(json!({"message": "boom {not json", "codexErrorInfo": "other"})).kind(),
+            "protocol"
+        );
+        assert_eq!(
+            replay(json!({"message": "x", "codexErrorInfo": "contextWindowExceeded"})).kind(),
+            "context_too_small"
+        );
+        assert_eq!(
+            replay(json!({"message": "x", "codexErrorInfo": "usageLimitExceeded"})).kind(),
+            "rate_limited"
+        );
+        assert_eq!(
+            replay(json!({"message": "x", "codexErrorInfo": "unauthorized"})).kind(),
+            "unauthorized"
+        );
     }
 
     #[test]
@@ -1159,7 +1275,7 @@ mod tests {
         state.map(
             Notification::parse(
                 "error",
-                &json!({"error": {"message": "usage limit", "codexErrorInfo": "UsageLimitExceeded"}, "willRetry": false}),
+                &json!({"error": {"message": "usage limit", "codexErrorInfo": "usageLimitExceeded"}, "willRetry": false}),
             )
             .unwrap(),
         );
@@ -1467,7 +1583,7 @@ mod tests {
             Notification::Error(
                 serde_json::from_value(json!({
                     "threadId": thread,
-                    "error": {"message": "the real cause", "codexErrorInfo": "BadRequest"},
+                    "error": {"message": "the real cause", "codexErrorInfo": "badRequest"},
                     "willRetry": will_retry,
                 }))
                 .unwrap(),
@@ -1851,7 +1967,7 @@ mod tests {
         let detail = |extra: Option<&str>| {
             let payload: ErrorPayload = serde_json::from_value(json!({
                 "message": "boom",
-                "codexErrorInfo": "BadRequest",
+                "codexErrorInfo": "badRequest",
                 "additionalDetails": extra,
             }))
             .unwrap();
