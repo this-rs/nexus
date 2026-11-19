@@ -172,26 +172,74 @@ pub async fn process_table() -> Vec<ProcessRow> {
 }
 
 /// Reads the process table once, from a synchronous context (a drop with no
-/// runtime to await in). Same `ps` and same timeout as [`process_table`], run on a
-/// thread so the caller never waits past [`PS_TIMEOUT`]; `PATH` is the only
-/// variable passed on. Empty when `ps` is missing, fails or times out.
+/// runtime to await in). Same `ps` (built by `isolated_command`, so the same
+/// environment allowlist) as [`process_table`], run on a detached thread that
+/// polls it until `deadline`; the caller waits at most until `deadline` too. On
+/// expiry the thread kills `ps` and reaps it, so none outlives the deadline and
+/// none stays a zombie. Empty when `ps` is missing, fails or times out.
 #[cfg(unix)]
-pub fn process_table_blocking() -> Vec<ProcessRow> {
-    let mut command = std::process::Command::new("ps");
+pub fn process_table_blocking(deadline: std::time::Instant) -> Vec<ProcessRow> {
+    use crate::transport::spawn::{EnvPolicy, isolated_command};
+    use std::io::Read;
+    use std::time::Instant;
+    let mut command = isolated_command("ps", &EnvPolicy::allowlist());
     command
         .args(["-A", "-o", "pid=,ppid=,etime="])
-        .env_clear()
         .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null());
-    if let Some(path) = std::env::var_os("PATH") {
-        command.env("PATH", path);
-    }
     let (sender, receiver) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let _ = sender.send(command.output());
+        let std_command = command.as_std_mut();
+        let mut child = match std_command.spawn() {
+            Ok(child) => child,
+            Err(error) => {
+                let _ = sender.send(Err(error.to_string()));
+                return;
+            },
+        };
+        let Some(mut stdout) = child.stdout.take() else {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = sender.send(Err("no stdout".to_owned()));
+            return;
+        };
+        // Drained on its own thread so a full pipe never keeps `ps` from exiting.
+        let (text_sender, text_receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            let _ = stdout.read_to_end(&mut bytes);
+            let _ = text_sender.send(bytes);
+        });
+        loop {
+            match child.try_wait() {
+                Ok(Some(_)) => {
+                    let bytes = text_receiver
+                        .recv_timeout(std::time::Duration::from_millis(200))
+                        .unwrap_or_default();
+                    let _ = sender.send(Ok(bytes));
+                    return;
+                },
+                Ok(None) if Instant::now() < deadline => {
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                },
+                Ok(None) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    let _ = sender.send(Err("timeout".to_owned()));
+                    return;
+                },
+                Err(error) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    let _ = sender.send(Err(error.to_string()));
+                    return;
+                },
+            }
+        }
     });
-    match receiver.recv_timeout(PS_TIMEOUT) {
-        Ok(Ok(output)) => parse_process_table(&String::from_utf8_lossy(&output.stdout)),
+    match receiver.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+        Ok(Ok(bytes)) => parse_process_table(&String::from_utf8_lossy(&bytes)),
         Ok(Err(error)) => {
             tracing::warn!(%error, "the process table could not be read");
             Vec::new()
@@ -205,18 +253,25 @@ pub fn process_table_blocking() -> Vec<ProcessRow> {
 
 /// Reads the process table once, synchronously. Always empty off Unix.
 #[cfg(not(unix))]
-pub fn process_table_blocking() -> Vec<ProcessRow> {
+pub fn process_table_blocking(_deadline: std::time::Instant) -> Vec<ProcessRow> {
     Vec::new()
 }
 
 /// [`signal_descendants`] from a synchronous context: the same two readings and the
 /// same recycled-pid guard, nothing awaited. Returns the pids that took the signal.
+///
+/// One budget for the whole call: both readings share a single deadline of
+/// [`PS_TIMEOUT`] from the entry, so the caller waits at most [`PS_TIMEOUT`] in
+/// total (plus the few microseconds of the signals), not once per reading. A
+/// reading that runs out of budget comes back empty, and nothing is signalled
+/// from an empty one.
 pub fn signal_descendants_blocking(root: u32, signal: i32) -> Vec<u32> {
-    let seen = descendants_in(&process_table_blocking(), root);
+    let deadline = std::time::Instant::now() + PS_TIMEOUT;
+    let seen = descendants_in(&process_table_blocking(deadline), root);
     if seen.is_empty() {
         return Vec::new();
     }
-    let fresh = process_table_blocking();
+    let fresh = process_table_blocking(deadline);
     still_the_same(&seen, &fresh, root, false)
         .into_iter()
         .filter(|pid| signal_pid(*pid, signal))
