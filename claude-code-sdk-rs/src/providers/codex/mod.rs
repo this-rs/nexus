@@ -1172,15 +1172,34 @@ pub fn mcp_launch(servers: &BTreeMap<String, McpServerSpec>) -> Result<McpLaunch
     Ok(launch)
 }
 
-/// The model ids `catalog()` lists: Codex's own `model/list` when it answered, else the
-/// configuration. A declared default missing from a non-empty live list is warned about.
+/// The model ids `catalog()` lists: Codex's own `model/list` when it is trustworthy, else
+/// the configuration.
+///
+/// "Trustworthy" means the listing overlaps what we declared: measured on 0.162.1 with a
+/// ChatGPT account, `model/list` names the 8 models that account may use, and a model the
+/// configuration declared but the list does not name (`gpt-6.2-astra`, refused with a 400
+/// `model_not_found` at `turn/start`) is NOT served — offering it made every session fail.
+///
+/// A listing that shares NOTHING with the configuration is a different catalogue, not a
+/// verdict on ours: an instance that runs on an API key sees the key's models, and dropping
+/// what the operator configured would silently empty the menu. That case keeps the union.
 fn merge_catalog(default_model: Option<&str>, models: &[String], live: &[String]) -> Vec<String> {
-    let mut ids: Vec<String> = if live.is_empty() {
-        default_model
-            .map(str::to_owned)
-            .into_iter()
-            .chain(models.iter().cloned())
-            .collect()
+    let configured = default_model
+        .map(str::to_owned)
+        .into_iter()
+        .chain(models.iter().cloned());
+    let overlaps = live
+        .iter()
+        .any(|id| configured.clone().any(|declared| declared == *id));
+    let mut ids: Vec<String> = if live.is_empty() || !overlaps {
+        if !live.is_empty() && !overlaps {
+            tracing::warn!(
+                live = live.len(),
+                declared = models.len(),
+                "Codex's `model/list` shares no model with the configuration: treated as another catalogue, configuration kept"
+            );
+        }
+        configured.chain(live.iter().cloned()).collect()
     } else {
         if let Some(default) = default_model.filter(|d| !live.iter().any(|m| m == d)) {
             tracing::warn!(
@@ -1214,6 +1233,18 @@ mod tests {
         let declared = names(&["gpt-6.2-astra", "gpt-6-astra"]);
         let ids = merge_catalog(Some("gpt-6.2-astra"), &declared, &live);
         assert_eq!(ids, names(&["gpt-6-astra", "gpt-6.1-terra"]));
+    }
+
+    /// A live list that shares nothing with the configuration is another catalogue (an API
+    /// key sees its key's models, not the account's), not a verdict on ours: dropping the
+    /// configured models would empty the menu. The measured 0.162.1 list, on the other hand,
+    /// does overlap — that is when it may exclude a declared model.
+    #[test]
+    fn a_live_list_that_shares_nothing_is_not_taken_as_a_verdict() {
+        let live = names(&["api-key-model-1"]);
+        let declared = names(&["gpt-6-astra"]);
+        let ids = merge_catalog(Some("gpt-6-astra"), &declared, &live);
+        assert_eq!(ids, names(&["api-key-model-1", "gpt-6-astra"]));
     }
 
     #[test]
