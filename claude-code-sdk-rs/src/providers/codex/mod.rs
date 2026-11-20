@@ -892,26 +892,23 @@ impl AgentProvider for CodexProvider {
     }
 
     async fn catalog(&self) -> Result<Vec<ModelInfo>, ProviderError> {
-        // The models the configuration names, plus the ones Codex itself lists
-        // (`model/list`, which needs a process and a login and returns no context
-        // window). A listing that fails (no binary, no login) leaves the configured
-        // names alone: the catalogue never errors because of it.
+        // `model/list` (needs a process and a login, returns no context window) is the
+        // MEASURED catalogue: when it answers a non-empty list it is the truth, and a
+        // configured model absent from it is dropped (the server refuses it with a 400
+        // `model_not_found`). A listing that fails or is empty (no binary, no login)
+        // leaves the configured names alone: the catalogue never errors because of it.
         let live = self.live_models().await.unwrap_or_default();
-        let mut ids: Vec<&String> = self
-            .config
-            .default_model
-            .iter()
-            .chain(self.config.models.iter())
-            .chain(live.iter())
-            .collect();
-        ids.sort();
-        ids.dedup();
+        let ids = merge_catalog(
+            self.config.default_model.as_deref(),
+            &self.config.models,
+            &live,
+        );
         Ok(ids
             .into_iter()
             .map(|id| {
                 let mut info = ModelInfo::new(id.clone());
-                info.is_default = self.config.default_model.as_ref() == Some(id);
-                info.pricing = self.config.prices.get(id).copied();
+                info.is_default = self.config.default_model.as_ref() == Some(&id);
+                info.pricing = self.config.prices.get(&id).copied();
                 info.context_window = self.config.context_window.map(|value| ContextWindow {
                     value,
                     source: ContextWindowSource::Configured,
@@ -1175,9 +1172,87 @@ pub fn mcp_launch(servers: &BTreeMap<String, McpServerSpec>) -> Result<McpLaunch
     Ok(launch)
 }
 
+/// The model ids `catalog()` lists: Codex's own `model/list` when it is trustworthy, else
+/// the configuration.
+///
+/// "Trustworthy" means the listing overlaps what we declared: measured on 0.162.1 with a
+/// ChatGPT account, `model/list` names the 8 models that account may use, and a model the
+/// configuration declared but the list does not name (`gpt-6.2-astra`, refused with a 400
+/// `model_not_found` at `turn/start`) is NOT served — offering it made every session fail.
+///
+/// A listing that shares NOTHING with the configuration is a different catalogue, not a
+/// verdict on ours: an instance that runs on an API key sees the key's models, and dropping
+/// what the operator configured would silently empty the menu. That case keeps the union.
+fn merge_catalog(default_model: Option<&str>, models: &[String], live: &[String]) -> Vec<String> {
+    let configured = default_model
+        .map(str::to_owned)
+        .into_iter()
+        .chain(models.iter().cloned());
+    let overlaps = live
+        .iter()
+        .any(|id| configured.clone().any(|declared| declared == *id));
+    let mut ids: Vec<String> = if live.is_empty() || !overlaps {
+        if !live.is_empty() && !overlaps {
+            tracing::warn!(
+                live = live.len(),
+                declared = models.len(),
+                "Codex's `model/list` shares no model with the configuration: treated as another catalogue, configuration kept"
+            );
+        }
+        configured.chain(live.iter().cloned()).collect()
+    } else {
+        if let Some(default) = default_model.filter(|d| !live.iter().any(|m| m == d)) {
+            tracing::warn!(
+                model = default,
+                "the default model is not in Codex's `model/list`: the server refuses it"
+            );
+        }
+        for declared in models.iter().filter(|m| !live.contains(m)) {
+            tracing::warn!(model = %declared, "a configured model is not in Codex's `model/list`: not offered");
+        }
+        live.to_vec()
+    };
+    ids.sort();
+    ids.dedup();
+    ids
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn names(list: &[&str]) -> Vec<String> {
+        list.iter().map(|n| (*n).to_owned()).collect()
+    }
+
+    /// Measured: the server lists 8 models, the configuration declared `gpt-6.2-astra`
+    /// (default) which it refuses; the live list is the truth.
+    #[test]
+    fn a_live_list_excludes_a_declared_model_the_server_does_not_know() {
+        let live = names(&["gpt-6.1-terra", "gpt-6-astra"]);
+        let declared = names(&["gpt-6.2-astra", "gpt-6-astra"]);
+        let ids = merge_catalog(Some("gpt-6.2-astra"), &declared, &live);
+        assert_eq!(ids, names(&["gpt-6-astra", "gpt-6.1-terra"]));
+    }
+
+    /// A live list that shares nothing with the configuration is another catalogue (an API
+    /// key sees its key's models, not the account's), not a verdict on ours: dropping the
+    /// configured models would empty the menu. The measured 0.162.1 list, on the other hand,
+    /// does overlap — that is when it may exclude a declared model.
+    #[test]
+    fn a_live_list_that_shares_nothing_is_not_taken_as_a_verdict() {
+        let live = names(&["api-key-model-1"]);
+        let declared = names(&["gpt-6-astra"]);
+        let ids = merge_catalog(Some("gpt-6-astra"), &declared, &live);
+        assert_eq!(ids, names(&["api-key-model-1", "gpt-6-astra"]));
+    }
+
+    #[test]
+    fn without_a_live_list_the_configuration_stays() {
+        let declared = names(&["gpt-6-astra"]);
+        let ids = merge_catalog(Some("gpt-6.2-astra"), &declared, &[]);
+        assert_eq!(ids, names(&["gpt-6-astra", "gpt-6.2-astra"]));
+    }
 
     #[test]
     fn the_debug_of_a_config_never_prints_an_environment_value() {
@@ -1395,6 +1470,10 @@ fn parse_model_list(result: &Value) -> Vec<String> {
             e.get("model")
                 .or_else(|| e.get("id"))
                 .and_then(Value::as_str)
+                // An empty or blank id is not a model: letting one through would make
+                // `merge_catalog` take a live list that names nothing, and the whole
+                // catalogue would collapse to that blank entry.
+                .filter(|id| !id.trim().is_empty())
                 .map(str::to_owned)
         })
         .collect()

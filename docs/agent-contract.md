@@ -651,12 +651,19 @@ contre `fake_codex` et des transcriptions écrites depuis le README de `codex-rs
   motifs (`provider_notice { policy_patterns_partial }`).
 - **Limites** : `limits.turn_timeout_ms` tenu (`done { error: timeout }`) ; `max_turns`, `max_tokens`,
   `max_cost_usd`, `max_tool_iterations` → `Unsupported { limits }` à l'ouverture.
-- **Fin de tour** : `turn/completed { failed }` → `done { is_error, error }` (`codexErrorInfo` :
-  `ContextWindowExceeded` → `context_too_small`, `UsageLimitExceeded` → `rate_limited`, `HttpConnectionFailed` /
-  `ResponseStreamDisconnected` / `ResponseStreamConnectionFailed` / `ResponseTooManyFailedAttempts` →
-  `endpoint_unreachable`, `Unauthorized` → `unauthorized` ou `auth_required`, `BadRequest` → `invalid_request`,
-  `SandboxError` / `InternalServerError` / `Other` → `protocol`) ; `error { process_exited }` terminal
-  seulement quand le processus meurt (la session est alors morte).
+- **Fin de tour** : `turn/completed { failed }` → `done { is_error, error }` (`codexErrorInfo`, noms RÉELS du
+  schéma 0.162.1 — `codex app-server generate-json-schema`, définition `CodexErrorInfo` — comparés SANS CASSE
+  pour accepter aussi les rejeux PascalCase : `contextWindowExceeded` → `context_too_small` ; `usageLimitExceeded` /
+  `sessionBudgetExceeded` / `rateLimitExceeded` → `rate_limited` ; `serverOverloaded` / `flexUnavailable` →
+  `overloaded` ; `httpConnectionFailed` / `responseStreamConnectionFailed` / `responseStreamDisconnected` /
+  `responseTooManyFailedAttempts` (objets portant `httpStatusCode`) → `endpoint_unreachable` ; `unauthorized` →
+  `unauthorized` ou `auth_required` ; `badRequest` → `invalid_request` ; `cyberPolicy` /
+  `misalignmentPolicyViolation` → `refused` ; `sandboxError` / `internalServerError` / `tooManyDenials` /
+  `threadRollbackFailed` → `protocol`). `other`, un nom inconnu ou absent : si la `message` porte le corps HTTP
+  brut du fournisseur (`{"type":"error","status":400,…}`), son `status` décide (400 → `invalid_request` avec le
+  corps conservé, 401/403 → `unauthorized`, 429 → `rate_limited`, 503/529 → `overloaded`, autre 5xx →
+  `endpoint_unreachable`), sinon `protocol`. `error { process_exited }` terminal seulement quand le processus
+  meurt (la session est alors morte).
 - **Processus** : un `codex app-server` (sans sous-commande : transport stdio par défaut, `--listen stdio://`, mesuré
   sur 0.162.1) par session — jamais le daemon partagé (`codex app-server daemon`, paquet 0.163.0) ni `codex
   app-server proxy --sock …`, dont le protocole est NON VÉRIFIÉ (une ligne `initialize` par le proxy n'obtient

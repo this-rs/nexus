@@ -407,8 +407,8 @@ pub struct ErrorPayload {
     pub additional_details: Option<String>,
 }
 
-/// `CodexErrorInfo`: a bare name (`"UsageLimitExceeded"`) or a one-key object
-/// (`{"HttpConnectionFailed":{"httpStatusCode":502}}`).
+/// `CodexErrorInfo`: a bare name (`"usageLimitExceeded"`) or a one-key object
+/// (`{"httpConnectionFailed":{"httpStatusCode":502}}`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct CodexErrorInfo {
     /// Variant name.
@@ -1093,14 +1093,14 @@ mod tests {
 
     #[test]
     fn error_info_is_a_name_or_a_one_key_object() {
-        let bare: CodexErrorInfo = serde_json::from_value(json!("UsageLimitExceeded")).unwrap();
-        assert_eq!(bare.kind, "UsageLimitExceeded");
+        let bare: CodexErrorInfo = serde_json::from_value(json!("usageLimitExceeded")).unwrap();
+        assert_eq!(bare.kind, "usageLimitExceeded");
         let with_status: CodexErrorInfo =
-            serde_json::from_value(json!({"HttpConnectionFailed": {"httpStatusCode": 502}}))
+            serde_json::from_value(json!({"httpConnectionFailed": {"httpStatusCode": 502}}))
                 .unwrap();
         assert_eq!(
             (with_status.kind.as_str(), with_status.http_status),
-            ("HttpConnectionFailed", Some(502))
+            ("httpConnectionFailed", Some(502))
         );
         assert!(serde_json::from_value::<CodexErrorInfo>(json!({"a": 1, "b": 2})).is_err());
         assert!(serde_json::from_value::<CodexErrorInfo>(json!(3)).is_err());
