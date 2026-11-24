@@ -366,7 +366,11 @@ async fn the_acp_adapter_passes_the_conformance_suite() {
     assert_eq!(caps.sandbox, SandboxLevel::None);
     assert_eq!(
         caps.permission_scopes,
-        vec![PermissionScope::Once, PermissionScope::Always]
+        vec![
+            PermissionScope::Once,
+            PermissionScope::Session,
+            PermissionScope::Always
+        ]
     );
     assert_eq!(caps.cost, CostBasis::Priced);
     assert_eq!(caps.context_window, None, "no window is invented");
@@ -653,8 +657,9 @@ async fn an_always_approval_selects_allow_always_and_a_scope_not_offered_is_refu
         ]
     );
 
-    // An agent that offers no `allow_always`: the ask offers `once` only and `always`
-    // answers `Unsupported { permission_scope }`; the request stays answerable.
+    // An agent that offers no `allow_always`: the ask offers `once` and `session`
+    // only, and `always` answers `Unsupported { permission_scope }`; the request
+    // stays answerable.
     let staging = Staging::new();
     let session = staging.open("permission_once_only").await;
     let mut stream = session.send_turn(TurnInput::text("go")).await.unwrap();
@@ -667,7 +672,10 @@ async fn an_always_approval_selects_allow_always_and_a_scope_not_offered_is_refu
     else {
         unreachable!()
     };
-    assert_eq!(scopes, vec![PermissionScope::Once]);
+    assert_eq!(
+        scopes,
+        vec![PermissionScope::Once, PermissionScope::Session]
+    );
     assert_eq!(
         session.answer_permission(&request_id, decision).await,
         Err(ProviderError::unsupported("permission_scope"))
@@ -685,6 +693,110 @@ async fn an_always_approval_selects_allow_always_and_a_scope_not_offered_is_refu
         .await
         .unwrap();
     assert_eq!(stop_of(&collect(stream).await), StopReason::Completed);
+    session.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_session_approval_is_remembered_for_the_tool_and_auto_answers_the_next() {
+    let staging = Staging::new();
+    let session = staging.open("permission_session").await;
+
+    // First turn: the ask arrives, answered for the session.
+    let mut stream = session.send_turn(TurnInput::text("go")).await.unwrap();
+    let AgentEvent::PermissionAsk {
+        request_id, scopes, ..
+    } = next_matching(&mut stream, |event| {
+        matches!(event, AgentEvent::PermissionAsk { .. })
+    })
+    .await
+    else {
+        unreachable!()
+    };
+    assert!(scopes.contains(&PermissionScope::Session));
+    session
+        .answer_permission(
+            &request_id,
+            PermissionDecision::Allow {
+                scope: PermissionScope::Session,
+                updated_input: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(stop_of(&collect(stream).await), StopReason::Completed);
+
+    // Second turn, same tool: no ask is raised again, the answer is auto-selected,
+    // and a notice names the session approval.
+    let second = collect(
+        session
+            .send_turn(TurnInput::text("go"))
+            .await
+            .expect("send_turn"),
+    )
+    .await;
+    assert_eq!(stop_of(&second), StopReason::Completed);
+    assert!(
+        !second
+            .iter()
+            .any(|event| matches!(event, AgentEvent::PermissionAsk { .. })),
+        "a session-scoped approval must not ask again: {second:?}"
+    );
+    assert!(second.iter().any(|event| matches!(
+        event,
+        AgentEvent::ProviderNotice { kind, .. } if kind == "permission_allowed_by_session"
+    )));
+    session.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_session_approval_never_overrides_a_deny() {
+    let staging = Staging::new();
+    let provider = staging.learned_provider().await;
+    let mut spec = staging.spec("permission_session_deny");
+    spec.policy = ToolPolicy::from_patterns(PolicyMode::Ask, &[], &["Bash(rm *)"]).unwrap();
+    let session = provider.open(spec).await.unwrap();
+
+    // Turn 1: `Bash(ls)` is asked, answered for the session.
+    let mut stream = session.send_turn(TurnInput::text("go")).await.unwrap();
+    let AgentEvent::PermissionAsk { request_id, .. } = next_matching(&mut stream, |e| {
+        matches!(e, AgentEvent::PermissionAsk { .. })
+    })
+    .await
+    else {
+        unreachable!()
+    };
+    session
+        .answer_permission(
+            &request_id,
+            PermissionDecision::Allow {
+                scope: PermissionScope::Session,
+                updated_input: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(stop_of(&collect(stream).await), StopReason::Completed);
+
+    // Turn 2: `Bash(rm *)` is denied by the policy, never auto-allowed by the
+    // session approval — no ask is raised, and the denial names the policy.
+    let second = collect(
+        session
+            .send_turn(TurnInput::text("go"))
+            .await
+            .expect("send_turn"),
+    )
+    .await;
+    assert_eq!(stop_of(&second), StopReason::Completed);
+    assert!(
+        !second
+            .iter()
+            .any(|event| matches!(event, AgentEvent::PermissionAsk { .. })),
+        "a deny must not ask: {second:?}"
+    );
+    assert!(second.iter().any(|event| matches!(
+        event,
+        AgentEvent::ProviderNotice { kind, .. } if kind == "permission_denied_by_policy"
+    )));
     session.close().await.unwrap();
 }
 
