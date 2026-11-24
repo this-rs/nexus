@@ -749,6 +749,58 @@ async fn a_session_approval_is_remembered_for_the_tool_and_auto_answers_the_next
 }
 
 #[tokio::test]
+async fn a_session_approval_never_overrides_a_deny() {
+    let staging = Staging::new();
+    let provider = staging.learned_provider().await;
+    let mut spec = staging.spec("permission_session_deny");
+    spec.policy = ToolPolicy::from_patterns(PolicyMode::Ask, &[], &["Bash(rm *)"]).unwrap();
+    let session = provider.open(spec).await.unwrap();
+
+    // Turn 1: `Bash(ls)` is asked, answered for the session.
+    let mut stream = session.send_turn(TurnInput::text("go")).await.unwrap();
+    let AgentEvent::PermissionAsk { request_id, .. } = next_matching(&mut stream, |e| {
+        matches!(e, AgentEvent::PermissionAsk { .. })
+    })
+    .await
+    else {
+        unreachable!()
+    };
+    session
+        .answer_permission(
+            &request_id,
+            PermissionDecision::Allow {
+                scope: PermissionScope::Session,
+                updated_input: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(stop_of(&collect(stream).await), StopReason::Completed);
+
+    // Turn 2: `Bash(rm *)` is denied by the policy, never auto-allowed by the
+    // session approval — no ask is raised, and the denial names the policy.
+    let second = collect(
+        session
+            .send_turn(TurnInput::text("go"))
+            .await
+            .expect("send_turn"),
+    )
+    .await;
+    assert_eq!(stop_of(&second), StopReason::Completed);
+    assert!(
+        !second
+            .iter()
+            .any(|event| matches!(event, AgentEvent::PermissionAsk { .. })),
+        "a deny must not ask: {second:?}"
+    );
+    assert!(second.iter().any(|event| matches!(
+        event,
+        AgentEvent::ProviderNotice { kind, .. } if kind == "permission_denied_by_policy"
+    )));
+    session.close().await.unwrap();
+}
+
+#[tokio::test]
 async fn a_cancelled_turn_answers_the_pending_permission_cancelled_then_sends_session_cancel() {
     let staging = Staging::new();
     let session = staging.open("permission_cancel").await;

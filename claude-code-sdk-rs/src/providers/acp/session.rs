@@ -41,7 +41,7 @@ use serde_json::{Value, json};
 use tokio::sync::{Notify, mpsc};
 
 use super::AcpConfig;
-use super::map::{Ask, MapConfig, MapState, answer_for, auto_answer, mode_id_for};
+use super::map::{Ask, MapConfig, MapState, answer_for, auto_answer, mode_id_for, session_answer};
 use super::transport::{Inbound, Process};
 use super::wire::{
     CancelParams, ModeInfo, ModeState, PermissionOption, PermissionRequest, PromptParams,
@@ -337,26 +337,34 @@ impl Core {
             },
         };
         let mut ask = self.lock().map.ask_for(&request);
-        // A session-scoped approval answers the call without asking again; it is
-        // scoped to that tool only (the canonical name), never to another tool.
-        let session_approved = {
+        // The policy decides first, and a `deny` wins over any earlier approval
+        // (mirrors native policy_args): a tool approved for the session is not
+        // asked again, UNLESS the policy denies it.
+        let decision = {
             let state = self.lock();
-            state.approved.contains(&ask.tool)
+            state.policy.decide(&ask.tool, Some(&ask.arg), ask.category)
         };
-        let auto: Option<(Value, &'static str)> = if session_approved {
-            auto_answer(&ask.options, true).map(|answer| (answer, "permission_allowed_by_session"))
-        } else {
-            let decision = {
-                let state = self.lock();
-                state.policy.decide(&ask.tool, Some(&ask.arg), ask.category)
-            };
-            match decision {
-                PolicyDecision::Allow => auto_answer(&ask.options, true)
-                    .map(|answer| (answer, "permission_allowed_by_policy")),
-                PolicyDecision::Deny => auto_answer(&ask.options, false)
-                    .map(|answer| (answer, "permission_denied_by_policy")),
-                _ => None,
-            }
+        let auto: Option<(Value, &'static str)> = match decision {
+            PolicyDecision::Deny => auto_answer(&ask.options, false)
+                .map(|answer| (answer, "permission_denied_by_policy")),
+            PolicyDecision::Allow => auto_answer(&ask.options, true)
+                .map(|answer| (answer, "permission_allowed_by_policy")),
+            PolicyDecision::Ask => {
+                // A session-scoped approval answers the call without asking again;
+                // it is scoped to that tool only (the canonical name), never to
+                // another tool. `allow_once` only: a session scope is never
+                // translated into a persistent `allow_always`.
+                let session_approved = {
+                    let state = self.lock();
+                    state.approved.contains(&ask.tool)
+                };
+                if session_approved {
+                    session_answer(&ask.options)
+                        .map(|answer| (answer, "permission_allowed_by_session"))
+                } else {
+                    None
+                }
+            },
         };
         match auto {
             Some((answer, notice)) => {

@@ -619,6 +619,14 @@ pub fn auto_answer(options: &[PermissionOption], allow: bool) -> Option<Value> {
     }
 }
 
+/// The auto-answer of a session approval: `allow_once` ONLY. A session-scoped
+/// approval must never select `allow_always`, which would outlive the session —
+/// if the agent no longer offers `allow_once`, the request is asked again instead.
+pub fn session_answer(options: &[PermissionOption]) -> Option<Value> {
+    option_of(options, "allow_once")
+        .map(|option| super::wire::permission_selected(&option.option_id))
+}
+
 /// `stopReason` → neutral stop reason, `is_error`, and the error behind it.
 pub fn stop_of(reason: &str) -> (StopReason, bool, Option<ProviderError>) {
     match reason {
