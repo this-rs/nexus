@@ -635,7 +635,11 @@ async fn capabilities_say_what_was_probed_and_nothing_more() {
     assert!(before.resume && before.tool_cancel && before.interactive_permissions);
     assert_eq!(
         before.permission_scopes,
-        vec![PermissionScope::Once, PermissionScope::Session]
+        vec![
+            PermissionScope::Once,
+            PermissionScope::Session,
+            PermissionScope::Always
+        ]
     );
     let after = h.provider.refresh_capabilities("m").await.unwrap();
     assert!(after.tools && after.thinking);
@@ -1192,7 +1196,14 @@ async fn ask_mode_asks_before_a_tool_that_is_not_read_only_and_runs_it_once_allo
     };
     assert_eq!(tool_name, "mcp__fake__write");
     assert_eq!(tool_call_id.as_deref(), Some("w1"));
-    assert_eq!(scopes, &[PermissionScope::Once, PermissionScope::Session]);
+    assert_eq!(
+        scopes,
+        &[
+            PermissionScope::Once,
+            PermissionScope::Session,
+            PermissionScope::Always
+        ]
+    );
     assert_eq!(input["text"], "data");
     assert_eq!(
         mcp_calls(&log, "write"),
@@ -1265,7 +1276,8 @@ async fn a_session_scoped_approval_is_not_asked_again() {
         0
     );
     assert_eq!(mcp_calls(&log, "write"), 2);
-    // `always` has nowhere to be kept: refused by name.
+    // `always` is a session approval that survives the session (PERM-ALWAYS-NATIVE):
+    // it is accepted, and the call runs.
     let h2 = Harness::new(vec![
         tool_reply(Some("x"), &[write_call()], None, None),
         text_reply(Some(TOOL), "end", None, None),
@@ -1273,24 +1285,70 @@ async fn a_session_scoped_approval_is_not_asked_again() {
     .await;
     let log2 = tempfile::tempdir().unwrap();
     let session = h2.open(h2.spec_with_mcp(&log_path(&log2))).await;
-    let mut stream = session.send_turn(TurnInput::text("x")).await.unwrap();
-    while let Some(event) = stream.next().await {
-        if let AgentEvent::PermissionAsk { request_id, .. } = event {
-            let always = PermissionDecision::Allow {
-                scope: PermissionScope::Always,
-                updated_input: None,
-            };
-            let refused = session
-                .answer_permission(&request_id, always)
-                .await
-                .unwrap_err();
-            assert_eq!(refused, ProviderError::unsupported("permission_scope"));
-            session
-                .answer_permission(&request_id, PermissionDecision::deny())
-                .await
-                .unwrap();
-        }
-    }
+    let always = turn_deciding(&*session, "x", |_| PermissionDecision::Allow {
+        scope: PermissionScope::Always,
+        updated_input: None,
+    })
+    .await;
+    assert_eq!(
+        always
+            .iter()
+            .filter(|e| matches!(e, AgentEvent::PermissionAsk { .. }))
+            .count(),
+        1
+    );
+    assert_eq!(mcp_calls(&log_path(&log2), "write"), 1);
+}
+
+#[tokio::test]
+async fn an_always_approval_is_honored_by_a_new_session() {
+    let h = Harness::new(vec![
+        tool_reply(Some("one"), &[write_call()], None, None),
+        text_reply(Some(TOOL), "done one", None, None),
+        tool_reply(
+            Some("two"),
+            &[("w2", "mcp__fake__write", json!({"text": "data"}))],
+            None,
+            None,
+        ),
+        text_reply(Some(TOOL), "done two", None, None),
+    ])
+    .await;
+    let log_dir = tempfile::tempdir().unwrap();
+    let log = log_path(&log_dir);
+
+    // First session: the ask arrives, answered "always".
+    let first = h.open(h.spec_with_mcp(&log)).await;
+    let events = turn_deciding(&*first, "one", |_| PermissionDecision::Allow {
+        scope: PermissionScope::Always,
+        updated_input: None,
+    })
+    .await;
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| matches!(e, AgentEvent::PermissionAsk { .. }))
+            .count(),
+        1
+    );
+    first.close().await.unwrap();
+
+    // A second session on the same provider (same rule store) is not asked again,
+    // and the call still runs.
+    let second = h.open(h.spec_with_mcp(&log)).await;
+    let events = turn_deciding(&*second, "two", |_| {
+        unreachable!("an always approval must not ask again")
+    })
+    .await;
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| matches!(e, AgentEvent::PermissionAsk { .. }))
+            .count(),
+        0
+    );
+    assert_eq!(mcp_calls(&log, "write"), 2);
+    second.close().await.unwrap();
 }
 
 // ---------------------------------------------------------------------------
