@@ -1,6 +1,6 @@
 %% name: nexus-agent-contract
 %% covers: claude-code-sdk-rs/src/agent/*.rs, docs/agent-contract.md, claude-code-sdk-rs/tests/agent_contract_snapshots.rs, claude-code-sdk-rs/tests/agent_registry.rs
-%% verified: 2026-11-19
+%% verified: 2026-11-24
 %% ---
 %% ETAT (2026-11-07, CONTRACT_VERSION = 10 (v10 = effort de raisonnement par tour : ReasoningEffort { low, medium, high }, TurnDirective::reasoning_effort, Capabilities::reasoning_effort, notice reasoning_effort_ignored ; v9 = quota, QUOTA ; v8 = compaction_directive) ; en 7 : v7 = cinq méthodes à défaut de SessionHooks, les événements de Claude Code (ISO1) ; v6 = AgentSession::compact (ISO3-a) ; v5 = + ModelEndpoint::probe_images à défaut, décision images par modèle du natif — instantané v5 identique à v4 hors version ; Claude Code images = true, local et SSH (A12 révisée : une valeur de capacité, aucune forme, version inchangée) ; v4 : + SessionHooks::before_turn, TurnContext, TurnDirective) ; au 2026-10-05 : `claude-code-sdk-rs/src/agent/` existe : types, traits ET registre (registry.rs) ;
 %%   des providers l'implémentent (claude_code, native, codex, acp : voir nexus-agent-providers). Vérifié par : cargo test -p nexus-claude --lib agent:: ;

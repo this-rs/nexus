@@ -862,9 +862,18 @@ impl Core {
             // does not end it: the CLI calls the model again with the refusal, and the model goes
             // on for a while. The interrupt ends the turn; the tools of the step are not signalled
             // (`turn_only`), and the CLI's `result` closes the turn as an interruption.
+            //
+            // That interruption is OURS, and the host must not read it as a stop of the person:
+            // `ended_on_question` turns that `result` into a completed turn, as the native
+            // engine's is. Reported as `Interrupted`, every host that closes an open question on
+            // an interruption killed the card 8 ms after it appeared — measured 2026-11-24 on
+            // the orchestrator (session 76faba47, events 39613-39618), where the answer then had
+            // to be typed by hand ("Cette question ne peut plus être répondue").
             self.lock().map.set_interrupt_requested(true);
+            self.lock().map.set_ended_on_question(true);
             if let Err(error) = self.write(control::interrupt()).await {
                 self.lock().map.set_interrupt_requested(false);
+                self.lock().map.set_ended_on_question(false);
                 warn!(%error, "the turn could not be ended on the question");
             }
         }
@@ -1540,6 +1549,13 @@ impl AgentSession for ClaudeCodeSession {
             let (sender, receiver) = mpsc::unbounded_channel();
             state.turn = Some(sender);
             state.map.set_interrupt_requested(false);
+            // A turn ends without a `result` more often than it looks: a question arriving
+            // OUT of turn (the interrupt then ends nothing), a lost `result` (the stream's
+            // broadcast drops on `Lagged`), an `error` item that closes the turn, the process
+            // gone. The previous turn's flags must not survive into this one — otherwise a
+            // real interruption of THIS turn is read through the last turn's question and
+            // reported as a completed turn (silently the reverse of the lie this fixes).
+            state.map.set_ended_on_question(false);
             (receiver, blocks)
         };
         let text = input.joined_text();
