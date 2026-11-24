@@ -40,6 +40,7 @@ use tokio::sync::{Notify, mpsc, oneshot};
 
 use super::cancel::CancelToken;
 use super::mcp::McpClient;
+use super::rules::PermissionRuleStore;
 use super::tasks::{self as background, TaskTable};
 use super::tools::{ToolEntry, ToolRegistry};
 use super::transcript::TranscriptStore;
@@ -225,6 +226,8 @@ pub(crate) struct Core {
     /// request log only: it ties a model request to the host's conversation.
     pub(crate) host_session_id: Option<String>,
     pub(crate) store: Arc<dyn TranscriptStore>,
+    /// "always" approvals, persisted by the host (PERM-ALWAYS-NATIVE).
+    pub(crate) rules: Arc<dyn PermissionRuleStore>,
     /// Whether the session is a sub-agent (`lineage.depth` 1 or more): its stop hook is
     /// `before_subagent_stop`, not `before_stop`.
     pub(crate) is_subagent: bool,
@@ -252,6 +255,8 @@ pub(crate) struct CoreParts {
     pub(crate) transcript_id: String,
     pub(crate) host_session_id: Option<String>,
     pub(crate) store: Arc<dyn TranscriptStore>,
+    pub(crate) rules: Arc<dyn PermissionRuleStore>,
+    pub(crate) initial_approved: Vec<String>,
     pub(crate) policy: ToolPolicy,
     pub(crate) model: String,
     pub(crate) messages: Vec<ChatMessage>,
@@ -273,7 +278,7 @@ impl Core {
             out_of_band_taken: false,
             pending: HashMap::new(),
             inflight: HashMap::new(),
-            approved: HashSet::new(),
+            approved: parts.initial_approved.into_iter().collect(),
             policy: parts.policy,
             model: parts.model,
             active_window: parts.capabilities.context_window.map(|w| w.value),
@@ -312,6 +317,7 @@ impl Core {
             transcript_id: parts.transcript_id,
             host_session_id: parts.host_session_id,
             store: parts.store,
+            rules: parts.rules,
             is_subagent: parts.is_subagent,
             resumed: parts.resumed,
             state: Mutex::new(state),
@@ -644,7 +650,7 @@ impl AgentSession for NativeSession {
             if !self.capabilities.permission_scopes.contains(scope) {
                 return Err(ProviderError::unsupported("permission_scope"));
             }
-            if *scope == PermissionScope::Session
+            if matches!(scope, PermissionScope::Session | PermissionScope::Always)
                 && let Some(pending) = state.pending.get(request_id)
             {
                 // An ask about a subject is remembered for that subject only (N23b): "session"
@@ -653,6 +659,13 @@ impl AgentSession for NativeSession {
                     Some(subject) => consent_key(&pending.tool, subject),
                     None => pending.tool.clone(),
                 };
+                if *scope == PermissionScope::Always {
+                    // "always" is a session approval that survives the session: the host's
+                    // store keeps it (PERM-ALWAYS-NATIVE). Persist FIRST, before granting
+                    // the session approval, so a store that refuses (fail closed) never
+                    // leaves an "always" that was granted but not kept.
+                    self.core.rules.insert(&key)?;
+                }
                 state.approved.insert(key);
             }
         }

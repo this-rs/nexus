@@ -76,6 +76,7 @@ pub mod r#loop;
 pub mod mcp;
 pub(crate) mod policy_args;
 pub mod resilience;
+pub mod rules;
 pub mod session;
 pub(crate) mod tasks;
 pub mod tools;
@@ -86,6 +87,7 @@ pub use cancel::CancelToken;
 pub use compaction::CompactionConfig;
 pub use mcp::{McpClient, McpConfig, McpError, McpLaunch, McpTool};
 pub use resilience::RetryPolicy;
+pub use rules::{MemoryRuleStore, PermissionRuleStore};
 pub use session::NativeSession;
 pub use tools::{
     NEXUS_TOOLS_CATALOG, NEXUS_TOOLS_SERVER, ToolEntry, ToolRegistry, exposed_name,
@@ -261,6 +263,7 @@ pub struct NativeProvider {
     config: Arc<NativeConfig>,
     endpoint: Arc<dyn ModelEndpoint>,
     store: Arc<dyn TranscriptStore>,
+    rules: Arc<dyn PermissionRuleStore>,
     facts: ModelFacts,
 }
 
@@ -433,12 +436,19 @@ impl NativeProvider {
             config,
             endpoint,
             store: Arc::new(MemoryTranscriptStore::new()),
+            rules: Arc::new(MemoryRuleStore::new()),
         }
     }
 
     /// Keeps transcripts in `store` instead of memory.
     pub fn with_transcript_store(mut self, store: Arc<dyn TranscriptStore>) -> Self {
         self.store = store;
+        self
+    }
+
+    /// Keeps "always" approvals in `rules` instead of memory.
+    pub fn with_rule_store(mut self, rules: Arc<dyn PermissionRuleStore>) -> Self {
+        self.rules = rules;
         self
     }
 
@@ -693,6 +703,7 @@ impl NativeProvider {
             ..
         } = spec;
         let max_turns = max_turns.or(self.config.max_turns);
+        let initial_approved = self.rules.load()?;
         let core = session::Core::new(session::CoreParts {
             capabilities,
             facts: self.facts.clone(),
@@ -710,6 +721,8 @@ impl NativeProvider {
             transcript_id,
             host_session_id,
             store: Arc::clone(&self.store),
+            rules: Arc::clone(&self.rules),
+            initial_approved,
             policy,
             model,
             messages,
@@ -759,7 +772,11 @@ impl AgentProvider for NativeProvider {
     fn capabilities(&self, model: Option<&str>) -> Capabilities {
         let mut capabilities = Capabilities::none();
         capabilities.interactive_permissions = true;
-        capabilities.permission_scopes = vec![PermissionScope::Once, PermissionScope::Session];
+        capabilities.permission_scopes = vec![
+            PermissionScope::Once,
+            PermissionScope::Session,
+            PermissionScope::Always,
+        ];
         capabilities.sandbox = SandboxLevel::None;
         capabilities.secret_isolation = true;
         capabilities.per_session_mcp = true;

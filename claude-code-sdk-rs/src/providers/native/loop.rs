@@ -2286,6 +2286,7 @@ mod consent_tests {
     };
     use crate::providers::native::ModelFacts;
     use crate::providers::native::cancel::CancelToken;
+    use crate::providers::native::rules::MemoryRuleStore;
     use crate::providers::native::session::{Core, CoreParts, TurnSignal};
     use crate::providers::native::tools::{ToolEntry, ToolRegistry};
     use crate::providers::native::transcript::MemoryTranscriptStore;
@@ -2374,6 +2375,8 @@ mod consent_tests {
             transcript_id: "consent-test".to_owned(),
             host_session_id: None,
             store: Arc::new(MemoryTranscriptStore::new()),
+            rules: Arc::new(MemoryRuleStore::new()),
+            initial_approved: Vec::new(),
             policy: ToolPolicy::default(),
             model: "m".to_owned(),
             messages: Vec::new(),
