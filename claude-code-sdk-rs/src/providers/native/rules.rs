@@ -17,6 +17,13 @@ use crate::agent::ProviderError;
 
 /// Where "always" approvals are kept. Implementations are synchronous: an
 /// approval is a short string, written once per answer.
+///
+/// The store is read once, at session open: a [`remove`](Self::remove) (revocation)
+/// affects sessions opened afterward. Revoking a rule for an already-open session
+/// is the host's responsibility (it owns the session lifecycle) — the same
+/// load-at-open contract as [`TranscriptStore`].
+///
+/// [`TranscriptStore`]: super::transcript::TranscriptStore
 pub trait PermissionRuleStore: Send + Sync {
     /// Every persisted approval key (a bare tool name, or `tool\u{0}subject`).
     fn load(&self) -> Result<Vec<String>, ProviderError>;

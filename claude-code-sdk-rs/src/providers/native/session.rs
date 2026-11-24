@@ -659,12 +659,14 @@ impl AgentSession for NativeSession {
                     Some(subject) => consent_key(&pending.tool, subject),
                     None => pending.tool.clone(),
                 };
-                state.approved.insert(key.clone());
                 if *scope == PermissionScope::Always {
                     // "always" is a session approval that survives the session: the host's
-                    // store keeps it (PERM-ALWAYS-NATIVE).
+                    // store keeps it (PERM-ALWAYS-NATIVE). Persist FIRST, before granting
+                    // the session approval, so a store that refuses (fail closed) never
+                    // leaves an "always" that was granted but not kept.
                     self.core.rules.insert(&key)?;
                 }
+                state.approved.insert(key);
             }
         }
         if let Some(pending) = state.pending.remove(request_id) {
