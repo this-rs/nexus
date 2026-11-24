@@ -100,10 +100,11 @@ jobs:
   test:
     name: Test (${{ matrix.os }} / ${{ matrix.toolchain }})
     runs-on: ${{ matrix.os }}
-    # A healthy job takes about 3 minutes; 30 cuts off a hung test (PR #45: two `start_paused`
-    # tests deadlocked on Windows and the job sat silent for 49 minutes) instead of holding a
-    # runner for GitHub's 6-hour default.
-    timeout-minutes: 30
+    # A healthy job takes about 3 minutes; 60 still cuts off a wedged test (PR #45: two
+    # `start_paused` tests deadlocked on Windows and the job sat silent for 49 minutes) instead
+    # of holding a runner for GitHub's 6-hour default. 60 (was 30): a cold full-features build on
+    # macOS runs ~40 min, and cancelling it at 30 means the cache is never saved — vicious cycle.
+    timeout-minutes: 60
     # Nightly is advisory only: rustc nightly is prone to ICEs unrelated to our code.
     continue-on-error: ${{ matrix.toolchain == 'nightly' }}
     strategy:
