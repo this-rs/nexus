@@ -427,6 +427,12 @@ fn model_of_window(kind: &str) -> Option<&'static str> {
 /// given: the card was unanswerable 8 ms after it appeared ("Cette question ne peut plus
 /// être répondue"). The native engine ends that turn `Completed` (A45), and this is the
 /// same turn: what ended it is the question, not a stop.
+///
+/// `ended_on_question` is therefore AUTHORITATIVE, not a hint weighed against `is_error`:
+/// the facade raises it only when it closes a question and interrupts right away, and the
+/// start of a turn clears it (see `send_turn`), so the next `result` is the one that
+/// interruption produced. A real API failure is not lost by this: `done.error` is still
+/// classified from the result text of a `Completed` turn that carries `is_error` (below).
 fn stop_reason(
     subtype: &str,
     is_error: bool,
@@ -437,10 +443,7 @@ fn stop_reason(
         "success" if is_error => StopReason::Error,
         "success" => StopReason::Completed,
         "error_max_turns" => StopReason::MaxTurns,
-        // A real refusal keeps its error: only the interruption the host sent to end the
-        // turn on the question is rewritten, never an API failure.
-        "error_during_execution" if ended_on_question && !is_error => StopReason::Completed,
-        "error_during_execution" if ended_on_question => StopReason::Error,
+        "error_during_execution" if ended_on_question => StopReason::Completed,
         "error_during_execution" if interrupt_requested => StopReason::Interrupted,
         "error_during_execution" => StopReason::Error,
         "error_max_budget_usd" => StopReason::BudgetExceeded,
@@ -1833,11 +1836,14 @@ mod tests {
             StopReason::Completed,
             "the interruption we sent to end the turn on the question is not a stop"
         );
-        // A real refusal keeps its error, question or not.
+        // The latch is AUTHORITATIVE: it is raised only when the host closed a question and
+        // interrupted right away, and a turn started since clears it (session::send_turn), so
+        // the next result is the one that interruption produced — `is_error` included. A real
+        // API failure is not lost: `done.error` is still classified from the result text.
         assert_eq!(
             stop("error_during_execution", true, true, true),
-            StopReason::Error,
-            "an API failure the CLI reports as an error stays an error"
+            StopReason::Completed,
+            "the turn we ended on a question is ours to name, whatever the flag says"
         );
         // An interruption with no question behind it keeps its meaning: somebody stopped
         // the turn, and an open question of that turn is dead with it.
@@ -1846,6 +1852,39 @@ mod tests {
             StopReason::Interrupted,
             "an interruption requested without a question keeps its meaning"
         );
+    }
+
+    /// The latch does not survive its own result: a later turn is read on its own evidence.
+    ///
+    /// A turn can end without any `result` (a question arriving out of turn, whose interrupt
+    /// ends nothing; a `result` dropped by the stream's broadcast; an `error` item; the
+    /// process gone). That is why `send_turn` clears the flag as well — this test pins the
+    /// half of the guard the mapping owns, the one the review of #161 measured as missing.
+    #[test]
+    fn a_question_flag_does_not_rewrite_the_next_turn() {
+        let mut state = MapState::new();
+        state.set_interrupt_requested(true);
+        state.set_ended_on_question(true);
+        match one(&result("error_during_execution", false), &mut state) {
+            AgentEvent::Done { stop_reason, .. } => assert_eq!(stop_reason, StopReason::Completed),
+            other => panic!("{other:?}"),
+        }
+        // The next turn is a real stop, and nothing of the last turn's question is left.
+        state.set_interrupt_requested(true);
+        assert!(
+            !state.ended_on_question(),
+            "a result clears the question flag"
+        );
+        match one(&result("error_during_execution", false), &mut state) {
+            AgentEvent::Done { stop_reason, .. } => {
+                assert_eq!(
+                    stop_reason,
+                    StopReason::Interrupted,
+                    "a real stop stays a stop"
+                )
+            },
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]

@@ -1549,6 +1549,13 @@ impl AgentSession for ClaudeCodeSession {
             let (sender, receiver) = mpsc::unbounded_channel();
             state.turn = Some(sender);
             state.map.set_interrupt_requested(false);
+            // A turn ends without a `result` more often than it looks: a question arriving
+            // OUT of turn (the interrupt then ends nothing), a lost `result` (the stream's
+            // broadcast drops on `Lagged`), an `error` item that closes the turn, the process
+            // gone. The previous turn's flags must not survive into this one — otherwise a
+            // real interruption of THIS turn is read through the last turn's question and
+            // reported as a completed turn (silently the reverse of the lie this fixes).
+            state.map.set_ended_on_question(false);
             (receiver, blocks)
         };
         let text = input.joined_text();

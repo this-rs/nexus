@@ -1099,10 +1099,14 @@ async fn ask_user_question_is_unblocked_by_the_adapter_byte_for_byte() {
             ))
             .await_stdin_containing("req-question")
             // The turn is ended on the question: the interrupt follows the refusal, and
-            // the CLI answers it (the scripted result is then the interruption's).
+            // the CLI answers it — measured shape (2026-11-24, orchestrator session
+            // 76faba47, events 39616/39618): an ERROR `tool_result`, then
+            // `error_during_execution` with `is_error: false`. Scripting a `success` result
+            // here made the `Completed` assertion below true whatever the facade did: the
+            // turn was reported `interrupted` on the wire and this test stayed green.
             .await_stdin_containing("\"subtype\":\"interrupt\"")
-            .json(tool_result("toolu_q", "asked", false))
-            .result_ok("asked"),
+            .json(tool_result("toolu_q", QUESTION_REJECTED, true))
+            .json(msg::result("error_during_execution", "", false)),
     ));
     let session = open(&provider, spec).await;
     let stream = session.send_turn(TurnInput::text("ask me")).await.unwrap();
