@@ -1,0 +1,17 @@
+# Two turns on the SAME tool, the second denied by policy: a session approval for
+# "ls" must never override a deny of "rm *".
+{"op":"include","file":"prelude.jsonl"}
+{"op":"expect","method":"session/prompt","defer":"p1"}
+{"op":"notify","method":"session/update","params":{"sessionId":"sess_fake1","update":{"sessionUpdate":"tool_call","toolCallId":"call_1","title":"Run ls","kind":"execute","status":"pending","rawInput":{"command":"ls"}}}}
+{"op":"server_request","id":"perm_1","method":"session/request_permission","params":{"sessionId":"sess_fake1","toolCall":{"toolCallId":"call_1","title":"Run ls","kind":"execute","status":"pending","rawInput":{"command":"ls"}},"options":[{"optionId":"allow-once","name":"Allow once","kind":"allow_once"},{"optionId":"reject-once","name":"Reject","kind":"reject_once"}]}}
+{"op":"await_response","id":"perm_1","expect":{"outcome":{"outcome":"selected","optionId":"allow-once"}}}
+{"op":"notify","method":"session/update","params":{"sessionId":"sess_fake1","update":{"sessionUpdate":"tool_call_update","toolCallId":"call_1","status":"completed","content":[{"type":"content","content":{"type":"text","text":"listed"}}]}}}
+{"op":"notify","method":"session/update","params":{"sessionId":"sess_fake1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"Done."}}}}
+{"op":"reply","to":"p1","result":{"stopReason":"end_turn","usage":{"inputTokens":120,"outputTokens":60,"totalTokens":180}}}
+{"op":"expect","method":"session/prompt","defer":"p2"}
+{"op":"notify","method":"session/update","params":{"sessionId":"sess_fake1","update":{"sessionUpdate":"tool_call","toolCallId":"call_2","title":"Run rm -rf build","kind":"execute","status":"pending","rawInput":{"command":"rm -rf build"}}}}
+{"op":"server_request","id":"perm_2","method":"session/request_permission","params":{"sessionId":"sess_fake1","toolCall":{"toolCallId":"call_2","title":"Run rm -rf build","kind":"execute","status":"pending","rawInput":{"command":"rm -rf build"}},"options":[{"optionId":"allow-once","name":"Allow once","kind":"allow_once"},{"optionId":"reject-once","name":"Reject","kind":"reject_once"}]}}
+{"op":"await_response","id":"perm_2","expect":{"outcome":{"outcome":"selected","optionId":"reject-once"}}}
+{"op":"notify","method":"session/update","params":{"sessionId":"sess_fake1","update":{"sessionUpdate":"tool_call_update","toolCallId":"call_2","status":"failed","content":[{"type":"content","content":{"type":"text","text":"permission denied"}}]}}}
+{"op":"notify","method":"session/update","params":{"sessionId":"sess_fake1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"Not done."}}}}
+{"op":"reply","to":"p2","result":{"stopReason":"end_turn","usage":{"inputTokens":120,"outputTokens":60,"totalTokens":180}}}

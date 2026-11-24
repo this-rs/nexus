@@ -41,7 +41,7 @@ use serde_json::{Value, json};
 use tokio::sync::{Notify, mpsc};
 
 use super::AcpConfig;
-use super::map::{Ask, MapConfig, MapState, answer_for, auto_answer, mode_id_for};
+use super::map::{Ask, MapConfig, MapState, answer_for, auto_answer, mode_id_for, session_answer};
 use super::transport::{Inbound, Process};
 use super::wire::{
     CancelParams, ModeInfo, ModeState, PermissionOption, PermissionRequest, PromptParams,
@@ -49,9 +49,9 @@ use super::wire::{
 };
 use crate::agent::{
     AgentEvent, AgentSession, CancelOutcome, CancelScope, Capabilities, EventStream,
-    InterruptOutcome, InterruptScope, PermissionDecision, PolicyDecision, PolicyMode,
-    ProcessDiagnostic, ProviderError, ProviderKind, QuestionAnswer, ResumeToken, SessionLimits,
-    StopReason, ToolPolicy, TurnInput,
+    InterruptOutcome, InterruptScope, PermissionDecision, PermissionScope, PolicyDecision,
+    PolicyMode, ProcessDiagnostic, ProviderError, ProviderKind, QuestionAnswer, ResumeToken,
+    SessionLimits, StopReason, ToolPolicy, TurnInput,
 };
 
 /// Capacity of the out-of-band buffer.
@@ -77,6 +77,8 @@ enum StopCause {
 struct PendingAsk {
     rpc_id: Value,
     options: Vec<PermissionOption>,
+    /// Canonical tool name the ask is about, for a session-scoped approval.
+    tool: String,
 }
 
 pub(crate) struct State {
@@ -90,6 +92,8 @@ pub(crate) struct State {
     out_of_band_dropped: u64,
     out_of_band_taken: bool,
     pending: HashMap<String, PendingAsk>,
+    /// Tools approved for the session (session-scoped approvals, mirrors native).
+    approved: HashSet<String>,
     policy: ToolPolicy,
     modes: Vec<ModeInfo>,
     noticed: HashSet<String>,
@@ -195,6 +199,7 @@ impl Core {
             out_of_band_dropped: 0,
             out_of_band_taken: false,
             pending: HashMap::new(),
+            approved: HashSet::new(),
             policy: parts.policy,
             modes: parts
                 .modes
@@ -332,26 +337,39 @@ impl Core {
             },
         };
         let mut ask = self.lock().map.ask_for(&request);
+        // The policy decides first, and a `deny` wins over any earlier approval
+        // (mirrors native policy_args): a tool approved for the session is not
+        // asked again, UNLESS the policy denies it.
         let decision = {
             let state = self.lock();
             state.policy.decide(&ask.tool, Some(&ask.arg), ask.category)
         };
-        let auto = match decision {
-            PolicyDecision::Allow => auto_answer(&ask.options, true).map(|answer| (answer, true)),
-            PolicyDecision::Deny => auto_answer(&ask.options, false).map(|answer| (answer, false)),
-            _ => None,
+        let auto: Option<(Value, &'static str)> = match decision {
+            PolicyDecision::Deny => auto_answer(&ask.options, false)
+                .map(|answer| (answer, "permission_denied_by_policy")),
+            PolicyDecision::Allow => auto_answer(&ask.options, true)
+                .map(|answer| (answer, "permission_allowed_by_policy")),
+            PolicyDecision::Ask => {
+                // A session-scoped approval answers the call without asking again;
+                // it is scoped to that tool only (the canonical name), never to
+                // another tool. `allow_once` only: a session scope is never
+                // translated into a persistent `allow_always`.
+                let session_approved = {
+                    let state = self.lock();
+                    state.approved.contains(&ask.tool)
+                };
+                if session_approved {
+                    session_answer(&ask.options)
+                        .map(|answer| (answer, "permission_allowed_by_session"))
+                } else {
+                    None
+                }
+            },
         };
         match auto {
-            Some((answer, allowed)) => {
+            Some((answer, notice)) => {
                 let _ = self.process.respond(&id, answer).await;
-                self.notice(
-                    if allowed {
-                        "permission_allowed_by_policy"
-                    } else {
-                        "permission_denied_by_policy"
-                    },
-                    json!({ "tool": ask.tool }),
-                );
+                self.notice(notice, json!({ "tool": ask.tool }));
                 // The synthesised `tool_call`, if any, still has to be announced.
                 for event in ask.events.drain(..) {
                     if !matches!(event, AgentEvent::PermissionAsk { .. }) {
@@ -372,6 +390,7 @@ impl Core {
             PendingAsk {
                 rpc_id,
                 options: ask.options,
+                tool: ask.tool,
             },
         );
         for mut event in ask.events {
@@ -641,7 +660,21 @@ impl AgentSession for AcpSession {
             }
             let (answer, cancel) = answer_for(&pending.options, &decision)?;
             let rpc_id = pending.rpc_id.clone();
+            // A "session" approval is remembered for that tool only (mirrors native
+            // session.rs:651): it never leaks to another tool or session. The tool
+            // is captured after the last borrow of `pending`, so `approved` can be
+            // written without holding that borrow.
+            let session_tool = if let PermissionDecision::Allow { scope, .. } = &decision
+                && *scope == PermissionScope::Session
+            {
+                Some(pending.tool.clone())
+            } else {
+                None
+            };
             state.pending.remove(request_id);
+            if let Some(tool) = session_tool {
+                state.approved.insert(tool);
+            }
             (rpc_id, answer, cancel)
         };
         self.core.process.respond(&rpc_id, answer).await?;
