@@ -1304,9 +1304,19 @@ La projection `Message → AgentEvent` est la fonction publique
 | erreur d'item du flux SDK | `error { … }` (classée, §7) | — | `error` (ou `retrying` si `retryable()` et aucun octet émis) | `message` ← `"Error: " + Display` |
 
 `subtype` → `stop_reason` : `success` → `completed` ; `error_max_turns` → `max_turns` ;
-`error_during_execution` → `interrupted` si une interruption a été demandée pendant le tour,
+`error_during_execution` → `completed` quand le tour se termine sur une QUESTION POSÉE (§15.6 :
+c'est l'interruption de l'adaptateur qui l'a fini, pas un arrêt de la personne — le harnais natif
+finit ce tour-là `completed`, A45 ; mesuré le 24/11/2026 sur l'orchestrateur, session 76faba47,
+événements 39613-39618 : rapporté `interrupted`, l'hôte fermait la question qu'il venait de recevoir
+8 ms après son apparition), `interrupted` si une interruption a été demandée pendant le tour,
 sinon `error` ; `error_max_budget_usd` → `budget_exceeded` ; autre → `error` si `is_error`, sinon
 `completed`.
+La question posée est le seul cas qui PRIME sur `is_error` : le drapeau n'est levé qu'au moment où
+l'adaptateur clôt une question puis interrompt aussitôt, et l'ouverture du tour suivant le remet à
+faux, donc le `result` qui suit est celui de cette interruption. Une vraie panne d'API n'est pas
+perdue pour autant : `done.error` reste classé à partir du texte du résultat, même sur un tour
+`completed` qui porte `is_error`. Partout ailleurs, `is_error` garde son `error`, sauf
+`error_max_turns` (→ `max_turns`) et `error_max_budget_usd` (→ `budget_exceeded`).
 
 `question.reply` : `turn` = la réponse de l'utilisateur part comme un tour ordinaire
 (`send_turn`), l'outil ayant déjà été débloqué par l'adaptateur (Claude Code : comportement actuel
@@ -1353,8 +1363,8 @@ de `serde_json` sans `preserve_order` (alphabétique).
 | 15.2 | `permission_deny(request_id, message)` | `{"response":{"request_id":R,"response":{"behavior":"deny","message":"User denied the permission request"},"subtype":"success"},"type":"control_response"}` (message par défaut ; remplacé si `deny.message` est fourni) |
 | 15.3 | `set_permission_mode(mode)` | `{"request":{"mode":M,"subtype":"set_permission_mode"},"request_id":U,"type":"control_request"}` |
 | 15.4 | `set_model(model)` | `{"request":{"model":M,"subtype":"set_model"},"request_id":U,"type":"control_request"}` |
-| 15.5 | `interrupt()` | `{"request":{"request_id":U,"type":"interrupt"},"type":"control_request"}` (forme de `InteractiveClient::build_interrupt_json`, réutilisée telle quelle) |
-| 15.6 | clôture `AskUserQuestion` | forme 15.2 (`deny`) avec `message` = `QUESTION_POSED_MESSAGE`, puis `interrupt` (15.5, `turn_only`) qui termine le tour. Un `allow` sans `answers` donne « The user did not answer the questions » et le modèle abandonne ; le refus seul laisse le CLI rappeler le modèle, qui continue un moment (ce que l'utilisateur observe) : d'où l'interruption |
+| 15.5 | `interrupt()` | `{"request":{"subtype":"interrupt"},"request_id":U,"type":"control_request"}` (forme de `InteractiveClient::build_interrupt_json`, réutilisée telle quelle ; le `subtype` est celui que le CLI 2.1.3xx attend — la forme sans lui, écrite ici jusqu au 24/11/2026, ne venait d aucune mesure) |
+| 15.6 | clôture `AskUserQuestion` | forme 15.2 (`deny`) avec `message` = `QUESTION_POSED_MESSAGE`, puis `interrupt` (15.5, `turn_only`) qui termine le tour. Un `allow` sans `answers` donne « The user did not answer the questions » et le modèle abandonne ; le refus seul laisse le CLI rappeler le modèle, qui continue un moment (ce que l'utilisateur observe) : d'où l'interruption. Cette interruption est CELLE DE L'ADAPTATEUR : le `result` qu'elle provoque (`error_during_execution`, `is_error: false`) est rapporté `completed` (voir la table `subtype` → `stop_reason`), jamais `interrupted` — un hôte qui lit `interrupted` comme « quelqu'un a arrêté le tour » ferme la question qu'il vient de recevoir |
 | 15.7 | réponse de hook | `build_hook_response_json(request_id, result)` (existant, déplacé sans changement) |
 
 Non reproduit : la forme du relais NATS `{"type":"control_response","response":{"allow":<bool>}}`

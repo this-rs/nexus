@@ -1765,6 +1765,18 @@ async fn question_utilisateur(ctx: &mut Ctx, prepared: &Prepared) {
             );
         },
         Some(QuestionReply::Turn) => {
+            // The turn that POSED the question ends on it, and it ends as a COMPLETED turn
+            // (A45) — never as a stopped one. A host reads "interrupted" as "somebody stopped
+            // the turn" and closes the question it has just been given: measured 2026-11-24 on
+            // the orchestrator (session 76faba47, events 39613-39618), where the Claude Code
+            // facade reported this very turn `interrupted` and every card died 8 ms after it
+            // appeared. The native engine already ended it `Completed`; this is the same turn.
+            expect_stop(
+                ctx,
+                &events,
+                StopReason::Completed,
+                "the turn that posed the question",
+            );
             let answer = TurnInput::text(format!("{}:answer", ctx.scenario.prompt()));
             let events = turn(ctx, &*session, answer, Plan::Passive)
                 .await
