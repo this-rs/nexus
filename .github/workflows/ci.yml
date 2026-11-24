@@ -95,8 +95,47 @@ jobs:
   # of twice (a plain run, then a second one for the coverage figure).
   #
   # beta and nightly only run on Linux: they watch for a compiler regression, which does not
-  # depend on the operating system. Windows and macOS keep stable, where the platform-specific
-  # code (paths, processes, signals) is exercised.
+  # depend on the operating system. Windows keeps stable, where the platform-specific code
+  # (paths, processes, signals) is exercised. macOS also keeps stable, but in its OWN job
+  # below, because it is NON BLOCKING — read the comment on `test-macos` before touching it.
+  # macOS, HORS de la matrice et NON BLOQUANT — décision du 24/11/2026, nommée ici et payée
+  # au grand jour.
+  #
+  # MESURÉ ce jour-là : `Test (macos-15 / stable)` n'obtient plus de runner. Seize tentatives
+  # annulées avec « The job was not acquired by Runner of type hosted even after multiple
+  # attempts » et trois fois « Due to capacity constraints, jobs targeting macOS arm64 runners
+  # may experience longer queue times » : `steps: []`, `runner_name` vide, 15 à 22 min de file.
+  # Pendant ce temps, le MÊME libellé a servi une machine en 5 s pour une sonde jetable
+  # (20:33), donc ce n'est ni les minutes (dépôt public), ni le code, ni un incident GitHub.
+  # Comme `CI Success` est le SEUL contexte requis par la protection de `main`
+  # (`enforce_admins: true`), cette file bloquait TOUTE fusion sans qu'aucun défaut de code
+  # soit en cause.
+  #
+  # CE QUE ÇA COÛTE, ET QUI DOIT ÊTRE LU : un échec macOS RÉEL ne bloque plus la fusion.
+  # Le job reste dans la liste des checks de la PR (rouge, annulé, ou vert — jamais silencieux),
+  # mais il n'y a plus de porte automatique : c'est un humain qui doit le lire. C'est une dette
+  # NOMMÉE, à restaurer en porte dès que la capacité macOS redevient fiable — pas un oubli.
+  # Il est volontairement ABSENT des `needs` de `ci-success` : c'est ce qui le rend non
+  # bloquant, et `continue-on-error` évite en plus qu'il fasse échouer le run entier.
+  test-macos:
+    name: Test (macos-15 / stable)
+    runs-on: macos-15
+    # 60 et non 30 : un build complet à froid sur macOS prend ~40 min, et l'annuler à 30
+    # signifie que le cache n'est jamais enregistré — cycle vicieux. Un test réellement figé
+    # est coupé bien avant les 6 h par défaut de GitHub.
+    timeout-minutes: 60
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-rust
+        with:
+          toolchain: stable
+          components: ''
+      - name: Run tests
+        run: |
+          features="$(scripts/nexus-features.sh)"
+          cargo test --features "$features"
+
   test:
     name: Test (${{ matrix.os }} / ${{ matrix.toolchain }})
     runs-on: ${{ matrix.os }}
@@ -110,7 +149,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { os: macos-15, toolchain: stable }
           - { os: windows-latest, toolchain: stable }
           - { os: ubuntu-latest, toolchain: beta }
           - { os: ubuntu-latest, toolchain: nightly }
@@ -329,6 +367,9 @@ jobs:
   ci-success:
     name: CI Success
     runs-on: ubuntu-latest
+    # `test-macos` est ABSENT de cette liste, volontairement : il est non bloquant (voir le
+    # commentaire du job). L'ajouter ici rendrait la porte de `main` dépendante d'une file
+    # de runners macOS qui, le 24/11/2026, n'a servi aucune machine pendant des heures.
     needs: [fmt, diagram-drift, clippy, test, conformance, coverage, docs, msrv, obscura]
     if: always()
     steps:

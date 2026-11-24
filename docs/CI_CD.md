@@ -16,7 +16,7 @@ flowchart TD
 
         fmt["fmt\n✅ rustfmt --check\n✅ diagram index derived & current"]
         fmt --> clippy["clippy\n✅ -D warnings"]
-        fmt --> test["test matrix\nubuntu / macos / windows\nstable + beta + nightly"]
+        fmt --> test["test matrix\nubuntu / windows\nstable + beta + nightly"]
         fmt --> docs["docs\ncargo doc"]
         fmt --> msrv["MSRV 1.88\ncargo build"]
 
@@ -64,12 +64,30 @@ Runs on every push and pull request to `main` and version branches.
 |-----|-------------|---------|
 | `fmt` | Check code formatting with rustfmt | ubuntu-latest |
 | `clippy` | Run Clippy lints with `-D warnings` | ubuntu-latest |
-| `test` | Run test matrix | ubuntu, macos, windows |
+| `test` | Run test matrix | ubuntu, windows |
+| `test-macos` | Tests on macOS — **NON BLOCKING** (absent des `needs` de `CI Success`) | macos-15 |
 | `conformance` | The agent contract per provider, against its fake executable (see below) | ubuntu-latest |
 | `coverage` | Generate code coverage report | ubuntu-latest |
 | `docs` | Build documentation | ubuntu-latest |
 | `security` | Run cargo-deny audit | ubuntu-latest |
 | `msrv` | Verify MSRV (1.88) | ubuntu-latest |
+
+#### macOS is not a merge gate (2026-11-24)
+
+`test-macos` runs `cargo test` on `macos-15` but is deliberately **absent from the `needs`
+of `CI Success`**, the only context required by the protection of `main`.
+
+Why: on 24/11/2026 the `macos-15` job stopped acquiring a runner — sixteen cancellations
+with *"The job was not acquired by Runner of type hosted even after multiple attempts"*
+and *"Due to capacity constraints, jobs targeting macOS arm64 runners may experience longer
+queue times"* (`steps: []`, empty `runner_name`, 15 to 22 min of queue), while the **same
+label** served a runner in 5 s for a throwaway probe. No code defect was involved, yet no
+pull request could be merged.
+
+What this costs, stated plainly: **a real macOS failure no longer blocks a merge.** The job
+still appears in the pull request's check list (red, cancelled, or green — never silent),
+so a human must read it. This is a named debt: restore it as a gate as soon as the macOS
+queue is reliable again. Do not read "no required check" as "green".
 
 #### Test Matrix
 

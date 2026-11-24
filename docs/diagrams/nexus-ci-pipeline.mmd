@@ -1,6 +1,6 @@
 %% name: nexus-ci-pipeline
 %% covers: .github/workflows/ci.yml, .github/workflows/release.yml
-%% verified: 2026-10-18
+%% verified: 2026-11-24
 flowchart TD
     subgraph PR["Pull Request"]
         direction TB
@@ -10,7 +10,8 @@ flowchart TD
         push --> drift["diagram-drift (PR only)\n✅ covered file changed ⇒ .mmd touched\nor Diagram-Unchanged trailer with a reason\n(cargo xtask diagrams drift · xtask/tests/commands.rs)"]
         drift --> ok
         push --> clippy["clippy\n✅ -D warnings\n(features : scripts/nexus-features.sh = toutes sauf nexus-tools/obscura, partout)"]
-        push --> test["test matrix\nmacOS stable · Windows stable\nLinux beta + nightly (advisory)\ncargo test (build + doc tests)"]
+        push --> test["test matrix\nWindows stable · Linux beta + nightly (advisory)\ncargo test (build + doc tests)"]
+        push --> mac["test-macos — NON BLOQUANT\nmacOS stable, hors de la matrice\nabsent des `needs` de CI Success :\nun échec macOS ne bloque plus la fusion\n(24/11/2026 : la file arm64 ne servait plus de machine)"]
         push --> conf["conformance (one job per provider)\nclaude-code · native · codex · acp · scripted\ncargo test -p nexus-claude, that provider's features only\nagainst its fake executable (fake_claude, fake_openai + fake_mcp, fake_codex, fake_acp)\nreal-CLI tests stay ignored (docs/CI_CD.md)"]
         push --> cov["ubuntu stable: test + coverage\ncargo llvm-cov (the one run of the suite)\n+ doc tests + logic-only report"]
         push --> docs["docs\ncargo doc"]
