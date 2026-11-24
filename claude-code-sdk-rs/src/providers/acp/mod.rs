@@ -917,7 +917,11 @@ impl AgentProvider for AcpProvider {
         let model = model.or(self.config.default_model.as_deref());
         let mut capabilities = Capabilities::none();
         capabilities.interactive_permissions = true;
-        capabilities.permission_scopes = vec![PermissionScope::Once, PermissionScope::Always];
+        capabilities.permission_scopes = vec![
+            PermissionScope::Once,
+            PermissionScope::Session,
+            PermissionScope::Always,
+        ];
         capabilities.secret_isolation = true;
         capabilities.per_session_mcp = self.carries_mcp();
         capabilities.thinking =

@@ -325,6 +325,11 @@ impl MapState {
         let mut scopes = Vec::new();
         if request.options.iter().any(|o| o.kind == "allow_once") {
             scopes.push(PermissionScope::Once);
+            // ACP has no "session" option: the host remembers a session-scoped
+            // approval locally (the session's `approved` set) and answers the
+            // immediate call with `allow_once`. Offer `Session` whenever an
+            // `allow_once` option exists to answer that call.
+            scopes.push(PermissionScope::Session);
         }
         if request.options.iter().any(|o| o.kind == "allow_always") {
             scopes.push(PermissionScope::Always);
@@ -560,11 +565,12 @@ fn option_of<'a>(options: &'a [PermissionOption], kind: &str) -> Option<&'a Perm
 /// The wire answer to a permission decision, and whether the turn is to be cancelled
 /// after it.
 ///
-/// `Allow` with `Once` / `Always` selects the `allow_once` / `allow_always` option; a
-/// scope the request does not offer (and `Session`, which ACP has no option for) is
-/// `Unsupported { permission_scope }`; an `updated_input` is
-/// `Unsupported { permission_updated_input }`. `Deny` selects `reject_once`, else
-/// `reject_always`, else answers `cancelled`.
+/// `Allow` with `Once` or `Session` selects the `allow_once` option (`Session` is a
+/// host-side memory: the immediate call is allowed once, and the session remembers
+/// the tool for the rest of the session); `Always` selects `allow_always`. A scope
+/// the request does not offer is `Unsupported { permission_scope }`; an
+/// `updated_input` is `Unsupported { permission_updated_input }`. `Deny` selects
+/// `reject_once`, else `reject_always`, else answers `cancelled`.
 pub fn answer_for(
     options: &[PermissionOption],
     decision: &PermissionDecision,
@@ -578,9 +584,10 @@ pub fn answer_for(
                 return Err(ProviderError::unsupported("permission_updated_input"));
             }
             let kind = match scope {
-                PermissionScope::Once => "allow_once",
+                // `Session` has no ACP option: the immediate call is allowed once,
+                // and the session remembers the tool for the rest of the session.
+                PermissionScope::Once | PermissionScope::Session => "allow_once",
                 PermissionScope::Always => "allow_always",
-                _ => return Err(ProviderError::unsupported("permission_scope")),
             };
             let option = option_of(options, kind)
                 .ok_or_else(|| ProviderError::unsupported("permission_scope"))?;
@@ -993,16 +1000,25 @@ mod tests {
             deny,
             json!({"outcome":{"outcome":"selected","optionId":"o2"}})
         );
-        for scope in [PermissionScope::Always, PermissionScope::Session] {
-            let decision = PermissionDecision::Allow {
-                scope,
-                updated_input: None,
-            };
-            assert_eq!(
-                answer_for(&options, &decision).unwrap_err(),
-                ProviderError::unsupported("permission_scope")
-            );
-        }
+        // `Session` is a host-side memory that still answers the immediate call
+        // with `allow_once`; `Always` is refused because the agent offered no
+        // `allow_always` option.
+        let session = PermissionDecision::Allow {
+            scope: PermissionScope::Session,
+            updated_input: None,
+        };
+        assert_eq!(
+            answer_for(&options, &session).unwrap().0,
+            json!({"outcome":{"outcome":"selected","optionId":"o1"}})
+        );
+        let always = PermissionDecision::Allow {
+            scope: PermissionScope::Always,
+            updated_input: None,
+        };
+        assert_eq!(
+            answer_for(&options, &always).unwrap_err(),
+            ProviderError::unsupported("permission_scope")
+        );
         let only_allow = &options[..1];
         let (cancelled, _) = answer_for(only_allow, &PermissionDecision::deny()).unwrap();
         assert_eq!(cancelled, json!({"outcome":{"outcome":"cancelled"}}));
@@ -1230,7 +1246,7 @@ mod tests {
         };
         assert_eq!(
             scopes(&["allow_once", "reject_once"]),
-            [PermissionScope::Once]
+            [PermissionScope::Once, PermissionScope::Session]
         );
         assert_eq!(
             scopes(&["allow_always", "reject_always"]),
@@ -1238,7 +1254,11 @@ mod tests {
         );
         assert_eq!(
             scopes(&["allow_once", "allow_always"]),
-            [PermissionScope::Once, PermissionScope::Always]
+            [
+                PermissionScope::Once,
+                PermissionScope::Session,
+                PermissionScope::Always
+            ]
         );
         assert!(scopes(&["reject_once"]).is_empty());
     }
