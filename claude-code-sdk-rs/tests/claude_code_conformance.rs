@@ -131,6 +131,11 @@ fn interrupted_result() -> Value {
     msg::result("error_during_execution", "", true)
 }
 
+/// What the CLI writes as the `tool_result` of an `AskUserQuestion` the host closed
+/// (§15.6). Copied from the measurement of 2026-11-24 (orchestrator session 76faba47,
+/// event 39616).
+const QUESTION_REJECTED: &str = "The user doesn't want to proceed with this tool use. The tool use was rejected (eg. if it was a file edit, the new_string was NOT written to the file). STOP what you are doing and wait for the user to tell you how to proceed.";
+
 const INTERRUPT_MARK: &str = r#""subtype":"interrupt""#;
 
 /// The transcript that stages a scenario as its documentation says.
@@ -275,28 +280,36 @@ fn transcript_for(scenario: Scenario) -> Transcript {
                 .json(tool_result("toolu_p", "permission denied", true)),
             "not done",
         ),
-        // Reply mode `turn`: the adapter unblocks the tool itself, the turn ends,
-        // and the answer comes as a second turn.
+        // Reply mode `turn`: the adapter denies the question AND interrupts the turn to
+        // end it (§15.6), and the answer comes as a second turn.
+        //
+        // The shape below is the one MEASURED on Claude Code 2.1.329, 2026-11-24 (the
+        // orchestrator, session 76faba47, events 39613-39618): the CLI answers the denied
+        // tool call with an error `tool_result` ("The user doesn't want to proceed…") and
+        // closes the turn with `subtype: "error_during_execution", is_error: false` — the
+        // shape of a stop. The earlier script (a successful `tool_result` followed by a
+        // `success` result, no interrupt awaited) described a CLI that does not exist: it
+        // made the facade look right while every real question was reported as an
+        // interruption, which closed the question card 8 ms after it appeared.
         Scenario::QuestionUtilisateur => {
             let question = json!({"questions": [{
                 "question": "Which one?", "header": "Choice", "multiSelect": false,
                 "options": [{"label": "A", "description": "first"}, {"label": "B"}]
             }]});
             answer(
-                answer(
-                    begin(scenario)
-                        .json(tool_use("toolu_q", "AskUserQuestion", question.clone()))
-                        .json(can_use_tool(
-                            "req-question",
-                            "AskUserQuestion",
-                            question,
-                            Some("toolu_q"),
-                        ))
-                        .await_stdin_containing("req-question")
-                        .json(tool_result("toolu_q", "asked", false)),
-                    "waiting for your answer",
-                )
-                .await_stdin_containing(scenario.prompt()),
+                begin(scenario)
+                    .json(tool_use("toolu_q", "AskUserQuestion", question.clone()))
+                    .json(can_use_tool(
+                        "req-question",
+                        "AskUserQuestion",
+                        question,
+                        Some("toolu_q"),
+                    ))
+                    .await_stdin_containing("req-question")
+                    .await_stdin_containing(INTERRUPT_MARK)
+                    .json(tool_result("toolu_q", QUESTION_REJECTED, true))
+                    .json(msg::result("error_during_execution", "", false))
+                    .await_stdin_containing(scenario.prompt()),
                 "thanks",
             )
         },
@@ -1086,10 +1099,14 @@ async fn ask_user_question_is_unblocked_by_the_adapter_byte_for_byte() {
             ))
             .await_stdin_containing("req-question")
             // The turn is ended on the question: the interrupt follows the refusal, and
-            // the CLI answers it (the scripted result is then the interruption's).
+            // the CLI answers it — measured shape (2026-11-24, orchestrator session
+            // 76faba47, events 39616/39618): an ERROR `tool_result`, then
+            // `error_during_execution` with `is_error: false`. Scripting a `success` result
+            // here made the `Completed` assertion below true whatever the facade did: the
+            // turn was reported `interrupted` on the wire and this test stayed green.
             .await_stdin_containing("\"subtype\":\"interrupt\"")
-            .json(tool_result("toolu_q", "asked", false))
-            .result_ok("asked"),
+            .json(tool_result("toolu_q", QUESTION_REJECTED, true))
+            .json(msg::result("error_during_execution", "", false)),
     ));
     let session = open(&provider, spec).await;
     let stream = session.send_turn(TurnInput::text("ask me")).await.unwrap();
